@@ -3,7 +3,10 @@
  * Shows the sub-agent prompt + nested thought/tool stream; maximize / close to return.
  */
 import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { Collapse, useFold } from '../Collapse';
 import { createPortal } from 'react-dom';
+import { useTranslation } from 'react-i18next';
+import type { TFunction } from 'i18next';
 import { Maximize2, Minimize2, X, CheckCircle, XCircle } from 'lucide-react';
 import { OpenSquadLoader } from '../OpenSquadLoader';
 import type { WorkflowEvent } from '../../utils/aiChatTimeline';
@@ -79,7 +82,7 @@ type NestedLine =
     }
   | { key: string; kind: 'info'; text: string };
 
-function buildNestedLines(events: WorkflowEvent[]): NestedLine[] {
+function buildNestedLines(events: WorkflowEvent[], t: TFunction): NestedLine[] {
   const lines: NestedLine[] = [];
   for (let i = 0; i < events.length; i++) {
     const evt = events[i];
@@ -121,25 +124,25 @@ function buildNestedLines(events: WorkflowEvent[]): NestedLine[] {
       let secondary = '';
       if (fileEdit?.kind === 'read') {
         primary = running
-          ? `Reading ${fileEdit.fileName}`
+          ? t('aiChat.toolFlow.line.reading', { name: fileEdit.fileName })
           : failed
-            ? `Failed read ${fileEdit.fileName}`
-            : `Read ${fileEdit.fileName}`;
+            ? t('aiChat.toolFlow.line.readFailed', { name: fileEdit.fileName })
+            : t('aiChat.toolFlow.line.read', { name: fileEdit.fileName });
         secondary = fileEdit.lineRange || '';
       } else if (fileEdit?.kind === 'write') {
         primary = running
-          ? `Writing ${fileEdit.fileName}`
+          ? t('aiChat.toolFlow.line.writing', { name: fileEdit.fileName })
           : failed
-            ? `Failed write ${fileEdit.fileName}`
-            : `Wrote ${fileEdit.fileName}`;
+            ? t('aiChat.toolFlow.line.writeFailed', { name: fileEdit.fileName })
+            : t('aiChat.toolFlow.line.wrote', { name: fileEdit.fileName });
       } else if (fileEdit) {
         primary = running
-          ? `Editing ${fileEdit.fileName}`
+          ? t('aiChat.toolFlow.line.editing', { name: fileEdit.fileName })
           : failed
-            ? `Failed edit ${fileEdit.fileName}`
-            : `Edited ${fileEdit.fileName}`;
+            ? t('aiChat.toolFlow.line.editFailed', { name: fileEdit.fileName })
+            : t('aiChat.toolFlow.line.edited', { name: fileEdit.fileName });
       } else if (failed) {
-        secondary = 'fail';
+        secondary = t('aiChat.toolFlow.line.fail');
       }
       lines.push({
         key,
@@ -163,7 +166,7 @@ function buildNestedLines(events: WorkflowEvent[]): NestedLine[] {
         key,
         kind: 'tool',
         primary: name,
-        secondary: failed ? 'fail' : '',
+        secondary: failed ? t('aiChat.toolFlow.line.fail') : '',
         running: false,
         status: failed ? 'error' : 'success',
         args: '',
@@ -186,24 +189,30 @@ function buildNestedLines(events: WorkflowEvent[]): NestedLine[] {
 }
 
 const NestedLineView: React.FC<{ line: NestedLine }> = ({ line }) => {
-  const [open, setOpen] = useState(line.kind === 'thought');
+  const { t } = useTranslation();
+  // Shared fold primitive — sub-agent lines fold with the same easing as the
+  // main tool flow. Bodies mount lazily (a sub-agent can emit many lines).
+  const { open, mounted, toggle } = useFold(line.kind === 'thought');
 
   if (line.kind === 'thought') {
     return (
       <div className="w-full">
         <button
           type="button"
-          onClick={() => setOpen((v) => !v)}
+          onClick={toggle}
+          aria-expanded={open}
           className="inline-flex items-baseline gap-1.5 py-0.5 text-left bg-transparent border-0 p-0 cursor-pointer text-[13px] text-textMuted"
         >
-          <span className="font-medium text-textMain/80">Thinking</span>
-          <span className="text-textMuted/70">{open ? '⌄' : '>'}</span>
+          <span className="font-medium text-textMain/80">{t('aiChat.toolFlow.line.thinking')}</span>
+          <span className={`os-fold-chevron text-textMuted/70${open ? ' is-open' : ''}`}>&gt;</span>
         </button>
-        {open && (
-          <div className="mt-0.5 pl-3 pr-1 py-1.5 rounded-md bg-black/[0.04] dark:bg-white/[0.05]">
-            <MarkdownScrollBody text={line.text} follow muted maxHeightClass="max-h-[280px]" />
-          </div>
-        )}
+        <Collapse open={open}>
+          {mounted ? (
+            <div className="mt-0.5 pl-3 pr-1 py-1.5 rounded-md bg-black/[0.04] dark:bg-white/[0.05]">
+              <MarkdownScrollBody text={line.text} follow muted maxHeightClass="max-h-[280px]" />
+            </div>
+          ) : null}
+        </Collapse>
       </div>
     );
   }
@@ -229,7 +238,8 @@ const NestedLineView: React.FC<{ line: NestedLine }> = ({ line }) => {
     <div className="w-full">
       <button
         type="button"
-        onClick={() => setOpen((v) => !v)}
+        onClick={toggle}
+        aria-expanded={open}
         className="inline-flex items-center gap-1.5 py-0.5 text-left bg-transparent border-0 p-0 cursor-pointer max-w-full"
       >
         {statusIcon}
@@ -243,13 +253,14 @@ const NestedLineView: React.FC<{ line: NestedLine }> = ({ line }) => {
           ) : null}
           {line.running ? <span className="text-textMuted/70"> …</span> : null}
         </span>
-        <span className="text-[12px] text-textMuted/60 shrink-0">{open ? '⌄' : '>'}</span>
+        <span className={`os-fold-chevron text-[12px] text-textMuted/60${open ? ' is-open' : ''}`}>&gt;</span>
       </button>
-      {open && (line.args || line.result) && (
-        <div className="mt-1 mb-1.5 ml-4 rounded-md border border-border/50 bg-black/[0.03] dark:bg-white/[0.04] overflow-hidden">
+      <Collapse open={open}>
+        {mounted && (line.args || line.result) ? (
+          <div className="mt-1 mb-1.5 ml-4 rounded-md border border-border/50 bg-black/[0.03] dark:bg-white/[0.04] overflow-hidden">
           {line.args ? (
             <div className="px-2.5 py-2 border-b border-border/30">
-              <div className="text-[10px] font-medium text-textMuted/60 mb-1 uppercase tracking-wide">Args</div>
+              <div className="text-[10px] font-medium text-textMuted/60 mb-1 uppercase tracking-wide">{t('aiChat.toolFlow.line.args')}</div>
               <pre className="text-[11px] font-mono whitespace-pre-wrap break-words m-0 max-h-[180px] overflow-y-auto text-textMuted">
                 {line.args}
               </pre>
@@ -257,21 +268,22 @@ const NestedLineView: React.FC<{ line: NestedLine }> = ({ line }) => {
           ) : null}
           {line.result ? (
             <div className="px-2.5 py-2">
-              <div className="text-[10px] font-medium text-textMuted/60 mb-1 uppercase tracking-wide">Result</div>
+              <div className="text-[10px] font-medium text-textMuted/60 mb-1 uppercase tracking-wide">{t('aiChat.toolFlow.line.result')}</div>
               <pre className="text-[11px] font-mono whitespace-pre-wrap break-words m-0 max-h-[220px] overflow-y-auto text-textMuted">
                 {line.result}
               </pre>
             </div>
           ) : line.running ? (
-            <div className="px-2.5 py-2 text-[12px] text-textMuted/70">Running…</div>
+            <div className="px-2.5 py-2 text-[12px] text-textMuted/70">{t('aiChat.toolFlow.line.running')}</div>
           ) : null}
-        </div>
-      )}
+          </div>
+        ) : null}
+      </Collapse>
     </div>
   );
 };
 
-export const SubAgentPanel: React.FC<SubAgentPanelProps> = ({
+const SubAgentPanelInner: React.FC<SubAgentPanelProps> = ({
   open,
   onClose,
   title,
@@ -280,8 +292,9 @@ export const SubAgentPanel: React.FC<SubAgentPanelProps> = ({
   finalResult = '',
   running = false,
 }) => {
+  const { t } = useTranslation();
   const [maximized, setMaximized] = useState(false);
-  const lines = useMemo(() => buildNestedLines(events), [events]);
+  const lines = useMemo(() => buildNestedLines(events, t), [events, t]);
   const resultText = (finalResult || '').trim();
   const streamRef = useRef<HTMLDivElement>(null);
 
@@ -332,10 +345,10 @@ export const SubAgentPanel: React.FC<SubAgentPanelProps> = ({
             {running ? (
               <div className="text-[11px] text-violet-500/90 flex items-center gap-1 mt-0.5">
                 <OpenSquadLoader size={12} />
-                Exploring
+                {t('aiChat.toolFlow.line.exploring')}
               </div>
             ) : (
-              <div className="text-[11px] text-textMuted mt-0.5">Delegate complete</div>
+              <div className="text-[11px] text-textMuted mt-0.5">{t('aiChat.toolFlow.line.delegateComplete')}</div>
             )}
           </div>
           <button
@@ -371,13 +384,13 @@ export const SubAgentPanel: React.FC<SubAgentPanelProps> = ({
         <div ref={streamRef} className="flex-1 min-h-0 overflow-y-auto px-4 pb-4 pt-1 space-y-1.5">
           {lines.length === 0 && !resultText ? (
             <div className="text-[13px] text-textMuted/70 py-6 text-center">
-              {running ? 'Waiting for sub-agent activity…' : 'No nested activity recorded.'}
+              {running ? t('aiChat.toolFlow.line.waitingSubAgent') : t('aiChat.toolFlow.line.noSubAgentActivity')}
             </div>
           ) : (
             <>
               {lines.length > 0 && (
                 <>
-                  <div className="text-[12px] font-semibold text-textMain/75 pt-1 pb-0.5">Exploring</div>
+                  <div className="text-[12px] font-semibold text-textMain/75 pt-1 pb-0.5">{t('aiChat.toolFlow.line.exploring')}</div>
                   {lines.map((line) => (
                     <NestedLineView key={line.key} line={line} />
                   ))}
@@ -385,7 +398,7 @@ export const SubAgentPanel: React.FC<SubAgentPanelProps> = ({
               )}
               {resultText ? (
                 <div className="mt-3 pt-2 border-t border-border/50">
-                  <div className="text-[12px] font-semibold text-textMain/75 pb-1.5">Result</div>
+                  <div className="text-[12px] font-semibold text-textMain/75 pb-1.5">{t('aiChat.toolFlow.line.result')}</div>
                   <div className="rounded-lg border border-emerald-500/25 bg-emerald-500/[0.04] px-3 py-2.5">
                     <pre className="text-[12.5px] leading-relaxed whitespace-pre-wrap break-words font-sans m-0 text-textMain/90 max-h-[360px] overflow-y-auto">
                       {resultText}
@@ -402,3 +415,5 @@ export const SubAgentPanel: React.FC<SubAgentPanelProps> = ({
 
   return createPortal(panel, document.body);
 };
+
+export const SubAgentPanel = React.memo(SubAgentPanelInner);

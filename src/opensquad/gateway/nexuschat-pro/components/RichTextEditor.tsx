@@ -2,6 +2,7 @@ import React, { useState, useRef, useEffect } from 'react';
 import { Bold, Italic, Link, List, Code, Smile, Eye, EyeOff } from 'lucide-react';
 import { User } from '../types';
 import { parse } from 'marked';
+import { sanitizeHtml } from '../utils/safeHtml';
 import { AvatarImg } from './AvatarImg';
 
 interface RichTextEditorProps {
@@ -66,12 +67,13 @@ export const RichTextEditor: React.FC<RichTextEditorProps> = ({ value, onChange,
   };
 
   // Parse markdown content for preview
+  // Preview is injected via innerHTML → sanitize after the mention rewrite.
   const parseContent = (content: string) => {
     if (!content.trim()) return '';
     const withMentions = content.replace(/@(\w+)/g, '**@$1**');
     let parsed = parse(withMentions) as string;
     parsed = parsed.replace(/@(\w+)/g, '<span class="text-primary font-bold">@$1</span>');
-    return parsed;
+    return sanitizeHtml(parsed);
   };
 
   return (

@@ -7,9 +7,11 @@ plugin ``/v1/audio/transcriptions``, etc.).
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import mimetypes
 import os
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -66,8 +68,9 @@ async def transcribe_file(
         data["language"] = lang
 
     try:
-        with open(audio_path, "rb") as f:
-            file_bytes = f.read()
+        # Off the event loop: reading a multi-MB recording here would stall every
+        # other request served by this worker.
+        file_bytes = await asyncio.to_thread(Path(audio_path).read_bytes)
         if len(file_bytes) < 64:
             return {"success": False, "error": "audio file too small"}
 
@@ -126,8 +129,7 @@ async def transcribe_bytes(
     fd, tmp = tempfile.mkstemp(suffix=suffix, prefix="oai_asr_")
     os.close(fd)
     try:
-        with open(tmp, "wb") as f:
-            f.write(audio)
+        await asyncio.to_thread(Path(tmp).write_bytes, audio)
         return await transcribe_file(
             api_key=api_key,
             base_url=base_url,
@@ -171,7 +173,7 @@ async def transcribe_pcm_with_card(
 
     if not pcm or len(pcm) < 320:
         return {"success": False, "error": "PCM too short"}
-    wav = pcm16le_to_wav_bytes(pcm, sample_rate=int(sample_rate) or 24000)
+    wav = await asyncio.to_thread(pcm16le_to_wav_bytes, pcm, sample_rate=int(sample_rate) or 24000)
     return await transcribe_bytes(
         api_key=card.get("api_key") or "",
         base_url=resolve_asr_base_url(card),

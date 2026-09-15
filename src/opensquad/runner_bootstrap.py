@@ -115,6 +115,14 @@ def create_tool_registry(config: dict[str, Any]) -> ToolRegistry:
     except ImportError as exc:
         logger.warning("Failed to import choice_tools: %s", exc)
 
+    # Follow-up suggestions (suggest_followups) — tappable next-turn chips
+    try:
+        from opensquad.tools import followup_tools
+
+        registry.register(followup_tools, "followup_tools", level="core")
+    except ImportError as exc:
+        logger.warning("Failed to import followup_tools: %s", exc)
+
     if "agent_setup" in tools_list:
         try:
             from opensquad.tools import agent_setup

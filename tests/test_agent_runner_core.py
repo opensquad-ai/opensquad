@@ -85,26 +85,71 @@ class TestValidateMessageSequence:
 
     def test_empty_req_no_change(self, application_context):
         ctx = application_context
-        ctx.chat_api.req = []
         runner = AgentRunner(
             chat_api=ctx.chat_api,
             tool_registry=ctx.tool_registry,
             agent_context=ctx,
         )
+        runner.chat_api.req = []
         runner._validate_message_sequence()
         assert runner.chat_api.req == []
 
     def test_orphan_tool_removed(self, application_context):
         ctx = application_context
-        ctx.chat_api.req = [{"role": "tool", "content": "orphan"}]
         runner = AgentRunner(
             chat_api=ctx.chat_api,
             tool_registry=ctx.tool_registry,
             agent_context=ctx,
         )
+        runner.chat_api.req = [{"role": "tool", "content": "orphan"}]
         runner._validate_message_sequence()
         tool_msgs = [m for m in runner.chat_api.req if m.get("role") == "tool"]
         assert len(tool_msgs) == 0
+
+    def test_leading_tool_reuses_existing_call_id(self, application_context):
+        """History[-N:] can start on role=tool after a system prompt.
+
+        Inventing a new synth_* id while leaving the original tool_call_id
+        produces DeepSeek 400: assistant tool_calls not answered.
+        """
+        ctx = application_context
+        runner = AgentRunner(
+            chat_api=ctx.chat_api,
+            tool_registry=ctx.tool_registry,
+            agent_context=ctx,
+        )
+        runner.chat_api.req = [
+            {"role": "system", "content": "sys"},
+            {
+                "role": "tool",
+                "tool_call_id": "call_0939_filesystem.list_directory_0",
+                "name": "filesystem.list_directory",
+                "content": "ok",
+            },
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": "call_later",
+                        "type": "function",
+                        "function": {"name": "filesystem.read_file", "arguments": "{}"},
+                    }
+                ],
+            },
+            {"role": "tool", "tool_call_id": "call_later", "content": "ok2"},
+        ]
+        runner._validate_message_sequence()
+        req = runner.chat_api.req
+        assert req[0]["role"] == "system"
+        assert req[1]["role"] == "assistant"
+        synth_ids = [tc["id"] for tc in req[1]["tool_calls"]]
+        assert synth_ids == ["call_0939_filesystem.list_directory_0"]
+        assert not any(str(i).startswith("synth_") for i in synth_ids)
+        assert req[2]["role"] == "tool"
+        assert req[2]["tool_call_id"] == "call_0939_filesystem.list_directory_0"
+        assert req[3]["tool_calls"][0]["id"] == "call_later"
+        assert req[4]["tool_call_id"] == "call_later"
 
 
 class TestAgentRunnerDI:

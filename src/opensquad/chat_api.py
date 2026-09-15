@@ -2,13 +2,12 @@ import asyncio
 import base64
 import json
 import logging
-import re
 import threading
 import uuid
 from collections import OrderedDict
 
 from .system_config import syscfg
-from .xml_parser import StreamingTagParser
+from .xml_parser import StreamingTagParser, StreamingThoughtBlockDropper, strip_prompted_thought_blocks
 
 try:
     from tool import logger
@@ -2095,6 +2094,7 @@ class ChatAPI:
             self.stream_parser._buffered_tags.add("thought")  # Ensure thought can be buffered or streamed as needed
             # Use a temporary attribute to mark whether native thought has occurred this turn
             self._turn_has_native_thought = False
+            self._thought_dropper = StreamingThoughtBlockDropper()
 
         def _is_timeout_error(exc: Exception) -> bool:
             cls = type(exc).__name__.lower()
@@ -2278,6 +2278,9 @@ class ChatAPI:
                         self._turn_has_native_thought = True
                         collected_reasoning.append(reasoning)
                         self._emit_with_sid("thought", reasoning)
+                        if self.stream_parser:
+                            # Mentions of <thought> in the body must stay literal.
+                            self.stream_parser.set_passthrough_tags(("thought", "think"))
 
                     # 2. Handle regular content
                     content = delta.content
@@ -2285,15 +2288,15 @@ class ChatAPI:
                         full_response.append(content)
                         self.printer.dynamic_single_callback(content)
                         if self.stream_parser:
-                            # Core anti-collision logic: if native thought already occurred this turn
-                            # and the current chunk contains thought tags, filter them out
+                            feed = content
                             if self._turn_has_native_thought:
-                                # Fully remove <thought>...</thought> and its content to avoid interference
-                                # In streaming, simply suppress these tag characters
-                                content = content.replace("<thought>", "").replace("</thought>", "")
-                                content = content.replace("<think>", "").replace("</think>", "")
-
-                            self.stream_parser.feed(content)
+                                dropper = getattr(self, "_thought_dropper", None)
+                                if dropper is None:
+                                    dropper = StreamingThoughtBlockDropper()
+                                    self._thought_dropper = dropper
+                                feed = dropper.feed(content)
+                            if feed:
+                                self.stream_parser.feed(feed)
 
                     # 3. Handle audio output delta (OpenAI audio modality)
                     audio_delta = getattr(delta, "audio", None)
@@ -2395,28 +2398,25 @@ class ChatAPI:
             tool_call_strategy.set_delta_callback(None)
 
         if self.stream_parser:
+            if getattr(self, "_turn_has_native_thought", False):
+                dropper = getattr(self, "_thought_dropper", None)
+                if dropper is not None:
+                    tail = dropper.flush()
+                    if tail:
+                        self.stream_parser.feed(tail)
             self.stream_parser.finish()
 
-        # -- Double-think detection + fix --
-        # If native reasoning_content was received this turn and the model's body also outputs <thought>...</thought>,
-        # the model did not follow the instruction "don't output thought tags if native thinking is present".
-        # Strip <thought>...</thought> (including content) with regex to avoid double-rendering in UI.
-        _THOUGHT_RE = re.compile(r"<thought>.*?</thought>", re.DOTALL | re.IGNORECASE)
-        _THINK_INLINE_RE = re.compile(r"<think>.*?</think>", re.DOTALL | re.IGNORECASE)
+        # Native reasoning_content plus XML <thought> dumps in the body.
+        # Drop real line-start blocks (including inner text); leave mentions
+        # and fenced samples intact so the live bubble is not hole-punched.
         if collected_reasoning:
-            if _THOUGHT_RE.search(res_text):
+            stripped = strip_prompted_thought_blocks(res_text)
+            if stripped != res_text:
                 logger.warning(
-                    "[ChatAPI] Double-think detected: model output <thought>...</thought> "
-                    "despite having native reasoning_content. Stripping prompted thought block."
+                    "[ChatAPI] Double-think detected: model output a prompted "
+                    "<thought>/<think> block despite having native reasoning_content. Stripping."
                 )
-                res_text = _THOUGHT_RE.sub("", res_text).strip()
-            # Also handle <think>...</think> (used by some models)
-            if _THINK_INLINE_RE.search(res_text):
-                logger.warning(
-                    "[ChatAPI] Double-think detected: model output <think>...</think> "
-                    "in content despite having native reasoning_content. Stripping."
-                )
-                res_text = _THINK_INLINE_RE.sub("", res_text).strip()
+                res_text = stripped.strip()
 
         # If native reasoning content was collected, we need to:
         # 1. Save the clean content (without reasoning) for the API message's "content" field

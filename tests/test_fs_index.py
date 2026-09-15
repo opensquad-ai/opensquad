@@ -88,10 +88,16 @@ class TestWalkFallback:
     def test_symlink_loop_not_recursed(self, tmp_path: Path):
         (tmp_path / "real").mkdir()
         (tmp_path / "real" / "a.txt").write_text("x", encoding="utf-8")
+        link = tmp_path / "real" / "loop"
         try:
-            os.symlink(tmp_path, tmp_path / "real" / "loop", target_is_directory=True)
+            os.symlink(tmp_path, link, target_is_directory=True)
         except (OSError, NotImplementedError):
             pytest.skip("symlink creation not permitted on this platform")
+        # Some sandboxed filesystems accept os.symlink() without raising but
+        # never materialise the link. Asserting on a link that does not exist
+        # would report a fake traversal bug, so bail out instead.
+        if not os.path.islink(link):
+            pytest.skip("symlink creation silently ignored by this filesystem")
         result = list_tree(str(tmp_path), use_cache=False)
         paths = {e["path"] for e in result["entries"]}
         # The symlink appears as a file entry (never recursed), so no infinite loop

@@ -40,8 +40,8 @@ dependencies = [
     "aiosqlite>=0.19.0",
     "alembic>=1.12.0",
     "python-dotenv>=1.0.0",
-    "python-jose[cryptography]>=3.3.0",
-    "passlib[bcrypt]>=1.7.4",
+    "PyJWT[crypto]>=2.8.0",
+    "bcrypt>=4.1.0",
     "python-multipart>=0.0.6",
     "tiktoken>=0.5.0",
     "certifi>=2023.0.0",
@@ -69,15 +69,41 @@ dev = [
 websearch = [
     "beautifulsoup4>=4.12",
     "lxml>=5.0",
+    # Imported directly by gateway/backend/run.py and the websearch service.
+    # Pinned explicitly rather than relying on it arriving transitively
+    # through playwright-stealth.
+    "playwright>=1.40",
     "playwright-stealth>=1.0",
+    # plugins/websearch/service/wash_content.py (module-level import)
+    "trafilatura>=1.8",
+    # plugins/websearch/service/pdf_processor.py: `import fitz`. Note this is
+    # PyMuPDF, NOT PyPDF2 — the plugin's own requirements.txt used to name
+    # PyPDF2, which nothing in the tree imports.
+    "pymupdf>=1.24",
+]
+telegram = [
+    # Imported by plugins/telegram/adapter.py. Was previously undeclared, so
+    # `uv sync --extra dev` produced a venv where the telegram adapter could
+    # not be imported and its regression tests failed on the CI gate.
+    "python-telegram-bot>=21.0",
 ]
 whisper = [
     "flask>=3.0",
     "flask-cors>=4.0",
     "pycryptodome>=3.19",
 ]
+google = [
+    # Imported by opensquad/google_api.py (the GoogleAPI provider) through the
+    # lazy _ensure_genai() probe. Previously undeclared, so on any machine
+    # without it GoogleAPI silently initialised with _genai=None and
+    # _convert_tools_to_google_format() returned an empty tool list -- the
+    # provider looked configured but never sent a tool. The regression tests in
+    # tests/test_claude_google_native_fc.py failed on the CI gate for the same
+    # reason. Install with: pip install "opensquad[google]"
+    "google-generativeai>=0.8.0",
+]
 all = [
-    "opensquad[websearch,whisper]",
+    "opensquad[websearch,telegram,google,whisper]",
 ]
 
 [project.urls]
@@ -176,28 +202,45 @@ ignore = [
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+# A `def test_*` that *returns* a non-None value is almost always a converted
+# script: pytest ignores the return value, so the test asserts nothing and
+# passes unconditionally. Several files under tests/ were exactly that.
+# Fail loudly instead of silently going green.
+filterwarnings = [
+    "error::pytest.PytestReturnNotNoneWarning",
+]
 # CI-5: coverage was previously forced for every local pytest run via global
 # addopts, slowing local feedback by 20-40%. It is now enabled explicitly in
 # CI (ci.yml full gate) via `pytest --cov=opensquad --cov-report=...`.
 # Local runs stay fast: `pytest -q`.
 
-# ── Coverage gate ─────────────────────────────────────────
-# OpenSquad targets a floor of 80% line coverage on the core
-# ``opensquad`` package. A PR that drops coverage below this
-# threshold fails ``pytest`` before review. New code without tests
-# must be either covered or explicitly excluded via ``# pragma: no
-# cover`` (use sparingly). Adjust via PR if a structural change
-# genuinely requires a temporary drop.
+# ── Coverage gate (ratchet) ───────────────────────────────
+# Measured baseline: 21.3% line coverage over 214 modules of the ``opensquad``
+# package (11,419 / 48,399 statements); 67 of those modules sit at 0%.
+#
+# HISTORICAL NOTE — read before "restoring" 80%: the previous comment here
+# claimed a hard 80% floor that failed PRs. It never did. ci.yml passed
+# ``--cov-fail-under=0`` to pytest and put the ``coverage report --fail-under``
+# check behind ``continue-on-error: true``, so the number was never enforced and
+# drifted unmeasured. The floor below is a *ratchet*: the number may go up but
+# never down. Raising it to 80 means writing the missing tests, not editing this
+# value. Regenerate the baseline with:
+#     pytest --cov=opensquad --cov-report=term-missing
 [tool.coverage.run]
 source = ["opensquad"]
 branch = true
 omit = [
     "*/tests/*",
     "*/__pycache__/*",
+    # Defensive only: `nexuschat-pro/` ships a frozen PyInstaller runtime plus
+    # node_modules. It is not part of the measured set under the current
+    # invocation, but a broader `--cov=src` run would sweep it in and make any
+    # floor meaningless, so exclude it explicitly.
+    "*/gateway/nexuschat-pro/*",
 ]
 
 [tool.coverage.report]
-fail_under = 80
+fail_under = 21
 show_missing = true
 skip_covered = false
 exclude_lines = [

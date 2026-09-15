@@ -6,6 +6,7 @@ import { getAvatarUrl, getLocalAvatarFallback } from '../utils/image';
 import { AvatarImg } from './AvatarImg';
 import { OpenSquadLoader } from './OpenSquadLoader';
 import { uploadAPI, messageAPI, groupAPI } from '../services/api';
+import { highlightText } from '../utils/highlightText';
 
 interface RightPanelProps {
   isOpen: boolean;
@@ -208,11 +209,10 @@ export const RightPanel: React.FC<RightPanelProps> = ({ isOpen, onClose, group, 
   };
 
   // 高亮搜索文本
-  const highlightText = (text: string, query: string) => {
-    if (!query?.trim()) return text;
-    const regex = new RegExp(`(${query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')})`, 'gi');
-    return text.replace(regex, '<mark class="bg-yellow-200 text-yellow-800 px-0.5 rounded">$1</mark>');
-  };
+  // highlightText comes from utils/highlightText.ts — it escapes the message
+  // text and the query before wrapping the match, because the result is
+  // injected with dangerouslySetInnerHTML. Inline here it was untestable and
+  // never escaped `text` at all.
 
   return (
     <div className="w-full lg:w-80 h-full border-l border-border bg-panel flex flex-col shadow-xl z-20">

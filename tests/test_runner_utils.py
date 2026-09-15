@@ -103,12 +103,20 @@ class TestRemoveAllTags:
     def test_empty_text(self):
         assert self._target("") == ""
 
-    def test_remove_thought_tag(self):
+    def test_inline_thought_keeps_content(self):
+        # Only *line-start* <thought>/<think> blocks are dropped (see
+        # xml_parser.strip_prompted_thought_blocks). An inline one is a plain
+        # tag-strip so prose is never hole-punched — "I think" must survive.
         text = "Before <thought>I think this</thought> After"
         result = self._target(text)
-        assert "Before" in result
-        assert "I think" not in result
-        assert "After" in result
+        assert result == "Before I think this After"
+
+    def test_line_start_thought_block_dropped(self):
+        assert self._target("<thought>secret</thought>visible") == "visible"
+        assert self._target("line1\n<thought>secret</thought>\nline3") == "line1\n\nline3"
+
+    def test_silent_protocol_block_dropped_with_content(self):
+        assert self._target("A <plan>secret</plan> B") == "A  B"
 
     def test_to_user_content_kept(self):
         text = "Intro <to_user>Hello there</to_user> Outro"
@@ -120,6 +128,34 @@ class TestRemoveAllTags:
         text = "Just some text without tags."
         result = self._target(text)
         assert result == "Just some text without tags."
+
+    def test_timeout_block_removed_not_inner_kept(self):
+        assert self._target("<timeout>60</timeout>") == ""
+        assert "60" not in self._target("Keep <timeout>60</timeout> me")
+        assert "Keep" in self._target("Keep <timeout>60</timeout> me")
+        assert "me" in self._target("Keep <timeout>60</timeout> me")
+        assert self._target("<sleep>5</sleep>") == ""
+        assert self._target("<to_system>task_complete</to_system>") == ""
+
+
+class TestComposeUserVisibleMessage:
+    """Protocol XML must not become the visible assistant reply."""
+
+    @staticmethod
+    def _target(text: str):
+        from opensquad._runner._tag_utils import compose_user_visible_message
+
+        return compose_user_visible_message(text)
+
+    def test_timeout_only_is_empty(self):
+        text, tag = self._target("<timeout>60</timeout>")
+        assert text == ""
+        assert tag is None
+
+    def test_timeout_after_to_user_dropped(self):
+        text, tag = self._target("<to_user>开始执行。</to_user>\n<timeout>60</timeout>")
+        assert text == "开始执行。"
+        assert tag == "to_user"
 
 
 # ── _remove_tags / _extract_tag ─────────────────────────────────────────
@@ -253,3 +289,12 @@ class TestIsRepeatedContent:
     def test_empty_text(self):
         assert self._target("") is False
         assert self._target(None) is False
+
+
+def test_looks_like_auth_failure_detects_credits_401():
+    from opensquad.runner import _looks_like_auth_failure
+
+    assert _looks_like_auth_failure(
+        "[Error: AuthenticationError - Error code: 401 - CreditsError Insufficient balance]"
+    )
+    assert not _looks_like_auth_failure("ok, I'll reply in the group")

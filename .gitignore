@@ -299,6 +299,17 @@ src/plugins/*/ui/package-lock.json
 _ws_run.log.err
 src/plugins/websearch/service/reranker/models/
 
+# ── local review scratch ──
+# Ad-hoc fix diffs and purge/repro captures produced while auditing a change.
+# These are per-instance evidence, never source.
+_rev_*.diff
+_pw_repro/
+# Scratch space for cross-tree test comparisons (e.g. a `git worktree` checked
+# out at HEAD) and their captured pytest logs. Never source.
+.tmpscratch/
+# Isolated uv cache used when the default per-user cache is unavailable.
+.uvtmp/
+
 # ── Local optimization audit docs (generated reports, not source) ──
 优化doc/
 
@@ -317,10 +328,38 @@ docs/方案讨论*/skill/
 # ── Local private report / proposal docs (per-instance analysis, not source) ──
 # Optimization reports, plan-discussion rounds, fix-plan drafts and execution
 # summaries are generated locally for review and are NOT part of the source tree.
+#
+# The rules below are deliberately broader than "docs/report_*.md": these drafts
+# get written under whatever path is convenient at the time, so the naming shape
+# is matched tree-wide rather than anchored to docs/. Nothing tracked matches
+# them (checked with `git ls-files`), and `git check-ignore` is the way to tell
+# whether a given file is actually excluded.
+**/方案*.md
+**/方案讨论*/
 docs/report_*.md
-docs/方案讨论*/
-docs/优化修复方案_*.md
+**/*优化报告*.md
+**/*优化修复方案*.md
+docs/plan_*.md
+/plan_*.md
 plan_fix_*.md
+
+# ── Local scratch: one-off probes, codegen temp dirs, run artifacts ──
+# `__probe_*` / `__debug_*` are ad-hoc vitest files written to inspect a single
+# behaviour; they assert nothing about the product and are deleted once answered.
+**/__probe_*.test.ts
+**/__probe_*.test.tsx
+**/__debug_*.test.ts
+**/__debug_*.test.tsx
+# esbuild output from compiling one component in isolation.
+.tmp-jsx-check/
+# Playwright's default outputDir (.last-run.json, traces, screenshots).
+test-results/
+# Repo-root `tools/` is machine-local scratch and has never been tracked: one-off
+# dump scripts with hard-coded absolute paths to this machine's runtime dirs,
+# plus session notes. Re-include a file explicitly if it ever becomes real source.
+tools/_*.py
+tools/*.md
+tools/*.ps1
 
 # ===== Private plugins / skills (not for public repo) =====
 src/plugins/news2theme/

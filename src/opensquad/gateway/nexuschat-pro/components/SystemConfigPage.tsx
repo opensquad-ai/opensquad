@@ -2,6 +2,7 @@ import React, { useState, useEffect, useCallback, useRef, forwardRef, useImperat
 import {
   X, Save, RefreshCw, ToggleLeft, ToggleRight, Plus, FolderOpen, ExternalLink,
   CheckCircle, AlertCircle, Palette, Info, SlidersHorizontal, Cable, Settings2,
+  ChevronDown, Check,
 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { systemConfigAPI, versionAPI } from '../services/api';
@@ -142,6 +143,20 @@ const GeneralTab: React.FC = () => {
   const { t, i18n } = useTranslation();
   const [level, setLevel] = useWorkflowExpandLevel();
   const isZh = i18n.language === 'zh' || i18n.language.startsWith('zh');
+  const [wfOpen, setWfOpen] = useState(false);
+  const wfWrapRef = useRef<HTMLDivElement>(null);
+
+  // Click-outside to close the workflow-level dropdown.
+  useEffect(() => {
+    if (!wfOpen) return;
+    const onDoc = (e: MouseEvent) => {
+      if (wfWrapRef.current && !wfWrapRef.current.contains(e.target as Node)) {
+        setWfOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', onDoc);
+    return () => document.removeEventListener('mousedown', onDoc);
+  }, [wfOpen]);
 
   return (
     <div className="space-y-6">
@@ -182,46 +197,56 @@ const GeneralTab: React.FC = () => {
         </div>
       </section>
 
-      <section>
-        <h4 className="text-sm font-semibold text-textMain">
-          {t('systemConfig.general.workflowExpand.title')}
-        </h4>
-        <p className="mt-1 text-xs leading-relaxed text-textMuted">
-          {t('systemConfig.general.workflowExpand.hint')}
-        </p>
-        <div className="mt-3 space-y-2">
-          {WORKFLOW_EXPAND_OPTIONS.map((opt) => {
-            const active = level === opt.id;
-            return (
-              <button
-                key={opt.id}
-                type="button"
-                onClick={() => setLevel(opt.id)}
-                className={`flex w-full items-start gap-3 rounded-xl border px-3.5 py-3 text-left transition-all duration-soft ease-soft ${
-                  active
-                    ? 'border-primary/45 bg-primary/8 shadow-soft'
-                    : 'border-border bg-bgLight/60 hover:border-border hover:bg-panel/70'
-                }`}
-              >
-                <span
-                  className={`mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded-full border ${
-                    active ? 'border-primary' : 'border-border'
-                  }`}
-                  aria-hidden
-                >
-                  {active ? <span className="h-2 w-2 rounded-full bg-primary" /> : null}
-                </span>
-                <span className="min-w-0 flex-1">
-                  <span className={`block text-sm font-medium ${active ? 'text-textMain' : 'text-textMain/90'}`}>
-                    {t(opt.titleKey)}
-                  </span>
-                  <span className="mt-0.5 block text-xs leading-relaxed text-textMuted">
-                    {t(opt.descKey)}
-                  </span>
-                </span>
-              </button>
-            );
-          })}
+      <section className="flex items-center justify-between gap-4">
+        <div className="min-w-0">
+          <h4 className="text-sm font-semibold text-textMain">
+            {t('systemConfig.general.workflowExpand.title')}
+          </h4>
+          <p className="mt-1 text-xs leading-relaxed text-textMuted">
+            {t('systemConfig.general.workflowExpand.hint')}
+          </p>
+        </div>
+        <div ref={wfWrapRef} className="relative shrink-0">
+          <button
+            type="button"
+            onClick={() => setWfOpen(o => !o)}
+            aria-label={t('systemConfig.general.workflowExpand.title')}
+            aria-expanded={wfOpen}
+            className="flex w-32 items-center justify-between gap-2 rounded-xl border border-border bg-bgLight px-3 py-1.5 text-xs text-textMain transition-colors hover:border-primary/40"
+          >
+            <span className="truncate">
+              {t(WORKFLOW_EXPAND_OPTIONS.find(o => o.id === level)?.titleKey ?? '')}
+            </span>
+            <ChevronDown
+              size={13}
+              className={`shrink-0 text-textMuted transition-transform duration-soft ${wfOpen ? 'rotate-180' : ''}`}
+            />
+          </button>
+          {wfOpen ? (
+            <div className="absolute right-0 top-[calc(100%+4px)] z-20 w-36 overflow-hidden rounded-2xl border border-border bg-panel py-1 shadow-lg">
+              {WORKFLOW_EXPAND_OPTIONS.map((opt) => {
+                const active = level === opt.id;
+                return (
+                  <button
+                    key={opt.id}
+                    type="button"
+                    onClick={() => {
+                      setLevel(opt.id);
+                      setWfOpen(false);
+                    }}
+                    className={`flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs transition-colors duration-soft ease-soft ${
+                      active
+                        ? 'bg-primary/5 text-textMain'
+                        : 'text-textMuted hover:bg-primary/10 hover:text-textMain'
+                    }`}
+                  >
+                    <Check size={13} className={`shrink-0 text-primary ${active ? '' : 'opacity-0'}`} />
+                    <span className="truncate">{t(opt.titleKey)}</span>
+                  </button>
+                );
+              })}
+            </div>
+          ) : null}
         </div>
       </section>
     </div>
@@ -780,7 +805,7 @@ export const SystemConfigPage: React.FC<SystemConfigPageProps> = ({
   // Match the former "应用" (embedded app panel) footprint so switching tabs
   // does not resize the modal.
   const settingsShellClass =
-    'w-[min(96rem,calc(100vw-0.75rem))] h-[calc(100vh-0.75rem)] max-h-[calc(100vh-0.75rem)] shrink-0';
+    'w-[min(76.8rem,calc((100vw-0.75rem)*0.8))] h-[calc((100vh-0.75rem)*0.8)] max-h-[calc((100vh-0.75rem)*0.8)] shrink-0';
 
   return (
     <SoftOverlay

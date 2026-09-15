@@ -35,17 +35,21 @@ interface UnifiedDiffViewProps {
 function DiffCodeRow({ line, lang }: { line: DiffLine; lang: string }) {
   const isIns = line.type === 'insert';
   const isDel = line.type === 'delete';
-  const rowBg = isIns ? 'bg-[#12261e]' : isDel ? 'bg-[#2a1215]' : 'bg-transparent';
-  const gutterBg = isIns
-    ? 'bg-[#0e3a28] text-emerald-400/90'
+  const rowBg = isIns
+    ? 'bg-[#dafbe1] dark:bg-[#12261e]'
     : isDel
-      ? 'bg-[#4a151c] text-rose-300/90'
-      : 'text-gray-600';
+      ? 'bg-[#ffebe9] dark:bg-[#2a1215]'
+      : 'bg-transparent';
+  const gutterBg = isIns
+    ? 'bg-[#aceebb] text-emerald-800 dark:bg-[#0e3a28] dark:text-emerald-400/90'
+    : isDel
+      ? 'bg-[#ffcecb] text-rose-800 dark:bg-[#4a151c] dark:text-rose-300/90'
+      : 'text-textMuted';
   const mark = isIns ? '+' : isDel ? '-' : ' ';
   const markColor = isIns
-    ? 'text-emerald-400'
+    ? 'text-emerald-700 dark:text-emerald-400'
     : isDel
-      ? 'text-rose-400'
+      ? 'text-rose-700 dark:text-rose-400'
       : 'text-transparent';
   // Single gutter: prefer new (current) line, fall back to old for pure deletes.
   const lineno = line.new_lineno ?? line.old_lineno ?? '';
@@ -64,7 +68,11 @@ function DiffCodeRow({ line, lang }: { line: DiffLine; lang: string }) {
       </span>
       <span
         className={`flex-1 min-w-0 whitespace-pre-wrap break-words pr-2 leading-[18px] ${
-          isIns ? 'text-emerald-100/95' : isDel ? 'text-rose-100/90' : 'text-gray-300'
+          isIns
+            ? 'text-emerald-950 dark:text-emerald-100/95'
+            : isDel
+              ? 'text-rose-950 dark:text-rose-100/90'
+              : 'text-textMain'
         }`}
         dangerouslySetInnerHTML={{ __html: highlightLine(line.text || '', lang) }}
       />
@@ -126,8 +134,8 @@ export const UnifiedDiffView: React.FC<UnifiedDiffViewProps> = ({
   }
 
   return (
-    <div className="flex-1 min-h-0 overflow-auto bg-[#1e1e1e] font-mono text-[11px] leading-[18px]">
-      <div className="sticky top-0 z-[1] flex items-center gap-2 px-2 py-1 border-b border-white/10 bg-[#1e1e1e]/95 backdrop-blur-sm text-[10px]">
+    <div className="flex-1 min-h-0 overflow-auto file-code-surface font-mono text-[11px] leading-[18px]">
+      <div className="sticky top-0 z-[1] flex items-center gap-2 px-2 py-1 border-b border-border bg-bgLight/95 dark:bg-[#0d1117]/95 backdrop-blur-sm text-[10px]">
         <span className="text-emerald-400 tabular-nums font-medium">+{additions}</span>
         <span className="text-rose-400 tabular-nums font-medium">-{deletions}</span>
       </div>
@@ -141,7 +149,7 @@ export const UnifiedDiffView: React.FC<UnifiedDiffViewProps> = ({
               <React.Fragment key={i}>
                 <button
                   type="button"
-                  className="w-full text-left px-2 py-0.5 text-[10px] text-gray-500 hover:text-gray-300 bg-[#2a2a2a]/80 hover:bg-[#333] border-y border-black/40"
+                  className="w-full text-left px-2 py-0.5 text-[10px] text-textMuted hover:text-textMain bg-bgDark/60 hover:bg-bgDark dark:bg-[#2a2a2a]/80 dark:hover:bg-[#333] border-y border-border"
                   onClick={() => {
                     if (!hidden.length) {
                       onExpandWithoutHidden?.();

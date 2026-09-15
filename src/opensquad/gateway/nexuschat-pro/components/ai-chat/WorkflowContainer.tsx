@@ -3,7 +3,6 @@
  *
  * Groups thought blocks, tool calls, and tool results within a
  * collapsible section that shows timing information.
- * Matches the legacy HTML's workflow-container pattern.
  *
  * Usage:
  *   - Active workflow (still running): status="Thinking...", defaultOpen={true}
@@ -11,13 +10,14 @@
  *
  * Timing:
  *   - While running: pass `startedMs` (epoch ms from backend turn_start).
- *     The component computes `Date.now() - startedMs` every 100ms.
+ *     Elapsed time is driven by a shared 400ms ticker (not a per-instance 100ms timer).
  *   - When completed: pass `finalElapsedMs` (ms, from backend turn_elapsed).
- *     The display freezes at this value. It is also persisted in the session.
  */
-import React, { useState, useEffect, useRef, useLayoutEffect } from 'react';
-import { ChevronDown, ChevronRight, CheckCircle2 } from 'lucide-react';
+import React, { useEffect, useRef } from 'react';
+import { CheckCircle2 } from 'lucide-react';
+import { Collapse, FoldChevron, isFoldAnimating, useFold } from '../Collapse';
 import { formatElapsed } from '../../utils/formatElapsed';
+import { useSharedNow } from '../../hooks/useSharedNow';
 import { OpenSquadLoader } from '../OpenSquadLoader';
 
 interface WorkflowContainerProps {
@@ -32,64 +32,40 @@ interface WorkflowContainerProps {
   finalElapsedMs?: number;
 }
 
-export const WorkflowContainer: React.FC<WorkflowContainerProps> = ({
+const WorkflowContainerInner: React.FC<WorkflowContainerProps> = ({
   status,
   children,
   defaultOpen = false,
   startedMs,
   finalElapsedMs,
 }) => {
-  const [isOpen, setIsOpen] = useState(defaultOpen);
-  const [liveElapsed, setLiveElapsed] = useState(0);
-  const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const { open: isOpen, toggle: toggleOpen, setOpen } = useFold(defaultOpen);
   const prevDefaultOpen = useRef(defaultOpen);
   const userOverride = useRef<'open' | 'closed' | null>(null);
 
-  // Inner scroll: sticky-bottom auto-scroll
   const scrollRef = useRef<HTMLDivElement>(null);
+  const columnRef = useRef<HTMLDivElement>(null);
   const isAtBottomRef = useRef(true);
-  const prevScrollHeightRef = useRef(0);
 
-  // "Running" means there's an active status string
   const isRunning = !!status;
+  const now = useSharedNow(isRunning && startedMs !== undefined);
 
-  // Sync defaultOpen changes: auto-collapse when workflow completes
   useEffect(() => {
     if (prevDefaultOpen.current && !defaultOpen) {
-      // Auto-collapse ONLY if the user has NOT pinned it open.
       if (userOverride.current !== 'open') {
-        const t = setTimeout(() => setIsOpen(false), 800);
+        const t = setTimeout(() => setOpen(false), 800);
         prevDefaultOpen.current = defaultOpen;
         return () => clearTimeout(t);
       }
     }
     if (!prevDefaultOpen.current && defaultOpen) {
-      // Auto-open while running, unless user explicitly collapsed earlier.
-      if (userOverride.current !== 'closed') setIsOpen(true);
+      if (userOverride.current !== 'closed') setOpen(true);
     }
     prevDefaultOpen.current = defaultOpen;
-  }, [defaultOpen]);
+  }, [defaultOpen, setOpen]);
 
-  // Live timer: only runs while workflow is active and we have a start timestamp
-  useEffect(() => {
-    if (timerRef.current) {
-      clearInterval(timerRef.current);
-      timerRef.current = null;
-    }
-    if (isRunning && startedMs !== undefined) {
-      timerRef.current = setInterval(() => {
-        setLiveElapsed(Date.now() - startedMs);
-      }, 100);
-    }
-    return () => {
-      if (timerRef.current) clearInterval(timerRef.current);
-    };
-  }, [isRunning, startedMs]);
-
-  // Displayed duration:
-  //   completed → finalElapsedMs (exact, from backend)
-  //   running   → live calculation from startedMs
-  //   fallback  → 0
+  const liveElapsed =
+    startedMs !== undefined ? Math.max(0, now - startedMs) : 0;
   const displayElapsed = formatElapsed(
     finalElapsedMs !== undefined ? finalElapsedMs : liveElapsed,
   );
@@ -102,14 +78,10 @@ export const WorkflowContainer: React.FC<WorkflowContainerProps> = ({
   );
 
   const handleToggle = () => {
-    setIsOpen(prev => {
-      const next = !prev;
-      userOverride.current = next ? 'open' : 'closed';
-      return next;
-    });
+    const next = toggleOpen();
+    userOverride.current = next ? 'open' : 'closed';
   };
 
-  // Track whether inner scroll is at the bottom
   const handleInnerScroll = () => {
     const el = scrollRef.current;
     if (!el) return;
@@ -117,49 +89,51 @@ export const WorkflowContainer: React.FC<WorkflowContainerProps> = ({
     isAtBottomRef.current = dist < 30;
   };
 
-  // After content changes, auto-scroll only if we were at the bottom.
-  // If user has scrolled up to read a specific tool call, freeze position.
-  useLayoutEffect(() => {
+  useEffect(() => {
     const el = scrollRef.current;
-    if (!el) return;
-    const prevH = prevScrollHeightRef.current;
-    prevScrollHeightRef.current = el.scrollHeight;
-    const delta = el.scrollHeight - prevH;
-    if (delta <= 0) return;
-    if (isAtBottomRef.current) {
+    const col = columnRef.current;
+    if (!el || !col || !isOpen) return;
+    const pin = () => {
+      if (!isAtBottomRef.current) return;
+      // User expanding an inner fold grows the box content — keep the fold
+      // header in place instead of yanking the box to its bottom.
+      if (isFoldAnimating()) return;
       el.scrollTop = el.scrollHeight - el.clientHeight;
-    }
-  });
+    };
+    pin();
+    const ro = new ResizeObserver(pin);
+    ro.observe(col);
+    return () => ro.disconnect();
+  }, [isOpen]);
 
   return (
     <div className="mb-3 ml-2 sm:ml-9 border border-border rounded-lg overflow-hidden bg-panel/50">
-      {/* Header */}
       <div
         className="flex items-center gap-2 px-3 py-2 cursor-pointer hover:bg-primary/10 transition-colors select-none"
         onClick={handleToggle}
+        aria-expanded={isOpen}
       >
         {icon}
         <span className="text-xs text-textMuted flex-1 truncate">{displayStatus}</span>
         <span className="text-[10px] text-textMuted font-mono">{displayElapsed}</span>
-        {isOpen
-          ? <ChevronDown size={14} className="text-textMuted" />
-          : <ChevronRight size={14} className="text-textMuted" />
-        }
+        <FoldChevron open={isOpen} size={14} />
       </div>
 
-      {/* Content — keep mounted (hidden when collapsed) so open SubAgentPanel
-          portals keep receiving live async-delegate updates after the parent
-          turn seals and this container auto-collapses. */}
-      <div
-        ref={scrollRef}
-        onScroll={handleInnerScroll}
-        className={`border-t border-border px-3 py-2 space-y-2 max-h-[600px] overflow-y-auto text-xs ${
-          isOpen ? '' : 'hidden'
-        }`}
-        aria-hidden={!isOpen}
-      >
-        {children}
-      </div>
+      {/* Children stay mounted either way — the scroll-pinning effect needs the
+          column ref — so the fold is a pure height transition. */}
+      <Collapse open={isOpen}>
+        <div
+          ref={scrollRef}
+          onScroll={handleInnerScroll}
+          className="border-t border-border px-3 py-2 max-h-[600px] overflow-y-auto text-xs"
+        >
+          <div ref={columnRef} className="space-y-2">
+            {children}
+          </div>
+        </div>
+      </Collapse>
     </div>
   );
 };
+
+export const WorkflowContainer = React.memo(WorkflowContainerInner);

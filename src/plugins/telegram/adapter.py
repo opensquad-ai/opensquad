@@ -79,9 +79,16 @@ try:
         filters,
     )
     from telegram.request import HTTPXRequest
-except ImportError:
-    logger.error("Missing python-telegram-bot library. Install with:\n  pip install python-telegram-bot")
-    sys.exit(1)
+except ImportError as exc:
+    # Do NOT sys.exit() here. Plugins are imported in-process by
+    # plugins/plugin_manager.py::_import_plugin_class, which catches ImportError
+    # to skip an unavailable plugin. SystemExit is not an ImportError, so exiting
+    # here killed the whole agent process instead of skipping one plugin — and it
+    # made this module unimportable in tests. Raise so that handler can run.
+    raise ImportError(
+        "Missing python-telegram-bot library. Install with:\n"
+        "  pip install python-telegram-bot    (or: pip install 'opensquad[telegram]')"
+    ) from exc
 
 
 # ══════════════════════════════════════════════

@@ -10,6 +10,7 @@ import {
   isShellPollToolName,
   rebuildShellStreamsFromEvents,
   sealShellStreamFromResult,
+  shellJobDoneLabel,
   type ShellStreamState,
 } from './shellJobGrouping';
 
@@ -26,6 +27,9 @@ describe('shellJobGrouping', () => {
     expect(isShellJobToolName('system__start_job')).toBe(true);
     expect(isShellJobToolName('system.start_job')).toBe(true);
     expect(isShellJobToolName('system__run_session_job')).toBe(true);
+    expect(isShellJobToolName('shell')).toBe(true);
+    expect(isShellJobToolName('system.shell')).toBe(true);
+    expect(isShellJobToolName('terminal')).toBe(true);
     expect(isShellJobToolName('system__check_job')).toBe(false);
     expect(isShellPollToolName('system__check_job')).toBe(true);
   });
@@ -104,5 +108,24 @@ describe('shellJobGrouping', () => {
     expect(streams.c1?.state).toBe('done');
     expect(streams.c1?.output).toContain('hi');
     expect(streams.c1?.command).toContain('echo');
+  });
+
+  it('labels timeout vs abort vs generic failure', () => {
+    expect(shellJobDoneLabel(false, false)).toBe('Completed');
+    expect(
+      shellJobDoneLabel(false, true, JSON.stringify({
+        status: 'error',
+        timed_out: true,
+        message: 'Command timed out after 120s',
+      })),
+    ).toBe('Timed out');
+    expect(
+      shellJobDoneLabel(false, true, JSON.stringify({
+        status: 'error',
+        aborted: true,
+        message: 'Command aborted by user stop',
+      })),
+    ).toBe('Aborted');
+    expect(shellJobDoneLabel(false, true, JSON.stringify({ status: 'error', message: 'boom' }))).toBe('Failed');
   });
 });

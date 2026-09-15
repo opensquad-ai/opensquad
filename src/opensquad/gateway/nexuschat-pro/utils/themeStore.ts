@@ -12,6 +12,7 @@ import {
   PURITY_MAX,
   PURITY_MIN,
   PRESET_METAS,
+  ThemePalette,
   ThemePrefs,
   ThemePresetId,
   buildPalette,
@@ -104,25 +105,52 @@ const LEGACY_MAP: Record<string, Partial<ThemePrefs>> = {
 };
 
 let cachedPrefs: ThemePrefs | null = null;
+let lastPalette: ThemePalette | null = null;
 let systemMediaCleanup: (() => void) | null = null;
 
+/**
+ * Palette produced by the most recent `applyThemePrefs` call.
+ *
+ * The settings panel needs *measured* numbers (e.g. the contrast ratio the
+ * current theme actually renders) rather than an echo of the requested
+ * preference — recomputing the palette there would duplicate the
+ * appearance/primary/surfaceHue resolution logic and drift from it.
+ */
+export function getActivePalette(): ThemePalette | null {
+  return lastPalette;
+}
+
+/**
+ * Derived from `PRESET_METAS` so adding/renaming a preset can never leave a
+ * stale id accepted here.
+ *
+ * This list used to be hand-written and still contained `'paper'` long after
+ * that preset was renamed to `'rose'`, even though `ThemePresetId` no longer
+ * had it. A persisted `'paper'` therefore passed validation, kept its slot
+ * forever (never self-healing), rendered surfaces derived from a fallback
+ * primary, and left the settings grid with no preset highlighted.
+ */
 function isPresetId(v: unknown): v is ThemePresetId {
-  return (
-    v === 'random' ||
-    v === 'ink-green' ||
-    v === 'lake-blue' ||
-    v === 'minimal' ||
-    v === 'paper' ||
-    v === 'rose' ||
-    v === 'pure-white' ||
-    v === 'violet' ||
-    v === 'luxury' ||
-    v === 'custom'
-  );
+  return v === 'custom' || PRESET_METAS.some((m) => m.id === v);
 }
 
 function isMode(v: unknown): v is AppearanceMode {
   return v === 'light' || v === 'dark' || v === 'system';
+}
+
+/**
+ * Coerce a persisted numeric pref, falling back only when the value is
+ * genuinely absent or unparseable.
+ *
+ * Do NOT replace this with `Number(v) || fallback`: `0` is falsy, and
+ * `PURITY_MIN` is exactly `0`, so the purity slider silently snapped back to
+ * the default 36 the moment the user dragged it to the left end (measured:
+ * `sanitizePrefs({purity: 0}).purity === 36`).
+ */
+function numOr(v: unknown, fallback: number): number {
+  if (v === null || v === undefined || v === '') return fallback;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : fallback;
 }
 
 export function sanitizePrefs(raw: Partial<ThemePrefs> | null | undefined): ThemePrefs {
@@ -131,17 +159,9 @@ export function sanitizePrefs(raw: Partial<ThemePrefs> | null | undefined): Them
     mode: isMode(base.mode) ? base.mode : DEFAULT_THEME_PREFS.mode,
     preset: isPresetId(base.preset) ? base.preset : DEFAULT_THEME_PREFS.preset,
     primary: normalizeHex(base.primary || DEFAULT_THEME_PREFS.primary),
-    purity: clamp(Number(base.purity) || DEFAULT_THEME_PREFS.purity, PURITY_MIN, PURITY_MAX),
-    contrast: clamp(
-      Number(base.contrast) || DEFAULT_THEME_PREFS.contrast,
-      CONTRAST_MIN,
-      CONTRAST_MAX,
-    ),
-    fontSize: clamp(
-      Number(base.fontSize) || DEFAULT_THEME_PREFS.fontSize,
-      FONT_SIZE_MIN,
-      FONT_SIZE_MAX,
-    ),
+    purity: clamp(numOr(base.purity, DEFAULT_THEME_PREFS.purity), PURITY_MIN, PURITY_MAX),
+    contrast: clamp(numOr(base.contrast, DEFAULT_THEME_PREFS.contrast), CONTRAST_MIN, CONTRAST_MAX),
+    fontSize: clamp(numOr(base.fontSize, DEFAULT_THEME_PREFS.fontSize), FONT_SIZE_MIN, FONT_SIZE_MAX),
     serif: Boolean(base.serif),
   };
 }
@@ -233,8 +253,16 @@ export function applyThemePrefs(prefs?: ThemePrefs): ThemePrefs {
   const appearance = resolveAppearance(next.mode);
   // For built-in presets, resolve the *effective* primary against the
   // current appearance so presets whose light-mode primary is illegible
-  // on dark surfaces (e.g. paper's near-black charcoal) get an explicit
-  // dark-mode override. Custom / random keep the user's saved colour.
+  // on dark surfaces (e.g. rose / pure-white's near-black charcoal) get an
+  // explicit `darkPrimary` override. Custom / random keep the user's saved
+  // colour.
+  //
+  // This resolution is load-bearing beyond button fills: the accent is also
+  // painted as *text* on the page (`.dark .prose code`, `.prose a`,
+  // `text-primary`), so a preset that skips `darkPrimary` while owning a
+  // near-black accent renders agent output invisibly in dark mode.
+  // themeEngine.test.ts → "accent colour stays distinguishable from the
+  // page" guards the whole table.
   const effectivePrimary =
     next.preset === 'custom' || next.preset === 'random'
       ? next.primary
@@ -252,6 +280,7 @@ export function applyThemePrefs(prefs?: ThemePrefs): ThemePrefs {
     surfaceHue,
     preset: next.preset,
   });
+  lastPalette = palette;
 
   clearLegacyThemeClasses(root);
   root.classList.toggle('dark', appearance === 'dark');
@@ -273,6 +302,7 @@ export function applyThemePrefs(prefs?: ThemePrefs): ThemePrefs {
   root.style.setProperty('--color-stage', hexToRgbTriplet(palette.stage));
   root.style.setProperty('--color-panel', hexToRgbTriplet(palette.panel));
   root.style.setProperty('--color-border', hexToRgbTriplet(palette.border));
+  root.style.setProperty('--color-boundary', hexToRgbTriplet(palette.boundary));
   root.style.setProperty('--color-bubble-self', hexToRgbTriplet(palette.bubbleSelf));
   root.style.setProperty('--color-bubble-other', hexToRgbTriplet(palette.bubbleOther));
   root.style.setProperty('--color-text-main', hexToRgbTriplet(palette.textMain));
@@ -328,6 +358,25 @@ export function updateThemePrefs(patch: Partial<ThemePrefs>): ThemePrefs {
   const next = sanitizePrefs({ ...loadThemePrefs(), ...patch });
   saveThemePrefs(next);
   return applyThemePrefs(next);
+}
+
+/**
+ * Patch produced by one of the appearance sliders (vibrance / contrast /
+ * font size).
+ *
+ * Exists as a named function purely so the invariant "adjusting a slider must
+ * not change the selected preset" can be asserted directly. These sliders used
+ * to also send `preset: 'custom'`, which threw away the preset's hand-tuned
+ * surface pair and swapped in accent-derived surfaces — so moving the contrast
+ * slider visibly repainted the page (measured: ink-green `#EFF0EB` warm →
+ * `#EBF0EE` cool green). Contrast and vibrance are orthogonal to surface
+ * selection; only the colour picker is allowed to switch to `custom`.
+ */
+export function appearanceSliderPatch(
+  field: 'purity' | 'contrast' | 'fontSize',
+  value: number,
+): Partial<ThemePrefs> {
+  return { [field]: value };
 }
 
 export function openThemeSettings(): void {

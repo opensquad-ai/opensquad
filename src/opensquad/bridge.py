@@ -8,6 +8,7 @@ import json
 import logging
 import uuid
 from typing import Any
+from urllib.parse import urlsplit
 
 import requests
 import websockets
@@ -17,6 +18,15 @@ from opensquad.message_queue import message_queue
 from opensquad.system_config import syscfg
 
 logger = logging.getLogger(__name__)
+
+
+def _is_loopback(url: str) -> bool:
+    """True when the URL points at this machine, so no proxy should be consulted."""
+    try:
+        host = urlsplit(url).hostname or ""
+    except ValueError:
+        return False
+    return host in ("127.0.0.1", "localhost", "::1")
 
 
 class ChatProBridge:
@@ -34,6 +44,12 @@ class ChatProBridge:
         if base_url is None:
             base_url = syscfg.gateway_http()
         self.base_url = base_url
+        # Loopback traffic must bypass HTTP_PROXY: proxy_bypass("127.0.0.1") is False on
+        # this platform, so an HTTP_PROXY in the environment would hijack calls to the
+        # local gateway and make them fail silently after the timeout. Same semantics as
+        # opensquad/utils/local_http.open_local (trust_env=False).
+        self._session = requests.Session()
+        self._session.trust_env = not _is_loopback(base_url)
         self.ws_url = base_url.replace("http", "ws") + "/ws"
         self.email = email
         self.password = password
@@ -64,7 +80,7 @@ class ChatProBridge:
         """Login and obtain a Token. If the account does not exist (401), auto-register and retry."""
         try:
             logger.info(f"[Bridge] Login to {self.base_url} as {self.email}...")
-            r = requests.post(
+            r = self._session.post(
                 f"{self.base_url}/api/auth/login", json={"email": self.email, "password": self.password}, timeout=5
             )
 
@@ -73,7 +89,7 @@ class ChatProBridge:
                 logger.info(f"[Bridge] Login 401, attempting auto-register for {self.email}...")
                 # Agent @ai accounts must use the internal registration path
                 # (web /auth/register rejects *@ai without X-Node-Secret).
-                reg = requests.post(
+                reg = self._session.post(
                     f"{self.base_url}/api/auth/register",
                     json={"email": self.email, "password": self.password, "name": self.agent_name},
                     headers=self._internal_headers(),
@@ -81,7 +97,7 @@ class ChatProBridge:
                 )
                 if reg.status_code in (200, 201):
                     logger.info(f"[Bridge] Auto-registered {self.email} as '{self.agent_name}', retrying login...")
-                    r = requests.post(
+                    r = self._session.post(
                         f"{self.base_url}/api/auth/login",
                         json={"email": self.email, "password": self.password},
                         timeout=5,
@@ -98,7 +114,7 @@ class ChatProBridge:
                         return False
                     logger.info("[Bridge] Auto-register 400 (email exists), attempting password reset...")
                     try:
-                        reset = requests.post(
+                        reset = self._session.post(
                             f"{self.base_url}/api/auth/reset-password",
                             json={
                                 "email": self.email,
@@ -109,7 +125,7 @@ class ChatProBridge:
                         )
                         if reset.status_code in (200, 201):
                             logger.info(f"[Bridge] Password reset OK for {self.email}, retrying login...")
-                            r = requests.post(
+                            r = self._session.post(
                                 f"{self.base_url}/api/auth/login",
                                 json={"email": self.email, "password": self.password},
                                 timeout=5,
@@ -199,7 +215,7 @@ class ChatProBridge:
                 # Try to fetch group details (including member list)
                 try:
                     r = await asyncio.to_thread(
-                        requests.get,
+                        self._session.get,
                         f"{self.base_url}/api/groups/{gid}",
                         **{"params": {"token": self.token}, "timeout": 5},
                     )
@@ -258,14 +274,14 @@ class ChatProBridge:
         try:
             if not self._ensure_token():
                 return []
-            r = requests.get(f"{self.base_url}/api/groups", params={"token": self.token}, timeout=5)
+            r = self._session.get(f"{self.base_url}/api/groups", params={"token": self.token}, timeout=5)
             if r.status_code != 200:
                 logger.error(f"[Bridge] Failed to fetch groups: HTTP {r.status_code} - {r.text[:200]}")
                 # Auto re-login when token expires
                 if r.status_code == 401:
                     logger.info("[Bridge] Token expired, re-logging in...")
                     if self.login():
-                        r = requests.get(f"{self.base_url}/api/groups", params={"token": self.token}, timeout=5)
+                        r = self._session.get(f"{self.base_url}/api/groups", params={"token": self.token}, timeout=5)
                         if r.status_code != 200:
                             return []
                     else:
@@ -292,7 +308,7 @@ class ChatProBridge:
                 return {}
 
             def _fetch(tid):
-                return requests.get(
+                return self._session.get(
                     f"{self.base_url}/api/groups/{tid}",
                     params={"token": self.token},
                     timeout=5,
@@ -323,7 +339,9 @@ class ChatProBridge:
                 return {"ok": False, "detail": "Bridge not logged in and auto-login failed"}
 
             joined = False
-            r = requests.post(f"{self.base_url}/api/groups/{group_id}/join", params={"token": self.token}, timeout=5)
+            r = self._session.post(
+                f"{self.base_url}/api/groups/{group_id}/join", params={"token": self.token}, timeout=5
+            )
             if r.status_code == 200:
                 logger.info(f"[Bridge] Joined group {group_id}")
                 joined = True
@@ -331,7 +349,7 @@ class ChatProBridge:
                 # Auto re-login when token expires and retry
                 logger.info("[Bridge] Token expired, re-logging in...")
                 if self.login():
-                    r = requests.post(
+                    r = self._session.post(
                         f"{self.base_url}/api/groups/{group_id}/join", params={"token": self.token}, timeout=5
                     )
                     if r.status_code == 200:
@@ -363,7 +381,9 @@ class ChatProBridge:
                 return {"ok": False, "detail": "Bridge not logged in and auto-login failed"}
 
             def _leave(gid: str):
-                return requests.post(f"{self.base_url}/api/groups/{gid}/leave", params={"token": self.token}, timeout=5)
+                return self._session.post(
+                    f"{self.base_url}/api/groups/{gid}/leave", params={"token": self.token}, timeout=5
+                )
 
             r = _leave(group_id)
             if r.status_code == 401:
@@ -752,8 +772,8 @@ class ChatProBridge:
                     # att_url format: /uploads/xxx.jpg -- needs to be downloaded from ChatPro
                     full_url = f"{self.base_url}{att_url}"
                     headers = {"Authorization": f"Bearer {self.token}"} if self.token else {}
-                    # Wrap synchronous requests.get with asyncio.to_thread to avoid blocking the event loop
-                    r = await asyncio.to_thread(requests.get, full_url, **{"headers": headers, "timeout": 10})
+                    # Wrap synchronous self._session.get with asyncio.to_thread to avoid blocking the event loop
+                    r = await asyncio.to_thread(self._session.get, full_url, **{"headers": headers, "timeout": 10})
                     r.raise_for_status()
 
                     # Save locally
@@ -799,14 +819,16 @@ class ChatProBridge:
 
             with open(file_path, "rb") as f:
                 files = {"file": (filename, f, mime_type)}
-                r = requests.post(f"{self.base_url}/api/upload", params={"token": self.token}, files=files, timeout=30)
+                r = self._session.post(
+                    f"{self.base_url}/api/upload", params={"token": self.token}, files=files, timeout=30
+                )
                 # Retry on token expiry
                 if r.status_code == 401:
                     logger.info("[Bridge] Token expired during upload, re-logging in...")
                     if self.login():
                         f.seek(0)
                         files = {"file": (filename, f, mime_type)}
-                        r = requests.post(
+                        r = self._session.post(
                             f"{self.base_url}/api/upload", params={"token": self.token}, files=files, timeout=30
                         )
                     else:
@@ -900,14 +922,14 @@ class ChatProBridge:
                 logger.info(
                     f"[Bridge] Sending {target_type} message to {target_id} (attempt {attempt + 1}/{retries})..."
                 )
-                r = requests.post(url, params={"token": self.token}, json=payload, timeout=15)
+                r = self._session.post(url, params={"token": self.token}, json=payload, timeout=15)
 
                 # Auto re-login when token expires and retry
                 if r.status_code == 401:
                     logger.info("[Bridge] Token expired, re-logging in...")
                     if self.login():
                         # Retry -- simply let the loop continue (a re-post here would be better, kept simple)
-                        r = requests.post(url, params={"token": self.token}, json=payload, timeout=15)
+                        r = self._session.post(url, params={"token": self.token}, json=payload, timeout=15)
                     else:
                         last_error = "Re-login failed"
                         continue
@@ -918,7 +940,7 @@ class ChatProBridge:
                     join_result = self.join_group_api(target_id)
                     if join_result.get("ok"):
                         logger.info(f"[Bridge] Successfully joined group {target_id}, retrying send...")
-                        r = requests.post(url, params={"token": self.token}, json=payload, timeout=15)
+                        r = self._session.post(url, params={"token": self.token}, json=payload, timeout=15)
                     else:
                         last_error = f"403 Forbidden and join failed: {join_result.get('detail')}"
                         logger.error(f"[Bridge] {last_error}")
@@ -957,7 +979,7 @@ class ChatProBridge:
         try:
             if not self._ensure_token():
                 return []
-            r = requests.get(
+            r = self._session.get(
                 f"{self.base_url}/api/groups/{group_id}/messages",
                 params={"token": self.token, "limit": limit},
                 timeout=5,
@@ -968,7 +990,7 @@ class ChatProBridge:
                 if r.status_code == 401:
                     logger.info("[Bridge] Token expired, re-logging in...")
                     if self.login():
-                        r = requests.get(
+                        r = self._session.get(
                             f"{self.base_url}/api/groups/{group_id}/messages",
                             params={"token": self.token, "limit": limit},
                             timeout=5,

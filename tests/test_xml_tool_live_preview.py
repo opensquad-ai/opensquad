@@ -113,3 +113,102 @@ def test_ling_peek_emits_delta_for_arg_key_format():
     assert "websearch" in str(deltas[-1][1].get("name") or "")
     parser.finish()
     assert not any("<tool_call" in x for x in leaked)
+
+
+def _dsml_handlers():
+    return {
+        "tool_calls": lambda _x: None,
+        "function_calls": lambda _x: None,
+        "calls": lambda _x: None,
+        "invoke": lambda _x: None,
+        "parameter": lambda _x: None,
+        "tool_call": lambda _x: None,
+        "thought": lambda _x: None,
+    }
+
+
+def test_orphan_dsml_close_tag_does_not_leak():
+    leaked: list[str] = []
+    parser = StreamingTagParser(
+        handlers=_dsml_handlers(),
+        default_handler=lambda x: leaked.append(x),
+    )
+    parser.feed("ok text")
+    parser.feed("</||DSML||calls>")
+    parser.finish()
+    joined = "".join(leaked)
+    assert "DSML" not in joined
+    assert "calls" not in joined
+    assert "ok text" in joined
+
+
+def test_word_ending_in_t_then_dsml_open_does_not_leak():
+    leaked: list[str] = []
+    parser = StreamingTagParser(
+        handlers=_dsml_handlers(),
+        default_handler=lambda x: leaked.append(x),
+    )
+    parser.feed("result")
+    parser.feed("<||DSML||calls>inner</||DSML||calls>")
+    parser.finish()
+    joined = "".join(leaked)
+    assert joined == "result"
+    assert "DSML" not in joined
+
+
+def test_dsml_close_spacing_mismatch_does_not_leak():
+    leaked: list[str] = []
+    parser = StreamingTagParser(
+        handlers=_dsml_handlers(),
+        default_handler=lambda x: leaked.append(x),
+    )
+    fw = "\uff5c\uff5c"
+    parser.feed(f"<{fw}DSML{fw} calls>")
+    parser.feed(f'<{fw}DSML{fw} invoke name="shell">dir</{fw}DSML{fw} invoke>')
+    parser.feed(f"</{fw}DSML{fw}calls>")  # no space, unlike the opener
+    parser.finish()
+    joined = "".join(leaked)
+    assert "DSML" not in joined
+    assert "<" not in joined
+
+
+def test_halfwidth_dsml_close_after_fullwidth_open():
+    leaked: list[str] = []
+    parser = StreamingTagParser(
+        handlers=_dsml_handlers(),
+        default_handler=lambda x: leaked.append(x),
+    )
+    fw = "\uff5c\uff5c"
+    parser.feed(f"<{fw}DSML{fw}calls>inner</||DSML||calls>")
+    parser.finish()
+    assert "DSML" not in "".join(leaked)
+    assert "inner" not in "".join(leaked)
+
+
+def test_parse_partial_skips_streaming_name_prefixes():
+    assert ResponseParser.parse_partial_tool_preview("tool_call", "<func>files", {}) is None
+    assert ResponseParser.parse_partial_tool_preview("tool_call", "<func>filesystem", {}) is None
+    assert ResponseParser.parse_partial_tool_preview("tool_call", "<func>get s", {}) is None
+    assert ResponseParser.parse_partial_tool_preview("invoke", "<func>list", {"name": "tool_call"}) is None
+    parsed = ResponseParser.parse_partial_tool_preview("tool_call", "<func>filesystem.list_directory", {})
+    assert parsed is not None
+    assert parsed[0] == "filesystem.list_directory"
+
+
+def test_streaming_func_name_emits_stable_id_once_ready():
+    leaked: list[str] = []
+    previews: list[tuple[str, dict]] = []
+    parser = StreamingTagParser(
+        handlers={"tool_call": lambda _x: None, "thought": lambda _x: None},
+        default_handler=lambda x: leaked.append(x),
+    )
+    attach_xml_tool_preview(parser, lambda et, data: previews.append((et, data)))
+    parser.feed("<tool_call>\n<func>files")
+    early = [p for p in previews if p[0] == "tool_call_delta"]
+    assert not early, f"prefix must not preview: {early!r}"
+    parser.feed("ystem.list_directory")
+    deltas = [p for p in previews if p[0] == "tool_call_delta"]
+    assert deltas
+    payload = deltas[-1][1]
+    assert payload.get("id") == "xml_preview_open"
+    assert payload.get("name") == "filesystem.list_directory"

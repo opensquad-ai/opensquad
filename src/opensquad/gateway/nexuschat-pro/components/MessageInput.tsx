@@ -4,6 +4,7 @@ import i18next from 'i18next';
 import { Bold, Italic, Link, List, Code, Smile, Folder, Paperclip, Send, X, Image as ImageIcon, Mic } from 'lucide-react';
 import { User } from '../types';
 import { parse } from 'marked';
+import { sanitizeHtml } from '../utils/safeHtml';
 import { AvatarImg } from './AvatarImg';
 import { getUserMediaSafe } from '../utils/mediaDevices';
 
@@ -330,12 +331,13 @@ export const MessageInput: React.FC<MessageInputProps> = ({
   };
 
   // Parse markdown content for preview
+  // Preview is injected via innerHTML → sanitize after the mention rewrite.
   const parseContent = (content: string) => {
     if (!content.trim()) return '';
     const withMentions = content.replace(/@(\w+)/g, '**@$1**');
     let parsed = parse(withMentions) as string;
     parsed = parsed.replace(/@(\w+)/g, '<span class="text-primary font-bold">@$1</span>');
-    return parsed;
+    return sanitizeHtml(parsed);
   };
 
   return (

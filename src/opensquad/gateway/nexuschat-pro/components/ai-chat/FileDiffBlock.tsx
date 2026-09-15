@@ -18,11 +18,13 @@
  */
 import React, { useState, useMemo, useEffect } from 'react';
 import { useTranslation } from 'react-i18next';
-import { ChevronDown, ChevronRight, CheckCircle, XCircle, FilePen, FilePlus, FileText, MessageSquare, ChevronsUpDown } from 'lucide-react';
+import { CheckCircle, XCircle, FilePen, FilePlus, FileText, MessageSquare, ChevronsUpDown } from 'lucide-react';
 import { marked } from 'marked';
 import { OpenSquadLoader } from '../OpenSquadLoader';
+import { Collapse, FoldChevron, useFold } from '../Collapse';
 import { FollowScrollBox } from './FollowScrollBox';
 import { getLangForFile, highlightLine, escapeHtml, HLJS_THEME_CSS } from '../../utils/codeHighlight';
+import { sanitizeHtml } from '../../utils/safeHtml';
 
 /**
  * Extract a quoted string field (JSON or Python-repr style) from a tool payload.
@@ -503,15 +505,23 @@ const DiffLineRow: React.FC<DiffLineRowProps> = ({ line, lang }) => {
     : '';
 
   const lineNumStyle = isRemoved
-    ? 'text-red-400/50 bg-red-500/15 border-red-500/20'
+    ? 'text-red-700/70 bg-red-500/15 border-red-500/20 dark:text-red-400/50'
     : isAdded
-    ? 'text-green-400/50 bg-green-500/15 border-green-500/20'
-    : 'text-gray-600 bg-transparent border-gray-700/30';
+    ? 'text-green-700/70 bg-green-500/15 border-green-500/20 dark:text-green-400/50'
+    : 'text-textMuted bg-transparent border-border/70';
 
   const marker = isRemoved ? '-' : isAdded ? '+' : ' ';
-  const markerColor = isRemoved ? 'text-red-400 font-bold' : isAdded ? 'text-green-400 font-bold' : 'text-transparent';
+  const markerColor = isRemoved
+    ? 'text-red-600 dark:text-red-400 font-bold'
+    : isAdded
+    ? 'text-green-600 dark:text-green-400 font-bold'
+    : 'text-transparent';
 
-  const contentColor = isRemoved ? 'text-red-200' : isAdded ? 'text-green-200' : 'text-gray-300';
+  const contentColor = isRemoved
+    ? 'text-red-800 dark:text-red-200'
+    : isAdded
+    ? 'text-green-800 dark:text-green-200'
+    : 'text-textMain';
 
   return (
     <div className={`flex items-start font-mono text-[11px] leading-5 min-w-0 ${rowBg}`}>
@@ -569,7 +579,7 @@ const HLJS_STYLE = HLJS_THEME_CSS;
 
 function renderReadMarkdown(text: string): string {
   try {
-    return marked.parse(text, { breaks: true, async: false }) as string;
+    return sanitizeHtml(marked.parse(text, { breaks: true, async: false }) as string);
   } catch {
     return escapeHtml(text);
   }
@@ -587,10 +597,10 @@ const ReadContentPane: React.FC<{ content: string; lang: string }> = ({ content,
     const mdHtml = renderReadMarkdown(text);
     return (
       <div
-        className="prose prose-sm prose-invert max-w-none break-words overflow-x-auto ai-markdown
+        className="prose prose-sm dark:prose-invert max-w-none break-words overflow-x-auto ai-markdown file-markdown
                    text-[12.5px] leading-relaxed
                    max-h-[500px] overflow-y-auto
-                   bg-gray-950 px-3.5 py-3"
+                   bg-bgLight px-3.5 py-3"
         dangerouslySetInnerHTML={{ __html: mdHtml }}
       />
     );
@@ -598,7 +608,7 @@ const ReadContentPane: React.FC<{ content: string; lang: string }> = ({ content,
 
   const lines = text.length ? text.split('\n') : [''];
   return (
-    <div className="max-h-[500px] overflow-y-auto overflow-x-hidden bg-gray-950">
+    <div className="max-h-[500px] overflow-y-auto overflow-x-hidden file-code-surface">
       <style>{HLJS_STYLE}</style>
       {lines.map((lineContent, i) => {
         const html = highlightLine(lineContent, lang);
@@ -607,12 +617,12 @@ const ReadContentPane: React.FC<{ content: string; lang: string }> = ({ content,
             key={i}
             className="flex items-start font-mono text-[11px] leading-5 min-w-0 hover:bg-primary/10"
           >
-            <span className="select-none w-10 shrink-0 text-right pr-2 leading-5 tabular-nums text-[10px] text-gray-600 border-r border-gray-700/30 bg-gray-900/30">
+            <span className="select-none w-10 shrink-0 text-right pr-2 leading-5 tabular-nums text-[10px] text-textMuted border-r border-border/70">
               {startLine + i}
             </span>
             <span className="w-5 shrink-0" />
             <span
-              className="flex-1 min-w-0 whitespace-pre-wrap break-words pl-0.5 text-gray-300"
+              className="flex-1 min-w-0 whitespace-pre-wrap break-words pl-0.5 text-textMain"
               dangerouslySetInnerHTML={{ __html: html }}
             />
           </div>
@@ -644,12 +654,16 @@ interface FileDiffBlockProps {
 
 export const FileDiffBlock: React.FC<FileDiffBlockProps> = ({ info, status, note, resultContent, embedded = false, onFileClick }) => {
   const { t } = useTranslation();
-  const [isOpen, setIsOpen] = useState(embedded);
+  // Shared fold primitive. The diff body must stay lazily mounted: the Myers/LCS
+  // pass below is deliberately skipped while collapsed ("skip ... until the fold
+  // is actually visible"), so mounting every diff up-front would pay the full
+  // cost for the whole timeline. `mounted` keeps that guarantee AND animates.
+  const { open: isOpen, mounted, toggle: toggleOpen, setOpenNow } = useFold(embedded);
   const [expandedFolds, setExpandedFolds] = useState<Set<number>>(new Set());
 
   useEffect(() => {
-    if (embedded) setIsOpen(true);
-  }, [embedded]);
+    if (embedded) setOpenNow(true);
+  }, [embedded, setOpenNow]);
 
   const lang = useMemo(() => getLangForFile(info.fileName), [info.fileName]);
 
@@ -659,7 +673,11 @@ export const FileDiffBlock: React.FC<FileDiffBlockProps> = ({ info, status, note
     ? <XCircle size={12} className="text-red-500 flex-shrink-0" />
     : <OpenSquadLoader size={12} className="flex-shrink-0" />;
 
-  const showDiffBody = embedded || isOpen;
+  const showDiffBody = embedded || mounted;
+  /** In `embedded` mode the PARENT owns the fold, so the body is rendered raw —
+   *  a grid/overflow wrapper here could clip popovers and change layout. */
+  const fold = (children: React.ReactNode) =>
+    embedded ? children : <Collapse open={isOpen}>{children}</Collapse>;
   // Skip Myers/LCS until the fold is actually visible (collapsed header only
   // needs the cheap added/removed counts from extractFileEditInfo).
   const rawDiffLines = useMemo<RawDiffLine[]>(() => {
@@ -731,13 +749,14 @@ export const FileDiffBlock: React.FC<FileDiffBlockProps> = ({ info, status, note
   // ── Read operation: simple viewer ──────────────────────────
   if (info.kind === 'read') {
     const canExpand = !!resultContent;
-    const showBody = embedded ? !!resultContent : isOpen && !!resultContent;
+    const showBody = embedded ? !!resultContent : mounted && !!resultContent;
     return (
       <div className="rounded-md border border-sky-500/20 bg-sky-500/5 overflow-hidden">
         {!embedded && (
           <div
             className={`flex items-center gap-1.5 px-2 py-1.5 transition-colors select-none ${canExpand ? 'cursor-pointer hover:bg-sky-500/10' : ''}`}
-            onClick={() => canExpand && setIsOpen(!isOpen)}
+            onClick={() => canExpand && toggleOpen()}
+            aria-expanded={canExpand ? isOpen : undefined}
           >
             {statusIcon}
             <FileText size={11} className="text-textMuted flex-shrink-0" />
@@ -761,22 +780,22 @@ export const FileDiffBlock: React.FC<FileDiffBlockProps> = ({ info, status, note
               </span>
             )}
             {canExpand && (
-              isOpen
-                ? <ChevronDown size={12} className="text-textMuted flex-shrink-0 ml-1" />
-                : <ChevronRight size={12} className="text-textMuted flex-shrink-0 ml-1" />
+              <FoldChevron open={isOpen} className="ml-1" />
             )}
           </div>
         )}
-        {showBody && resultContent && (
-          <div className={embedded ? '' : 'border-t border-sky-500/10'}>
-            <div className="px-2 py-1 bg-black/20 border-b border-sky-500/10">
-              <span className="text-[10px] text-textMuted font-mono">{info.filePath}</span>
-              {info.lineRange && (
-                <span className="text-[10px] text-sky-500 dark:text-sky-400 font-mono ml-2">({info.lineRange})</span>
-              )}
+        {fold(
+          showBody && resultContent ? (
+            <div className={embedded ? '' : 'border-t border-sky-500/10'}>
+              <div className="px-2 py-1 bg-black/20 border-b border-sky-500/10">
+                <span className="text-[10px] text-textMuted font-mono">{info.filePath}</span>
+                {info.lineRange && (
+                  <span className="text-[10px] text-sky-500 dark:text-sky-400 font-mono ml-2">({info.lineRange})</span>
+                )}
+              </div>
+              <ReadContentPane content={resultContent} lang={lang} />
             </div>
-            <ReadContentPane content={resultContent} lang={lang} />
-          </div>
+          ) : null,
         )}
       </div>
     );
@@ -797,7 +816,8 @@ export const FileDiffBlock: React.FC<FileDiffBlockProps> = ({ info, status, note
       {!embedded && (
         <div
           className="flex items-center gap-1.5 px-2 py-1.5 cursor-pointer hover:bg-amber-500/10 transition-colors select-none"
-          onClick={() => setIsOpen(!isOpen)}
+          onClick={toggleOpen}
+          aria-expanded={isOpen}
         >
           {statusIcon}
           <OpIcon size={11} className="text-textMuted flex-shrink-0" />
@@ -825,16 +845,14 @@ export const FileDiffBlock: React.FC<FileDiffBlockProps> = ({ info, status, note
               -{actualRemoved}
             </span>
           )}
-          {isOpen
-            ? <ChevronDown size={12} className="text-textMuted flex-shrink-0 ml-1" />
-            : <ChevronRight size={12} className="text-textMuted flex-shrink-0 ml-1" />
-          }
+          <FoldChevron open={isOpen} className="ml-1" />
         </div>
       )}
 
       {/* ── Expanded diff ── */}
-      {(embedded || isOpen) && (
-        <div className={embedded ? '' : 'border-t border-amber-500/10'}>
+      {fold(
+        showDiffBody ? (
+          <div className={embedded ? '' : 'border-t border-amber-500/10'}>
           {/* File path + note */}
           <div className="px-2 py-1.5 bg-black/20 border-b border-amber-500/10 space-y-0.5">
             <span className="block text-[10px] text-textMuted font-mono">{info.filePath}</span>
@@ -850,7 +868,7 @@ export const FileDiffBlock: React.FC<FileDiffBlockProps> = ({ info, status, note
           <FollowScrollBox
             contentKey={`${info.filePath}:${info.newStr.length}:${info.oldStr?.length ?? 0}`}
             follow={status === 'running'}
-            className="max-h-[500px] overflow-y-auto overflow-x-hidden bg-gray-950"
+            className="max-h-[500px] overflow-y-auto overflow-x-hidden file-code-surface"
           >
             <style>{HLJS_STYLE}</style>
 
@@ -902,7 +920,8 @@ export const FileDiffBlock: React.FC<FileDiffBlockProps> = ({ info, status, note
               })
             )}
           </FollowScrollBox>
-        </div>
+          </div>
+        ) : null,
       )}
     </div>
   );

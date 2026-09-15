@@ -10,6 +10,7 @@ import {
   Columns2,
   FileCode2,
   FileText,
+  ListTodo,
   MoreHorizontal,
   MessageSquare,
   Plus,
@@ -48,6 +49,7 @@ interface ContentTabBarProps {
 function TabIcon({ kind }: { kind: ContentTab['kind'] }) {
   if (kind === 'session') return <MessageSquare size={12} className="text-sky-500 shrink-0" />;
   if (kind === 'scheduled-tasks') return <Clock size={12} className="text-violet-500 shrink-0" />;
+  if (kind === 'tasks') return <ListTodo size={12} className="text-sky-500 shrink-0" />;
   return <FileCode2 size={12} className="text-amber-500 shrink-0" />;
 }
 
@@ -88,6 +90,9 @@ export const ContentTabBar: React.FC<ContentTabBarProps> = ({
   const rowRef = useRef<HTMLDivElement>(null);
   const tabElsRef = useRef<Map<string, HTMLDivElement>>(new Map());
   const prevRectsRef = useRef<Map<string, DOMRect>>(new Map());
+  /** 自定义拖拽 ghost（只横移）+ 其 document 级 dragover 监听清理器 */
+  const dragGhostRef = useRef<HTMLDivElement | null>(null);
+  const dragGhostCleanupRef = useRef<(() => void) | null>(null);
 
   const propKeys = useMemo(() => tabs.map((t) => contentTabKey(t.tab)), [tabs]);
   const byKey = useMemo(() => {
@@ -112,7 +117,9 @@ export const ContentTabBar: React.FC<ContentTabBarProps> = ({
       for (const [key, nextRect] of nextRects) {
         const prevRect = prev.get(key);
         const el = tabElsRef.current.get(key);
-        if (!prevRect || !el || key === dragKeyRef.current) continue;
+        // 被拖标签也参与 FLIP：系统拖拽影像已隐藏、自定义 ghost 很低调，
+        // 被拖标签瞬跳会非常显眼，必须和其他标签一样平滑滑入新槽位。
+        if (!prevRect || !el) continue;
         const dx = prevRect.left - nextRect.left;
         if (Math.abs(dx) < 1) continue;
         el.style.transition = 'none';
@@ -150,6 +157,10 @@ export const ContentTabBar: React.FC<ContentTabBarProps> = ({
       el.style.transition = '';
       el.style.transform = '';
     }
+    dragGhostCleanupRef.current?.();
+    dragGhostCleanupRef.current = null;
+    dragGhostRef.current?.remove();
+    dragGhostRef.current = null;
   };
 
   /** Keep tab DnD from bubbling into the page-level file-upload overlay. */
@@ -199,16 +210,48 @@ export const ContentTabBar: React.FC<ContentTabBarProps> = ({
                   /* ignore */
                 }
                 e.dataTransfer.setData('text/plain', key);
-                // Empty drag image feels smoother than a huge OS ghost for tabs
+                // 隐藏系统拖拽影像（1px 透明），用自定义 ghost 替代：
+                // 锁定在标签栏垂直中心、只跟随鼠标横向移动，杜绝纵向乱飘。
                 try {
-                  const ghost = document.createElement('div');
-                  ghost.style.cssText =
-                    'position:fixed;top:-1000px;left:-1000px;padding:4px 10px;border-radius:6px;' +
-                    'background:rgba(0,0,0,0.08);font-size:11px;pointer-events:none;';
-                  ghost.textContent = title;
+                  const empty = document.createElement('div');
+                  empty.style.cssText =
+                    'position:fixed;top:-1000px;left:-1000px;width:1px;height:1px;';
+                  document.body.appendChild(empty);
+                  e.dataTransfer.setDragImage(empty, 0, 0);
+                  window.setTimeout(() => empty.remove(), 0);
+
+                  const rowRect = rowRef.current?.getBoundingClientRect();
+                  // Ghost = a clone of the source tab element: identical
+                  // background, colours, radius and truncation — it should look
+                  // exactly like the tab being dragged, not like a white card.
+                  const tabEl = tabElsRef.current.get(key);
+                  const tabRect = tabEl?.getBoundingClientRect();
+                  if (!tabEl || !tabRect) return;
+                  const ghost = tabEl.cloneNode(true) as HTMLDivElement;
+                  ghost.removeAttribute('data-flip-id');
+                  ghost.style.cssText +=
+                    'position:fixed;z-index:9999;margin:0;pointer-events:none;' +
+                    'transition:none;animation:none;' +
+                    'box-shadow:0 2px 10px rgb(0 0 0 / 0.22);' +
+                    'transform:translate(-50%,-50%);' +
+                    `width:${Math.round(tabRect.width)}px;height:${Math.round(tabRect.height)}px;` +
+                    `left:${e.clientX}px;top:${
+                      rowRect ? rowRect.top + rowRect.height / 2 : e.clientY
+                    }px;`;
                   document.body.appendChild(ghost);
-                  e.dataTransfer.setDragImage(ghost, 16, 12);
-                  window.setTimeout(() => ghost.remove(), 0);
+                  dragGhostRef.current = ghost;
+
+                  const onDocDragOver = (ev: DragEvent) => {
+                    const g = dragGhostRef.current;
+                    if (g) g.style.left = `${ev.clientX}px`;
+                  };
+                  // 捕获阶段监听：标签栏内部会 stopPropagation（阻断文件上传
+                  // 覆盖层），冒泡到 document 的 dragover 永远不会触发 → ghost
+                  // 卡死在原地。捕获阶段在事件到达目标前运行，不受影响。
+                  document.addEventListener('dragover', onDocDragOver, true);
+                  dragGhostCleanupRef.current = () => {
+                    document.removeEventListener('dragover', onDocDragOver, true);
+                  };
                 } catch {
                   /* ignore */
                 }
@@ -232,6 +275,16 @@ export const ContentTabBar: React.FC<ContentTabBarProps> = ({
                 e.dataTransfer.dropEffect = 'move';
                 const from = dragKeyRef.current;
                 if (from === key) return;
+                // 中点换位：拖过目标标签水平中点即触发预览调换。
+                const rect = e.currentTarget.getBoundingClientRect();
+                const ratio = rect.width > 0 ? (e.clientX - rect.left) / rect.width : 0.5;
+                const fromIdx = displayKeys.indexOf(from);
+                const toIdx = displayKeys.indexOf(key);
+                const passed = fromIdx < toIdx ? ratio >= 0.5 : ratio <= 0.5;
+                if (!passed) {
+                  if (overKey === key) setOverKey(null);
+                  return;
+                }
                 setOverKey(key);
                 setPreviewKeys((prev) => {
                   const base = prev || propKeys;

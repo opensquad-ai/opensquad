@@ -116,6 +116,8 @@ class GatewayAdapter(BaseAgent):
         _sub("plan", self.on_generic_event("plan"))
         # Subscribe to workflow elapsed-time events
         _sub("turn_elapsed", self.on_generic_event("turn_elapsed"))
+        # Per-round billed token usage (final-assistant-message 消耗 badge)
+        _sub("turn_usage", self.on_generic_event("turn_usage"))
         _sub("turn_cancelled", self.on_generic_event("turn_cancelled"))
         # Subscribe to prompt_update events
         _sub("prompt_update", self.on_generic_event("prompt_update"))
@@ -127,6 +129,8 @@ class GatewayAdapter(BaseAgent):
         _sub("voice_realtime_status", self.on_generic_event("voice_realtime_status"))
         # Subscribe to context compression summary stream events
         _sub("summary_stream", self.on_generic_event("summary_stream"))
+        # M2: parallel task lifecycle — relay task_update / task_removed to the web UI
+        self._wire_task_scheduler()
         _sub("group_member_update", self.on_generic_event("group_member_update"))
         _sub("user_status_update", self.on_generic_event("user_status_update"))
         # Shell / background job live output for CMD-style web panel
@@ -154,7 +158,50 @@ class GatewayAdapter(BaseAgent):
                 cancel_task.cancel()
         self._stream_flush_tasks.clear()
         self._stream_buffers.clear()
+        self._unwire_task_scheduler()
         logger.info(f"[GatewayAdapter] Disposed: unsubscribed {count} handlers")
+
+    # ------------------------------------------------------------------
+    # M2: parallel task scheduler wiring
+    # ------------------------------------------------------------------
+
+    def _wire_task_scheduler(self):
+        """Forward TaskScheduler lifecycle events to the web UI and register
+        the default task executor so queued tasks can actually run."""
+        try:
+            from opensquad.tasks import task_scheduler as ts
+            from opensquad.tasks.hooks import register_default_executor
+
+            register_default_executor()
+
+            def _on_task_event(payload: dict):
+                try:
+                    loop = asyncio.get_event_loop()
+                    if loop.is_running():
+                        asyncio.ensure_future(self._send_event(payload, payload.get("type", "task_update")))
+                except RuntimeError:
+                    pass
+
+            ts.subscribe(_on_task_event)
+            self._task_unsubscribe = lambda: ts.unsubscribe(_on_task_event)
+
+            sched = ts.get_scheduler()
+            sched.configure(agent_id=getattr(self.config, "agent_id", "") or "")
+            try:
+                sched.attach_loop(asyncio.get_event_loop())
+            except RuntimeError:
+                pass
+            sched.recover()
+        except Exception:
+            logger.warning("[GatewayAdapter] task scheduler wiring failed", exc_info=True)
+
+    def _unwire_task_scheduler(self):
+        try:
+            if getattr(self, "_task_unsubscribe", None):
+                self._task_unsubscribe()
+                self._task_unsubscribe = None
+        except Exception:
+            pass
 
     @staticmethod
     def _unwrap(data):
@@ -318,6 +365,21 @@ class GatewayAdapter(BaseAgent):
                 else:
                     input_hub.request_stop()
                     logger.info(f"[Adapter] Stop task (legacy no-sid, no focus) → all by user {user_id}")
+            return
+
+        if command == "stop_session_job":
+            # Kill a single background shell job (composer terminal bar trash icon).
+            job_id = str(cmd_data.get("job_id") or "").strip()
+            if not job_id:
+                logger.warning(f"[Adapter] stop_session_job from user {user_id}: missing job_id")
+                return
+            try:
+                from opensquad.tools.system import stop_job
+
+                res = stop_job(job_id)
+                logger.info(f"[Adapter] stop_session_job {job_id} by user {user_id}: {res.get('status')}")
+            except Exception:
+                logger.warning(f"[Adapter] stop_session_job {job_id} failed", exc_info=True)
             return
 
         if command == "set_primary_session":
@@ -719,8 +781,35 @@ class GatewayAdapter(BaseAgent):
                 )
             return
 
+        if command == "task_rpc":
+            await self._handle_task_rpc(cmd_data)
+            return
+
         logger.warning(f"[Adapter] Unknown command: {command}, falling back to base handler")
         await super()._handle_command(data)
+
+    async def _handle_task_rpc(self, cmd_data: dict):
+        """Serve one task-RPC request coming from the Gateway's REST layer.
+
+        ``/api/tasks`` is mounted in the *gateway* process while the
+        TaskScheduler lives *here*, in the agent process. Split deployments
+        therefore proxy every task op down this command channel and expect a
+        ``task_command_result`` frame back, correlated by ``req_id``.
+
+        The reply is always sent — even on failure — otherwise the gateway's
+        pending future would sit until its timeout.
+        """
+        req_id = str(cmd_data.get("req_id") or "")
+        op = str(cmd_data.get("op") or "")
+        try:
+            from opensquad.tasks.rpc import dispatch_task_op
+            from opensquad.tasks.task_scheduler import get_scheduler
+
+            result = dispatch_task_op(get_scheduler(), op, cmd_data.get("params") or {})
+        except Exception as exc:  # noqa: BLE001
+            logger.error("[Adapter] task_rpc bootstrap failed: %s", exc, exc_info=True)
+            result = {"ok": False, "error": f"scheduler unavailable: {exc}"}
+        await self._send_event({"req_id": req_id, "op": op, "result": result}, "task_command_result")
 
     async def _try_wake_agent(self, reason: str = "urgent-command", *, inject_sentinel: bool = False):
         """Wake the agent if it is sleeping.
@@ -908,6 +997,37 @@ class GatewayAdapter(BaseAgent):
             session_id=session_id or "",
             model_card=model_card,
         )
+
+    async def push_task_turn(self, *, session_id: str, content: str, task=None) -> bool:
+        """M2: deliver one task turn into the agent runtime.
+
+        Reuses the same ingress path as a web chat message so the turn flows
+        through the normal runner lifecycle (events, plan tracking, tool UI).
+        """
+        if not session_id or not content:
+            return False
+        try:
+            if session_id:
+                input_hub.clear_session_stop(session_id)
+            input_hub.clear_stop_request()
+        except Exception:
+            logger.debug("[Adapter] task turn clear stop latch skipped", exc_info=True)
+        await self._try_wake_agent("task-turn", inject_sentinel=False)
+        try:
+            from opensquad.ingress_policy import push_ingress
+
+            push_ingress(
+                content,
+                source="gateway",
+                channel="web",
+                user_id=f"task:{getattr(task, 'task_id', '') or session_id}",
+                client_id="",
+                session_id=session_id,
+            )
+            return True
+        except Exception:
+            logger.error("[Adapter] task turn delivery failed", exc_info=True)
+            return False
 
     async def on_runner_output(self, data):
         """When Runner finishes a reply (final text response; content should be a string)."""

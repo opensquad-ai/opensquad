@@ -108,12 +108,13 @@ class TaskSupervisor:
         try:
             import json
             import os
-            import urllib.request
+
+            from opensquad.utils.local_http import open_local
 
             launcher_url = (
                 f"http://127.0.0.1:{os.environ.get('OPENSQUAD_LAUNCHER_PORT', '9600')}/_internal/task_watch_heartbeat"
             )
-            data = json.dumps(
+            payload = json.dumps(
                 {
                     "agent_id": os.environ.get("OPENSQUAD_AGENT_ID", ""),
                     "event": event,
@@ -122,10 +123,17 @@ class TaskSupervisor:
                     "timestamp": time.time(),
                 }
             ).encode("utf-8")
-            req = urllib.request.Request(
-                launcher_url, data=data, method="POST", headers={"Content-Type": "application/json"}
-            )
-            urllib.request.urlopen(req, timeout=2)
+            # open_local: an ambient HTTP_PROXY would swallow this heartbeat and
+            # the launcher would treat a healthy task as stalled. The bare
+            # ``except`` below hides that failure silently, so it must not proxy.
+            with open_local(
+                launcher_url,
+                timeout=2,
+                method="POST",
+                data=payload,
+                headers={"Content-Type": "application/json"},
+            ) as resp:
+                resp.read()
         except Exception:
             pass  # Non-critical — launcher may be restarting
 

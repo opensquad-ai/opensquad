@@ -91,43 +91,101 @@ export function highlightLine(code: string, lang: string): string {
   }
 }
 
-/** Material Palenight — shared by FileDiffBlock + ProjectFilesPanel preview. */
+/**
+ * Inject HLJS_THEME_CSS into <head> exactly once, on first use.
+ *
+ * Chat fenced code blocks (renderFencedMarkdown) produce `.hljs-*` spans but
+ * render outside the file pane, which mounts this stylesheet locally — so
+ * before this helper existed, chat syntax colours came from a separate,
+ * appearance-blind Palenight subset in index.css: light pages got pastel
+ * Palenight tokens on a hardcoded near-black well. Injecting here makes the
+ * chat well follow the same two-palette theme (GitHub Light / Palenight dark)
+ * as the file display, from a single source of truth.
+ */
+let themeInjected = false;
+
+export function ensureHljsTheme(): void {
+  if (themeInjected || typeof document === 'undefined') return;
+  themeInjected = true;
+  const style = document.createElement('style');
+  style.setAttribute('data-hljs-theme', '');
+  style.textContent = HLJS_THEME_CSS;
+  document.head.appendChild(style);
+}
+
+/** GitHub Light by default; Material Palenight only under html.dark. */
 export const HLJS_THEME_CSS = `
-  .hljs-keyword { color: #c792ea; }
-  .hljs-built_in { color: #82aaff; }
-  .hljs-type { color: #ffcb6b; }
-  .hljs-literal { color: #ff5874; }
-  .hljs-number { color: #f78c6c; }
-  .hljs-operator { color: #89ddff; }
-  .hljs-punctuation { color: #89ddff; }
-  .hljs-property { color: #80cbc4; }
-  .hljs-regexp { color: #f07178; }
-  .hljs-string { color: #c3e88d; }
-  .hljs-char { color: #c3e88d; }
-  .hljs-subst { color: #a6accd; }
-  .hljs-symbol { color: #82aaff; }
-  .hljs-variable { color: #f07178; }
-  .hljs-template-variable { color: #f07178; }
-  .hljs-link { color: #80cbc4; text-decoration: underline; }
-  .hljs-selector-id { color: #82aaff; }
-  .hljs-selector-class { color: #ffcb6b; }
-  .hljs-selector-attr { color: #c3e88d; }
-  .hljs-selector-pseudo { color: #c792ea; }
-  .hljs-attr { color: #ffcb6b; }
-  .hljs-attribute { color: #c3e88d; }
-  .hljs-name { color: #f07178; }
-  .hljs-tag { color: #f07178; }
-  .hljs-comment { color: #546e7a; font-style: italic; }
-  .hljs-meta { color: #546e7a; }
-  .hljs-meta .hljs-string { color: #c3e88d; }
-  .hljs-section { color: #82aaff; font-weight: bold; }
-  .hljs-title { color: #82aaff; font-weight: bold; }
-  .hljs-title.class_ { color: #ffcb6b; }
-  .hljs-title.function_ { color: #82aaff; }
-  .hljs-params { color: #a6accd; }
-  .hljs-formula { color: #c792ea; }
-  .hljs-deletion { color: #ef5350; background-color: rgba(239,83,80,0.1); }
-  .hljs-addition { color: #66bb6a; background-color: rgba(102,187,106,0.1); }
+  .hljs-keyword { color: #cf222e; }
+  .hljs-built_in { color: #0550ae; }
+  .hljs-type { color: #953800; }
+  .hljs-literal { color: #0550ae; }
+  .hljs-number { color: #0550ae; }
+  .hljs-operator { color: #1f2328; }
+  .hljs-punctuation { color: #1f2328; }
+  .hljs-property { color: #0550ae; }
+  .hljs-regexp { color: #0a3069; }
+  .hljs-string { color: #0a3069; }
+  .hljs-char { color: #0a3069; }
+  .hljs-subst { color: #1f2328; }
+  .hljs-symbol { color: #0550ae; }
+  .hljs-variable { color: #953800; }
+  .hljs-template-variable { color: #953800; }
+  .hljs-link { color: #0a3069; text-decoration: underline; }
+  .hljs-selector-id { color: #0550ae; }
+  .hljs-selector-class { color: #953800; }
+  .hljs-selector-attr { color: #0a3069; }
+  .hljs-selector-pseudo { color: #cf222e; }
+  .hljs-attr { color: #0550ae; }
+  .hljs-attribute { color: #0550ae; }
+  .hljs-name { color: #116329; }
+  .hljs-tag { color: #0550ae; }
+  .hljs-comment { color: #656d76; font-style: italic; }
+  .hljs-meta { color: #656d76; }
+  .hljs-meta .hljs-string { color: #0a3069; }
+  .hljs-section { color: #0550ae; font-weight: bold; }
+  .hljs-title { color: #8250df; font-weight: bold; }
+  .hljs-title.class_ { color: #953800; }
+  .hljs-title.function_ { color: #8250df; }
+  .hljs-params { color: #1f2328; }
+  .hljs-formula { color: #cf222e; }
+  .hljs-deletion { color: #82071e; background-color: #ffebe9; }
+  .hljs-addition { color: #116329; background-color: #dafbe1; }
   .hljs-emphasis { font-style: italic; }
   .hljs-strong { font-weight: bold; }
+
+  html.dark .hljs-keyword { color: #c792ea; }
+  html.dark .hljs-built_in { color: #82aaff; }
+  html.dark .hljs-type { color: #ffcb6b; }
+  html.dark .hljs-literal { color: #ff5874; }
+  html.dark .hljs-number { color: #f78c6c; }
+  html.dark .hljs-operator { color: #89ddff; }
+  html.dark .hljs-punctuation { color: #89ddff; }
+  html.dark .hljs-property { color: #80cbc4; }
+  html.dark .hljs-regexp { color: #f07178; }
+  html.dark .hljs-string { color: #c3e88d; }
+  html.dark .hljs-char { color: #c3e88d; }
+  html.dark .hljs-subst { color: #a6accd; }
+  html.dark .hljs-symbol { color: #82aaff; }
+  html.dark .hljs-variable { color: #f07178; }
+  html.dark .hljs-template-variable { color: #f07178; }
+  html.dark .hljs-link { color: #80cbc4; text-decoration: underline; }
+  html.dark .hljs-selector-id { color: #82aaff; }
+  html.dark .hljs-selector-class { color: #ffcb6b; }
+  html.dark .hljs-selector-attr { color: #c3e88d; }
+  html.dark .hljs-selector-pseudo { color: #c792ea; }
+  html.dark .hljs-attr { color: #ffcb6b; }
+  html.dark .hljs-attribute { color: #c3e88d; }
+  html.dark .hljs-name { color: #f07178; }
+  html.dark .hljs-tag { color: #f07178; }
+  html.dark .hljs-comment { color: #546e7a; font-style: italic; }
+  html.dark .hljs-meta { color: #546e7a; }
+  html.dark .hljs-meta .hljs-string { color: #c3e88d; }
+  html.dark .hljs-section { color: #82aaff; font-weight: bold; }
+  html.dark .hljs-title { color: #82aaff; font-weight: bold; }
+  html.dark .hljs-title.class_ { color: #ffcb6b; }
+  html.dark .hljs-title.function_ { color: #82aaff; }
+  html.dark .hljs-params { color: #a6accd; }
+  html.dark .hljs-formula { color: #c792ea; }
+  html.dark .hljs-deletion { color: #ef5350; background-color: rgba(239,83,80,0.1); }
+  html.dark .hljs-addition { color: #66bb6a; background-color: rgba(102,187,106,0.1); }
 `;

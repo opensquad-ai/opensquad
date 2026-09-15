@@ -645,15 +645,26 @@ class TurnLoop:
 
                 # Drain event pipeline (per-tool, may contain events that arrived during execution)
                 from opensquad.event_pipeline import event_pipeline
+                from opensquad.session_parallel import get_turn_local
 
-                _raw_events = event_pipeline.drain_sync(session_id=getattr(self.runner, "_turn_sid", "") or None)
+                # Per-coroutine sid FIRST: `runner._turn_sid` is a shared attr
+                # that every concurrent parallel turn overwrites on start, so
+                # with 2+ live turns a tool execution could drain ANOTHER
+                # session's pipeline bucket (cross-talk) — and drops this
+                # session's mid-turn supplements instead.
+                _tl_here = get_turn_local()
+                _tool_sid = (_tl_here.sid if _tl_here and _tl_here.sid else "") or str(
+                    getattr(self.runner, "_turn_sid", "") or ""
+                )
+
+                _raw_events = event_pipeline.drain_sync(session_id=_tool_sid or None)
 
                 for evt in _raw_events:
                     if evt.source in ("web", "gateway", "group", "dm") and evt.content and evt.content.strip():
                         _get_session_manager().add_message(
                             "user",
                             evt.content,
-                            sid=getattr(self.runner, "_turn_sid", "") or None,
+                            sid=_tool_sid or None,
                         )
                         await self.runner._emit("user_msg", evt.content)
                     if evt.source == "vision_tool" and evt.metadata.get("action") == "inject_images":

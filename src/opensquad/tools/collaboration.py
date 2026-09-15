@@ -1683,12 +1683,15 @@ def check_worker_status(collab_id: str = "", worker_id: str = "") -> dict[str, A
     """
     try:
         import json as _json
-        import urllib.request
+
+        from opensquad.utils.local_http import open_local
 
         launcher_port = os.environ.get("OPENSQUAD_LAUNCHER_PORT", "9600")
         url = f"http://127.0.0.1:{launcher_port}/api/task_watch_status"
-        resp = urllib.request.urlopen(url, timeout=5)
-        data = _json.loads(resp.read())
+        # open_local: an ambient HTTP_PROXY must not intercept this loopback
+        # query, or every worker looks "unreachable" to the supervisor.
+        with open_local(url, timeout=5) as resp:
+            data = _json.loads(resp.read())
         workers = data.get("workers", {})
 
         if worker_id:

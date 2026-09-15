@@ -19,39 +19,24 @@ import React, { useState, useEffect, useLayoutEffect, useRef, useCallback, useMe
 import {
   Send, Square,
   PanelLeftOpen, PanelLeftClose, PanelRightOpen, PanelRightClose, X, FileIcon, FileText, Upload,
-  ChevronUp, ChevronDown, Moon, Zap, Bell,
+  Moon, Zap, Bell,
+  RefreshCw,
   Clock,
 } from 'lucide-react';
 
 import { useTranslation } from 'react-i18next';
-import { getAiWsService, releaseAiWsService, AIWSMessage, AIWebSocketStatus } from '../services/aiWebSocket';
-import { agentSessionAPI, authAPI, adminAPI, AdminAgent, modelCardAPI, ModelCardInfo, skillAPI, SkillInfo, SERVER_BASE_URL } from '../services/api';
+import { getAiWsService, AIWebSocketStatus } from '../services/aiWebSocket';
+import { agentSessionAPI, authAPI, adminAPI, AdminAgent, modelCardAPI, ModelCardInfo, skillAPI, SkillInfo } from '../services/api';
 import type { AgentSession } from '../services/api';
-import {
-  cancelPendingVoiceHangup,
-  clearVoiceCallPersist,
-  readVoiceCallPersist,
-  schedulePendingVoiceHangup,
-  writeVoiceCallPersist,
-} from '../utils/voiceCallPersist';
 import { resolveChatAvatar, toAbsoluteMediaUrl } from '../utils/image';
-import { playGentleNotificationSound } from '../utils/sounds';
 import { OpenSquadLoader } from './OpenSquadLoader';
 import {
-  absorbAssistantFinalText,
-  appendLiveWorkflowBatch,
   appendWorkflowEvent,
-  appendWorkflowEvents,
-  extractLiveToolCallFromMarkup,
-  stripToolCallMarkup,
+  composeAssistantDisplayContent,
   buildTimelineFromSession,
-  foldTaskProcessSinceLastUser,
   formatUserSkillDisplayContent,
   genTimelineUID,
-  rebaseTimelineUids,
-  timelineHasToolEvent,
   timelineHasVisibleChatContent,
-  workflowToolEventKey,
   sealIncompleteWorkflows,
   sealWorkflowAndAppendAssistantMessage,
   toWebMediaUrl,
@@ -74,11 +59,17 @@ import {
 import { pickSessionLiveTimeline } from '../utils/sessionLiveTimeline';
 import {
   mergeSessionTokenStats,
-  tokenStatsSid,
-  unwrapTokenStatsPayload,
 } from '../utils/sessionTokenStats';
 import { useTextSelectionFreeze } from '../hooks/useTextSelectionFreeze';
 import { useIsCompactAgentWeb, useIsMobileViewport } from '../hooks/useMatchMedia';
+import { useAgentWebVoice } from '../hooks/useAgentWebVoice';
+import { useAgentWebSocket } from '../hooks/useAgentWebSocket';
+import {
+  flattenArchivedSections,
+  logMediaDebug,
+  type UploadedFile,
+} from '../utils/agentWebChatHelpers';
+import { loadLastModelPick, saveLastModelPick } from '../utils/agentWebModelPick';
 import {
   setSessionProjectPath,
   setSessionWorkspaceId,
@@ -138,6 +129,7 @@ import {
   type HtmlEmbedPayload,
 } from './ai-chat/HtmlEmbedBlock';
 import { ProjectFilesPanel, type ProjectFileOpenRequest } from './ai-chat/ProjectFilesPanel';
+import { TurnChangedFilesCard, collectTurnChangedFilesBefore } from './ai-chat/TurnChangedFilesCard';
 import { SessionChangesBar, COMMIT_PUSH_MESSAGE, type SessionChangesSummary } from './ai-chat/SessionChangesBar';
 import { RestoreCheckpointModal } from './ai-chat/RestoreCheckpointModal';
 import { WorkspaceTabBar } from './ai-chat/WorkspaceTabBar';
@@ -152,6 +144,7 @@ import {
   type AgentWebComposerHandle,
   type ComposerSendPayload,
 } from './ai-chat/AgentWebComposer';
+import { ShellTerminalsBar } from './ai-chat/ShellTerminalsBar';
 import { useWorkflowExpandLevel } from '../utils/workflowExpandPref';
 import {
   SoloUserNavRail,
@@ -161,11 +154,13 @@ import {
 import { TaskFoldBlock } from './ai-chat/TaskFoldBlock';
 import { TimelineRow } from './ai-chat/TimelineRow';
 import { ChatTimeline } from './ai-chat/ChatTimeline';
+import { ChatScrollComposerHint, ChatScrollHud } from './ai-chat/ChatScrollHud';
 import { SoloModelPicker } from './ai-chat/SoloModelPicker';
 import { EffortPicker, type ReasoningEffort } from './ai-chat/EffortPicker';
 import { ModePicker, type AgentMode } from './ai-chat/ModePicker';
 import { ModeSwitchApprovalCard, type ModeSwitchApproval } from './ai-chat/ModeSwitchApprovalCard';
-import { OptionsApprovalCard, type OptionsProposal, hydrateOptionsProposalsFromEvents } from './ai-chat/OptionsApprovalCard';
+import { FollowupSuggestions, type FollowupSuggestion } from './ai-chat/FollowupSuggestions';
+import { OptionsApprovalCard, type OptionsProposal } from './ai-chat/OptionsApprovalCard';
 import { SoloAttachMenu } from './ai-chat/SoloAttachMenu';
 import { SlashMenu } from './ai-chat/SlashMenu';
 import {
@@ -193,11 +188,8 @@ const PluginManagerPage = React.lazy(() =>
 );
 const RolesPage = React.lazy(() => import('./RolesPage'));
 import {
-  applyJobStatus,
-  applyJobStdout,
-  seedShellStreamFromToolCall,
-  sealShellStreamFromResult,
   rebuildShellStreamsFromTimeline,
+  collectRunningShellJobs,
   type ShellStreamState,
 } from '../utils/shellJobGrouping';
 
@@ -210,68 +202,6 @@ interface AIChatPageProps {
   currentUser?: { id: string; name: string; avatar?: string | null } | null;
   onOpenProfile?: () => void;
   onOpenSettings?: () => void;
-}
-
-/** Last manually selected model / effort — survives refresh before config loads. */
-function lastModelStorageKey(agentId: string) {
-  return `opensquad.agent.${agentId}.lastModel`;
-}
-function loadLastModelPick(agentId: string): { card: string | null; effort: ReasoningEffort | null } {
-  try {
-    const raw = localStorage.getItem(lastModelStorageKey(agentId));
-    if (!raw) return { card: null, effort: null };
-    const parsed = JSON.parse(raw);
-    const card = typeof parsed?.card === 'string' && parsed.card.trim() ? parsed.card.trim() : null;
-    const effortRaw = parsed?.effort;
-    const effort =
-      effortRaw === 'low' || effortRaw === 'medium' || effortRaw === 'high' ? effortRaw : null;
-    return { card, effort };
-  } catch {
-    return { card: null, effort: null };
-  }
-}
-function saveLastModelPick(
-  agentId: string,
-  patch: { card?: string | null; effort?: ReasoningEffort | null },
-) {
-  try {
-    const prev = loadLastModelPick(agentId);
-    const next = {
-      card: patch.card !== undefined ? patch.card : prev.card,
-      effort: patch.effort !== undefined ? patch.effort : prev.effort,
-    };
-    localStorage.setItem(lastModelStorageKey(agentId), JSON.stringify(next));
-  } catch {
-    /* ignore */
-  }
-}
-
-// ---- Uploaded file info ----
-interface UploadedFile {
-  path: string;
-  filename: string;
-  original_name: string;
-  url: string;
-  size: number;
-  content_type: string;
-  is_image: boolean;
-  is_audio?: boolean;
-  is_video?: boolean;
-  type?: string;
-  duration?: number;
-}
-
-/** Expand any legacy archived_section folds into a flat timeline. */
-function flattenArchivedSections(entries: TimelineEntry[]): TimelineEntry[] {
-  const out: TimelineEntry[] = [];
-  for (const e of entries) {
-    if (e.kind === 'archived_section') {
-      out.push(...flattenArchivedSections(e.data.entries));
-    } else {
-      out.push(e);
-    }
-  }
-  return out;
 }
 
 export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, currentUser, onOpenProfile, onOpenSettings }) => {
@@ -364,334 +294,45 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
   const [attachments, setAttachments] = useState<UploadedFile[]>([]);
   const [isDragOver, setIsDragOver] = useState(false);
   const [isUploading, setIsUploading] = useState(false);
-  const [voicePanelOpen, setVoicePanelOpen] = useState(false);
-  const [voiceRealtimeStatus, setVoiceRealtimeStatus] = useState('idle');
-  const [voiceTranscript, setVoiceTranscript] = useState('');
-  const [voiceRealtimeError, setVoiceRealtimeError] = useState('');
-  /** Auto-speak each final agent reply via TTS (persisted per agent). */
-  const [autoSpeechEnabled, setAutoSpeechEnabled] = useState(false);
-  const autoSpeechEnabledRef = useRef(false);
-  const voiceRealtimeStatusRef = useRef('idle');
-  const autoTtsAudioRef = useRef<HTMLAudioElement | null>(null);
-  const lastAutoSpokenRef = useRef('');
-  /** Pipeline: cancel token + text already queued from the live stream. */
-  const autoTtsGenRef = useRef(0);
-  const autoTtsStreamOffsetRef = useRef(0);
-  const autoTtsTextQueueRef = useRef<string[]>([]);
-  const autoTtsUrlQueueRef = useRef<string[]>([]);
-  /** Parallel synth results keyed by sequence — drained in order into the play queue. */
-  const autoTtsOrderedUrlsRef = useRef<Map<number, string>>(new Map());
-  const autoTtsNextSynthSeqRef = useRef(0);
-  const autoTtsNextPlaySeqRef = useRef(0);
-  const autoTtsSynthActiveRef = useRef(0);
-  const autoTtsPlayingRef = useRef(false);
-  const enqueueAutoTtsChunksRef = useRef<(chunks: string[]) => void>(() => {});
-  const feedAutoTtsFromStreamRef = useRef<(fullText: string) => void>(() => {});
-  /** Structured realtime captions — avoids user/assistant role mixing on streaming deltas. */
-  const voiceCaptionRef = useRef<{ role: string; text: string }[]>([]);
-  const voiceConnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  /** True while probing agent for an in-progress call after refresh. */
-  const voiceResumeProbeRef = useRef(false);
-  /** Set on pagehide so refresh/tab-close does not hang up the agent-side session. */
-  const voicePageHideRef = useRef(false);
-  const clearVoiceConnectTimer = useCallback(() => {
-    if (voiceConnectTimerRef.current) {
-      clearTimeout(voiceConnectTimerRef.current);
-      voiceConnectTimerRef.current = null;
-    }
-  }, []);
-  const armVoiceConnectTimeout = useCallback(() => {
-    clearVoiceConnectTimer();
-    voiceConnectTimerRef.current = setTimeout(() => {
-      setVoiceRealtimeStatus((prev) => {
-        if (prev === 'connecting') {
-          setVoiceRealtimeError('Realtime connect timed out (Agent 未在 20s 内返回状态，请重启 Agent 后再试)');
-          return 'error';
-        }
-        return prev;
-      });
-    }, 20000);
-  }, [clearVoiceConnectTimer]);
 
-  useEffect(() => {
-    autoSpeechEnabledRef.current = autoSpeechEnabled;
-  }, [autoSpeechEnabled]);
-
-  useEffect(() => {
-    voiceRealtimeStatusRef.current = voiceRealtimeStatus;
-  }, [voiceRealtimeStatus]);
-
-  useEffect(() => {
-    if (!agentId) {
-      setAutoSpeechEnabled(false);
-      return;
-    }
-    try {
-      setAutoSpeechEnabled(localStorage.getItem(`ai_chat_auto_tts:${agentId}`) === 'true');
-    } catch {
-      setAutoSpeechEnabled(false);
-    }
-  }, [agentId]);
-
-  const stopAutoTts = useCallback(() => {
-    autoTtsGenRef.current += 1;
-    autoTtsTextQueueRef.current = [];
-    autoTtsUrlQueueRef.current = [];
-    autoTtsOrderedUrlsRef.current.clear();
-    autoTtsNextSynthSeqRef.current = 0;
-    autoTtsNextPlaySeqRef.current = 0;
-    autoTtsSynthActiveRef.current = 0;
-    autoTtsPlayingRef.current = false;
-    autoTtsStreamOffsetRef.current = 0;
-    const a = autoTtsAudioRef.current;
-    if (a) {
-      a.pause();
-      a.removeAttribute('src');
-      a.load();
-    }
-  }, []);
-
-  /** Unlock autoplay during a user gesture (toggle Auto speech on). */
-  const unlockAutoTtsAudio = useCallback(() => {
-    try {
-      // Tiny silent wav — browsers require a play() inside a click handler once.
-      const silent =
-        'data:audio/wav;base64,UklGRigAAABXQVZFZm10IBIAAAABAAEARKwAAIhYAQACABAAAABkYXRhAgAAAAEA';
-      const a = new Audio(silent);
-      a.volume = 0.01;
-      void a.play().then(() => {
-        a.pause();
-        a.currentTime = 0;
-      }).catch(() => { /* ignore */ });
-      // Keep a dedicated element for subsequent auto-plays after unlock.
-      if (!autoTtsAudioRef.current) {
-        autoTtsAudioRef.current = new Audio();
-      }
-    } catch { /* ignore */ }
-  }, []);
-
-  /** Split reply into short sentences so first audio can start before full TTS finishes. */
-  const splitAutoTtsChunks = useCallback((text: string, maxLen = 100): string[] => {
-    const cleaned = (text || '').replace(/\s+/g, ' ').trim();
-    if (!cleaned) return [];
-    const rawParts = cleaned.split(/(?<=[。！？!?；;…\n])/);
-    const chunks: string[] = [];
-    for (const part of rawParts) {
-      const s = part.trim();
-      if (!s) continue;
-      if (s.length <= maxLen) {
-        chunks.push(s);
-        continue;
-      }
-      for (let i = 0; i < s.length; i += maxLen) {
-        const piece = s.slice(i, i + maxLen).trim();
-        if (piece) chunks.push(piece);
-      }
-    }
-    return chunks;
-  }, []);
-
-  const resolveAutoTtsUrl = useCallback((url: string) => {
-    if (!url) return '';
-    if (url.startsWith('http')) return url;
-    return `${SERVER_BASE_URL}${url.startsWith('/') ? url : `/${url}`}`;
-  }, []);
-
-  const pumpAutoTtsPlay = useCallback(async (gen: number) => {
-    if (autoTtsPlayingRef.current) return;
-    autoTtsPlayingRef.current = true;
-    try {
-      while (gen === autoTtsGenRef.current) {
-        const url = autoTtsUrlQueueRef.current.shift();
-        if (!url) break;
-        if (!autoSpeechEnabledRef.current) break;
-        const audio = autoTtsAudioRef.current || new Audio();
-        autoTtsAudioRef.current = audio;
-        audio.src = url;
-        try {
-          await audio.play();
-        } catch (playErr) {
-          console.warn('[AIChatPage] Auto TTS play() blocked:', playErr);
-          unlockAutoTtsAudio();
-          await new Promise((r) => setTimeout(r, 40));
-          try {
-            await audio.play();
-          } catch {
-            continue;
-          }
-        }
-        await new Promise<void>((resolve) => {
-          const done = () => {
-            audio.removeEventListener('ended', done);
-            audio.removeEventListener('error', done);
-            resolve();
-          };
-          audio.addEventListener('ended', done);
-          audio.addEventListener('error', done);
-        });
-      }
-    } finally {
-      autoTtsPlayingRef.current = false;
-      if (
-        gen === autoTtsGenRef.current &&
-        autoTtsUrlQueueRef.current.length > 0 &&
-        autoSpeechEnabledRef.current
-      ) {
-        void pumpAutoTtsPlay(gen);
-      }
-    }
-  }, [unlockAutoTtsAudio]);
-
-  const pumpAutoTtsSynth = useCallback(async (gen: number) => {
-    const CONCURRENCY = 2;
-    const flushOrdered = () => {
-      while (autoTtsOrderedUrlsRef.current.has(autoTtsNextPlaySeqRef.current)) {
-        const url = autoTtsOrderedUrlsRef.current.get(autoTtsNextPlaySeqRef.current)!;
-        autoTtsOrderedUrlsRef.current.delete(autoTtsNextPlaySeqRef.current);
-        autoTtsNextPlaySeqRef.current += 1;
-        if (url) autoTtsUrlQueueRef.current.push(url);
-      }
-      if (autoTtsUrlQueueRef.current.length > 0) {
-        void pumpAutoTtsPlay(gen);
-      }
-    };
-    while (
-      gen === autoTtsGenRef.current &&
-      autoSpeechEnabledRef.current &&
-      agentId &&
-      autoTtsTextQueueRef.current.length > 0 &&
-      autoTtsSynthActiveRef.current < CONCURRENCY
-    ) {
-      const chunk = autoTtsTextQueueRef.current.shift();
-      if (!chunk) break;
-      const seq = autoTtsNextSynthSeqRef.current;
-      autoTtsNextSynthSeqRef.current += 1;
-      autoTtsSynthActiveRef.current += 1;
-      void (async () => {
-        try {
-          console.log('[AIChatPage] Auto TTS chunk…', chunk.slice(0, 60));
-          const t0 = performance.now();
-          const res = await agentSessionAPI.synthesize(agentId, chunk);
-          console.log('[AIChatPage] Auto TTS chunk ready', Math.round(performance.now() - t0), 'ms');
-          if (gen !== autoTtsGenRef.current || !autoSpeechEnabledRef.current) return;
-          const url = resolveAutoTtsUrl(res.url || '');
-          autoTtsOrderedUrlsRef.current.set(seq, url || '');
-          flushOrdered();
-        } catch (err) {
-          console.warn('[AIChatPage] Auto TTS chunk failed:', err);
-          if (gen === autoTtsGenRef.current) {
-            autoTtsOrderedUrlsRef.current.set(seq, '');
-            flushOrdered();
-          }
-        } finally {
-          autoTtsSynthActiveRef.current = Math.max(0, autoTtsSynthActiveRef.current - 1);
-          if (gen === autoTtsGenRef.current) {
-            void pumpAutoTtsSynth(gen);
-          }
-        }
-      })();
-    }
-  }, [agentId, pumpAutoTtsPlay, resolveAutoTtsUrl]);
-
-  const enqueueAutoTtsChunks = useCallback((chunks: string[]) => {
-    const cleaned = chunks.map((c) => c.trim()).filter(Boolean);
-    if (!cleaned.length || !agentId) return;
-    if (!autoSpeechEnabledRef.current) return;
-    const vs = voiceRealtimeStatusRef.current;
-    if (vs === 'connected' || vs === 'connecting' || vs === 'tool_running') {
-      console.log('[AIChatPage] Auto TTS skipped: realtime busy =', vs);
-      return;
-    }
-    autoTtsTextQueueRef.current.push(...cleaned);
-    void pumpAutoTtsSynth(autoTtsGenRef.current);
-  }, [agentId, pumpAutoTtsSynth]);
-
-  /** While the reply is still streaming, synthesize completed sentences early. */
-  const feedAutoTtsFromStream = useCallback((fullText: string) => {
-    if (!autoSpeechEnabledRef.current || !agentId) return;
-    const vs = voiceRealtimeStatusRef.current;
-    if (vs === 'connected' || vs === 'connecting' || vs === 'tool_running') return;
-
-    const full = fullText || '';
-    let offset = autoTtsStreamOffsetRef.current;
-    if (offset > full.length) offset = 0;
-    const pending = full.slice(offset);
-    if (!pending.trim()) return;
-
-    const chunks: string[] = [];
-    let consumed = 0;
-    const re = /[\s\S]*?[。！？!?\n]/g;
-    let m: RegExpExecArray | null;
-    while ((m = re.exec(pending)) !== null) {
-      const piece = m[0].trim();
-      if (piece) chunks.push(...splitAutoTtsChunks(piece));
-      consumed = m.index + m[0].length;
-    }
-    // No punctuation yet — hard-cut once the buffer is long enough.
-    if (!chunks.length && pending.trim().length >= 100) {
-      const cut = pending.slice(0, 100);
-      chunks.push(...splitAutoTtsChunks(cut));
-      consumed = cut.length;
-    }
-    if (!chunks.length || consumed <= 0) return;
-    autoTtsStreamOffsetRef.current = offset + consumed;
-    enqueueAutoTtsChunks(chunks);
-  }, [agentId, enqueueAutoTtsChunks, splitAutoTtsChunks]);
-
-  const speakFinalReply = useCallback(async (text: string) => {
-    const prompt = (text || '').trim();
-    if (!agentId || !prompt) return;
-    if (!autoSpeechEnabledRef.current) {
-      console.log('[AIChatPage] Auto TTS skipped: disabled');
-      return;
-    }
-    const vs = voiceRealtimeStatusRef.current;
-    if (vs === 'connected' || vs === 'connecting' || vs === 'tool_running') {
-      console.log('[AIChatPage] Auto TTS skipped: realtime busy =', vs);
-      return;
-    }
-    if (lastAutoSpokenRef.current === prompt) {
-      console.log('[AIChatPage] Auto TTS skipped: already spoken this text');
-      return;
-    }
-    lastAutoSpokenRef.current = prompt;
-
-    // Prefer remainder after stream-prefetch; fall back to full text.
-    const offset = Math.min(autoTtsStreamOffsetRef.current, prompt.length);
-    const rest = prompt.slice(offset).trim();
-    autoTtsStreamOffsetRef.current = prompt.length;
-    if (rest) {
-      enqueueAutoTtsChunks(splitAutoTtsChunks(rest));
-    } else if (autoTtsTextQueueRef.current.length === 0 && autoTtsUrlQueueRef.current.length === 0 && !autoTtsPlayingRef.current) {
-      // Stream already covered everything but nothing queued (edge) — speak full.
-      enqueueAutoTtsChunks(splitAutoTtsChunks(prompt));
-    }
-  }, [agentId, enqueueAutoTtsChunks, splitAutoTtsChunks]);
-
-  const toggleAutoSpeech = useCallback((enabled: boolean) => {
-    setAutoSpeechEnabled(enabled);
-    autoSpeechEnabledRef.current = enabled;
-    if (agentId) {
-      try {
-        localStorage.setItem(`ai_chat_auto_tts:${agentId}`, String(enabled));
-      } catch { /* ignore */ }
-    }
-    if (enabled) {
-      // Critical: unlock browser autoplay during this click gesture.
-      unlockAutoTtsAudio();
-    } else {
-      stopAutoTts();
-    }
-  }, [agentId, stopAutoTts, unlockAutoTtsAudio]);
-
-  useEffect(() => () => stopAutoTts(), [stopAutoTts]);
-
-  enqueueAutoTtsChunksRef.current = enqueueAutoTtsChunks;
-  feedAutoTtsFromStreamRef.current = feedAutoTtsFromStream;
-
-  const speakFinalReplyRef = useRef(speakFinalReply);
-  speakFinalReplyRef.current = speakFinalReply;
-
+  const wsServiceRef = useRef<ReturnType<typeof getAiWsService> | null>(null);
+  const [agentProfile, setAgentProfile] = useState<AdminAgent | null>(null);
+  const {
+    autoSpeechEnabled,
+    autoSpeechEnabledRef,
+    toggleAutoSpeech,
+    stopAutoTts,
+    feedAutoTtsFromStreamRef,
+    speakFinalReplyRef,
+    lastAutoSpokenRef,
+    voicePanelOpen,
+    setVoicePanelOpen,
+    voiceRealtimeStatus,
+    setVoiceRealtimeStatus,
+    voiceTranscript,
+    setVoiceTranscript,
+    voiceRealtimeError,
+    setVoiceRealtimeError,
+    voiceBindings,
+    setVoiceBindings,
+    voiceCaptionRef,
+    voiceResumeProbeRef,
+    voicePageHideRef,
+    voiceRealtimeStatusRef,
+    clearVoiceConnectTimer,
+    armVoiceConnectTimeout,
+    handleVoiceBindingsChange,
+    handleVoiceRealtimeStart,
+    handleVoiceRealtimeStop,
+    handleVoiceAudioChunk,
+    handleMouthpieceUtterance,
+    handleForceAskAgentChange,
+    unlockAutoTtsAudio,
+  } = useAgentWebVoice({
+    agentId,
+    agentDirName: agentProfile?.dir_name,
+    wsServiceRef,
+  });
   // Session id first — token % is keyed per session for parallel panes.
   const [currentSessionId, setCurrentSessionId] = useState<string | null>(null);
 
@@ -904,11 +545,12 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     } catch {
       /* ignore */
     }
-    setFileOpenRequest({ path: p, nonce: Date.now() });
     const snap = loadWorkspaceStore(agentId);
     const wsId = snap.chrome.activeWorkspaceId;
     const ws = wsId ? snap.workspaces.find((w) => w.id === wsId) : null;
     if (wsId && ws) {
+      // Workspace exists → show the file ONCE, as a workspace content tab.
+      // (Opening the files-panel preview here too would render the same file twice.)
       void (async () => {
         // Prefer agentId here — agentProfile is declared later in this component
         // (TDZ). Cache keys also accept agentId; dir_name is used when opening
@@ -919,6 +561,9 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
         openContentTab(agentId, wsId, { kind: 'file', id: p });
         setWsSnap(loadWorkspaceStore(agentId));
       })();
+    } else {
+      // No active workspace → fall back to the files panel preview.
+      setFileOpenRequest({ path: p, nonce: Date.now() });
     }
   }, [agentId]);
 
@@ -1038,7 +683,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     isFrozenRef: textSelectFrozenRef,
   } = useTextSelectionFreeze(messagesContainerRef, liveSelectView);
   const displayTimeline = selectFrozenView.entries;
-  const displayStreamingText = stripToolCallMarkup(selectFrozenView.streaming || '').trim();
+  const displayStreamingText = composeAssistantDisplayContent(selectFrozenView.streaming || '').trim();
 
   const sessionBootstrapDoneRef = useRef(false); // true after first canonical timeline set on connect
   const sessionReloadSeqRef = useRef(0);
@@ -1054,8 +699,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
    // Auth expiry
   const [sessionExpired, setSessionExpired] = useState(false);
 
-  // Agent chat profile (avatar + name)
-  const [agentProfile, setAgentProfile] = useState<AdminAgent | null>(null);
+  // Agent chat profile (avatar + name) — agentProfile state is declared with voice hook
   const [modelName, setModelName] = useState<string | null>(null);
   const [agentApiProtocol, setAgentApiProtocol] = useState<string | null>(null);
   const [agentProvider, setAgentProvider] = useState<string | null>(null);
@@ -1068,71 +712,6 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
   const [currentCardName, setCurrentCardName] = useState<string | null>(() =>
     loadLastModelPick(agentId).card,
   );
-  const [voiceBindings, setVoiceBindings] = useState({
-    asr_card: '',
-    tts_card: '',
-    realtime_card: '',
-    realtime_voice: '',
-  });
-
-  const handleVoiceBindingsChange = useCallback(
-    async (next: {
-      asr_card: string;
-      tts_card: string;
-      realtime_card: string;
-      realtime_voice: string;
-    }) => {
-      setVoiceBindings(next);
-      wsServiceRef.current?.setVoiceConfig(next);
-      const dir = agentProfile?.dir_name || agentId;
-      if (!dir) return;
-      try {
-        const cfg = await adminAPI.getConfig(dir);
-        const full = { ...(cfg.config || {}) };
-        full.voice = { ...(full.voice || {}), ...next };
-        await adminAPI.updateConfig(dir, full);
-      } catch (e) {
-        console.warn('[AIChatPage] persist voice config failed', e);
-      }
-    },
-    [agentId, agentProfile?.dir_name],
-  );
-
-  const handleVoiceRealtimeStart = useCallback(
-    (opts?: { forceAskAgent?: boolean }) => {
-      setVoiceTranscript('');
-      voiceCaptionRef.current = [];
-      setVoiceRealtimeError('');
-      setVoiceRealtimeStatus('connecting');
-      writeVoiceCallPersist(agentId, opts?.forceAskAgent !== false);
-      armVoiceConnectTimeout();
-      wsServiceRef.current?.startVoiceRealtime({
-        force_ask_agent: opts?.forceAskAgent !== false,
-      });
-    },
-    [agentId, armVoiceConnectTimeout],
-  );
-
-  const handleVoiceRealtimeStop = useCallback(() => {
-    clearVoiceConnectTimer();
-    clearVoiceCallPersist(agentId);
-    wsServiceRef.current?.stopVoiceRealtime();
-    setVoiceRealtimeStatus('idle');
-    setVoiceRealtimeError('');
-  }, [agentId, clearVoiceConnectTimer]);
-
-  const handleVoiceAudioChunk = useCallback((b64: string) => {
-    wsServiceRef.current?.sendVoiceAudioIn(b64);
-  }, []);
-
-  const handleMouthpieceUtterance = useCallback((b64: string, sampleRate: number) => {
-    wsServiceRef.current?.sendMouthpieceUtterance(b64, sampleRate);
-  }, []);
-
-  const handleForceAskAgentChange = useCallback((force: boolean) => {
-    wsServiceRef.current?.setVoiceRealtimeOptions({ force_ask_agent: force });
-  }, []);
-
   const [reasoningEffort, setReasoningEffort] = useState<ReasoningEffort>(
     () => loadLastModelPick(agentId).effort || 'high',
   );
@@ -1152,6 +731,8 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
   const modelSwitchRevertRef = useRef<Record<string, { card: string | null; model: string }>>({});
   const [modeApprovals, setModeApprovals] = useState<ModeSwitchApproval[]>([]);
   const [optionsProposals, setOptionsProposals] = useState<OptionsProposal[]>([]);
+  /** Agent-offered follow-up chips (suggest_followups tool) — cleared on the next user turn. */
+  const [followupSuggestions, setFollowupSuggestions] = useState<FollowupSuggestion[]>([]);
   const [agentCwd, setAgentCwd] = useState<string | null>(null);
   /** Default workspace root from agent (used when user never picks a folder). */
   const [defaultCwd, setDefaultCwd] = useState<string | null>(null);
@@ -1167,6 +748,11 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     ).length;
   }, [timeline]);
   const [showContextViewer, setShowContextViewer] = useState(false);
+  // 上下文详情面板跟随「发起查看的那条会话」。tab 模式下切换会话标签只更新
+  // pane/tab 状态、刻意不回写 currentSessionId（见 handleContentTabSelect——
+  // 回写会重挂载 chatSlot / 触发全局加载），重启后 currentSessionId 停在启动
+  // 会话上，于是无论看哪个标签，详情都显示同一次会话。null = 跟随焦点会话。
+  const [contextViewerSessionId, setContextViewerSessionId] = useState<string | null>(null);
   const [isCompressingContext, setIsCompressingContext] = useState(false);
 
   // Lazy loading state
@@ -1204,14 +790,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     bumpComposerLandingEpoch((n) => n + 1);
   }, []);
 
-  // Scroll button visibility
-  const [showScrollTop, setShowScrollTop] = useState(false);
-  const [showScrollBottom, setShowScrollBottom] = useState(false);
-  const [scrollActive, setScrollActive] = useState(false);
-  const scrollHideTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const userScrolledRef = useRef(false); // true when user manually scrolled away from bottom
-  // Ref to the current per-agent WS service (set inside the WS useEffect, used by callbacks)
-  const wsServiceRef = useRef<ReturnType<typeof getAiWsService> | null>(null);
 
   // ---- Pending message queue (per-session only; other sessions run in parallel) ----
   // When a *specific* session is busy, further sends to that same session park here.
@@ -1411,6 +990,11 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
   const [workflowExpandLevel] = useWorkflowExpandLevel();
   /** Live stdout for system.start_job / run_session_job (keyed by tool call_id) */
   const [shellStreams, setShellStreams] = useState<Record<string, ShellStreamState>>({});
+  /** Background terminals still running across the visible timeline (composer-top bar). */
+  const runningShellJobs = useMemo(
+    () => collectRunningShellJobs(displayTimeline, shellStreams),
+    [displayTimeline, shellStreams],
+  );
 
   // UI render mode: classic (user bubble + agent document) | solo (document stream). Global preference.
   type AiChatUiMode = 'classic' | 'solo';
@@ -1477,60 +1061,90 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
   const effectivePlanSteps = planSteps.length > 0 ? planSteps : latestPlanStepsFromTimeline;
 
   // ---- contextEntries: flatten timeline → ContextEntry[] for ContextViewer ----
-  const contextEntries = useMemo((): ContextEntry[] => {
-    const result: ContextEntry[] = [];
-    let msgIdx = 0, evtIdx = 0, promptIdx = 0;
-    for (const entry of timeline) {
-      if (entry.kind === 'message') {
-        result.push({
-          id: `${currentSessionId || 'local'}-msg-${msgIdx++}`,
-          kind: entry.data.role as 'user' | 'assistant',
-          content: entry.data.content,
-          timestamp: entry.data.timestamp,
-          elapsed_ms: (entry.data as any).elapsed_ms,
-        });
-      } else if (entry.kind === 'workflow') {
-        for (const evt of entry.data.events) {
+  // 抽成独立函数：详情面板可能查看「非焦点会话」（tab 模式），solo timeline
+  // 与 per-session bucket 必须走同一条映射路径，避免两份实现漂移。
+  const flattenTimelineToContextEntries = useCallback(
+    (source: TimelineEntry[], sid: string | null): ContextEntry[] => {
+      const result: ContextEntry[] = [];
+      let msgIdx = 0, evtIdx = 0, promptIdx = 0;
+      for (const entry of source) {
+        if (entry.kind === 'message') {
           result.push({
-            id: `${currentSessionId || 'local'}-evt-${evtIdx++}`,
-            kind: evt.type as ContextEntry['kind'],
-            content: evt.content,
-            timestamp: typeof evt.timestamp === 'number'
-              ? new Date(evt.timestamp).toISOString()
-              : (evt.timestamp ? String(evt.timestamp) : undefined),
-            result: evt.result,
-            resultStatus: evt.resultStatus,
+            id: `${sid || 'local'}-msg-${msgIdx++}`,
+            kind: entry.data.role as 'user' | 'assistant',
+            content: entry.data.content,
+            timestamp: entry.data.timestamp,
+            elapsed_ms: (entry.data as any).elapsed_ms,
+          });
+        } else if (entry.kind === 'workflow') {
+          for (const evt of entry.data.events) {
+            result.push({
+              id: `${sid || 'local'}-evt-${evtIdx++}`,
+              kind: evt.type as ContextEntry['kind'],
+              content: evt.content,
+              timestamp: typeof evt.timestamp === 'number'
+                ? new Date(evt.timestamp).toISOString()
+                : (evt.timestamp ? String(evt.timestamp) : undefined),
+              result: evt.result,
+              resultStatus: evt.resultStatus,
+            });
+          }
+        } else if (entry.kind === 'prompt') {
+          result.push({
+            id: `${sid || 'local'}-prompt-${promptIdx++}`,
+            kind: 'prompt',
+            content: entry.data.system_prompt,
+            dynamicPrefix: entry.data.dynamic_prefix || undefined,
+            promptChanged: entry.data.changed,
+            timestamp: entry.data.timestamp,
+            diff: entry.data.diff,
+          });
+        } else if (entry.kind === 'status_hint') {
+          const hint = entry.data;
+          const hintKind: ContextEntry['kind'] =
+            hint.hintType === 'sleep' ? 'sleep' :
+            hint.hintType === 'wake'  ? 'wake'  : 'state_change';
+          const label =
+            hint.hintType === 'sleep' ? t('aiChat.sleepMode', { seconds: hint.content }) :
+            hint.hintType === 'wake'  ? t('aiChat.wakeMode', { content: hint.content }) :
+            t('aiChat.stateChanged', { content: hint.content });
+          result.push({
+            id: `${sid || 'local'}-hint-${evtIdx++}`,
+            kind: hintKind,
+            content: label,
+            timestamp: new Date(hint.timestamp).toISOString(),
           });
         }
-      } else if (entry.kind === 'prompt') {
-        result.push({
-          id: `${currentSessionId || 'local'}-prompt-${promptIdx++}`,
-          kind: 'prompt',
-          content: entry.data.system_prompt,
-          dynamicPrefix: entry.data.dynamic_prefix || undefined,
-          promptChanged: entry.data.changed,
-          timestamp: entry.data.timestamp,
-          diff: entry.data.diff,
-        });
-      } else if (entry.kind === 'status_hint') {
-        const hint = entry.data;
-        const hintKind: ContextEntry['kind'] =
-          hint.hintType === 'sleep' ? 'sleep' :
-          hint.hintType === 'wake'  ? 'wake'  : 'state_change';
-        const label =
-          hint.hintType === 'sleep' ? t('aiChat.sleepMode', { seconds: hint.content }) :
-          hint.hintType === 'wake'  ? t('aiChat.wakeMode', { content: hint.content }) :
-          t('aiChat.stateChanged', { content: hint.content });
-        result.push({
-          id: `${currentSessionId || 'local'}-hint-${evtIdx++}`,
-          kind: hintKind,
-          content: label,
-          timestamp: new Date(hint.timestamp).toISOString(),
-        });
       }
-    }
-    return result;
-  }, [timeline, currentSessionId]);
+      return result;
+    },
+    [t],
+  );
+
+  const contextEntries = useMemo(
+    () => flattenTimelineToContextEntries(timeline, currentSessionId),
+    [flattenTimelineToContextEntries, timeline, currentSessionId],
+  );
+
+  // 详情面板的数据源跟随 contextViewerSessionId，而不是焦点会话：非焦点会话
+  // 按 tokenStats 同一套优先级解析（live bucket → 磁盘缓存），保证面板里的
+  // 「上下文构成」与「原始消息」永远来自同一条会话。
+  const contextViewerEntries = useMemo((): ContextEntry[] => {
+    const sid = contextViewerSessionId;
+    if (!sid || sid === currentSessionId) return contextEntries;
+    const live = pickSessionLiveTimeline(liveTimelinesBySession, sid);
+    const source = (live && live.length > 0 ? live : null)
+      ?? getCachedSessionTimeline(agentId, sid)
+      ?? [];
+    return flattenTimelineToContextEntries(source, sid);
+  }, [
+    contextViewerSessionId,
+    currentSessionId,
+    contextEntries,
+    liveTimelinesBySession,
+    agentId,
+    flattenTimelineToContextEntries,
+  ]);
 
   // ---- Fetch agent profile (avatar + name) + model name ----
   const autoStartTriedRef = useRef<Record<string, number>>({});
@@ -1745,35 +1359,9 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
   }, [refreshModelCards]);
 
   // ---- Auto-scroll ----
-  const scrollToBottom = useCallback(() => {
-    chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-    userScrolledRef.current = false;
+  const markUnpinnedFromBottom = useCallback((away: boolean) => {
+    userScrolledRef.current = away;
   }, []);
-
-  const scrollToTop = useCallback(() => {
-    messagesContainerRef.current?.scrollTo({ top: 0, behavior: 'smooth' });
-  }, []);
-
-  // Track scroll position for button visibility + lazy load trigger
-  const handleMessagesScroll = useCallback(() => {
-    const el = messagesContainerRef.current;
-    if (!el) return;
-    const { scrollTop, scrollHeight, clientHeight } = el;
-    const distFromBottom = scrollHeight - scrollTop - clientHeight;
-    setShowScrollTop(scrollTop > 200);
-    setShowScrollBottom(distFromBottom > 200);
-    userScrolledRef.current = distFromBottom > 100;
-
-    // Show buttons on scroll, then hide after 1.5s of inactivity
-    setScrollActive(true);
-    if (scrollHideTimerRef.current) clearTimeout(scrollHideTimerRef.current);
-    scrollHideTimerRef.current = setTimeout(() => setScrollActive(false), 1500);
-
-    // Lazy load: trigger when scrolled near top
-    if (scrollTop < 100 && hasMoreHistory && !isLoadingMore) {
-      loadMoreHistory();
-    }
-  }, [hasMoreHistory, isLoadingMore]);
 
   // Load earlier messages (prepend to timeline)
   const loadMoreHistory = useCallback(async () => {
@@ -1840,3055 +1428,113 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     return sealWorkflowAndAppendAssistantMessage(prev, msg);
   }
 
-  // ---- WebSocket connection ----
-  useEffect(() => {
-    if (!agentId) return;
-
-    cancelPendingVoiceHangup(agentId);
-    voicePageHideRef.current = false;
-    const onPageHide = () => {
-      // Refresh / tab close: do not hang up agent-side realtime; sessionStorage resumes UI.
-      voicePageHideRef.current = true;
-      cancelPendingVoiceHangup(agentId);
-    };
-    window.addEventListener('pagehide', onPageHide);
-
-    const aiWsService = getAiWsService(agentId);
-    aiWsService.connect(agentId);
-    wsServiceRef.current = aiWsService;
-
-    const tryResumeVoiceCall = () => {
-      if (!readVoiceCallPersist(agentId)) return;
-      voiceResumeProbeRef.current = true;
-      aiWsService.queryVoiceRealtime();
-    };
-
-    // Auth expiry detection — prompt re-login when token is invalid/expired
-    const unsubAuthExpired = aiWsService.onAuthExpired(() => {
-      setSessionExpired(true);
-    });
-
-    const unsubStatus = aiWsService.onStatusChange((status) => {
-      setWsStatus(status);
-      if (status === 'connected') {
-        setAgentStatus('connected');
-        tryResumeVoiceCall();
-        // Session may already be focused before WS is ready — refresh % now.
-        const sid =
-          (currentSessionIdRef.current || agentCurrentSessionIdRef.current || '').trim();
-        if (sid) {
-          try {
-            aiWsService.requestTokenStats(sid);
-          } catch {
-            /* ignore */
-          }
-        }
-      } else if (status === 'disconnected') {
-        setAgentStatus('disconnected');
-        const busy = [...busySessionsRef.current];
-        for (const sid of busy) {
-          if (!sid) continue;
-          userStoppedBySidRef.current[sid] = true;
-          eventSidRef.current = sid;
-          setTimeline((prev) => sealIncompleteWorkflows(prev, {
-            cancelOpenTools: 'Cancelled: agent disconnected',
-            fallbackStartedMs: turnStartedMsRef.current,
-          }));
-          eventSidRef.current = '';
-          clearSessionRunState(sid);
-        }
-      } else if (status === 'connecting') {
-        setAgentStatus('connecting');
-      } else if (status === 'agent-starting') {
-        setAgentStatus('agent-starting');
-      } else if (status === 'error') {
-        setAgentStatus('error');
-      }
-    });
-
-    // ---- Message handlers ----
-    // Route every live WS event into the correct per-session timeline bucket
-    // via eventSidRef (see setTimeline wrapper above). Without this, parallel
-    // pane B's events overwrite the global timeline while A is still running.
-    const onWs = (type: string, handler: (msg: AIWSMessage) => void) =>
-      aiWsService.on(type, (msg: AIWSMessage) => {
-        // Prefer explicit msg.sid. Do NOT fall back to currentSessionId for
-        // live turn events — missing sid used to dump pane B into the focused pane.
-        const sid = String((msg as any).sid || '').trim();
-        const liveTurn = type === 'stream' || type === 'message' || type === 'response'
-          || type === 'to_user_reply' || type === 'to_user_final' || type === 'to_user_end_task'
-          || type === 'thought' || type === 'tool_call' || type === 'tool_call_delta'
-          || type === 'tool_result' || type === 'plan' || type === 'summary_stream'
-          || type === 'compression_progress' || type === 'turn_start' || type === 'turn_elapsed'
-          || type === 'turn_cancelled' || type === 'prompt_update' || type === 'output_media'
-          || type === 'job_stdout' || type === 'job_status';
-        if (!sid && liveTurn) {
-          return;
-        }
-        eventSidRef.current = sid;
-        try {
-          handler(msg);
-        } finally {
-          eventSidRef.current = '';
-        }
-      });
-
-    type LiveWorkflowItem = { event: WorkflowEvent; status: string | null; sid: string };
-    const pendingLiveWorkflowEvents: LiveWorkflowItem[] = [];
-    let workflowTimelineRaf: number | null = null;
-    const flushLiveWorkflowEvents = () => {
-      if (workflowTimelineRaf != null) {
-        cancelAnimationFrame(workflowTimelineRaf);
-        workflowTimelineRaf = null;
-      }
-      if (!pendingLiveWorkflowEvents.length) return;
-      const batch = pendingLiveWorkflowEvents.splice(0);
-      const bySid = new Map<string, Array<{ event: WorkflowEvent; status: string | null }>>();
-      for (const item of batch) {
-        const payload = { event: item.event, status: item.status };
-        const list = bySid.get(item.sid);
-        if (list) list.push(payload);
-        else bySid.set(item.sid, [payload]);
-      }
-      const prevSid = eventSidRef.current;
-      bySid.forEach((items, sid) => {
-        eventSidRef.current = sid;
-        const hasParentTool = items.some(
-          (it) => it.event.type === 'tool_call' && !it.event.subAgent,
-        );
-        let commitText = '';
-        if (hasParentTool) {
-          const focused = currentSessionIdRef.current || '';
-          const raw =
-            streamingTextBySessionRef.current[sid]
-            || (sid === focused ? streamingTextRef.current : '')
-            || '';
-          if (String(raw).trim()) {
-            commitText = stripToolCallMarkup(raw).trim();
-            if (streamUiFlushTimerRef.current) {
-              clearTimeout(streamUiFlushTimerRef.current);
-              streamUiFlushTimerRef.current = null;
-            }
-            if (streamingTextBySessionRef.current[sid]) {
-              const st = { ...streamingTextBySessionRef.current };
-              delete st[sid];
-              streamingTextBySessionRef.current = st;
-              setStreamingTextBySession(st);
-            }
-            if (sid === focused) {
-              streamingTextRef.current = '';
-              setStreamingText('');
-            }
-          }
-        }
-        setTimeline((prev) => appendLiveWorkflowBatch(prev, items, {
-          commitAssistantText: commitText,
-        }));
-      });
-      eventSidRef.current = prevSid;
-    };
-    const enqueueLiveWorkflowEvent = (
-      event: WorkflowEvent,
-      status: string | null,
-      immediate = false,
-    ) => {
-      const sid = (eventSidRef.current || currentSessionIdRef.current || '').trim();
-      if (!sid) return;
-      pendingLiveWorkflowEvents.push({ event, status, sid });
-      if (immediate) {
-        flushLiveWorkflowEvents();
-        return;
-      }
-      if (workflowTimelineRaf == null) {
-        workflowTimelineRaf = requestAnimationFrame(() => {
-          workflowTimelineRaf = null;
-          flushLiveWorkflowEvents();
-        });
-      }
-    };
-
-    let markupSniffBuf = '';
-    let markupToolSig = '';
-    const sniffMarkupTool = (chunk: string) => {
-      if (!chunk) return;
-      markupSniffBuf += chunk;
-      if (markupSniffBuf.length > 8000) markupSniffBuf = markupSniffBuf.slice(-8000);
-      const parsed = extractLiveToolCallFromMarkup(markupSniffBuf);
-      if (!parsed) return;
-      const argsKey = typeof parsed.arguments === 'string'
-        ? parsed.arguments
-        : JSON.stringify(parsed.arguments);
-      const sig = `${parsed.name}|${argsKey}`;
-      if (markupToolSig === sig) return;
-      markupToolSig = sig;
-      enqueueLiveWorkflowEvent(
-        {
-          type: 'tool_call',
-          content: {
-            id: parsed.id,
-            name: parsed.name,
-            arguments: parsed.arguments,
-            args: parsed.arguments,
-            partial: true,
-            index: 0,
-          },
-          timestamp: Date.now(),
-        },
-        `Calling ${parsed.name}...`,
-      );
-    };
-
-    // Ready-stage notifications: chat is usable once WS connects; extensions /
-    // MCP finishing arrive later as agent_ready_stage (extensions_ready / full_ready).
-    const unsubReadyStage = onWs('agent_ready_stage', (msg: AIWSMessage) => {
-      const stage = ((msg as any).data?.stage) || '';
-      if (stage === 'extensions_ready') setToolsStage('loading');
-      else if (stage === 'full_ready') setToolsStage('ready');
-    });
-
-    // Stream — accumulate chunks via ref, then sync to state (per-session)
-    const streamSeqRef = { current: 0 };
-    const unsubStream = onWs('stream', (msg: AIWSMessage) => {
-      if (isSidStopped() || isSidFinalizing()) return;
-      const text = _extractContent(msg);
-      if (text) {
-        streamSeqRef.current += 1;
-        const sid = eventSidRef.current || currentSessionIdRef.current || '';
-        if (sid) {
-          // 只累积到 ref；UI 刷新由 scheduleStreamFlush 节流合并。
-          streamingTextBySessionRef.current = { ...streamingTextBySessionRef.current, [sid]: (streamingTextBySessionRef.current[sid] || '') + text };
-          isStreamingBySessionRef.current = { ...isStreamingBySessionRef.current, [sid]: true };
-        }
-        // Solo / focused pane still uses the global streaming fields.
-        if (!sid || sid === (currentSessionIdRef.current || '')) {
-          streamingTextRef.current += text;
-        }
-        sniffMarkupTool(text);
-        scheduleStreamFlush();
-      }
-    });
-
-    // Final message / response — finalize streaming into a message
-    const handleFinal = (msg: AIWSMessage) => {
-      console.log('[AIChatPage] 📨 handleFinal called!', JSON.stringify(msg).substring(0, 200));
-      // Guard: prevent duplicate finalization (both 'message' and 'response'
-      // may fire for the same reply). Per-sid so pane A's final does not drop pane B.
-      const finalSid = eventSidKey();
-      if (isSidStopped(finalSid) || isSidFinalizing(finalSid)) return;
-
-      const text = _extractContent(msg);
-      // Prefer the event's text (complete user_msg from runner) over the
-      // accumulated streaming ref (may be missing the last debounced chunk).
-      // Never fall back to the *focused* pane's stream when this event has a sid.
-      const streamedForSid = finalSid
-        ? (streamingTextBySessionRef.current[finalSid]
-          || (finalSid === (currentSessionIdRef.current || '') ? streamingTextRef.current : ''))
-        : streamingTextRef.current;
-      const finalText = text || streamedForSid;
-
-      if (typeof finalText === 'string' && finalText.trim().length > 0) {
-        const raw = msg as any;
-        const messageId = raw.message_id || raw.id || undefined;
-        const role = (raw.role === 'user' ? 'user' : 'assistant') as 'user' | 'assistant';
-        const chatMsg: ChatMessage = {
-          role,
-          content: finalText,
-          timestamp: new Date().toISOString(),
-        };
-        if (messageId) {
-          chatMsg.message_id = messageId;
-        }
-
-        // During hydrate, buffer finals so the disk full-replace cannot wipe
-        // a to_user that arrived mid-refresh (disk flush lag is common).
-        if (isHydratingSessionRef.current) {
-          pendingHydrationFinalsRef.current.push(chatMsg);
-          return;
-        }
-
-        if (finalSid) finalizingBySidRef.current[finalSid] = true;
-
-        setTimeline(prev => {
-          const absorbed = absorbAssistantFinalText(prev, finalText, messageId);
-          if (absorbed) return absorbed;
-          // Broadcast message_id dedup across all entries (not just last)
-          if (messageId) {
-            const exists = prev.some(e =>
-              e.kind === 'message' && (e.data as ChatMessage).message_id === messageId
-            );
-            if (exists) {
-              console.log('[AIChatPage] handleFinal: message_id found earlier in timeline, skipping');
-              return prev;
-            }
-          }
-
-          const next = finalizeWorkflowAndAddMessage(prev, chatMsg);
-          if (pendingFilePushesRef.current.length > 0) {
-            const buffered = pendingFilePushesRef.current.map((m) => ({
-              kind: 'message' as const,
-              data: m,
-              _uid: genUID(),
-            }));
-            pendingFilePushesRef.current = [];
-            return [...next, ...buffered];
-          }
-          return next;
-        });
-        // IMPORTANT: do NOT gate TTS on a flag mutated inside setTimeline —
-        // React may defer the updater, leaving the flag false and silently skipping speech.
-        // Dedup is handled inside speakFinalReply via lastAutoSpokenRef.
-        if (role === 'assistant') {
-          void speakFinalReplyRef.current(finalText);
-          // 温和结束提示：仅在页面处于后台时才响铃（不打扰正在使用的用户）
-          if (!pageActiveRef.current) playGentleNotificationSound();
-        }
-      }
-
-      // Clear streaming (global + per-session bucket for this event's sid)
-      cancelStreamFlush();
-      const clearSid = eventSidRef.current || currentSessionIdRef.current || '';
-      if (clearSid) {
-        const st = { ...streamingTextBySessionRef.current };
-        delete st[clearSid];
-        streamingTextBySessionRef.current = st;
-        setStreamingTextBySession(st);
-        const ib = { ...isStreamingBySessionRef.current };
-        delete ib[clearSid];
-        isStreamingBySessionRef.current = ib;
-        setIsStreamingBySession(ib);
-        // A final message means this session's turn is over — release its
-        // parallel busy marker immediately instead of waiting for the next
-        // busy_sessions broadcast. The backend dispatcher re-broadcasts on a
-        // ~5s idle loop, so without this the composer stays in "executing"
-        // (busy) for seconds after the reply already rendered.
-        if (busySessionsRef.current.includes(clearSid)) {
-          const remaining = busySessionsRef.current.filter((id) => id !== clearSid);
-          busySessionsRef.current = remaining;
-          setBusySessions(remaining);
-        }
-      }
-      if (!clearSid || clearSid === (currentSessionIdRef.current || '')) {
-        streamingTextRef.current = '';
-        setStreamingText('');
-        setIsStreaming(false);
-        setAgentStatus('connected');
-      }
-
-      // Fallback: clear new-session loading if a final message arrives before current_session
-      if (newSessionPendingRef.current) {
-        newSessionPendingRef.current = false;
-        setIsLoadingSession(false);
-      }
-
-      // Reset guard after a short delay (allow next turn's final to work)
-      setTimeout(() => {
-        if (finalSid) delete finalizingBySidRef.current[finalSid];
-      }, 300);
-    };
-    const unsubMessage = onWs('message', handleFinal);
-    const unsubResponse = onWs('response', handleFinal);
-    const unsubToUserReply = onWs('to_user_reply', (msg: AIWSMessage) => {
-      // to_user_reply behaves like final text but expects user input afterward
-      handleFinal(msg);
-      setAgentStatus('awaiting_reply');
-    });
-
-    const unsubSessionTitle = aiWsService.on('session_title', (msg: AIWSMessage) => {
-      const data = msg.content || msg.data;
-      const title = typeof data === 'object' ? data.title : null;
-      const sessionId = typeof data === 'object' && typeof data?.id === 'string' ? data.id : null;
-      if (title) {
-        // Agent-chosen title wins over the provisional first-message title.
-        pendingSessionTitleRef.current = null;
-        setCurrentSessionId(prev => prev || sessionId);
-        if (sessionId) {
-          setSessionTitleUpdate({ id: sessionId, title });
-        }
-      }
-    });
-
-    const unsubToUserFinal = onWs('to_user_final', (msg: AIWSMessage) => {
-      handleFinal(msg);
-    });
-
-    const unsubToUserEndTask = onWs('to_user_end_task', (msg: AIWSMessage) => {
-      // Same as final text, then fold agent process since the last user message.
-      const endSid = eventSidKey();
-      if (isSidFinalizing(endSid) || isSidStopped(endSid)) return;
-      if (endSid) finalizingBySidRef.current[endSid] = true;
-
-      const text = _extractContent(msg);
-      const streamedForSid = endSid
-        ? (streamingTextBySessionRef.current[endSid]
-          || (endSid === (currentSessionIdRef.current || '') ? streamingTextRef.current : ''))
-        : streamingTextRef.current;
-      const finalText = text || streamedForSid;
-
-      if (typeof finalText === 'string' && finalText.trim().length > 0) {
-        const raw = msg as any;
-        const messageId = raw.message_id || raw.id || undefined;
-        const chatMsg: ChatMessage = {
-          role: 'assistant',
-          content: finalText,
-          timestamp: new Date().toISOString(),
-          end_task: true,
-        };
-        if (messageId) {
-          chatMsg.message_id = messageId;
-        }
-
-        setTimeline(prev => {
-          const absorbed = absorbAssistantFinalText(prev, finalText, messageId);
-          if (absorbed) {
-            const patched = [...absorbed];
-            for (let i = patched.length - 1; i >= 0; i--) {
-              const entry = patched[i];
-              if (entry.kind !== 'message') continue;
-              const existing = entry.data;
-              if (existing.role === 'user') break;
-              if (existing.role === 'assistant') {
-                patched[i] = {
-                  kind: 'message',
-                  data: { ...existing, end_task: true },
-                  _uid: entry._uid,
-                };
-                break;
-              }
-            }
-            return foldTaskProcessSinceLastUser(patched);
-          }
-          if (messageId) {
-            const exists = prev.some(e =>
-              e.kind === 'message' && (e.data as ChatMessage).message_id === messageId
-            );
-            if (exists) {
-              const patched = prev.map((e) =>
-                e.kind === 'message' && (e.data as ChatMessage).message_id === messageId
-                  ? { ...e, data: { ...(e.data as ChatMessage), end_task: true } }
-                  : e,
-              );
-              return foldTaskProcessSinceLastUser(patched);
-            }
-          }
-
-          let next = finalizeWorkflowAndAddMessage(prev, chatMsg);
-          if (pendingFilePushesRef.current.length > 0) {
-            const buffered = pendingFilePushesRef.current.map((m) => ({
-              kind: 'message' as const,
-              data: m,
-              _uid: genUID(),
-            }));
-            pendingFilePushesRef.current = [];
-            next = [...next, ...buffered];
-          }
-          return foldTaskProcessSinceLastUser(next);
-        });
-        void speakFinalReplyRef.current(finalText);
-        // 温和结束提示：仅在页面处于后台时才响铃（不打扰正在使用的用户）
-        if (!pageActiveRef.current) playGentleNotificationSound();
-      }
-
-      streamingTextRef.current = '';
-      setStreamingText('');
-      setIsStreaming(false);
-      setAgentStatus('connected');
-
-      if (newSessionPendingRef.current) {
-        newSessionPendingRef.current = false;
-        setIsLoadingSession(false);
-      }
-
-      setTimeout(() => {
-        if (endSid) delete finalizingBySidRef.current[endSid];
-      }, 300);
-    });
-
-    // Thought — accumulate consecutive chunks into a single thought block
-    const unsubThought = onWs('thought', (msg: AIWSMessage) => {
-      if (isSidStopped()) return;
-      const text = _extractContent(msg);
-      if (text) {
-        const raw = msg.content ?? msg.data;
-        const isSubAgent =
-          typeof raw === 'object' && raw !== null && !!(raw as any).sub_agent;
-        const subTaskLabel =
-          typeof raw === 'object' && raw !== null
-            ? String((raw as any).sub_task_label || '')
-            : '';
-        const event: WorkflowEvent = {
-          type: 'thought',
-          content: text,
-          timestamp: Date.now(),
-          subAgent: isSubAgent || undefined,
-          subTaskLabel: subTaskLabel || undefined,
-          jobId:
-            typeof raw === 'object' && raw !== null && (raw as any).job_id
-              ? String((raw as any).job_id)
-              : undefined,
-        };
-        if (isHydratingSessionRef.current) {
-          pendingHydrationWorkflowEventsRef.current.push({ event, status: 'Thinking...' });
-          return;
-        }
-        enqueueLiveWorkflowEvent(event, 'Thinking...');
-        sniffMarkupTool(text);
-        // Background sub-agents (self-learn / delegate) must not flip the parent
-        // chat into "thinking" — otherwise the Stop button stays on and the
-        // idle message queue never drains after the sub-agent finishes.
-        if (!isSubAgent) {
-          setAgentStatus('thinking');
-        }
-      }
-    });
-
-    // Tool call
-    const unsubToolCall = onWs('tool_call', (msg: AIWSMessage) => {
-      if (isSidStopped()) return;
-      const data = msg.content || msg.data;
-      const toolName = typeof data === 'object' ? (data.name || data.tool || 'Tool') : 'Tool';
-      const isSubAgent = typeof data === 'object' && !!data.sub_agent;
-      const event: WorkflowEvent = {
-        type: 'tool_call',
-        content: data,
-        timestamp: Date.now(),
-        subAgent: isSubAgent,
-        subTaskLabel: typeof data === 'object' ? (data.sub_task_label || '') : '',
-        jobId: typeof data === 'object' && data?.job_id ? String(data.job_id) : undefined,
-      };
-      if (isHydratingSessionRef.current) {
-        pendingHydrationWorkflowEventsRef.current.push({ event, status: `Calling ${toolName}...` });
-      } else {
-        enqueueLiveWorkflowEvent(event, `Calling ${toolName}...`);
-        setShellStreams((prev) => seedShellStreamFromToolCall(prev, event));
-      }
-      // Parent tool_call commits in-flight stream text inside flushLiveWorkflowEvents
-      // so the tool row lands below the reply instead of discarding the buffer.
-    });
-
-    // Live Native-FC tool arguments (file write/edit code streaming into tool fold)
-    const unsubToolCallDelta = onWs('tool_call_delta', (msg: AIWSMessage) => {
-      if (isSidStopped()) return;
-      const data = msg.content || msg.data;
-      if (!data || typeof data !== 'object') return;
-      const toolName = data.name || data.tool || 'Tool';
-      const event: WorkflowEvent = {
-        type: 'tool_call',
-        content: {
-          id: data.id,
-          index: data.index,
-          name: toolName,
-          arguments: data.arguments ?? data.args ?? '',
-          args: data.arguments ?? data.args ?? '',
-          partial: true,
-        },
-        timestamp: Date.now(),
-        subAgent: !!data.sub_agent,
-        subTaskLabel: data.sub_task_label || '',
-      };
-      if (isHydratingSessionRef.current) {
-        pendingHydrationWorkflowEventsRef.current.push({
-          event,
-          status: `Writing ${toolName}...`,
-        });
-        return;
-      }
-      enqueueLiveWorkflowEvent(event, `Writing ${toolName}...`);
-      if (!data.sub_agent) {
-        setAgentStatus('thinking');
-      }
-    });
-
-    // Tool result — merge into matching tool_call
-    const unsubToolResult = onWs('tool_result', (msg: AIWSMessage) => {
-      if (isSidStopped()) return;
-      const data = msg.content || msg.data;
-      const toolName = typeof data === 'object' ? (data.name || data.tool || 'Tool') : 'Tool';
-      const event: WorkflowEvent = {
-        type: 'tool_result',
-        content: data,
-        timestamp: Date.now(),
-        subAgent: typeof data === 'object' ? !!data.sub_agent : false,
-        subTaskLabel: typeof data === 'object' ? (data.sub_task_label || '') : '',
-        jobId: typeof data === 'object' && data?.job_id ? String(data.job_id) : undefined,
-      };
-      const callId =
-        typeof data === 'object' && data
-          ? String(data.id || data.tool_use_id || '')
-          : '';
-      const resultText =
-        typeof data === 'object' && data
-          ? (typeof data.result === 'string'
-              ? data.result
-              : data.result != null
-                ? JSON.stringify(data.result)
-                : '')
-          : '';
-      if (callId && resultText) {
-        setShellStreams((prev) => sealShellStreamFromResult(prev, callId, resultText));
-      }
-      if (isHydratingSessionRef.current) {
-        pendingHydrationWorkflowEventsRef.current.push({ event, status: `${toolName} completed` });
-        return;
-      }
-      enqueueLiveWorkflowEvent(event, `${toolName} completed`, true);
-      // Live-update session change stats / files panel after mutations (no page reload)
-      const tn = String(toolName || '').toLowerCase();
-      if (
-        tn.includes('write') ||
-        tn.includes('replace') ||
-        tn.includes('delete') ||
-        tn.includes('edit_file') ||
-        tn.includes('filesystem') ||
-        tn.includes('run_session') ||
-        tn.includes('start_job') ||
-        tn.includes('check_job') ||
-        tn.includes('shell') ||
-        tn.includes('cmd')
-      ) {
-        // Immediate refresh + debounced follow-up (covers slow disk / meta flush)
-        void refreshSessionChangesRef.current?.();
-        scheduleRefreshSessionChanges();
-      }
-    });
-
-    // Live shell / background job stdout for CMD panel
-    // Live shell / background job stdout for CMD panel
-    const unsubJobStdout = onWs('job_stdout', (msg: AIWSMessage) => {
-      const data = (msg.content || msg.data || {}) as Record<string, unknown>;
-      setShellStreams((prev) => applyJobStdout(prev, data));
-    });
-    const unsubJobStatus = onWs('job_status', (msg: AIWSMessage) => {
-      const data = (msg.content || msg.data || {}) as Record<string, unknown>;
-      setShellStreams((prev) => applyJobStatus(prev, data));
-    });
-
-    // Plan — Runner sends {id, text} after parsing <plan> tag
-    const unsubPlan = onWs('plan', (msg: AIWSMessage) => {
-      if (isSidStopped()) return;
-      const data = msg.content || msg.data;
-      // data is usually {id: "plan_XXXX", text: "..."} from Runner
-      const planContent = typeof data === 'object' ? (data.text || data.content || data) : data;
-      const steps = parsePlanContent(planContent);
-      if (steps.length > 0) {
-        setPlanSteps(steps);
-        // Also add as a workflow event for inline display
-        const event: WorkflowEvent = { type: 'plan', content: steps, timestamp: Date.now() };
-        enqueueLiveWorkflowEvent(event, 'Planning...');
-      }
-    });
-
-    // Summary stream (context compression)
-    const unsubSummaryStream = onWs('summary_stream', (msg: AIWSMessage) => {
-      const data = msg.content || msg.data || {};
-      const streamId = typeof data === 'object' ? (data.id || 'summary') : 'summary';
-      const delta = typeof data === 'object' ? (data.delta || '') : '';
-      const fullText = typeof data === 'object' && typeof data.text === 'string' ? data.text : '';
-      const tick = typeof data === 'object' ? (Number(data.tick) || 0) : 0;
-      const done = typeof data === 'object' ? !!data.done : false;
-
-      // When summary stream finishes, clear the compressing flag immediately
-      if (done) {
-        setIsCompressingContext(false);
-      }
-
-      const cache = summaryStreamCacheRef.current;
-      if (!cache[streamId]) cache[streamId] = '';
-      if (delta) {
-        cache[streamId] += delta;
-      } else if (fullText) {
-        // Support final full-text payload (done=true, text=...)
-        cache[streamId] = fullText;
-      }
-      const text = cache[streamId];
-      console.debug('[AIChatPage] summary_stream recv', {
-        streamId,
-        deltaLen: delta.length,
-        fullTextLen: fullText.length,
-        cachedLen: text.length,
-        done,
-      });
-
-      if (SUMMARY_STREAM_DEBUG) {
-        console.log('[AIChatPage][summary_stream] recv', {
-          streamId,
-          deltaLen: typeof delta === 'string' ? delta.length : 0,
-          fullTextLen: typeof fullText === 'string' ? fullText.length : 0,
-          done,
-          cacheLen: typeof text === 'string' ? text.length : 0,
-        });
-      }
-
-      setTimeline(prev => {
-        const updated = [...prev];
-        let targetWfIdx = -1;
-        for (let i = updated.length - 1; i >= 0; i--) {
-          const entry = updated[i];
-          if (entry.kind === 'workflow' && !entry.data.completed) {
-            targetWfIdx = i;
-            break;
-          }
-        }
-        if (targetWfIdx < 0) {
-          return appendWorkflowEvent(prev, {
-            type: 'summary_stream',
-            content: { id: streamId, text, done },
-            timestamp: Date.now(),
-          }, done ? 'Summary completed' : 'Summarizing...');
-        }
-
-        const targetWf = updated[targetWfIdx];
-        if (targetWf.kind !== 'workflow') return prev;
-        const wf = targetWf.data;
-        // Keep at most ONE summary_stream per workflow block:
-        // - Streaming deltas (done=false) update in-place
-        // - When done=true, the old streaming entry becomes the final green box
-        // - No duplicate blue+green boxes
-        const events = wf.events.filter((e: WorkflowEvent) => {
-          if (e.type !== 'summary_stream') return true;
-          // Remove all existing summary_stream entries — we only keep the latest
-          return false;
-        }) as WorkflowEvent[];
-        events.push({
-          type: 'summary_stream',
-          content: { id: streamId, text, done },
-          timestamp: Date.now(),
-          _uid: genUID(),
-        } as WorkflowEvent);
-
-        updated[targetWfIdx] = {
-          ...updated[targetWfIdx],
-          data: {
-            ...wf,
-            events,
-            // Compression finished with no following chat message — stop "working".
-            status: done ? null : 'Summarizing...',
-            completed: done ? true : wf.completed,
-          }
-        } as TimelineEntry;
-        return updated;
-      });
-    });
-
-    // Compression progress (real-time progress updates from manual __COMPRESS_CONTEXT__)
-    const unsubCompressionProgress = onWs('compression_progress', (msg: AIWSMessage) => {
-      const data = msg.content || msg.data || {};
-      const text = typeof data === 'object' ? (data.text || '') : '';
-      const isFinal = typeof data === 'object' ? !!data.is_final : false;
-      const traceId = typeof data === 'object' ? (data.trace_id || '') : '';
-
-      console.debug('[AIChatPage] compression_progress recv', { text, isFinal, traceId });
-
-      if (isFinal) {
-        setIsCompressingContext(false);
-      } else {
-        setIsCompressingContext(true);
-      }
-
-      // Show progress in workflow timeline
-      if (text) {
-        setTimeline(prev => {
-          const updated = [...prev];
-          // Find the last incomplete workflow block
-          let targetWfIdx = -1;
-          for (let i = updated.length - 1; i >= 0; i--) {
-            const entry = updated[i];
-            if (entry.kind === 'workflow' && !entry.data.completed) {
-              targetWfIdx = i;
-              break;
-            }
-          }
-          if (targetWfIdx < 0) {
-            return appendWorkflowEvent(prev, {
-              type: 'compression_progress',
-              content: { text, isFinal, trace_id: traceId },
-              timestamp: Date.now(),
-            }, text);
-          }
-
-          const targetWf = updated[targetWfIdx];
-          if (targetWf.kind !== 'workflow') return prev;
-          const wf = targetWf.data;
-          const events = [...wf.events];
-          // Merge into existing compression_progress event or append new one
-          let merged = false;
-          for (let i = events.length - 1; i >= 0; i--) {
-            const evt = events[i];
-            if (evt.type === 'compression_progress') {
-              events[i] = {
-                ...evt,
-                content: { text, isFinal, trace_id: traceId },
-                timestamp: Date.now(),
-              };
-              merged = true;
-              break;
-            }
-          }
-          if (!merged) {
-            events.push({
-              type: 'compression_progress',
-              content: { text, isFinal, trace_id: traceId },
-              timestamp: Date.now(),
-              _uid: genUID(),
-            });
-          }
-
-          updated[targetWfIdx] = {
-            ...updated[targetWfIdx],
-            data: {
-              ...wf,
-              events,
-              status: isFinal ? null : text,
-              completed: isFinal ? true : wf.completed,
-            }
-          } as TimelineEntry;
-          return updated;
-        });
-      }
-    });
-
-    // Token stats (per-session — parallel panes show their own %)
-    const unsubTokenStats = aiWsService.on('token_stats', (msg: AIWSMessage) => {
-      const data = unwrapTokenStatsPayload(msg);
-      if (!data) return;
-      const stats: TokenStatsState = {
-        used: Number(data.used) || 0,
-        max: Number(data.max) || 0,
-        breakdown: data.breakdown as TokenStatsState['breakdown'],
-        session: data.session,
-        cumulative: data.cumulative,
-      };
-      if (!(stats.max > 0) && !(stats.used > 0)) return;
-      // Prefer explicit sid from the payload. Do not attribute another session's
-      // broadcast to the focused history tab (currentSessionIdRef).
-      const sid = tokenStatsSid(msg, data);
-      if (!sid) return;
-      applyTokenStats(sid, stats);
-    });
-
-    // Status / state / wake / sleep / info
-    const handleStatus = (msg: AIWSMessage) => {
-      const data = msg.content || msg.data;
-      if (typeof data === 'string') {
-        const lower = data.toLowerCase();
-        const statusSid = String((msg as any).sid || '').trim();
-        const otherBusy = busySessionsRef.current.some(
-          (id) => id && id !== statusSid,
-        );
-        // Always allow idle / stopped so the Stop button releases — but do not
-        // paint the whole agent idle while another parallel session is still busy.
-        if (
-          data === 'idle' ||
-          data === 'ready' ||
-          lower.includes('task stopped') ||
-          lower.includes('response complete') ||
-          lower.includes('idle') ||
-          lower.includes('ready') ||
-          lower.includes('complete')
-        ) {
-          if (!otherBusy) {
-            setAgentStatus('idle');
-          }
-          if (lower.includes('task stopped')) {
-            if (!statusSid || statusSid === (currentSessionIdRef.current || '')) {
-              setIsStreaming(false);
-            }
-            if (statusSid) {
-              const ib = { ...isStreamingBySessionRef.current };
-              ib[statusSid] = false;
-              isStreamingBySessionRef.current = ib;
-              setIsStreamingBySession(ib);
-            }
-          }
-          return;
-        }
-        if (isSidStopped(statusSid)) return;
-        if (data === 'thinking' || data === 'processing') {
-          setAgentStatus('thinking');
-        } else if (data === 'working') {
-          setAgentStatus('working');
-        } else if (data === 'sleeping') {
-          setAgentStatus('sleeping');
-        }
-      }
-    };
-    const unsubState = aiWsService.on('state', (msg: AIWSMessage) => {
-      // Only update agentStatus — do NOT add to timeline; StatusBadge already reflects state changes
-      handleStatus(msg);
-    });
-    const unsubStatusEvt = aiWsService.on('status', handleStatus);
-    const unsubWake = onWs('wake', (msg: AIWSMessage) => {
-      setAgentStatus('connected');
-      const data = msg.content || msg.data;
-      if (data !== null && data !== undefined) {
-        setTimeline(prev => [...prev, {
-          kind: 'status_hint' as const,
-          data: { hintType: 'wake' as const, content: String(data), timestamp: Date.now() },
-          _uid: genUID(),
-        }]);
-      }
-    });
-    const unsubSleep = onWs('sleep', (msg: AIWSMessage) => {
-      setAgentStatus('sleeping');
-      const raw = msg.content ?? msg.data;
-      const seconds = typeof raw === 'number' ? raw : parseInt(String(raw), 10);
-      setTimeline(prev => [...prev, {
-        kind: 'status_hint' as const,
-        data: { hintType: 'sleep' as const, content: isNaN(seconds) ? 0 : seconds, timestamp: Date.now() },
-        _uid: genUID(),
-      }]);
-    });
-    const unsubInfo = onWs('info', (msg: AIWSMessage) => {
-      const raw = msg.content || msg.data;
-      const detailed =
-        typeof raw === 'string'
-          ? { text: raw }
-          : (typeof raw === 'object' && raw !== null ? raw : { text: String(raw) });
-
-      // System lifecycle noise — never show as a workflow "Activity" / empty block.
-      const infoText =
-        typeof detailed.text === 'string'
-          ? detailed.text
-          : (typeof (detailed as any).message === 'string' ? (detailed as any).message : '');
-      if (/^New session started$/i.test(infoText.trim()) || /^Workflow started$/i.test(infoText.trim())) {
-        return;
-      }
-
-      if (typeof detailed === 'object' && detailed !== null) {
-        const evt = (detailed as any).event;
-        if (evt === 'context_compressed' || evt === 'context_compress_skipped') {
-          setIsCompressingContext(false);
-          return;  // Skip system info — don't show blue prompt in workflow
-        }
-
-        if (evt === 'context_summary_generated' && typeof (detailed as any).summary === 'string') {
-          return; // ignore info event; summary_stream will carry final content
-        }
-
-        // Runtime model switch confirmation: update the header label and clear
-        // the switching spinner. Falls through so the existing info-event
-        // renderer (event==='model_card_switched') still shows the timeline card.
-        if (evt === 'model_card_switched') {
-          const switchedModel = (detailed as any).model;
-          const switchedCard = (detailed as any).card;
-          const sid = String((detailed as any).session_id || '').trim();
-          // Always promote to agent-wide last pick (new chats + refresh default).
-          if (typeof switchedCard === 'string' && switchedCard) {
-            setCurrentCardName(switchedCard);
-            saveLastModelPick(agentId, { card: switchedCard });
-          }
-          if (typeof switchedModel === 'string' && switchedModel) {
-            setModelName(switchedModel);
-          }
-          if (sid) {
-            delete modelSwitchRevertRef.current[sid];
-            if (typeof switchedCard === 'string' && switchedCard) {
-              setCardNameBySession((prev) => ({ ...prev, [sid]: switchedCard }));
-            }
-            if (typeof switchedModel === 'string' && switchedModel) {
-              setModelNameBySession((prev) => ({ ...prev, [sid]: switchedModel }));
-            }
-            setSwitchingModelBySession((prev) => ({ ...prev, [sid]: false }));
-          } else {
-            // Agent-default switch (e.g. from TUI): it takes effect for every
-            // session without its own override, so roll all panes onto the new
-            // card instead of letting stale per-session picks keep showing the
-            // old model.
-            setSwitchingModel(false);
-            if (typeof switchedCard === 'string' && switchedCard) {
-              setCardNameBySession((prev) => {
-                const next: Record<string, string> = {};
-                for (const k of Object.keys(prev)) next[k] = switchedCard;
-                return next;
-              });
-            }
-            if (typeof switchedModel === 'string' && switchedModel) {
-              setModelNameBySession((prev) => {
-                const next: Record<string, string> = {};
-                for (const k of Object.keys(prev)) next[k] = switchedModel;
-                return next;
-              });
-            }
-          }
-        }
-
-        if (evt === 'voice_config_updated') {
-          const v = (detailed as any).voice || {};
-          setVoiceBindings({
-            asr_card: String(v.asr_card || ''),
-            tts_card: String(v.tts_card || ''),
-            realtime_card: String(v.realtime_card || ''),
-            realtime_voice: String(v.realtime_voice || ''),
-          });
-          return;
-        }
-
-        if (evt === 'model_card_switch_failed') {
-          const sid = String((detailed as any).session_id || '').trim();
-          if (sid) {
-            const revert = modelSwitchRevertRef.current[sid];
-            if (revert) {
-              if (revert.card) {
-                setCardNameBySession((prev) => ({ ...prev, [sid]: revert.card as string }));
-              }
-              setModelNameBySession((prev) => ({ ...prev, [sid]: revert.model }));
-              delete modelSwitchRevertRef.current[sid];
-            }
-            setSwitchingModelBySession((prev) => ({ ...prev, [sid]: false }));
-          } else {
-            setSwitchingModel(false);
-          }
-          // Fall through so the failure shows in the timeline / system info
-        }
-
-        if (evt === 'reasoning_effort_changed') {
-          const next = (detailed as any).effort;
-          const sid = String((detailed as any).session_id || '').trim();
-          if (next === 'low' || next === 'medium' || next === 'high') {
-            setReasoningEffort(next);
-            saveLastModelPick(agentId, { effort: next });
-            if (sid) {
-              setReasoningBySession((prev) => ({ ...prev, [sid]: next }));
-            }
-          }
-          return; // don't spam timeline
-        }
-
-        if (evt === 'mode_switch_approval') {
-          const id = String((detailed as any).id || '');
-          const fromMode = (detailed as any).from_mode;
-          const toMode = (detailed as any).to_mode;
-          if (id && (toMode === 'plan' || toMode === 'build')) {
-            const approval: ModeSwitchApproval = {
-              id,
-              from_mode: fromMode === 'plan' || fromMode === 'build' ? fromMode : 'build',
-              to_mode: toMode,
-              reason: String((detailed as any).reason || (detailed as any).text || ''),
-              status: 'pending',
-            };
-            setModeApprovals((prev) => {
-              if (prev.some((a) => a.id === id)) return prev;
-              return [...prev, approval];
-            });
-          }
-          // Fall through so the timeline also shows the approval card
-        }
-
-        if (evt === 'agent_mode_changed') {
-          const next = (detailed as any).mode;
-          const sid = String((detailed as any).session_id || '').trim();
-          if (next === 'plan' || next === 'build') {
-            if (sid) {
-              setAgentModeBySession((prev) => ({ ...prev, [sid]: next }));
-            } else {
-              setAgentMode(next);
-            }
-          }
-          return;
-        }
-
-        if (evt === 'goal_changed') {
-          const g = (detailed as any).goal;
-          if (g && typeof g === 'object' && String(g.objective || '').trim()) {
-            setActiveGoal({
-              objective: String(g.objective || '').trim(),
-              status: String(g.status || 'pursuing'),
-              last_progress: g.last_progress ? String(g.last_progress) : undefined,
-              blocked_reason: g.blocked_reason ? String(g.blocked_reason) : undefined,
-            });
-          } else {
-            setActiveGoal(null);
-          }
-          return;
-        }
-
-        if (evt === 'mode_switch_resolved') {
-          const id = String((detailed as any).id || (detailed as any).approved_request_id || '');
-          const status = (detailed as any).status === 'denied' ? 'denied' : 'approved';
-          const toMode = (detailed as any).to_mode || (detailed as any).mode;
-          if (id) {
-            setModeApprovals((prev) =>
-              prev.map((a) => (a.id === id ? { ...a, status } : a)),
-            );
-          }
-          if (status === 'approved' && (toMode === 'plan' || toMode === 'build')) {
-            const sid = String((detailed as any).session_id || '').trim();
-            if (sid) {
-              setAgentModeBySession((prev) => ({ ...prev, [sid]: toMode }));
-            } else {
-              setAgentMode(toMode);
-            }
-          }
-          // Fall through to update timeline card status via re-render of pending→resolved
-        }
-
-        if (evt === 'propose_options') {
-          const id = String((detailed as any).id || '');
-          const prompt = String((detailed as any).prompt || '请选择一个选项：');
-          const rawOpts = (detailed as any).options || [];
-          const options = Array.isArray(rawOpts)
-            ? rawOpts
-                .map((o: any) => ({
-                  id: String((o && o.id) || ''),
-                  title: String((o && (o.title || o.name || o.label)) || ''),
-                  description: String((o && (o.description || o.summary)) || '') || undefined,
-                }))
-                .filter((o: { id: string; title: string }) => o.id && o.title)
-            : [];
-          const allowCustom = (detailed as any).allow_custom !== false;
-          const allowMultiple = !!(detailed as any).allow_multiple;
-          if (id && options.length >= 2) {
-            const proposal: OptionsProposal = {
-              id,
-              prompt,
-              options,
-              allow_custom: allowCustom,
-              allow_multiple: allowMultiple,
-              status: 'pending',
-            };
-            setOptionsProposals((prev) => {
-              if (prev.some((p) => p.id === id)) {
-                return prev.map((p) => (p.id === id ? { ...p, ...proposal } : p));
-              }
-              return [...prev, proposal];
-            });
-          }
-          // Fall through so the timeline also shows a compact status line
-        }
-
-        if (evt === 'propose_options_resolved') {
-          const id = String((detailed as any).id || '');
-          const statusRaw = String((detailed as any).status || 'chosen');
-          const status: OptionsProposal['status'] =
-            statusRaw === 'ignored' ? 'ignored' : statusRaw === 'custom' ? 'custom' : 'chosen';
-          const chosenOptionId = String((detailed as any).chosen_option_id || '');
-          const rawIds = (detailed as any).chosen_option_ids;
-          const chosenOptionIds = Array.isArray(rawIds)
-            ? rawIds.map((x: any) => String(x)).filter(Boolean)
-            : chosenOptionId
-              ? [chosenOptionId]
-              : [];
-          const customAnswer = String((detailed as any).custom_answer || '');
-          if (id) {
-            setOptionsProposals((prev) =>
-              prev.map((p) =>
-                p.id === id
-                  ? {
-                      ...p,
-                      status,
-                      chosen_option_id: chosenOptionIds[0] || chosenOptionId,
-                      chosen_option_ids: chosenOptionIds,
-                      custom_answer: customAnswer,
-                    }
-                  : p,
-              ),
-            );
-          }
-          // Fall through to update timeline compact status
-        }
-
-        // Task supervisor check-in: pass full payload but use a short status label
-        if (evt === 'task_supervisor_checkin') {
-          const stall = (detailed as any).stall_count || 0;
-          const urgencyLabel = stall > 4 ? 'URGENT' : stall > 2 ? 'WARNING' : 'REMINDER';
-          const checkinLabel = `Task Supervisor · ${urgencyLabel} (stall ${stall})`;
-          const checkinEvent: WorkflowEvent = {
-            type: 'info',
-            content: detailed,
-            timestamp: Date.now(),
-          };
-          setTimeline(prev => appendWorkflowEvent(prev, checkinEvent, checkinLabel));
-          return;
-        }
-      }
-
-      const summary =
-        typeof detailed.text === 'string' && detailed.text.trim().length > 0
-          ? detailed.text
-          : (typeof detailed.message === 'string' && detailed.message.trim().length > 0
-              ? detailed.message
-              : 'Info event');
-
-      const isSubAgent = typeof detailed === 'object' && detailed !== null && !!(detailed as any).sub_agent;
-      const event: WorkflowEvent = {
-        type: 'info',
-        content: detailed, // always keep full detail payload
-        timestamp: Date.now(),
-        subAgent: isSubAgent,
-        subTaskLabel: typeof detailed === 'object' && detailed !== null ? ((detailed as any).sub_task_label || '') : '',
-        jobId:
-          typeof detailed === 'object' && detailed !== null && (detailed as any).job_id
-            ? String((detailed as any).job_id)
-            : undefined,
-      };
-      setTimeline(prev => appendWorkflowEvent(prev, event, summary));
-      // Self-Learn runs outside a parent turn; nested thoughts used to leave the
-      // chat stuck on "thinking". Only release for Self-Learn completions.
-      const subEvt =
-        typeof detailed === 'object' && detailed !== null
-          ? String((detailed as any).event || '')
-          : '';
-      const subLabel =
-        typeof detailed === 'object' && detailed !== null
-          ? String((detailed as any).sub_task_label || (detailed as any).message || '')
-          : '';
-      if (
-        isSubAgent &&
-        subEvt === 'sub_agent_result' &&
-        /self-learn|self_learn/i.test(subLabel)
-      ) {
-        setAgentStatus((prev) => (prev === 'thinking' ? 'idle' : prev));
-        setIsStreaming(false);
-      }
-    });
-
-    // Turn start — reset streaming state and record workflow start timestamp (first turn only)
-    const unsubTurnStart = onWs('turn_start', (msg: AIWSMessage) => {
-      if (isSidStopped()) return;
-      const data = msg.content ?? msg.data;
-      const turnSid = String(eventSidRef.current || '').trim();
-      const isFocusedTurn =
-        !turnSid || turnSid === (currentSessionIdRef.current || '');
-      // turn=1 means the very first LLM call for this user message.
-      // turn>=2 means the agent is re-entering the loop after a tool call (same workflow).
-      // data===0 means a session management command (NEW_SESSION, LOAD_SESSION, etc.).
-      const turnNumber = typeof data === 'object' && data !== null ? (data as any).turn : 0;
-      const isFirstTurn = turnNumber <= 1; // turn=1 or data=0 (management)
-
-      // Salvage unfinalized streaming text ONLY on the first turn of a new user message.
-      // On subsequent turns (tool call re-entries), the agent is still in the same workflow —
-      // salvaging here would incorrectly finalize the ongoing workflow block and cause a new
-      // WorkflowContainer to be created for the next tool call.
-      // Scope to this event's session so pane B's turn_start cannot seal pane A's stream.
-      const salvageSrc = turnSid
-        ? (streamingTextBySessionRef.current[turnSid] || (isFocusedTurn ? streamingTextRef.current : ''))
-        : streamingTextRef.current;
-      if (isFirstTurn && salvageSrc && !isSidFinalizing(turnSid)) {
-        const salvaged = salvageSrc;
-        if (salvaged.trim().length > 0) {
-          const salvagedMsg: ChatMessage = {
-            role: 'assistant',
-            content: salvaged,
-            timestamp: new Date().toISOString(),
-          };
-          setTimeline(prev => finalizeWorkflowAndAddMessage(prev, salvagedMsg));
-        }
-      }
-      if (isFirstTurn && isFocusedTurn) {
-        lastAutoSpokenRef.current = '';
-        // Cancel any leftover auto-TTS from the previous turn.
-        autoTtsGenRef.current += 1;
-        autoTtsTextQueueRef.current = [];
-        autoTtsUrlQueueRef.current = [];
-        autoTtsOrderedUrlsRef.current.clear();
-        autoTtsNextSynthSeqRef.current = 0;
-        autoTtsNextPlaySeqRef.current = 0;
-        autoTtsSynthActiveRef.current = 0;
-        autoTtsPlayingRef.current = false;
-        autoTtsStreamOffsetRef.current = 0;
-        const a = autoTtsAudioRef.current;
-        if (a) {
-          a.pause();
-          a.removeAttribute('src');
-          a.load();
-        }
-      }
-      if (turnSid) {
-        cancelStreamFlush();
-        const st = { ...streamingTextBySessionRef.current };
-        delete st[turnSid];
-        streamingTextBySessionRef.current = st;
-        setStreamingTextBySession(st);
-        const ib = { ...isStreamingBySessionRef.current };
-        ib[turnSid] = false;
-        isStreamingBySessionRef.current = ib;
-        setIsStreamingBySession(ib);
-      }
-      if (isFocusedTurn) {
-        streamingTextRef.current = '';
-        setStreamingText('');
-        setIsStreaming(false);
-      }
-      if (turnSid) delete finalizingBySidRef.current[turnSid];
-      // Only start the workflow timer when the backend supplies a real started_ms.
-      // turn_start(0) alone is session management (__NEW_SESSION__, empty switch, …)
-      // and must NOT flip the UI into "thinking" (looks like a blank turn started).
-      const isRealWorkflow = typeof data === 'object' && data !== null && typeof (data as any).started_ms === 'number';
-      const numericTurn =
-        typeof data === 'number'
-          ? data
-          : typeof data === 'object' && data !== null
-            ? Number((data as any).turn || 0)
-            : 0;
-      if (isRealWorkflow || numericTurn >= 1) {
-        if (isFocusedTurn) setAgentStatus('thinking');
-        clearOutboundTurnPending(turnSid || undefined);
-      }
-      if (isRealWorkflow && isFirstTurn) {
-        const startedMs = (data as any).started_ms as number;
-        // Reset timer on each new workflow (turn=1). Subsequent turns (2+ after tool calls)
-        // must NOT overwrite it so the timer reflects the full workflow duration.
-        // Only the focused pane drives the solo chrome timer.
-        if (isFocusedTurn) {
-          setTurnStartedMs(startedMs);
-        }
-        // Stamp started_ms onto the active incomplete workflow (or create one) so
-        // refresh can restore Working-for-Xs without relying on live turnStartedMs.
-        setTimeline((prev) => {
-          const updated = [...prev];
-          for (let i = updated.length - 1; i >= 0; i--) {
-            const entry = updated[i];
-            if (entry.kind !== 'workflow') continue;
-            if (entry.data.completed) break;
-            updated[i] = {
-              ...entry,
-              data: { ...entry.data, started_ms: entry.data.started_ms ?? startedMs, completed: false },
-            };
-            return updated;
-          }
-          updated.push({
-            kind: 'workflow',
-            data: {
-              events: [],
-              status: 'working',
-              completed: false,
-              started_ms: startedMs,
-            },
-            _uid: genUID(),
-          });
-          return updated;
-        });
-      }
-    });
-
-    // Turn elapsed — backend sends {started_ms, ended_ms} after to_user_final
-    const unsubTurnElapsed = onWs('turn_elapsed', (msg: AIWSMessage) => {
-      const data = msg.content ?? msg.data;
-      if (typeof data !== 'object' || data === null) return;
-      const { started_ms, ended_ms } = data as { started_ms?: number; ended_ms?: number };
-      if (typeof started_ms !== 'number' || typeof ended_ms !== 'number') return;
-      const finalMs = ended_ms - started_ms;
-      // Stamp the final elapsed time onto the last workflow block in the timeline,
-      // and mark it completed so the live timer stops.
-      setTimeline(prev => {
-        const updated = [...prev];
-        for (let i = updated.length - 1; i >= 0; i--) {
-          if (updated[i].kind === 'workflow') {
-            const wfData = (updated[i] as { kind: 'workflow'; data: WorkflowBlock }).data;
-            updated[i] = {
-              ...updated[i],
-              data: { ...wfData, elapsed_ms: finalMs, completed: true, status: null },
-            } as TimelineEntry;
-            break;
-          }
-        }
-        return updated;
-      });
-      // Clear live start timestamp (turn is over)
-      setTurnStartedMs(undefined);
-      scheduleRefreshSessionChanges();
-    });
-
-    const unsubTurnCancelled = onWs('turn_cancelled', (msg: AIWSMessage) => {
-      const sid = String((msg as any).sid || eventSidRef.current || '').trim();
-      const data = (msg.content || msg.data || {}) as Record<string, unknown>;
-      const reason = String(data.reason || 'user_stop');
-      const cancelText = reason === 'agent_crash'
-        ? 'Cancelled: agent disconnected'
-        : reason === 'withdraw'
-          ? 'Cancelled: withdrawn'
-          : 'Cancelled: stopped by user';
-      if (sid) userStoppedBySidRef.current[sid] = true;
-      setTimeline((prev) => sealIncompleteWorkflows(prev, {
-        cancelOpenTools: cancelText,
-        fallbackStartedMs: turnStartedMsRef.current,
-      }));
-      if (sid) clearSessionRunState(sid);
-      setTurnStartedMs(undefined);
-    });
-
-    // Prompt update — insert/update prompt entry in timeline (first item = first prompt)
-    const unsubPromptUpdate = onWs('prompt_update', (msg: AIWSMessage) => {
-      const data: any = msg.content ?? msg.data ?? msg;
-      const systemPrompt: string = data?.system_prompt ?? '';
-      const dynamicPrefix: string = data?.dynamic_prefix ?? '';
-      const changed: boolean = data?.changed ?? false;
-      const diff: string[] | undefined = Array.isArray(data?.diff) ? data.diff : undefined;
-      if (!systemPrompt) return;
-      const entry: TimelineEntry = {
-        kind: 'prompt' as const,
-        data: {
-          system_prompt: systemPrompt,
-          dynamic_prefix: dynamicPrefix,
-          changed,
-          timestamp: new Date().toISOString(),
-          diff,
-        },
-        _uid: genUID(),
-      };
-      setTimeline(prev => {
-        // 按时间顺序追加；首次也不再插到最前
-        const hasPrompt = prev.some(e => e.kind === 'prompt');
-        if (!hasPrompt) return [...prev, entry];
-        if (!changed) return prev;  // 系统提示词未变化，跳过
-        return [...prev, entry];
-      });
-
-      // Skip system info — don't show blue "Context summary has been injected" prompt
-    });
-
-    // output_media — model-generated audio/images, patch onto last assistant message
-    const unsubOutputMedia = onWs('output_media', (msg: AIWSMessage) => {
-      const items: Array<{ type: string; url: string; mime: string }> = msg.content ?? msg.data ?? [];
-      if (!Array.isArray(items) || items.length === 0) return;
-      const audioItems = items.filter(i => i.type === 'audio');
-      const imageItems = items.filter(i => i.type === 'image');
-      setTimeline(prev => {
-        const next = [...prev];
-        for (let i = next.length - 1; i >= 0; i--) {
-          const e = next[i];
-          if (e.kind === 'message' && (e.data as ChatMessage).role === 'assistant') {
-            const existing = e.data as ChatMessage;
-            const patched: ChatMessage = {
-              ...existing,
-              output_audio: audioItems.length
-                ? [...(existing.output_audio ?? []), ...audioItems.map(a => ({ url: a.url, mime: a.mime }))]
-                : existing.output_audio,
-              output_images: imageItems.length
-                ? [...(existing.output_images ?? []), ...imageItems.map(a => a.url)]
-                : existing.output_images,
-            };
-            next[i] = { ...e, data: patched };
-            break;
-          }
-        }
-        return next;
-      });
-    });
-
-    const unsubVoiceAudioOut = aiWsService.on('voice_audio_out', (msg: AIWSMessage) => {
-      const data: any = msg.content ?? msg.data ?? {};
-      const audio = data?.audio || data?.data?.audio;
-      const url = data?.url || data?.data?.url;
-      const format = data?.format || data?.mime || '';
-      if (audio) {
-        window.dispatchEvent(new CustomEvent('opensquad-voice-audio-out', { detail: { audio } }));
-      } else if (url) {
-        window.dispatchEvent(
-          new CustomEvent('opensquad-voice-audio-out', {
-            detail: { url, format, mime: data?.mime },
-          }),
-        );
-      }
-    });
-    const unsubVoiceTranscript = aiWsService.on('voice_transcript', (msg: AIWSMessage) => {
-      const data: any = msg.content ?? msg.data ?? {};
-      const role = (data?.role === 'user' ? 'user' : 'assistant') as 'user' | 'assistant';
-      const chunk = String(data?.text || data?.delta || '');
-      if (!chunk) return;
-      const caps = voiceCaptionRef.current;
-      const last = caps.length ? caps[caps.length - 1] : null;
-      if (data?.final) {
-        // Prefer replacing an in-progress same-role line with the authoritative final text.
-        if (last && last.role === role) {
-          last.text = chunk;
-        } else {
-          caps.push({ role, text: chunk });
-        }
-      } else if (last && last.role === role) {
-        last.text += chunk;
-      } else {
-        caps.push({ role, text: chunk });
-      }
-      // Cap length so the panel stays readable
-      if (caps.length > 40) {
-        voiceCaptionRef.current = caps.slice(-40);
-      }
-      setVoiceTranscript(
-        voiceCaptionRef.current.map((c) => `${c.role}: ${c.text}`).join('\n'),
-      );
-    });
-    const unsubVoiceStatus = aiWsService.on('voice_realtime_status', (msg: AIWSMessage) => {
-      const data: any = msg.content ?? msg.data ?? {};
-      const status = data?.status || (typeof data === 'string' ? data : 'idle');
-      clearVoiceConnectTimer();
-      // Ignore option-ack / idle noise when not in a call attempt.
-      if (status === 'options_updated' || (status === 'idle' && data?.note)) {
-        return;
-      }
-
-      const active =
-        status === 'connected' ||
-        status === 'tool_running' ||
-        status === 'connecting' ||
-        status === 'session.created' ||
-        status === 'session.updated';
-
-      // Resume probe after refresh: keep live session, or restart if agent lost it.
-      if (voiceResumeProbeRef.current) {
-        voiceResumeProbeRef.current = false;
-        if (active) {
-          const force =
-            data?.force_ask_agent != null
-              ? Boolean(data.force_ask_agent)
-              : (readVoiceCallPersist(agentId)?.forceAskAgent ?? true);
-          writeVoiceCallPersist(agentId, force);
-          setVoiceRealtimeStatus(String(status));
-          setVoiceRealtimeError('');
-          setVoicePanelOpen(true);
-          return;
-        }
-        const persist = readVoiceCallPersist(agentId);
-        if (persist) {
-          setVoiceRealtimeStatus('connecting');
-          setVoiceRealtimeError('');
-          setVoicePanelOpen(true);
-          armVoiceConnectTimeout();
-          aiWsService.startVoiceRealtime({ force_ask_agent: persist.forceAskAgent });
-          return;
-        }
-      }
-
-      if (active) {
-        const force =
-          data?.force_ask_agent != null
-            ? Boolean(data.force_ask_agent)
-            : (readVoiceCallPersist(agentId)?.forceAskAgent ?? true);
-        writeVoiceCallPersist(agentId, force);
-      } else if (status === 'disconnected' || status === 'idle' || status === 'error') {
-        clearVoiceCallPersist(agentId);
-      }
-
-      setVoiceRealtimeStatus(String(status));
-      if (status === 'error') {
-        const errText = data?.error ? String(data.error) : 'Realtime connection failed';
-        setVoiceRealtimeError(errText);
-        console.warn('[AIChatPage] voice realtime error', errText);
-      } else if (status === 'connected' || status === 'disconnected' || status === 'idle') {
-        setVoiceRealtimeError('');
-      }
-    });
-
-    const appendFilePushMessage = (entries: TimelineEntry[], assistantMsg: ChatMessage): TimelineEntry[] => {
-      const k = _messageIdentityKey(assistantMsg);
-      if (k) {
-        const exists = entries.some((e) => e.kind === 'message' && _messageIdentityKey(e.data as ChatMessage) === k);
-        if (exists) return entries;
-      }
-      return [...entries, { kind: 'message', data: assistantMsg, _uid: genUID() }];
-    };
-
-    const flushBufferedFilePushes = (entries: TimelineEntry[]): TimelineEntry[] => {
-      if (pendingFilePushesRef.current.length === 0) return entries;
-      let next = [...entries];
-      for (const pendingMsg of pendingFilePushesRef.current) {
-        next = appendFilePushMessage(next, pendingMsg);
-      }
-      pendingFilePushesRef.current = [];
-      return next;
-    };
-
-    const queueBufferedFilePush = (assistantMsg: ChatMessage) => {
-      const k = _messageIdentityKey(assistantMsg);
-      if (k) {
-        const exists = pendingFilePushesRef.current.some((m) => _messageIdentityKey(m) === k);
-        if (exists) return;
-      }
-      pendingFilePushesRef.current = [...pendingFilePushesRef.current, assistantMsg];
-    };
-
-    const hydrateCurrentSession = (opts?: {
-      showLoading?: boolean;
-      wasNewSession?: boolean;
-    }) => {
-      hydrateCurrentSessionRef.current = hydrateCurrentSession;
-      const seq = ++sessionReloadSeqRef.current;
-      isHydratingSessionRef.current = true;
-      sessionBootstrapDoneRef.current = false;
-      // Only clear chrome-ready on explicit loading hydrates (refresh/connect).
-      // Soft reloads must not flash the full-pane "加载会话中" over an open chat.
-      if (opts?.showLoading) {
-        setSessionBootstrapped(false);
-      }
-      pendingHydrationMediaRef.current = [];
-      pendingHydrationWorkflowEventsRef.current = [];
-      pendingHydrationFinalsRef.current = [];
-      diskSessionLoadedRef.current = false;
-
-      (async () => {
-        try {
-          if (opts?.showLoading) {
-            setIsLoadingSession(true);
-            setSessionLoadingLabel(t('aiChat.loadingSession'));
-          }
-          const resp = await Promise.race([
-            // First page only — older turns load on scroll-up via loadMoreHistory.
-            agentSessionAPI.getCurrentSession(agentId, 0, SESSION_HISTORY_PAGE_SIZE),
-            new Promise<never>((_, reject) =>
-              setTimeout(() => reject(new Error('Hydration timeout (10s)')), 10000)
-            ),
-          ]);
-          if (seq !== sessionReloadSeqRef.current || viewingHistorySessionRef.current || newSessionPendingRef.current) {
-            return;
-          }
-          const currentSid = resp.current_session_id;
-          const session = resp.session;
-          if (currentSid) {
-            agentCurrentSessionIdRef.current = currentSid;
-          }
-          const guard = newSessionGuardRef.current;
-          if (
-            guard &&
-            Date.now() < guard.until &&
-            currentSid &&
-            currentSid !== guard.sid
-          ) {
-            console.warn(
-              '[AIChatPage] hydrate ignored (new-session guard): disk=%s keep=%s',
-              currentSid,
-              guard.sid,
-            );
-            return;
-          }
-          _logMediaDebug('current-session-response', {
-            currentSid,
-            messageCount: session?.messages?.length || 0,
-            sample: (session?.messages || []).slice(-5).map((m: any) => ({
-              mid: m?.message_id || m?.id,
-              role: m?.role,
-              type: m?.type,
-              images: Array.isArray(m?.images) ? m.images.length : 0,
-              files: Array.isArray(m?.files) ? m.files.length : 0,
-              attachments: Array.isArray(m?.attachments) ? m.attachments.length : 0,
-              contentHead: typeof m?.content === 'string' ? m.content.slice(0, 80) : '',
-            })),
-          });
-          if (currentSid && session) {
-            // Pre-deduplicate disk session messages by (role + normalized content).
-            // In some refresh scenarios the runner snapshot can contain the same
-            // user message twice (e.g. input-hub/Gateway racing). Removing exact
-            // text duplicates here prevents them from showing up after refresh.
-            const rawMessages = session.messages || [];
-            const seenMsgKeys = new Set<string>();
-            const dedupedMessages: any[] = [];
-            for (const m of rawMessages) {
-              const role = m?.role || '';
-              const content = typeof m?.content === 'string' ? m.content : '';
-              const normalized = content
-                .replace(/\[File:.*?\]\([^)]*\)/g, '')
-                .replace(/<image>[\s\S]*?<\/image>/gi, '')
-                .trim();
-              const key = normalized ? `${role}:${normalized}` : `empty:${role}:${dedupedMessages.length}`;
-              if (seenMsgKeys.has(key)) {
-                _logMediaDebug('hydrate-dedup-skip', { role, contentHead: content.slice(0, 80) });
-                continue;
-              }
-              seenMsgKeys.add(key);
-              dedupedMessages.push(m);
-            }
-            if (dedupedMessages.length !== rawMessages.length) {
-              _logMediaDebug('hydrate-dedup-result', {
-                before: rawMessages.length,
-                after: dedupedMessages.length,
-              });
-            }
-
-            const entries = buildTimelineFromSession(
-              dedupedMessages,
-              session.events || [],
-              session.archived_messages,
-              session.archived_events,
-            );
-            if (currentSid) {
-              putCachedSessionTimeline(agentId, currentSid, entries, {
-                complete: !(session.has_more ?? false),
-                messageCount: dedupedMessages.length,
-                totalMessages: session.total_messages,
-              });
-            }
-            _logMediaDebug('timeline-built-from-current', {
-              entryCount: entries.length,
-              messageSample: entries
-                .filter((e: any) => e.kind === 'message')
-                .slice(-5)
-                .map((e: any) => ({
-                  mid: e.data?.message_id,
-                  role: e.data?.role,
-                  type: e.data?.type,
-                  images: Array.isArray(e.data?.images) ? e.data.images.length : 0,
-                  attachments: Array.isArray(e.data?.attachments) ? e.data.attachments.length : 0,
-                })),
-            });
-            let nextEntries = [...entries];
-
-            if (pendingHydrationMediaRef.current.length > 0) {
-              const buffered = pendingHydrationMediaRef.current;
-              pendingHydrationMediaRef.current = [];
-              const mergedEntries = [...nextEntries];
-              // BUFFER_DEDUP_WINDOW_MS: WS history replay and disk-snapshot
-              // can race during refresh, causing the same user/assistant
-              // message to arrive in both sources. The disk snapshot is the
-              // authoritative one — buffered events are merged in only when
-              // they carry media the disk entry lacks (e.g. file_push). Plain
-              // text duplicates are dropped here to prevent the
-              // "last user message duplicated after refresh" bug.
-              const BUFFER_DEDUP_WINDOW_MS = 30_000;
-              for (const m of buffered) {
-                // (1) Identity match: message_id or role+content fallback
-                const k = _messageIdentityKey(m);
-                if (k) {
-                  const idx = mergedEntries.findIndex(
-                    (e: any) => e.kind === 'message' && _messageIdentityKey(e.data as ChatMessage) === k,
-                  );
-                  if (idx >= 0) {
-                    mergedEntries[idx] = {
-                      ...mergedEntries[idx],
-                      data: _mergeChatMessage(mergedEntries[idx].data as ChatMessage, m),
-                    } as TimelineEntry;
-                    continue;
-                  }
-                }
-
-                // (2) Content-level dedup: same role + same normalised
-                //     content within BUFFER_DEDUP_WINDOW_MS — applies to
-                //     plain text as well as media-bearing messages.
-                const mTs = m.timestamp ? new Date(m.timestamp).getTime() : NaN;
-                const mContentNorm = (typeof m.content === 'string' ? m.content : '')
-                  .replace(/\[File:.*?\]\([^)]*\)/g, '')
-                  .replace(/<image>.*?<\/image>/gis, '')
-                  .trim();
-                let contentDupIdx = -1;
-                for (let i = mergedEntries.length - 1; i >= 0; i -= 1) {
-                  const entry = mergedEntries[i];
-                  if (entry.kind !== 'message') continue;
-                  const d = entry.data as ChatMessage;
-                  if (d.role !== m.role) continue;
-                  const dContentNorm = (typeof d.content === 'string' ? d.content : '')
-                    .replace(/\[File:.*?\]\([^)]*\)/g, '')
-                    .replace(/<image>.*?<\/image>/gis, '')
-                    .trim();
-                  if (dContentNorm !== mContentNorm) continue;
-                  const dTs = d.timestamp ? new Date(d.timestamp).getTime() : NaN;
-                  if (
-                    Number.isNaN(mTs) ||
-                    Number.isNaN(dTs) ||
-                    Math.abs(dTs - mTs) <= BUFFER_DEDUP_WINDOW_MS
-                  ) {
-                    contentDupIdx = i;
-                    break;
-                  }
-                }
-                if (contentDupIdx >= 0) {
-                  mergedEntries[contentDupIdx] = {
-                    ...mergedEntries[contentDupIdx],
-                    data: _mergeChatMessage(mergedEntries[contentDupIdx].data as ChatMessage, m),
-                  } as TimelineEntry;
-                  continue;
-                }
-
-                // (3) Prefer richer assistant text onto the trailing disk
-                //     assistant (Gateway history often has cleaned to_user
-                //     while disk api_sync is still empty / lagging).
-                const hasMedia = !!(
-                  (m.images && m.images.length > 0) ||
-                  (m.attachments && m.attachments.length > 0) ||
-                  (Array.isArray((m as any).files) && (m as any).files.length > 0)
-                );
-                const hasText = mContentNorm.length > 0;
-                if (m.role === 'assistant' && hasText) {
-                  let richerIdx = -1;
-                  for (let i = mergedEntries.length - 1; i >= 0; i -= 1) {
-                    const entry = mergedEntries[i];
-                    if (entry.kind !== 'message') continue;
-                    const d = entry.data as ChatMessage;
-                    if (d.role === 'user') break;
-                    if (d.role !== 'assistant') continue;
-                    const dLen = (typeof d.content === 'string' ? d.content : '').trim().length;
-                    const mLen = mContentNorm.length;
-                    if (mLen > dLen) {
-                      richerIdx = i;
-                    }
-                    break;
-                  }
-                  if (richerIdx >= 0) {
-                    mergedEntries[richerIdx] = {
-                      ...mergedEntries[richerIdx],
-                      data: _mergeChatMessage(mergedEntries[richerIdx].data as ChatMessage, m),
-                    } as TimelineEntry;
-                    continue;
-                  }
-                }
-
-                // (4) Disk flush lag: keep Gateway-history text (and media)
-                //     that is not already on disk. Previously only media
-                //     survived here, which dropped to_user finals that only
-                //     existed in the Gateway WS cache.
-                if (!hasMedia && !hasText) continue;
-
-                if (!Number.isNaN(mTs)) {
-                  const nearIdx = mergedEntries.findIndex((e: any) => {
-                    if (e.kind !== 'message') return false;
-                    const d = e.data as ChatMessage;
-                    if (d.role !== 'assistant') return false;
-                    const dTs = d.timestamp ? new Date(d.timestamp).getTime() : NaN;
-                    if (Number.isNaN(dTs)) return false;
-                    return Math.abs(dTs - mTs) <= BUFFER_DEDUP_WINDOW_MS;
-                  });
-                  if (nearIdx >= 0 && hasMedia) {
-                    mergedEntries[nearIdx] = {
-                      ...mergedEntries[nearIdx],
-                      data: _mergeChatMessage(mergedEntries[nearIdx].data as ChatMessage, m),
-                    } as TimelineEntry;
-                    continue;
-                  }
-
-                  const insertAt = mergedEntries.findIndex((e: any) => {
-                    if (e.kind !== 'message') return false;
-                    const d = e.data as ChatMessage;
-                    const dTs = d.timestamp ? new Date(d.timestamp).getTime() : NaN;
-                    if (Number.isNaN(dTs)) return false;
-                    return dTs > mTs;
-                  });
-                  const entry = {
-                    kind: 'message' as const,
-                    data: m,
-                    _uid: String((m as any).message_id || (m as any).client_id || '').trim() || genUID(),
-                  };
-                  if (insertAt >= 0) {
-                    mergedEntries.splice(insertAt, 0, entry);
-                  } else {
-                    mergedEntries.push(entry);
-                  }
-                  continue;
-                }
-                mergedEntries.push({
-                  kind: 'message',
-                  data: m,
-                  _uid: String((m as any).message_id || (m as any).client_id || '').trim() || genUID(),
-                });
-              }
-              nextEntries = mergedEntries;
-            }
-
-            nextEntries = flushBufferedFilePushes(nextEntries);
-
-            const isCompressionHydration = compressionHydrationPendingRef.current;
-            compressionHydrationPendingRef.current = false;
-
-            if (isCompressionHydration) {
-              // Keep live message order + in-flight tool stream; disk snapshot
-              // already has archived turns flattened into the normal timeline.
-              eventSidRef.current = currentSid || '';
-              setTimeline((prev) => {
-                let merged = _mergeCompressionHydration(prev, nextEntries);
-                const bufferedWf = pendingHydrationWorkflowEventsRef.current;
-                pendingHydrationWorkflowEventsRef.current = [];
-                for (const { event, status } of bufferedWf) {
-                  merged = appendWorkflowEvent(merged, event, status);
-                }
-                const bufferedFinals = pendingHydrationFinalsRef.current;
-                pendingHydrationFinalsRef.current = [];
-                for (const chatMsg of bufferedFinals) {
-                  const mid = chatMsg.message_id;
-                  const already = merged.some((e) => {
-                    if (e.kind !== 'message') return false;
-                    const d = e.data as ChatMessage;
-                    if (mid && d.message_id && d.message_id === mid) return true;
-                    return d.role === 'assistant' && d.content === chatMsg.content;
-                  });
-                  if (already) continue;
-                  merged = finalizeWorkflowAndAddMessage(merged, chatMsg);
-                }
-                return _stabilizeHydratedTimeline(prev, merged);
-              });
-              eventSidRef.current = '';
-              // Restore CMD panels from disk; keep any live streams preferred.
-              setShellStreams((live) => ({
-                ...rebuildShellStreamsFromTimeline(nextEntries),
-                ...live,
-              }));
-            } else {
-              // Full replace path (connect / session switch / refresh).
-              const bufferedWf = pendingHydrationWorkflowEventsRef.current;
-              pendingHydrationWorkflowEventsRef.current = [];
-              let withBuffered = nextEntries;
-              for (const { event, status } of bufferedWf) {
-                withBuffered = appendWorkflowEvent(withBuffered, event, status);
-              }
-              const bufferedFinals = pendingHydrationFinalsRef.current;
-              pendingHydrationFinalsRef.current = [];
-              for (const chatMsg of bufferedFinals) {
-                // Dedup against disk/Gateway-merged timeline before sealing.
-                const mid = chatMsg.message_id;
-                const already = withBuffered.some((e) => {
-                  if (e.kind !== 'message') return false;
-                  const d = e.data as ChatMessage;
-                  if (mid && d.message_id && d.message_id === mid) return true;
-                  return d.role === 'assistant' && d.content === chatMsg.content;
-                });
-                if (already) continue;
-                withBuffered = finalizeWorkflowAndAddMessage(withBuffered, chatMsg);
-              }
-              if (bufferedFinals.length > 0) {
-                // Finals that landed during hydrate replace the streaming bubble.
-                streamingTextRef.current = '';
-                setStreamingText('');
-                setIsStreaming(false);
-              }
-              // If disk snapshot lags (common right after new session / early tools),
-              // keep any already-rendered live workflow so the Worked/Working fold
-              // does not vanish mid-turn. Also keep optimistic user bubbles that
-              // are not yet on disk (first send on a brand-new session).
-              // Write into the disk response's sid — not whatever UI focus was
-              // (parallel/scheduled current_session must not redirect hydrate).
-              // IMPORTANT: mirror currentSid into currentSessionIdRef BEFORE
-              // setTimeline. When the agent never announced current_session
-              // (startup load) the `connected` event carries only the gateway
-              // session key and currentSessionIdRef stays null; setTimeline's
-              // solo-mirror condition (eventSidRef === currentSessionIdRef)
-              // then fails and the hydrated timeline never reaches the chat
-              // pane -> blank chat after service restart.
-              currentSessionIdRef.current = currentSid || currentSessionIdRef.current;
-              eventSidRef.current = currentSid || '';
-              setTimeline((prev) => {
-                let merged = withBuffered;
-                // Preserve optimistic user messages missing from disk.
-                const diskKeys = new Set<string>();
-                for (const e of withBuffered) {
-                  if (e.kind !== 'message') continue;
-                  const k = _messageIdentityKey(e.data as ChatMessage);
-                  if (k) diskKeys.add(k);
-                }
-                for (const e of prev) {
-                  if (e.kind !== 'message') continue;
-                  const msg = e.data as ChatMessage;
-                  if (msg.role !== 'user') continue;
-                  const k = _messageIdentityKey(msg);
-                  if (k && diskKeys.has(k)) continue;
-                  // Content-level fallback when message_id differs.
-                  const norm = (typeof msg.content === 'string' ? msg.content : '').trim();
-                  const dup = merged.some((m) => {
-                    if (m.kind !== 'message') return false;
-                    const d = m.data as ChatMessage;
-                    return d.role === 'user' && (typeof d.content === 'string' ? d.content : '').trim() === norm;
-                  });
-                  if (dup) continue;
-                  merged = [...merged, e];
-                  if (k) diskKeys.add(k);
-                }
-                const liveWfs = prev.filter(
-                  (e) => e.kind === 'workflow' && !(e as { data: WorkflowBlock }).data.completed,
-                );
-                if (liveWfs.length === 0) {
-                  return _stabilizeHydratedTimeline(prev, merged);
-                }
-                const diskHasLive = merged.some(
-                  (e) => e.kind === 'workflow' && !(e as { data: WorkflowBlock }).data.completed,
-                );
-                if (diskHasLive) {
-                  return _stabilizeHydratedTimeline(prev, merged);
-                }
-                for (const wf of liveWfs) {
-                  for (const evt of (wf as { data: WorkflowBlock }).data.events) {
-                    merged = appendWorkflowEvent(
-                      merged,
-                      evt,
-                      (wf as { data: WorkflowBlock }).data.status || 'Working...',
-                    );
-                  }
-                }
-                return _stabilizeHydratedTimeline(prev, merged);
-              });
-              eventSidRef.current = '';
-              setShellStreams(rebuildShellStreamsFromTimeline(withBuffered));
-              nextEntries = withBuffered;
-            }
-            // Restore pending propose_options cards after refresh / session switch.
-            const allEvents = [
-              ...(session.archived_events || []),
-              ...(session.events || []),
-            ];
-            setOptionsProposals(hydrateOptionsProposalsFromEvents(allEvents));
-            // Restore live Working timer from disk started_ms after refresh.
-            {
-              let restoredStart: number | undefined;
-              for (let i = nextEntries.length - 1; i >= 0; i--) {
-                const e = nextEntries[i];
-                if (e.kind !== 'workflow' || e.data.completed) continue;
-                if (typeof e.data.started_ms === 'number') {
-                  restoredStart = e.data.started_ms;
-                } else {
-                  const firstTs = e.data.events[0]?.timestamp;
-                  if (typeof firstTs === 'number') restoredStart = firstTs;
-                }
-                break;
-              }
-              setTurnStartedMs(restoredStart);
-            }
-            sessionBootstrapDoneRef.current = true;
-            currentSessionIdRef.current = currentSid;
-            wsServiceRef.current?.setActiveSession(currentSid);
-            setCurrentSessionId(currentSid);
-            // Hydration complete — ask agent for this session's context % now
-            // (do not wait for the next user send).
-            try {
-              wsServiceRef.current?.requestTokenStats(currentSid);
-            } catch {
-              /* ignore */
-            }
-            // Composer model/effort follow the last UI pick (currentCardName /
-            // reasoningEffort), not a stale per-session card from disk.
-            viewingHistorySessionRef.current = false;
-            setViewingHistorySession(false);
-            loadingSessionIdRef.current = currentSid;
-            historyOffsetRef.current = session.messages?.length || 0;
-            setHasMoreHistory(session.has_more ?? false);
-            diskSessionLoadedRef.current = true;
-          } else {
-            // Disk session unavailable — use buffered WS history as fallback
-            setOptionsProposals([]);
-            const buffered = pendingHydrationMediaRef.current;
-            pendingHydrationMediaRef.current = [];
-            if (buffered.length > 0) {
-              const fallbackEntries: TimelineEntry[] = [];
-              for (const m of buffered) {
-                fallbackEntries.push({
-                  kind: 'message',
-                  data: m,
-                  _uid: String((m as any).message_id || (m as any).client_id || '').trim() || genUID(),
-                });
-              }
-              let merged = flushBufferedFilePushes(fallbackEntries);
-              setTimeline(merged);
-              sessionBootstrapDoneRef.current = true;
-              diskSessionLoadedRef.current = false;
-            }
-          }
-        } catch (err: any) {
-          console.warn('[AIChatPage] getCurrentSession failed, fallback to WS history:', err?.message || err);
-          diskSessionLoadedRef.current = false;
-          // Restore any buffered WS history that arrived during hydration
-          const buffered = pendingHydrationMediaRef.current;
-          pendingHydrationMediaRef.current = [];
-          if (buffered.length > 0 && !viewingHistorySessionRef.current) {
-            const fallbackEntries: TimelineEntry[] = [];
-            for (const m of buffered) {
-              fallbackEntries.push({
-                kind: 'message',
-                data: m,
-                _uid: String((m as any).message_id || (m as any).client_id || '').trim() || genUID(),
-              });
-            }
-            setTimeline(prev => {
-              if (prev.length > 0) return prev;
-              return flushBufferedFilePushes(fallbackEntries);
-            });
-            sessionBootstrapDoneRef.current = true;
-          }
-        } finally {
-          if (seq === sessionReloadSeqRef.current) {
-            if (opts?.wasNewSession) {
-              newSessionPendingRef.current = false;
-            }
-            setIsLoadingSession(false);
-            isHydratingSessionRef.current = false;
-            setSessionBootstrapped(true);
-            if (!sessionBootstrapDoneRef.current) {
-              sessionBootstrapDoneRef.current = true;
-            }
-            // Flush any workflow events that arrived between setTimeline and this
-            // finally (race window while isHydratingSessionRef was still true).
-            const lateWf = pendingHydrationWorkflowEventsRef.current;
-            if (lateWf.length > 0) {
-              pendingHydrationWorkflowEventsRef.current = [];
-              setTimeline((prev) => {
-                let next = prev;
-                for (const { event, status } of lateWf) {
-                  next = appendWorkflowEvent(next, event, status);
-                }
-                return next;
-              });
-            }
-            const lateFinals = pendingHydrationFinalsRef.current;
-            if (lateFinals.length > 0) {
-              pendingHydrationFinalsRef.current = [];
-              setTimeline((prev) => {
-                let next = prev;
-                for (const chatMsg of lateFinals) {
-                  const mid = chatMsg.message_id;
-                  const already = next.some((e) => {
-                    if (e.kind !== 'message') return false;
-                    const d = e.data as ChatMessage;
-                    if (mid && d.message_id && d.message_id === mid) return true;
-                    return d.role === 'assistant' && d.content === chatMsg.content;
-                  });
-                  if (already) continue;
-                  next = finalizeWorkflowAndAddMessage(next, chatMsg);
-                }
-                return next;
-              });
-              streamingTextRef.current = '';
-              setStreamingText('');
-              setIsStreaming(false);
-            }
-            // Allow WS history events to flow through when disk session is unavailable
-            if (!diskSessionLoadedRef.current) {
-              sessionBootstrapDoneRef.current = true;
-            }
-          }
-          // Superseded hydrates leave loading to the latest seq; mount failsafe
-          // covers abandoned supersedes during reconnect churn.
-        }
-      })();
-    };
-
-    const scheduleCurrentSessionHydration = (delayMs: number = 120) => {
-      if (newSessionPendingRef.current) return;
-      if (sessionReloadTimerRef.current) {
-        clearTimeout(sessionReloadTimerRef.current);
-      }
-      sessionReloadTimerRef.current = setTimeout(() => {
-        sessionReloadTimerRef.current = null;
-        if (viewingHistorySessionRef.current || newSessionPendingRef.current) return;
-        hydrateCurrentSession({ showLoading: false });
-      }, delayMs);
-    };
-
-    // Disk hydrate does NOT need agent WS. If we wait only for `connected`, a
-    // reconnecting agent (keepalive timeout / 1013 agent_not_ready) leaves
-    // sessionBootstrapped=false forever → stuck「加载会话中」.
-    hydrateCurrentSession({ showLoading: true });
-    const bootstrapFailsafeTimer = window.setTimeout(() => {
-      if (!sessionBootstrapDoneRef.current) {
-        console.warn('[AIChatPage] session bootstrap failsafe — clearing stuck loading overlay');
-        setIsLoadingSession(false);
-        isHydratingSessionRef.current = false;
-        setSessionBootstrapped(true);
-        sessionBootstrapDoneRef.current = true;
-      } else {
-        setIsLoadingSession(false);
-        setSessionBootstrapped(true);
-      }
-    }, 12000);
-
-    // ---- Session & connection events ----
-
-    // Gateway sends "connected" immediately after WS handshake with
-    // session_id and history_count. This is the initial session info.
-    // The message shape is: {type:"connected", agent_id, agent_name, session_id, history_count}
-    // (all fields at top level, no content/data wrapper)
-    const unsubConnected = aiWsService.on('connected', (msg: AIWSMessage) => {
-      // Fields are at top level of the message object
-      const raw = msg as any;
-      const sid = raw.session_id || raw.sessionId || (raw.content && raw.content.session_id);
-      // Gateway fallback when the agent has not yet reported its disk session:
-      // session_id == gateway_session_key ("<user_id>:<agent_id>") is NOT a
-      // real history key — using it 404s every /agent-sessions/{sid} read and
-      // pollutes the timeline cache. Skip it; the disk hydrate / current_session
-      // event supplies the canonical id shortly after.
-      const isGatewaySessionKey =
-        !!sid &&
-        typeof sid === 'string' &&
-        sid.includes(':') &&
-        sid.endsWith(`:${agentId}`);
-      if (sid && !isGatewaySessionKey) {
-        currentSessionIdRef.current = sid;
-        wsServiceRef.current?.setActiveSession(sid);
-        setCurrentSessionId(sid);
-        setViewingHistorySession(false);
-      }
-      console.log('[AIChatPage] Connected to agent, session:', sid, 'history:', raw.history_count);
-
-      // connected fires on WS reconnection (NOT after __NEW_SESSION__ command).
-      // Capture the flag now; the finally block uses it to decide whether to
-      // also clear a stuck new-session spinner (in case current_session was
-      // lost during an unstable connection at agent startup).
-      const wasNewSession = newSessionPendingRef.current;
-      // If newSession is still pending when WS (re)connects, it means the
-      // __NEW_SESSION__ command was sent but never reached the agent (e.g. WS was
-      // disconnected at that moment). Re-send to make sure it takes effect.
-      if (wasNewSession) {
-        aiWsService.newSession();
-        // Do not hydrate from disk — would reload stale session and bump sessionReloadSeqRef.
-        return;
-      }
-      pendingFilePushesRef.current = [];
-      // First paint already hydrates with a spinner. Later reconnects must be soft
-      // or every agent flap resets sessionBootstrapped and looks "stuck loading".
-      hydrateCurrentSession({ showLoading: !sessionBootstrapDoneRef.current });
-    });
-
-    // Gateway sends individual "history" messages (one per historical msg)
-    // right after "connected". Shape: {type:"history", role:"user"|"assistant", content:"..."}
-    // (fields at top level, no content/data wrapper)
-    // NOTE: If disk session was loaded successfully, skip these bare text messages
-    // because the disk session already contains full data with events.
-    const unsubHistory = onWs('history', (msg: AIWSMessage) => {
-      const raw = msg as any;
-      const role = raw.role || 'assistant';
-      const content = raw.content || '';
-      const msgType = raw.msg_type || raw.type || 'text';
-
-      const files: any[] = Array.isArray(raw.files) ? raw.files : [];
-      const contentStr = typeof content === 'string' ? content : '';
-      const hasInlineMedia = (Array.isArray(raw.images) && raw.images.length > 0)
-        || (Array.isArray(raw.attachments) && raw.attachments.length > 0)
-        || files.length > 0
-        || msgType === 'file_push'
-        || contentStr.includes('<image>')
-        || contentStr.includes('[File:');
-
-      // During hydration/rebuild, buffer ALL history events (not just media).
-      // This ensures messages survive refresh even when the agent disk session is
-      // temporarily unavailable. If disk session loads successfully, non-media
-      // buffered events are discarded; if it fails, they become the timeline.
-      if (isHydratingSessionRef.current) {
-        _logMediaDebug('ws-history-buffering', {
-          msgType,
-          mid: raw.message_id || raw.id,
-          contentHead: contentStr.slice(0, 120),
-          hasInlineMedia,
-        });
-        // Session boundary in WS history replay: drop anything before latest __NEW_SESSION__ marker.
-        if (contentStr.trim() === '__NEW_SESSION__') {
-          pendingHydrationMediaRef.current = [];
-          _logMediaDebug('ws-history-hydrating-reset-on-new-session', {
-            mid: raw.message_id || raw.id,
-            msgType,
-          });
-          return;
-        }
-        // Buffer every history message during hydration
-        const imageUrlsFromFilesHyd = files
-          .filter((f: any) => !!f && (f.is_image || (typeof f.content_type === 'string' && f.content_type.startsWith('image/'))))
-          .map((f: any) => toWebMediaUrl(f.url || f.path || f.src || (f.filename ? `/uploads/${f.filename}` : '')))
-          .filter((u: any) => typeof u === 'string' && u.length > 0);
-        const imageUrlsFromHistoryHyd = Array.isArray(raw.images)
-          ? raw.images.map((u: any) => toWebMediaUrl(u)).filter((u: any) => typeof u === 'string' && u.length > 0)
-          : [];
-        const imageUrlsFromContentHyd: string[] = [];
-        if (typeof content === 'string') {
-          const reImg = /<image>(.*?)<\/image>/gi;
-          let im: RegExpExecArray | null;
-          while ((im = reImg.exec(content)) !== null) {
-            const u = toWebMediaUrl((im[1] || '').trim());
-            if (u) imageUrlsFromContentHyd.push(u);
-          }
-          const reFile = /\[File:\s*.*?\]\((.*?)\)/g;
-          let fm: RegExpExecArray | null;
-          while ((fm = reFile.exec(content)) !== null) {
-            const u = toWebMediaUrl((fm[1] || '').trim());
-            if (u) imageUrlsFromContentHyd.push(u);
-          }
-        }
-        const imageUrlsHyd = Array.from(new Set([
-          ...imageUrlsFromFilesHyd,
-          ...imageUrlsFromHistoryHyd,
-          ...imageUrlsFromContentHyd,
-        ]));
-        const nonImageFileAttachments: FileAttachment[] = files
-          .filter((f: any) => f && !f.is_image && !(typeof f.content_type === 'string' && f.content_type.startsWith('image/')))
-          .map((f: any) => {
-            const sz = (b: number) => {
-              if (!b || b < 1024) return `${b || 0} B`;
-              if (b < 1024 * 1024) return `${(b / 1024).toFixed(1)} KB`;
-              return `${(b / (1024 * 1024)).toFixed(1)} MB`;
-            };
-            const rawUrl = f.url || f.path || f.src || (f.filename ? `/uploads/${f.filename}` : '');
-            const name = f.original_name || f.filename || 'file';
-            const isVoice =
-              f.type === 'voice' || f.type === 'audio' || !!f.is_audio
-              || (typeof f.content_type === 'string' && f.content_type.startsWith('audio/'))
-              || /^voice_.*\.webm$/i.test(name);
-            return {
-              name,
-              size: sz(f.size),
-              url: rawUrl || undefined,
-              type: f.is_video && !isVoice ? 'video' as const : isVoice ? (f.type === 'voice' ? 'voice' as const : 'audio' as const) : 'file' as const,
-              duration: typeof f.duration === 'number' ? f.duration : undefined,
-            };
-          });
-        const attachmentsHyd = [
-          ...(Array.isArray(raw.attachments) ? raw.attachments : []),
-          ...nonImageFileAttachments,
-        ];
-        const pendingMsg: ChatMessage = {
-          role,
-          content: _cleanDisplayContent(content),
-          message_id: raw.message_id || raw.id || (raw.extra && (raw.extra.message_id || raw.extra.id)) || undefined,
-          timestamp: raw.timestamp,
-          type: msgType,
-          images: imageUrlsHyd.length > 0 ? imageUrlsHyd : undefined,
-          attachments: attachmentsHyd.length > 0 ? attachmentsHyd : undefined,
-        };
-        pendingHydrationMediaRef.current.push(pendingMsg);
-        return;
-      }
-
-      // Before first canonical timeline bootstrap is done, do not append WS history.
-      if (!sessionBootstrapDoneRef.current) {
-        _logMediaDebug('ws-history-skip-before-bootstrap', {
-          msgType,
-          mid: raw.message_id || raw.id,
-          contentHead: contentStr.slice(0, 120),
-          hasInlineMedia,
-        });
-        return;
-      }
-      // After canonical disk snapshot is loaded, ignore most WS history.
-      // EXCEPTION: file_push (Gateway-only) and assistant text that disk may
-      // still be missing (async flush lag vs Gateway cache).
-      if (diskSessionLoadedRef.current) {
-        const isAssistantText =
-          role === 'assistant'
-          && typeof contentStr === 'string'
-          && contentStr.trim().length > 0
-          && msgType !== 'file_push';
-        if (msgType === 'file_push' || files.length > 0 || isAssistantText) {
-          _logMediaDebug('ws-history-enrich-after-disk', {
-            msgType,
-            mid: raw.message_id || raw.id,
-            filesCount: files.length,
-            isAssistantText,
-            contentHead: contentStr.slice(0, 120),
-          });
-          // fall through to append / richer-merge logic below
-        } else {
-          if (!hasInlineMedia) {
-            _logMediaDebug('ws-history-skip-nonmedia-after-disk', {
-              msgType,
-              mid: raw.message_id || raw.id,
-              contentHead: contentStr.slice(0, 120),
-              hasInlineMedia,
-            });
-          } else {
-            _logMediaDebug('ws-history-skip-media-after-disk', {
-              msgType,
-              mid: raw.message_id || raw.id,
-              contentHead: contentStr.slice(0, 120),
-              hasInlineMedia,
-            });
-          }
-          return;
-        }
-      }
-      // (reachable only when disk session is not loaded)
-      _logMediaDebug('ws-history-in', {
-        mid: raw.message_id || raw.id,
-        role,
-        msgType,
-        images: Array.isArray(raw.images) ? raw.images.length : 0,
-        files: files.length,
-        attachments: Array.isArray(raw.attachments) ? raw.attachments.length : 0,
-        contentHead: typeof content === 'string' ? content.slice(0, 80) : '',
-      });
-
-      const imageUrlsFromFiles = files
-        .filter((f: any) => !!f && (f.is_image || (typeof f.content_type === 'string' && f.content_type.startsWith('image/'))))
-        .map((f: any) => {
-          const rawPath = f.url || f.path || f.src || (f.filename ? `/uploads/${f.filename}` : '');
-          if (typeof rawPath !== 'string' || !rawPath) return '';
-          if (rawPath.startsWith('http://') || rawPath.startsWith('https://')) return rawPath;
-          if (rawPath.startsWith('/uploads/')) return rawPath;
-          if (rawPath.includes('/uploads/')) {
-            return `/uploads/${rawPath.split('/uploads/').pop()}`;
-          }
-          if (rawPath.includes('\\uploads\\')) {
-            return `/uploads/${rawPath.split('\\uploads\\').pop()?.replace(/\\/g, '/')}`;
-          }
-          return rawPath.startsWith('/') ? rawPath : `/uploads/${rawPath.split(/[/\\]/).pop()}`;
-        })
-        .filter((u: any) => typeof u === 'string' && u.length > 0);
-      const imageUrlsFromHistory = Array.isArray(raw.images)
-        ? raw.images.filter((u: any) => typeof u === 'string' && u.length > 0)
-        : [];
-      const imageUrls = Array.from(new Set([...imageUrlsFromFiles, ...imageUrlsFromHistory]));
-      // Convert non-image files to structured FileAttachment objects so
-      // file cards survive history replay after page refresh.
-      const fileAttachments: FileAttachment[] = files
-        .filter((f: any) => f && !f.is_image && !(typeof f.content_type === 'string' && f.content_type.startsWith('image/')))
-        .map((f: any) => {
-          const sz = (b: number) => {
-            if (!b || b < 1024) return `${b || 0} B`;
-            if (b < 1024 * 1024) return `${(b / 1024).toFixed(1)} KB`;
-            return `${(b / (1024 * 1024)).toFixed(1)} MB`;
-          };
-          const rawUrl = f.url || f.path || f.src || (f.filename ? `/uploads/${f.filename}` : '');
-          const name = f.original_name || f.filename || 'file';
-          const isVoice =
-            f.type === 'voice' || f.type === 'audio' || !!f.is_audio
-            || (typeof f.content_type === 'string' && f.content_type.startsWith('audio/'))
-            || /^voice_.*\.webm$/i.test(name);
-          return {
-            name,
-            size: sz(f.size),
-            url: rawUrl || undefined,
-            type: f.is_video && !isVoice ? 'video' as const : isVoice ? (f.type === 'voice' ? 'voice' as const : 'audio' as const) : 'file' as const,
-            duration: typeof f.duration === 'number' ? f.duration : undefined,
-          };
-        });
-      const attachments = [
-        ...(Array.isArray(raw.attachments) ? raw.attachments : []),
-        ...fileAttachments,
-      ];
-
-      if (content || imageUrls.length > 0 || attachments.length > 0 || files.length > 0) {
-        _logMediaDebug('ws-history-mapped', {
-          mid: raw.message_id || raw.id,
-          msgType,
-          mappedImages: imageUrls,
-          mappedAttachments: attachments,
-          mappedFilesCount: files.length,
-          contentHead: contentStr.slice(0, 160),
-        });
-        const fileSig = files.map((f: any) => f.url || f.filename || f.original_name || '').join('|');
-        const dedupKey = `history:${msgType}:${role}:${content}:${fileSig}:${imageUrls.join('|')}:${attachments.length}`;
-        const now = Date.now();
-        const lastSeen = filePushDedupRef.current.get(dedupKey) || 0;
-        if (now - lastSeen < 2500) {
-          return;
-        }
-        filePushDedupRef.current.set(dedupKey, now);
-
-        const histMsg: ChatMessage = {
-          role,
-          content: _cleanDisplayContent(content),
-          message_id: raw.message_id || raw.id || (raw.extra && (raw.extra.message_id || raw.extra.id)) || undefined,
-          timestamp: raw.timestamp,
-          type: msgType,
-          images: imageUrls.length > 0 ? imageUrls : undefined,
-          attachments: attachments.length > 0 ? attachments : undefined,
-        };
-        setTimeline(prev => {
-          const k = _messageIdentityKey(histMsg);
-          if (k) {
-            const idx = prev.findIndex(
-              (e) => e.kind === 'message' && _messageIdentityKey(e.data as ChatMessage) === k,
-            );
-            if (idx >= 0) {
-              const next = [...prev];
-              next[idx] = {
-                ...next[idx],
-                data: _mergeChatMessage(next[idx].data as ChatMessage, histMsg),
-              } as TimelineEntry;
-              return next;
-            }
-          }
-          // Disk may have an empty/short api_sync bubble while Gateway history
-          // carries the cleaned to_user — upgrade the trailing assistant.
-          if (histMsg.role === 'assistant' && (histMsg.content || '').trim()) {
-            for (let i = prev.length - 1; i >= 0; i -= 1) {
-              const entry = prev[i];
-              if (entry.kind !== 'message') continue;
-              const d = entry.data as ChatMessage;
-              if (d.role === 'user') break;
-              if (d.role !== 'assistant') continue;
-              const dLen = (d.content || '').trim().length;
-              const mLen = (histMsg.content || '').trim().length;
-              if (mLen > dLen) {
-                const next = [...prev];
-                next[i] = {
-                  ...entry,
-                  data: _mergeChatMessage(d, histMsg),
-                };
-                return next;
-              }
-              // Same-length content already present — skip duplicate.
-              if (mLen > 0 && d.content === histMsg.content) return prev;
-              break;
-            }
-          }
-          return [...prev, { kind: 'message', data: histMsg, _uid: genUID() }];
-        });
-      }
-    });
-
-    // Agent (via GatewayAdapter) sends "current_session" when session changes
-    const unsubCurrentSession = aiWsService.on('current_session', (msg: AIWSMessage) => {
-      const data = msg.content || msg.data;
-      const previousSid = currentSessionIdRef.current;
-      let sid: string | null = null;
-      if (typeof data === 'object') {
-        if (data.data && typeof data.data === 'object') {
-          sid = data.data.id;
-        } else {
-          sid = data.id;
-        }
-      }
-      if (typeof data === 'string') {
-        sid = data;
-      }
-      const uid = String(msg.user_id || '').trim();
-      // Scheduled-task parallel spawn announces current_session for exec binding
-      // only — must NOT steal the interactive pane's focused session (that used
-      // to hydrate the focused chat into the new sid's live bucket → 会话串台).
-      if (uid.startsWith('scheduled-task:')) {
-        // Do not seed an empty live bucket here — that blocks disk hydrate in
-        // ExecWorkflowView until a full page refresh. First WS event for sid
-        // creates the bucket via setTimeline.
-        if (sid) {
-          requestSessionListRefresh(agentId, previousSid || sid);
-        }
-        return;
-      }
-      // Always track agent current — even while a history tab is focused.
-      if (sid) {
-        agentCurrentSessionIdRef.current = sid;
-        // Fetch this session's context % — never copy another session's stats.
-        try {
-          aiWsService.requestTokenStats(sid);
-        } catch {
-          /* ignore */
-        }
-      }
-      if (viewingHistorySessionRef.current) {
-        return;
-      }
-      if (sid) {
-        currentSessionIdRef.current = sid;
-        wsServiceRef.current?.setActiveSession(sid);
-        setCurrentSessionId(sid);
-        requestSessionListRefresh(agentId, sid);
-        console.info('[AIChatPage] current_session →', sid, {
-          previous: previousSid,
-          newSessionPending: newSessionPendingRef.current,
-        });
-      }
-      // Clear new-session loading — current_session fires when server confirms the new session
-      if (newSessionPendingRef.current) {
-        newSessionPendingRef.current = false;
-        setIsLoadingSession(false);
-        sessionBootstrapDoneRef.current = true;
-        if (sid) {
-          newSessionGuardRef.current = { sid, until: Date.now() + 20000 };
-          pinComposerLanding(sid);
-        }
-        // Keep empty timeline from handleNewSession; disk may still hold the old session.
-        return;
-      }
-      const guard = newSessionGuardRef.current;
-      if (guard && Date.now() < guard.until && sid && sid !== guard.sid) {
-        console.warn(
-          '[AIChatPage] current_session ignored during new-session guard: got=%s keep=%s',
-          sid,
-          guard.sid,
-        );
-        // Stay on the newly created session — snap active filter back.
-        currentSessionIdRef.current = guard.sid;
-        wsServiceRef.current?.setActiveSession(guard.sid);
-        setCurrentSessionId(guard.sid);
-        return;
-      }
-      if (!viewingHistorySessionRef.current && (sid !== previousSid || !sessionBootstrapDoneRef.current)) {
-        scheduleCurrentSessionHydration();
-      }
-    });
-
-    const unsubSessionList = aiWsService.on('session_list', (msg: AIWSMessage) => {
-      const data: any = (msg as any).content || (msg as any).data || msg;
-      const list = Array.isArray(data) ? data : Array.isArray(data?.sessions) ? data.sessions : null;
-      if (list) {
-        const primary = list.find((s: any) => s?.primary)?.id;
-        if (primary) setPrimarySessionId(String(primary));
-      }
-      requestSessionListRefresh(agentId, currentSessionIdRef.current);
-    });
-
-    const unsubBusySessions = aiWsService.on('busy_sessions', (msg: AIWSMessage) => {
-      const data: any = (msg as any).content || (msg as any).data || msg;
-      const sessions = Array.isArray(data?.sessions)
-        ? data.sessions.map(String)
-        : Array.isArray(data)
-          ? data.map(String)
-          : [];
-      setBusySessions((prev) => {
-        const filtered = sessions.filter((id) => !userStoppedBySidRef.current[id]);
-        if (
-          prev.length === filtered.length
-          && prev.every((id, i) => id === filtered[i])
-        ) {
-          return prev;
-        }
-        return filtered;
-      });
-    });
-
-    // Error frame → release busy state immediately. Backend has just emitted
-    // (or is about to emit) the final "error" frame and busy_sessions snapshot
-    // for the failing turn, but the snapshot can lag by seconds when the LLM
-    // call itself was the hang. We must not leave the composer stuck in
-    // "executing" while we wait for the scheduler reap loop.
-    const unsubError = aiWsService.on('error', (msg: AIWSMessage) => {
-      const data: any = (msg as any).content || (msg as any).data || msg;
-      const errSid = String(
-        (msg as any).sid
-        || (data && typeof data === 'object' ? (data.session_id || data.sid) : '')
-        || ''
-      ).trim();
-      const message = typeof data === 'string'
-        ? data
-        : String(data?.message || data?.error || data?.detail || '');
-      if (message) {
-        console.warn('[AIChatPage] ws error frame sid=%s message=%s', errSid || '-', message.slice(0, 200));
-      }
-      if (errSid) {
-        clearSessionRunState(errSid);
-      }
-    });
-
-    const unsubPrimarySession = aiWsService.on('primary_session', (msg: AIWSMessage) => {
-      const data: any = (msg as any).content || (msg as any).data || msg;
-      const sid = String(data?.primary_session_id || '').trim();
-      const ok = data?.ok !== false;
-      setPendingPrimarySessionId(null);
-      pendingPrimarySessionIdRef.current = null;
-      if (ok && sid) {
-        setPrimarySessionId(sid);
-        return;
-      }
-      console.warn('[AIChatPage] set_primary_session failed', data);
-    });
-
-    // Use history_sync as a trigger to reload the canonical current session
-    // snapshot, rather than trusting the WS payload directly.
-    const unsubHistorySync = aiWsService.on('history_sync', (msg: AIWSMessage) => {
-      if (viewingHistorySessionRef.current || newSessionPendingRef.current) return;
-      const data: any = msg.content || msg.data || {};
-      const sid = typeof data === 'object' ? (data.session_id || data.id || null) : null;
-      const reason = typeof data === 'object' ? data.reason : null;
-      if (reason === 'compression') {
-        // Always reload after compression so the "已归档" section appears
-        // without requiring a page refresh. Merge path keeps in-flight tools.
-        compressionHydrationPendingRef.current = true;
-        scheduleCurrentSessionHydration(80);
-        return;
-      }
-      if (reason === 'withdraw') {
-        // Agent truncated messages+events on disk; apply payload immediately so
-        // chat / tool-stream rewind without waiting for HTTP hydrate races.
-        setIsStreaming(false);
-        setAgentStatus('idle');
-        setTurnStartedMs(undefined);
-        clearOutboundTurnPending();
-        setStreamingText('');
-        streamingTextRef.current = '';
-        pendingHydrationMediaRef.current = [];
-        pendingHydrationWorkflowEventsRef.current = [];
-        try {
-          const msgs = Array.isArray(data.messages) ? data.messages : [];
-          const evts = Array.isArray(data.events) ? data.events : [];
-          const archivedMsgs = Array.isArray(data.archived_messages)
-            ? data.archived_messages
-            : undefined;
-          const archivedEvts = Array.isArray(data.archived_events)
-            ? data.archived_events
-            : undefined;
-          const entries = buildTimelineFromSession(
-            msgs,
-            evts,
-            archivedMsgs,
-            archivedEvts,
-          );
-          setTimeline(entries);
-          if (data.session_id) {
-            currentSessionIdRef.current = data.session_id;
-          }
-          sessionBootstrapDoneRef.current = true;
-          diskSessionLoadedRef.current = true;
-        } catch (err) {
-          console.warn('[AIChatPage] withdraw history apply failed', err);
-        }
-        // Verify against disk shortly after (Gateway cache already invalidated)
-        scheduleCurrentSessionHydration(120);
-        // Refresh file panel so withdrawn creates show as red tombstones
-        scheduleRefreshSessionChanges();
-        return;
-      }
-      if (!sid || !currentSessionIdRef.current || sid === currentSessionIdRef.current || !sessionBootstrapDoneRef.current) {
-        scheduleCurrentSessionHydration();
-      }
-    });
-
-    // Agent pushes files/attachments to chat (via HTTP push API -> WS forward)
-    const unsubFilePush = onWs('file_push', (msg: AIWSMessage) => {
-      if (viewingHistorySessionRef.current) {
-        return;
-      }
-      const raw = msg as any;
-      const files: any[] = raw.files || [];
-      const pushMsg: string = raw.message || '';
-
-      // Inline file size formatter (cannot reference component methods from useEffect)
-      const fmtSize = (b: number) => {
-        if (!b || b < 1024) return `${b || 0} B`;
-        if (b < 1024 * 1024) return `${(b / 1024).toFixed(1)} KB`;
-        return `${(b / (1024 * 1024)).toFixed(1)} MB`;
-      };
-
-      // Build content: message text + file descriptions
-      let content = pushMsg;
-      const imageUrls: string[] = [];
-      const fileDescs: string[] = [];
-
-      for (const f of files) {
-        if (f.is_image) {
-          imageUrls.push(f.url || `/uploads/${f.filename}`);
-        } else {
-          const media = f.is_video ? 'video' : f.is_audio ? 'audio' : 'file';
-          fileDescs.push(`[File: ${f.original_name || f.filename} (${fmtSize(f.size)}) type=${media}](${f.url || `/uploads/${f.filename}`})`);
-        }
-      }
-
-      if (fileDescs.length > 0) {
-        content = content ? `${content}\n\n${fileDescs.join('\n')}` : fileDescs.join('\n');
-      }
-
-      if (content || imageUrls.length > 0) {
-        const dedupKey = JSON.stringify({
-          m: pushMsg || '',
-          f: files.map((f: any) => f.url || f.filename || f.original_name || ''),
-        });
-        const now = Date.now();
-        const lastSeen = filePushDedupRef.current.get(dedupKey) || 0;
-        // Deduplicate immediate duplicated push (strict-mode / reconnection / double dispatch)
-        if (now - lastSeen < 2500) {
-          return;
-        }
-        filePushDedupRef.current.set(dedupKey, now);
-
-        const assistantMsg: ChatMessage = {
-          role: 'assistant',
-          content: content || '(files)',
-          message_id: raw.message_id || raw.id || (raw.extra && (raw.extra.message_id || raw.extra.id)) || undefined,
-          timestamp: raw.timestamp || new Date().toISOString(),
-          type: 'file_push',
-          images: imageUrls.length > 0 ? imageUrls : undefined,
-        };
-
-        if (isHydratingSessionRef.current || !sessionBootstrapDoneRef.current) {
-          queueBufferedFilePush(assistantMsg);
-          return;
-        }
-
-        setTimeline(prev => appendFilePushMessage(prev, assistantMsg));
-      }
-    });
-
-    return () => {
-      cancelStreamFlush();
-      if (workflowTimelineRaf != null) {
-        cancelAnimationFrame(workflowTimelineRaf);
-        workflowTimelineRaf = null;
-      }
-      window.clearTimeout(bootstrapFailsafeTimer);
-      unsubAuthExpired();
-      unsubStatus();
-      unsubReadyStage();
-      unsubStream();
-      unsubMessage();
-      unsubResponse();
-      unsubToUserReply();
-      unsubToUserFinal();
-      unsubToUserEndTask();
-      unsubSessionTitle();
-      unsubThought();
-      unsubToolCall();
-      unsubToolCallDelta();
-      unsubToolResult();
-      unsubJobStdout();
-      unsubJobStatus();
-      unsubPlan();
-      unsubSummaryStream();
-      unsubCompressionProgress();
-      unsubTokenStats();
-      unsubState();
-      unsubStatusEvt();
-      unsubWake();
-      unsubSleep();
-      unsubInfo();
-      unsubTurnStart();
-      unsubTurnElapsed();
-      unsubTurnCancelled();
-      unsubPromptUpdate();
-      unsubOutputMedia();
-      unsubVoiceAudioOut();
-      unsubVoiceTranscript();
-      unsubVoiceStatus();
-      clearVoiceConnectTimer();
-      window.removeEventListener('pagehide', onPageHide);
-      setVoiceRealtimeStatus('idle');
-      setVoiceRealtimeError('');
-      setVoicePanelOpen(false);
-      unsubConnected();
-      unsubHistory();
-      unsubCurrentSession();
-      unsubSessionList();
-      unsubBusySessions();
-      unsubError();
-      unsubPrimarySession();
-      unsubHistorySync();
-      unsubFilePush();
-      if (sessionReloadTimerRef.current) {
-        clearTimeout(sessionReloadTimerRef.current);
-        sessionReloadTimerRef.current = null;
-      }
-      if (voicePageHideRef.current) {
-        // Page refresh / tab close: keep agent mouthpiece/realtime session for resume.
-        releaseAiWsService(agentId);
-      } else {
-        // In-app navigate away (or StrictMode remount): delay hangup so remount can cancel.
-        schedulePendingVoiceHangup(agentId, () => {
-          try {
-            getAiWsService(agentId).stopVoiceRealtime();
-          } catch {
-            /* ignore */
-          }
-          clearVoiceCallPersist(agentId);
-          releaseAiWsService(agentId);
-        });
-      }
-    };
-  }, [agentId]);
-
-  // ---- Helpers ----
-
-  const _MEDIA_DEBUG = false;
-
-  function _logMediaDebug(stage: string, payload: any) {
-    if (!_MEDIA_DEBUG) return;
-    try {
-      console.log(`[AIChatPage][media-debug] ${stage}`, payload);
-      console.log(`[AIChatPage][media-debug-json] ${stage} ${JSON.stringify(payload)}`);
-    } catch {}
-  }
-
-
-  /** Remove storage/replay-only media markers from visible bubble text. */
-  function _cleanDisplayContent(input: string): string {
-    if (typeof input !== 'string' || !input) return input || '';
-    let s = input;
-    // Remove <image>...</image>
-    s = s.replace(/\n?\s*<image>[\s\S]*?<\/image>/gi, '');
-    // Remove markdown file markers [File: ...](...)
-    s = s.replace(/\n?\s*\[File:\s*.*?\]\(.*?\)/g, '');
-    // Collapse excessive blank lines
-    s = s.replace(/\n{3,}/g, '\n\n').trim();
-    return s;
-  }
-
-  /** Extract text content from a WS message (handles various nested formats) */
-  function _extractContent(msg: AIWSMessage): string {
-    const raw = msg.content ?? msg.data;
-    if (typeof raw === 'string') return raw;
-    if (typeof raw === 'object' && raw !== null) {
-      // {sid:..., data:...} wrapper from GatewayAdapter
-      if ('data' in raw && typeof raw.data === 'string') return raw.data;
-      if ('content' in raw && typeof raw.content === 'string') return raw.content;
-      if ('text' in raw && typeof raw.text === 'string') return raw.text;
-    }
-    return '';
-  }
-
-  /** Strong identity key. Only message_id is trusted across snapshots/sessions. */
-  function _messageIdentityKey(msg: Partial<ChatMessage>): string {
-    if (msg.message_id && String(msg.message_id).trim()) {
-      return `mid:${String(msg.message_id).trim()}`;
-    }
-    // Fallback identity: role + normalised content. Without this, a user
-    // message loaded from disk (no message_id) and the same message echoed
-    // via WS history (also no message_id) are treated as different and both
-    // rendered — causing the "last user message duplicated after refresh" bug.
-    const role = msg.role || '';
-    const rawContent = typeof msg.content === 'string' ? msg.content : '';
-    // Strip file/image markers so the same message with/without markers matches.
-    const normalized = rawContent
-      .replace(/\[File:.*?\]\([^)]*\)/g, '')
-      .replace(/<image>.*?<\/image>/gis, '')
-      .trim()
-      .slice(0, 200);
-    if (role && normalized) {
-      return `rc:${role}:${normalized}`;
-    }
-    return '';
-  }
-
-  /**
-   * Soft reconnect / history_sync hydrate: keep React keys stable and skip
-   * no-op replaces so mobile WS flaps do not remount the whole chat tree.
-   */
-  function _stabilizeHydratedTimeline(prev: TimelineEntry[], next: TimelineEntry[]): TimelineEntry[] {
-    const rebased = rebaseTimelineUids(prev, next);
-    if (
-      prev.length === rebased.length
-      && prev.every((p, i) => {
-        const n = rebased[i];
-        if (!n || p.kind !== n.kind || p._uid !== n._uid) return false;
-        if (p.kind === 'message' && n.kind === 'message') {
-          return p.data.content === n.data.content && p.data.role === n.data.role;
-        }
-        if (p.kind === 'workflow' && n.kind === 'workflow') {
-          return (
-            p.data.completed === n.data.completed
-            && p.data.status === n.data.status
-            && (p.data.events?.length || 0) === (n.data.events?.length || 0)
-            && (p.data.elapsed_ms || 0) === (n.data.elapsed_ms || 0)
-          );
-        }
-        return true;
-      })
-    ) {
-      return prev;
-    }
-    return rebased;
-  }
-
-  /** Merge two messages with the same identity, preferring richer media payload. */
-  function _mergeChatMessage(base: ChatMessage, incoming: ChatMessage): ChatMessage {
-    const uniq = (arr?: string[]) => Array.from(new Set((arr || []).filter(Boolean)));
-    const mergedImages = uniq([...(base.images || []), ...(incoming.images || [])]);
-    const mergedOutputImages = uniq([...(base.output_images || []), ...(incoming.output_images || [])]);
-
-    const mergeAttachments = (a?: FileAttachment[], b?: FileAttachment[]) => {
-      const out: FileAttachment[] = [];
-      const seen = new Set<string>();
-      for (const item of [...(a || []), ...(b || [])]) {
-        const k = `${item?.url || ''}|${item?.path || ''}|${item?.name || ''}`;
-        if (!k || seen.has(k)) continue;
-        seen.add(k);
-        out.push(item);
-      }
-      return out;
-    };
-
-    const mergeAudio = (a?: Array<{ url: string; mime: string }>, b?: Array<{ url: string; mime: string }>) => {
-      const out: Array<{ url: string; mime: string }> = [];
-      const seen = new Set<string>();
-      for (const item of [...(a || []), ...(b || [])]) {
-        const k = `${item?.url || ''}|${item?.mime || ''}`;
-        if (!item?.url || seen.has(k)) continue;
-        seen.add(k);
-        out.push(item);
-      }
-      return out;
-    };
-
-    const mergedAttachments = mergeAttachments(base.attachments, incoming.attachments);
-    const mergedAudio = mergeAudio(base.output_audio, incoming.output_audio);
-
-    return {
-      ...base,
-      ...incoming,
-      content: (incoming.content && incoming.content.trim().length > 0) ? incoming.content : base.content,
-      images: mergedImages.length > 0 ? mergedImages : undefined,
-      attachments: mergedAttachments.length > 0 ? mergedAttachments : undefined,
-      output_images: mergedOutputImages.length > 0 ? mergedOutputImages : undefined,
-      output_audio: mergedAudio.length > 0 ? mergedAudio : undefined,
-      message_id: incoming.message_id || base.message_id,
-      type: incoming.type || base.type,
-      timestamp: incoming.timestamp || base.timestamp,
-    };
-  }
-
-  /**
-   * Merge existing timeline into a fresh snapshot WITHOUT importing unmatched old messages.
-   *
-   * Why: unmatched old messages may belong to a different session (race before snapshot arrives),
-   * which causes cross-session mixing after refresh.
-   */
-  function _mergeTimelineByMessageIdentity(prev: TimelineEntry[], snapshot: TimelineEntry[]): TimelineEntry[] {
-    const next = [...snapshot];
-    const msgIndex = new Map<string, number>();
-
-    next.forEach((e, i) => {
-      if (e.kind === 'message') {
-        msgIndex.set(_messageIdentityKey(e.data as ChatMessage), i);
-      }
-    });
-
-    // If snapshot has no identifiable messages yet, trust snapshot directly.
-    if (msgIndex.size === 0) {
-      return next;
-    }
-
-    for (const e of prev) {
-      if (e.kind !== 'message') continue;
-      const key = _messageIdentityKey(e.data as ChatMessage);
-      if (!key) continue;
-      const idx = msgIndex.get(key);
-      if (idx === undefined) {
-        // Intentionally skip unmatched old messages to avoid cross-session contamination.
-        continue;
-      }
-      const merged = _mergeChatMessage(next[idx].data as ChatMessage, e.data as ChatMessage);
-      next[idx] = { ...next[idx], data: merged } as TimelineEntry;
-    }
-
-    return next;
-  }
-
-  /**
-   * After context compression, the disk snapshot is authoritative (archived
-   * turns are already flattened into the normal timeline). Keep only
-   * in-flight / optimistic live entries that are not yet on disk.
-   */
-  function _mergeCompressionHydration(
-    prev: TimelineEntry[],
-    snapshot: TimelineEntry[],
-  ): TimelineEntry[] {
-    const snapFlat = flattenArchivedSections(snapshot);
-    const prevFlat = flattenArchivedSections(prev);
-
-    const collectMessageKeys = (entries: TimelineEntry[], into: Set<string>) => {
-      for (const e of entries) {
-        if (e.kind !== 'message') continue;
-        const k = _messageIdentityKey(e.data as ChatMessage);
-        if (k) into.add(k);
-      }
-    };
-
-    const snapLiveKeys = new Set<string>();
-    collectMessageKeys(snapFlat, snapLiveKeys);
-
-    // Snapshot is the post-compress truth (already includes former archived turns).
-    let next = [...snapFlat];
-
-    for (const e of prevFlat) {
-      if (e.kind === 'message') {
-        const k = _messageIdentityKey(e.data as ChatMessage);
-        if (!k) continue;
-        if (snapLiveKeys.has(k)) continue;
-        // Optimistic message not yet flushed to disk — keep at the end.
-        next.push(e);
-        snapLiveKeys.add(k);
-        continue;
-      }
-      if (e.kind === 'workflow') {
-        const wf = e.data;
-        if (wf.completed) continue;
-        const hasNew = wf.events.some((evt) => {
-          const tk = workflowToolEventKey(evt);
-          if (!tk) return evt.type === 'summary_stream';
-          return !timelineHasToolEvent(next, evt);
-        });
-        if (!hasNew) continue;
-        const filteredEvents = wf.events.filter((evt) => {
-          const tk = workflowToolEventKey(evt);
-          if (!tk) return evt.type === 'summary_stream';
-          return !timelineHasToolEvent(next, evt);
-        });
-        if (filteredEvents.length === 0) continue;
-        next.push({
-          kind: 'workflow',
-          data: { ...wf, events: filteredEvents },
-          _uid: e._uid || genUID(),
-        });
-      }
-    }
-
-    return next;
-  }
-
-
-
+  useAgentWebSocket(agentId, {
+    SUMMARY_STREAM_DEBUG,
+    agentCurrentSessionIdRef,
+    agentStatus,
+    applyTokenStats,
+    busySessionsRef,
+    cancelStreamFlush,
+    clearOutboundTurnPending,
+    clearSessionRunState,
+    compressionHydrationPendingRef,
+    currentCardName,
+    currentSessionId,
+    currentSessionIdRef,
+    diskSessionLoadedRef,
+    eventSidKey,
+    eventSidRef,
+    filePushDedupRef,
+    finalizeWorkflowAndAddMessage,
+    finalizingBySidRef,
+    historyOffsetRef,
+    hydrateCurrentSessionRef,
+    isHydratingSessionRef,
+    isSidFinalizing,
+    isSidStopped,
+    isStreamingBySessionRef,
+    loadMoreHistory,
+    loadingSessionIdRef,
+    modelSwitchRevertRef,
+    newSessionGuardRef,
+    newSessionPendingRef,
+    pageActiveRef,
+    pendingFilePushesRef,
+    pendingHydrationFinalsRef,
+    pendingHydrationMediaRef,
+    pendingHydrationWorkflowEventsRef,
+    pendingPrimarySessionIdRef,
+    pendingSessionTitleRef,
+    pinComposerLanding,
+    reasoningEffort,
+    refreshSessionChangesRef,
+    scheduleRefreshSessionChanges,
+    scheduleStreamFlush,
+    sessionBootstrapDoneRef,
+    sessionBootstrapped,
+    sessionReloadSeqRef,
+    sessionReloadTimerRef,
+    setActiveGoal,
+    setAgentMode,
+    setAgentModeBySession,
+    setAgentStatus,
+    setBusySessions,
+    setCardNameBySession,
+    setCurrentCardName,
+    setCurrentSessionId,
+    setFollowupSuggestions,
+    setHasMoreHistory,
+    setIsCompressingContext,
+    setIsLoadingSession,
+    setIsStreaming,
+    setIsStreamingBySession,
+    setModeApprovals,
+    setModelName,
+    setModelNameBySession,
+    setOptionsProposals,
+    setPendingPrimarySessionId,
+    setPlanSteps,
+    setPrimarySessionId,
+    setReasoningBySession,
+    setReasoningEffort,
+    setSessionBootstrapped,
+    setSessionExpired,
+    setSessionLoadingLabel,
+    setSessionTitleUpdate,
+    setShellStreams,
+    setStreamingText,
+    setStreamingTextBySession,
+    setSwitchingModel,
+    setSwitchingModelBySession,
+    setTimeline,
+    setToolsStage,
+    setTurnStartedMs,
+    setViewingHistorySession,
+    setWsStatus,
+    streamUiFlushTimerRef,
+    streamingTextBySessionRef,
+    streamingTextRef,
+    summaryStreamCacheRef,
+    turnStartedMs,
+    turnStartedMsRef,
+    userStoppedBySidRef,
+    viewingHistorySessionRef,
+    wsServiceRef,
+    voicePageHideRef,
+    voiceResumeProbeRef,
+    voiceCaptionRef,
+    speakFinalReplyRef,
+    lastAutoSpokenRef,
+    clearVoiceConnectTimer,
+    armVoiceConnectTimeout,
+    setVoiceBindings,
+    setVoicePanelOpen,
+    setVoiceRealtimeStatus,
+    setVoiceRealtimeError,
+    setVoiceTranscript,
+    stopAutoTts,
+    t,
+  });
 
   // ---- Actions ----
 
@@ -5192,6 +1838,21 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     ],
   );
 
+  /**
+   * A new user turn consumes the agent's follow-up offer (`suggest_followups`).
+   *
+   * Fired from both send entry points (`handleSend`, `handlePaneComposerSend`)
+   * the moment the user commits a message, instead of waiting for the server's
+   * `turn_start` echo — that echo is a whole round-trip away (the chips visibly
+   * outlived the Enter keypress) and never arrives at all for a message parked
+   * in the pending queue. Once consumed the offer is gone for good; only a
+   * fresh `suggest_followups` from the next answer may bring chips back.
+   *
+   * The `turn_start` clear in `useAgentWebSocket` stays as the backstop for
+   * turns this UI does not originate (scheduled tasks, self-continuation).
+   */
+  const consumeFollowupOffer = useCallback(() => setFollowupSuggestions([]), []);
+
   const deliverMessage = useCallback((
     payload: {
       text: string;
@@ -5365,7 +2026,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
       }
     }
 
-    _logMediaDebug('handleSend-payload', {
+    logMediaDebug('handleSend-payload', {
       text,
       wsTextHead: wsText.slice(0, 200),
       allImages,
@@ -5472,6 +2133,9 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
   }, [currentSessionId, agentId]);
 
   const handleSend = () => {
+    // A user send consumes the agent's follow-up offer (see
+    // `consumeFollowupOffer`), whether the message goes out now or is parked.
+    consumeFollowupOffer();
     // /goal composer path (before normal send)
     const slash = parseSlashInput(inputText);
     if (slash?.kind === 'plan') {
@@ -5865,15 +2529,30 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     const currentText = sid
       ? (streamingTextBySessionRef.current[sid] || (sid === (currentSessionIdRef.current || '') ? streamingTextRef.current : ''))
       : streamingTextRef.current;
+    // Stamp elapsed so the stopped message shows the 消耗 badge (duration
+    // only — billed tokens are unknown at abort; a real turn_usage would
+    // overwrite if the backend ever sends one).
+    const stopStartedMs = turnStartedMsRef.current || 0;
+    const stopElapsedMs = stopStartedMs > 0 ? Math.max(0, Date.now() - stopStartedMs) : 0;
     const stoppedMsg: ChatMessage = {
       role: 'assistant',
       content: (currentText ? `${currentText}\n\n` : '') + '[Stopped]',
       timestamp: new Date().toISOString(),
+      ...(stopElapsedMs > 0
+        ? {
+            usage: {
+              input_tokens: 0,
+              output_tokens: 0,
+              total_tokens: 0,
+              elapsed_ms: stopElapsedMs,
+            },
+          }
+        : {}),
     };
     // Seal every incomplete workflow on this sid (not just the last block).
     setTimeline((prev) => {
       const sealed = sealIncompleteWorkflows(prev, {
-        cancelOpenTools: 'Cancelled: stopped by user',
+        cancelOpenTools: 'Cancelled: still running when the turn stopped',
         fallbackStartedMs: turnStartedMsRef.current,
       });
       return finalizeWorkflowAndAddMessage(sealed, stoppedMsg);
@@ -5935,6 +2614,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
         setTimeline([]);
         setShellStreams({});
         setOptionsProposals([]);
+        setFollowupSuggestions([]);
         setModeApprovals([]);
         setActiveGoal(null);
         setPendingSkill(null);
@@ -6002,6 +2682,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     setTimeline([]);
     setShellStreams({});
     setOptionsProposals([]);
+    setFollowupSuggestions([]);
     setModeApprovals([]);
     setActiveGoal(null);
     setPendingSkill(null);
@@ -7025,6 +3706,9 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     opts?: { stay?: boolean },
   ) => {
     if (!activeWorkspace) return;
+    // A user send consumes the agent's follow-up offer (see
+    // `consumeFollowupOffer`), whether the message goes out now or is parked.
+    consumeFollowupOffer();
     // First real send leaves the centered new-session landing and promotes
     // the draft into the sidebar session list.
     unpinComposerLanding(sessionId);
@@ -7411,6 +4095,17 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
         landing={isSessionComposerLanding(sessionId)}
         disabled={isLoadingSession || (!sessionBootstrapped && !composerLandingSessionsRef.current.has(sessionId))}
         busy={isSessionBusy(sessionId)}
+        terminalsPanel={
+          runningShellJobs.length > 0 ? (
+            <ShellTerminalsBar
+              jobs={runningShellJobs}
+              onStopJob={(job) => {
+                if (!job.jobId) return;
+                wsServiceRef.current?.stopSessionJob(job.jobId, job.sessionId || sessionId);
+              }}
+            />
+          ) : null
+        }
         agentMode={agentModeBySession[sessionId] ?? agentMode}
         onModeChange={(mode) => {
           setAgentModeBySession((prev) => ({ ...prev, [sessionId]: mode }));
@@ -7420,9 +4115,33 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
           if (focusedPaneId !== paneId) return null;
           const pendingModes = modeApprovals.filter((a) => a.status === 'pending');
           const pendingOptions = optionsProposals.filter((p) => p.status === 'pending');
-          if (pendingModes.length === 0 && pendingOptions.length === 0) return null;
+          if (
+            pendingModes.length === 0 &&
+            pendingOptions.length === 0 &&
+            followupSuggestions.length === 0
+          ) {
+            return null;
+          }
           return (
             <>
+              {followupSuggestions.length > 0 && (
+                <div className="mb-2">
+                  <FollowupSuggestions
+                    suggestions={followupSuggestions}
+                    onPick={(text) => {
+                      // No local clear here: tapping is just another send, and
+                      // `handlePaneComposerSend` consumes the offer for every
+                      // send path (single owner — see `consumeFollowupOffer`).
+                      void handlePaneComposerSend(
+                        paneId,
+                        sessionId,
+                        { text, images: [], attachments: [] },
+                        { stay: true },
+                      );
+                    }}
+                  />
+                </div>
+              )}
               {pendingModes.map((req) => (
                 <ModeSwitchApprovalCard
                   key={req.id}
@@ -7532,7 +4251,18 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
         }}
         cwd={agentCwd || defaultCwd}
         tokenStats={resolveTokenStatsForSession(sessionId)}
-        onViewReport={() => setShowContextViewer(true)}
+        onViewReport={() => {
+          // 详情面板跟随「这个 composer 所属的会话」——tab 模式下它往往不是
+          // currentSessionId（切 tab 不回写焦点会话），重启后更是停在启动会话。
+          setContextViewerSessionId(sessionId);
+          setShowContextViewer(true);
+          // 非焦点会话可能还没有 per-session 统计；不请求的话
+          // resolveTokenStatsForSession 会回退到 agentTokenStats——
+          // 那是上一次活跃会话的数字，恰好复刻本 bug 的另一半。
+          if (sessionId && sessionId !== currentSessionIdRef.current) {
+            requestSessionTokenStats(sessionId);
+          }
+        }}
         onCompressContext={handleCompressContext}
         compressing={isCompressingContext}
         compressDisabled={isLoadingSession || isCompressingContext}
@@ -7683,6 +4413,19 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     if (!activeWorkspace) return;
     const pane = focusedPaneId;
     openContentTab(agentId, activeWorkspace.id, { kind: 'scheduled-tasks', id: 'scheduled-tasks' }, pane);
+    if (pane) setFocusedPane(agentId, pane);
+    refreshWsSnap();
+  };
+
+  const handleOpenTasks = () => {
+    setLibraryView(null);
+    if (isCompactLayout) {
+      setSessionSidebarOpen(false);
+      setFilesPanelOpen(false);
+    }
+    if (!activeWorkspace) return;
+    const pane = focusedPaneId;
+    openContentTab(agentId, activeWorkspace.id, { kind: 'tasks', id: 'tasks' }, pane);
     if (pane) setFocusedPane(agentId, pane);
     refreshWsSnap();
   };
@@ -7999,6 +4742,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
         onOpenPlugins={handleOpenPlugins}
         onOpenRoles={handleOpenRoles}
         onOpenScheduledTasks={handleOpenScheduledTasks}
+        onOpenTasks={handleOpenTasks}
         onOpenSearch={openSessionSearch}
         skillsActive={libraryView === 'skills'}
         pluginsActive={libraryView === 'plugins'}
@@ -8049,14 +4793,17 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
         <ContextViewer
           agentId={agentId}
           agentName={agentProfile?.agent_name || agentId}
-          sessionId={currentSessionId}
+          sessionId={contextViewerSessionId ?? currentSessionId}
           provider={agentProvider}
           apiProtocol={agentApiProtocol}
           model={modelName}
           cwd={agentCwd}
-          tokenStats={resolveTokenStatsForSession(currentSessionId)}
-          entries={contextEntries}
-          onClose={() => setShowContextViewer(false)}
+          tokenStats={resolveTokenStatsForSession(contextViewerSessionId ?? currentSessionId)}
+          entries={contextViewerEntries}
+          onClose={() => {
+            setShowContextViewer(false);
+            setContextViewerSessionId(null);
+          }}
         />
       )}
 
@@ -8210,40 +4957,17 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
             </div>
           </div>
         )}
-        {/* Scroll buttons on outer panel edge */}
-        {(showScrollTop || showScrollBottom) && (
-          <div
-            className="pointer-events-none absolute right-1 bottom-4 z-20 transition-opacity duration-300"
-            style={{ opacity: scrollActive ? 1 : 0, pointerEvents: scrollActive ? undefined : 'none' }}
-          >
-            <div className="pointer-events-auto flex flex-col gap-2">
-              {showScrollTop && (
-                <button
-                  onClick={scrollToTop}
-                  className="w-8 h-8 bg-panel border border-border/70 rounded-full shadow-md flex items-center justify-center text-textMuted hover:text-primary hover:bg-primary/10 transition-colors"
-                  title="Scroll to top"
-                >
-                  <ChevronUp size={18} />
-                </button>
-              )}
-              {showScrollBottom && (
-                <button
-                  onClick={scrollToBottom}
-                  className="w-8 h-8 bg-panel border border-border/70 rounded-full shadow-md flex items-center justify-center text-textMuted hover:text-primary hover:bg-primary/10 transition-colors"
-                  title="Scroll to bottom"
-                >
-                  <ChevronDown size={18} />
-                </button>
-              )}
-            </div>
-          </div>
-        )}
+        <ChatScrollHud
+          scrollRef={messagesContainerRef}
+          onNearTop={loadMoreHistory}
+          nearTopEnabled={hasMoreHistory && !isLoadingMore}
+          onUnpin={markUnpinnedFromBottom}
+        />
         <ChatTimeline
           scrollRef={messagesContainerRef}
           entries={displayTimeline}
           className="h-full overflow-y-auto px-2 sm:px-4 py-3 sm:py-4 relative"
           style={{ minHeight: 0 }}
-          onScroll={handleMessagesScroll}
           columnClass={soloColumnClass}
           unpinRef={userScrolledRef}
           freezeRef={textSelectFrozenRef}
@@ -8291,13 +5015,37 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
                     ? () => requestWithdrawUserMessage(entryKey, entry.data, currentSessionId || undefined)
                     : undefined,
               };
+              // Files created/modified by the workflow that produced this reply
+              // (shown below the reply once the turn completes).
+              const turnChangedFiles =
+                entry.data.role === 'assistant'
+                  ? collectTurnChangedFilesBefore(displayTimeline, i)
+                  : [];
               // Classic: visualization iframes sit below the final assistant reply
               // (tool stream keeps the normal tool_call row only).
               const replyEmbeds: HtmlEmbedPayload[] =
                 !isSolo && entry.data.role === 'assistant'
                   ? (htmlEmbedsByAssistantIndex?.get(i) ?? [])
                   : [];
-              if (replyEmbeds.length === 0) {
+              const turnFilesCard =
+                turnChangedFiles.length > 0 ? (
+                  <TurnChangedFilesCard
+                    files={turnChangedFiles}
+                    onOpenFile={openProjectFile}
+                    onViewAll={() => {
+                      setFilesPanelOpen(true);
+                      if (isCompactLayout) setSessionSidebarOpen(false);
+                      try {
+                        localStorage.setItem('opensquad.filesPanel.open', 'true');
+                      } catch {
+                        /* ignore */
+                      }
+                      setFocusChangedNonce(Date.now());
+                    }}
+                    viewAllLabel={t('aiChat.turnFiles.viewAll')}
+                  />
+                ) : null;
+              if (replyEmbeds.length === 0 && !turnFilesCard) {
                 return (
                   <TimelineRow key={entryKey} lockLayout={lockLayout}>
                     {isSolo
@@ -8311,16 +5059,19 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
                   {isSolo
                     ? <SoloMessage {...msgProps} anchorId={entryKey} />
                     : <MessageBubble {...msgProps} anchorId={entryKey} />}
-                  <div className="w-full mt-1 mb-4" data-html-embeds-below-reply="1">
-                    {replyEmbeds.map((payload, ei) => (
-                      <HtmlEmbedBlock
-                        key={payload.id || payload.filename || `viz-${ei}`}
-                        payload={payload}
-                        variant="seamless"
-                        className="my-0"
-                      />
-                    ))}
-                  </div>
+                  {(replyEmbeds.length > 0 || turnFilesCard) && (
+                    <div className="w-full mt-1 mb-4" data-html-embeds-below-reply={replyEmbeds.length > 0 ? '1' : undefined}>
+                      {replyEmbeds.map((payload, ei) => (
+                        <HtmlEmbedBlock
+                          key={payload.id || payload.filename || `viz-${ei}`}
+                          payload={payload}
+                          variant="seamless"
+                          className="my-0"
+                        />
+                      ))}
+                      {turnFilesCard}
+                    </div>
+                  )}
                 </TimelineRow>
               );
             }
@@ -8333,35 +5084,34 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
               })();
               // Classic + Solo: document-style activity rows (thinking / tools)
               const curBlock = (entry as { kind: 'workflow'; data: WorkflowBlock }).data;
-              if (
-                i > 0 &&
-                displayTimeline[i - 1].kind === 'workflow' &&
-                !(displayTimeline[i - 1] as { kind: 'workflow'; data: WorkflowBlock }).data.completed &&
-                !curBlock.completed
-              ) {
+              if (i > 0 && displayTimeline[i - 1].kind === 'workflow') {
                 return null;
               }
               const blocks: WorkflowBlock[] = [curBlock];
-              if (!curBlock.completed) {
-                let j = i + 1;
-                while (
-                  j < displayTimeline.length &&
-                  displayTimeline[j].kind === 'workflow' &&
-                  !(displayTimeline[j] as { kind: 'workflow'; data: WorkflowBlock }).data.completed
-                ) {
-                  blocks.push((displayTimeline[j] as { kind: 'workflow'; data: WorkflowBlock }).data);
-                  j += 1;
-                }
+              let j = i + 1;
+              while (j < displayTimeline.length && displayTimeline[j].kind === 'workflow') {
+                blocks.push((displayTimeline[j] as { kind: 'workflow'; data: WorkflowBlock }).data);
+                j += 1;
               }
               const merged = blocks.length > 1 ? mergeWorkflowBlocks(blocks) : curBlock;
               const groupHasIncomplete = !merged.completed;
+              // 任务已交付判定：该工作流组之后紧跟 assistant 最终回复 →
+              // 即使块未密封/有未闭合工具，也停止"执行中"动画与流光。
+              const nextAfterGroup = displayTimeline[j];
+              const turnDelivered =
+                !!nextAfterGroup
+                && nextAfterGroup.kind === 'message'
+                && (nextAfterGroup.data as ChatMessage).role === 'assistant'
+                && typeof (nextAfterGroup.data as ChatMessage).content === 'string'
+                && !!(nextAfterGroup.data as ChatMessage).content.trim();
               const turnMs = groupHasIncomplete
                 ? turnStartedMs
                 : (!isSolo && i === lastIncompleteIdx ? turnStartedMs : undefined);
               return (
-                <TimelineRow key={entryKey} lockLayout={lockLayout || groupHasIncomplete}>
+                <TimelineRow key={entryKey} lockLayout={lockLayout || (groupHasIncomplete && !turnDelivered)}>
                   <SoloActivityRow
                     block={merged}
+                    turnDelivered={turnDelivered}
                     expandLevel={workflowExpandLevel}
                     turnStartedMs={turnMs}
                     shellStreams={shellStreams}
@@ -8390,6 +5140,21 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
                 <div key={entryKey} className="flex items-center gap-1.5 py-0.5 my-0.5 mx-0">
                   <div className="flex-1 h-px bg-border/25" />
                   {icon}
+                  <span className="text-[10px] text-textMuted/45 font-mono shrink-0">{label}</span>
+                  <div className="flex-1 h-px bg-border/25" />
+                </div>
+              );
+            }
+            if (entry.kind === 'model_switch') {
+              // 模型切换提示（无工作流时的独立轻量条目，不属于工作流统计）。
+              const sw = entry.data;
+              const label = sw.model
+                ? t('aiChat.modelSwitched', { model: sw.model })
+                : sw.text;
+              return (
+                <div key={entryKey} className="flex items-center gap-1.5 py-0.5 my-0.5 mx-0">
+                  <div className="flex-1 h-px bg-border/25" />
+                  <RefreshCw size={11} className="text-textMuted/50 shrink-0" />
                   <span className="text-[10px] text-textMuted/45 font-mono shrink-0">{label}</span>
                   <div className="flex-1 h-px bg-border/25" />
                 </div>
@@ -8460,6 +5225,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
                         <SoloActivityRow
                           key={nestedKey}
                           block={nested.data}
+                          turnDelivered
                           expandLevel={workflowExpandLevel}
                           turnStartedMs={undefined}
                           shellStreams={shellStreams}
@@ -8583,21 +5349,12 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
           </div>
         )}
 
-        {/* Classic only: scroll-to-bottom centered above composer */}
-        {!isSolo && showScrollBottom && (
-          <div className="relative flex-shrink-0 z-20 pointer-events-none h-0">
-            <div className={`${soloColumnClass} relative`}>
-              <button
-                type="button"
-                onClick={scrollToBottom}
-                className="pointer-events-auto absolute left-1/2 -translate-x-1/2 -top-10 w-8 h-8 rounded-full bg-panel border border-border/70 shadow-[0_2px_10px_rgba(0,0,0,0.08)] flex items-center justify-center text-textMuted hover:text-primary hover:bg-primary/10 transition-opacity duration-300 cursor-pointer"
-                style={{ opacity: scrollActive ? 1 : 0.55 }}
-                title="滚动到底部"
-              >
-                <ChevronDown size={18} className="text-gray-500" />
-              </button>
-            </div>
-          </div>
+        {!isSolo && (
+          <ChatScrollComposerHint
+            scrollRef={messagesContainerRef}
+            columnClass={soloColumnClass}
+            onUnpin={markUnpinnedFromBottom}
+          />
         )}
 
       </div>

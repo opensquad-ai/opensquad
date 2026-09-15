@@ -13,6 +13,7 @@ import {
   ThemePrefs,
   ThemePresetId,
   formatContrastLabel,
+  formatRatioLabel,
   getPresetPrimary,
   hexToRgb,
   hslToHex,
@@ -20,7 +21,12 @@ import {
   randomPrimary,
   rgbToHsl,
 } from '../utils/themeEngine';
-import { loadThemePrefs, updateThemePrefs } from '../utils/themeStore';
+import {
+  appearanceSliderPatch,
+  getActivePalette,
+  loadThemePrefs,
+  updateThemePrefs,
+} from '../utils/themeStore';
 
 const MODE_OPTIONS: { id: AppearanceMode; icon: React.ReactNode; labelKey: string }[] = [
   { id: 'light', icon: <Sun size={15} strokeWidth={1.75} />, labelKey: 'themeSettings.mode.light' },
@@ -176,6 +182,11 @@ export const ThemeSettingsPanel: React.FC = () => {
   const contrastPct = ((prefs.contrast - CONTRAST_MIN) / (CONTRAST_MAX - CONTRAST_MIN)) * 100;
   const fontPct = ((prefs.fontSize - FONT_SIZE_MIN) / (FONT_SIZE_MAX - FONT_SIZE_MIN)) * 100;
 
+  // Read the palette `patch()` just applied so the ratio below is a *measured*
+  // value rather than an echo of the requested target. `updateThemePrefs`
+  // applies synchronously, so this is always fresh for the current prefs.
+  const measured = getActivePalette();
+
   return (
     <div className="space-y-6">
       <section>
@@ -286,12 +297,11 @@ export const ThemeSettingsPanel: React.FC = () => {
               min={PURITY_MIN}
               max={PURITY_MAX}
               value={prefs.purity}
-              onChange={(e) =>
-                patch({
-                  purity: Number(e.target.value),
-                  preset: prefs.preset === 'random' ? 'random' : 'custom',
-                })
-              }
+              // Purity only tints the preset's surfaces toward the accent — it
+              // must NOT rewrite the preset. Doing so discarded the preset's
+              // hand-tuned surface pair and swapped in accent-derived ones, so
+              // dragging this slider visibly repainted the whole page.
+              onChange={(e) => patch(appearanceSliderPatch('purity', Number(e.target.value)))}
               className="theme-slider flex-1"
               style={
                 {
@@ -313,12 +323,9 @@ export const ThemeSettingsPanel: React.FC = () => {
               max={CONTRAST_MAX}
               step={0.1}
               value={prefs.contrast}
-              onChange={(e) =>
-                patch({
-                  contrast: Number(e.target.value),
-                  preset: prefs.preset === 'random' ? 'random' : 'custom',
-                })
-              }
+              // Same reasoning as the purity slider: contrast is orthogonal to
+              // surface selection, so it must not deselect the preset.
+              onChange={(e) => patch(appearanceSliderPatch('contrast', Number(e.target.value)))}
               className="theme-slider flex-1"
               style={
                 {
@@ -327,8 +334,11 @@ export const ThemeSettingsPanel: React.FC = () => {
                 } as React.CSSProperties
               }
             />
-            <span className="w-12 text-right font-mono text-xs text-textMuted">
-              {formatContrastLabel(prefs.contrast)}
+            <span
+              className="w-12 text-right font-mono text-xs text-textMuted"
+              title={t('themeSettings.contrastHint')}
+            >
+              {measured ? formatRatioLabel(measured.contrastMain) : formatContrastLabel(prefs.contrast)}
             </span>
           </div>
         </div>
@@ -364,7 +374,7 @@ export const ThemeSettingsPanel: React.FC = () => {
             max={FONT_SIZE_MAX}
             step={0.01}
             value={prefs.fontSize}
-            onChange={(e) => patch({ fontSize: Number(e.target.value) })}
+            onChange={(e) => patch(appearanceSliderPatch('fontSize', Number(e.target.value)))}
             className="theme-slider flex-1"
             style={
               {

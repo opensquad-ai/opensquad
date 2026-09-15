@@ -27,7 +27,8 @@ import {
   Redo2,
 } from 'lucide-react';
 import { getLangForFile, highlightLine, HLJS_THEME_CSS } from '../../utils/codeHighlight';
-import { AI_MARKDOWN_CLASS, renderFencedMarkdown } from '../../utils/fencedMarkdown';
+import { FILE_MARKDOWN_CLASS, renderFencedMarkdown } from '../../utils/fencedMarkdown';
+import { FileIndentGuides } from './FileIndentGuides';
 
 export type FileDocMode = 'rich' | 'source' | 'preview';
 
@@ -140,25 +141,26 @@ const SourceEditor: React.FC<{
   );
 
   return (
-    <div className="flex-1 min-h-0 flex bg-[#0d1117] overflow-hidden">
+    <div className="flex-1 min-h-0 flex file-code-surface overflow-hidden">
       <style>{HLJS_THEME_CSS}</style>
       {/* Line gutter — scroll synced with editor; soft-wrap may slightly drift on very long lines */}
       <div
         ref={gutterRef}
         aria-hidden
-        className="shrink-0 overflow-hidden select-none border-r border-gray-800 bg-[#0d1117]"
+        className="shrink-0 overflow-hidden select-none border-r border-border/70"
       >
-        <div className="py-2 pl-2 pr-2 text-[10px] leading-5 text-gray-600 tabular-nums font-mono text-right min-w-[2.25rem]">
+        <div className="py-2 pl-2 pr-2 text-[10px] leading-5 text-textMuted tabular-nums font-mono text-right min-w-[2.25rem]">
           {lines.map((_, i) => (
             <div key={i}>{i + 1}</div>
           ))}
         </div>
       </div>
       <div className="relative flex-1 min-w-0 min-h-0">
+        <FileIndentGuides padLeft="0.5rem" text={value} />
         <pre
           ref={preRef}
           aria-hidden
-          className={`absolute inset-0 overflow-auto pointer-events-none text-gray-200 [scrollbar-width:none] [-ms-overflow-style:none] [&::-webkit-scrollbar]:hidden ${SOURCE_CODE_CLASS}`}
+          className={`absolute inset-0 z-[1] overflow-auto pointer-events-none text-textMain [scrollbar-width:none] [-ms-overflow-style:none] [&::-webkit-scrollbar]:hidden ${SOURCE_CODE_CLASS}`}
           dangerouslySetInnerHTML={{ __html: highlightedHtml || '&nbsp;' }}
         />
         <textarea
@@ -172,7 +174,7 @@ const SourceEditor: React.FC<{
           onScroll={syncScroll}
           onKeyDown={onKeyDown}
           onChange={(e) => onChange(e.target.value)}
-          className={`absolute inset-0 w-full h-full resize-none overflow-auto bg-transparent outline-none border-0 caret-white text-transparent selection:bg-sky-500/35 ${SOURCE_CODE_CLASS}`}
+          className={`absolute inset-0 z-[1] w-full h-full resize-none overflow-auto bg-transparent outline-none border-0 caret-textMain text-transparent selection:bg-sky-500/35 ${SOURCE_CODE_CLASS}`}
           style={{ WebkitTextFillColor: 'transparent', color: 'transparent' }}
         />
       </div>
@@ -194,10 +196,10 @@ const PreviewPane: React.FC<{ fileName: string; content: string; isMarkdown: boo
 
   if (isMarkdown) {
     return (
-      <div className="flex-1 min-h-0 overflow-auto bg-[#f7f5f0] dark:bg-[#0d1117]">
+      <div className="flex-1 min-h-0 overflow-auto bg-bgLight">
         <style>{HLJS_THEME_CSS}</style>
         <div
-          className={`${AI_MARKDOWN_CLASS} prose prose-sm dark:prose-invert max-w-3xl mx-auto break-words px-6 py-5 text-[13px] leading-relaxed text-textMain`}
+          className={`${FILE_MARKDOWN_CLASS} max-w-3xl mx-auto px-6 py-5 text-[13px] leading-relaxed text-textMain`}
           dangerouslySetInnerHTML={{ __html: mdHtml }}
         />
       </div>
@@ -205,16 +207,17 @@ const PreviewPane: React.FC<{ fileName: string; content: string; isMarkdown: boo
   }
 
   return (
-    <div className="flex-1 min-h-0 overflow-auto bg-[#0d1117] font-mono text-[11px] leading-5">
+    <div className="flex-1 min-h-0 overflow-auto file-code-surface font-mono text-[11px] leading-5">
       <style>{HLJS_THEME_CSS}</style>
-      <div className="min-w-full inline-block">
+      <div className="min-w-full inline-block relative">
+        <FileIndentGuides padLeft="calc(2.5rem + 0.5rem)" text={content} />
         {lines.map((line, i) => (
-          <div key={i} className="flex items-start hover:bg-primary/10">
-            <span className="select-none w-10 shrink-0 text-right pr-2 text-gray-600 tabular-nums text-[10px] border-r border-gray-800">
+          <div key={i} className="relative z-[1] flex items-start hover:bg-primary/10">
+            <span className="select-none w-10 shrink-0 text-right pr-2 text-textMuted tabular-nums text-[10px] border-r border-border/70">
               {i + 1}
             </span>
             <span
-              className="flex-1 min-w-0 whitespace-pre-wrap break-words pl-2 text-gray-200"
+              className="flex-1 min-w-0 whitespace-pre-wrap break-words pl-2 text-textMain"
               dangerouslySetInnerHTML={{ __html: highlightLine(line, lang) }}
             />
           </div>
@@ -333,7 +336,7 @@ export const FileDocumentEditor: React.FC<FileDocumentEditorProps> = ({
 
   // rich
   return (
-    <div className="flex-1 min-h-0 flex flex-col bg-[#f7f5f0] dark:bg-[#161b22]">
+    <div className="flex-1 min-h-0 flex flex-col bg-bgLight">
       {!readOnly ? (
         <div className="flex-shrink-0 flex flex-wrap items-center gap-0.5 px-2 py-1.5 border-b border-border/70 bg-panel">
           <ToolBtn title="撤销" disabled={!editor?.can().undo()} onClick={() => editor?.chain().focus().undo().run()}>

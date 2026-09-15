@@ -7,9 +7,13 @@ import re
 import sys
 import threading
 import time
-import urllib.request
 
 from playwright.async_api import Browser, BrowserContext, async_playwright
+
+try:
+    from plugins._service_runtime import open_local
+except ImportError:
+    from _service_runtime import open_local
 
 try:
     from .bing_http import export_cookies_from_storage_state, fetch_serp_http
@@ -68,7 +72,9 @@ _rerank_call_lock = threading.Lock()
 def _rerank_cache_key(queries: list[str], documents: list[str]) -> str:
     import hashlib
 
-    h = hashlib.sha1()
+    # SHA1 here is a *cache key* only (never auth or integrity), so state that
+    # explicitly via usedforsecurity=False. Also silences bandit B324.
+    h = hashlib.sha1(usedforsecurity=False)
     for q, d in zip(queries, documents, strict=True):
         h.update(q.encode("utf-8", "replace"))
         h.update(b"\x00")
@@ -118,16 +124,18 @@ def _rerank_scores_sync(queries: list[str], documents: list[str], timeout: float
         return cached
 
     payload = json.dumps({"queries": queries, "documents": documents}).encode("utf-8")
-    req = urllib.request.Request(
-        f"{_RERANKER_URL}/rerank",
-        data=payload,
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
     try:
         # Serialize in-flight rerank calls: slow GPU batches must not stack.
         with _rerank_call_lock:
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
+            # open_local: an ambient HTTP_PROXY must not intercept this loopback
+            # call, or the reranker is unreachable and scores silently vanish.
+            with open_local(
+                f"{_RERANKER_URL}/rerank",
+                method="POST",
+                data=payload,
+                headers={"Content-Type": "application/json"},
+                timeout=timeout,
+            ) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
         scores = list(data.get("scores", []))
         if len(scores) != len(documents):

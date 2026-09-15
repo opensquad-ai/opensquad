@@ -7,6 +7,7 @@ import {
 import { skillAPI, SkillInfo, SkillSourceResponse, adminAPI, AdminAgent } from '../services/api';
 import { useTranslation } from 'react-i18next';
 import { marked } from 'marked';
+import { sanitizeHtml } from '../utils/safeHtml';
 import { OpenSquadLoader } from './OpenSquadLoader';
 
 interface SkillManagerPageProps {
@@ -292,7 +293,8 @@ const SkillDetailView: React.FC<{
   const renderedMd = useMemo(() => {
     if (!source?.skill_md) return '';
     try {
-      return marked.parse(source.skill_md) as string;
+      // skill_md comes from an installed skill package → untrusted.
+      return sanitizeHtml(marked.parse(source.skill_md) as string);
     } catch {
       return source.skill_md;
     }
@@ -497,7 +499,7 @@ const SkillDetailView: React.FC<{
                       prose-h1:text-xl prose-h2:text-lg prose-h3:text-base
                       prose-h1:border-b prose-h1:border-border prose-h1:pb-2
                       prose-ul:list-disc prose-ol:list-decimal"
-                    dangerouslySetInnerHTML={{ __html: marked.parse((source.other_sources || {})[activeTab]) as string }}
+                    dangerouslySetInnerHTML={{ __html: sanitizeHtml(marked.parse((source.other_sources || {})[activeTab]) as string) }}
                   />
                 ) : (
                   <pre className="bg-[#1e1e2e] border border-border rounded-xl p-4 text-sm font-mono text-textMuted overflow-x-auto whitespace-pre-wrap leading-relaxed">

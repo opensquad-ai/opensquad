@@ -247,6 +247,13 @@ class AIWebSocketService {
     this._sendCommand('stop_task', Object.keys(data).length ? data : undefined);
   }
 
+  /** Force-terminate a single background shell job (terminal bar trash icon). */
+  stopSessionJob(jobId: string, sessionId?: string) {
+    const data: Record<string, unknown> = { job_id: jobId };
+    if (sessionId) data.session_id = sessionId;
+    this._sendCommand('stop_session_job', data);
+  }
+
   /** Mark a session as the primary ingress target for external channels. */
   setPrimarySession(sessionId: string) {
     this._sendCommand('set_primary_session', { session_id: sessionId });

@@ -486,6 +486,59 @@ def _pid_exists(pid: int) -> bool:
         return False
 
 
+def _pid_command_line(pid: int) -> str:
+    try:
+        import psutil
+
+        return " ".join(psutil.Process(int(pid)).cmdline())
+    except Exception:
+        return ""
+
+
+def _pid_is_agent_boot(pid: int, agent_dir: str) -> bool:
+    """True when *pid* looks like an agents_boot for *agent_dir*."""
+    cmd = _pid_command_line(pid).lower()
+    if not cmd:
+        return False
+    needle = os.path.normcase(os.path.abspath(agent_dir)).lower()
+    if needle and needle in os.path.normcase(cmd):
+        return True
+    return ("agents_boot" in cmd or "--service agent" in cmd or "--agent-dir" in cmd) and os.path.basename(
+        agent_dir
+    ).lower() in cmd
+
+
+def reap_stale_agent_boot_lock(agent_dir: str, keep_pid: int | None = None) -> None:
+    """Drop leftover ``agents_boot.lock`` so auto-start is not blocked.
+
+    A previous launcher crash / force-kill leaves the lock file and often the
+    orphan process. The next spawn then hits the single-instance guard and
+    exits 0 — UI shows the agent never started.
+    """
+    lock_path = os.path.join(agent_dir, "data", "agents_boot.lock")
+    if not os.path.isfile(lock_path):
+        return
+    owner = 0
+    try:
+        with open(lock_path, encoding="utf-8") as f:
+            owner = int(f.read().strip() or "0")
+    except Exception:
+        owner = 0
+    if owner and keep_pid and owner == keep_pid:
+        return
+    if owner and _pid_exists(owner) and _pid_is_agent_boot(owner, agent_dir):
+        _log.info(
+            "[Launcher] Reaping leftover agent process (pid %s) holding %s",
+            owner,
+            lock_path,
+        )
+        _terminate_pid_tree(owner)
+    try:
+        os.remove(lock_path)
+    except OSError:
+        pass
+
+
 def _read_runtime_registry() -> list[dict]:
     _ensure_runtime_registry_dir()
     items: list[dict] = []
@@ -613,6 +666,8 @@ class AgentProcess:
         if self.process and self.process.poll() is None:
             _log.warning(f"[Launcher] {self.agent_name} already running (PID: {self.process.pid})")
             return False
+
+        reap_stale_agent_boot_lock(self.agent_dir)
 
         # Dynamic port assignment: use configured port if available; auto-find a free port if occupied or not configured
         target_port = self.config.get("web_server", {}).get("port")
@@ -860,11 +915,12 @@ class AgentProcess:
         if not self._health_port:
             return False  # Not discovered yet
         try:
-            import urllib.request
+            from opensquad.utils.local_http import open_local
 
             url = f"http://127.0.0.1:{self._health_port}/health"
-            req = urllib.request.Request(url, method="GET")
-            with urllib.request.urlopen(req, timeout=self.HEALTH_CHECK_TIMEOUT) as resp:
+            # open_local: an ambient HTTP_PROXY must not intercept loopback
+            # probes, or a healthy agent gets counted as failing and restarted.
+            with open_local(url, timeout=self.HEALTH_CHECK_TIMEOUT) as resp:
                 return resp.status == 200
         except Exception:
             return False
@@ -1455,11 +1511,11 @@ class PluginServiceProcess:
     def _check_health(self) -> bool:
         """Check whether the service is healthy via its /health endpoint."""
         try:
-            import urllib.request
+            from opensquad.utils.local_http import open_local
 
             url = f"http://127.0.0.1:{self.port}{self.health_endpoint}"
-            req = urllib.request.Request(url, method="GET")
-            with urllib.request.urlopen(req, timeout=3) as resp:
+            # open_local: see _check_agent_health -- bypass any ambient proxy.
+            with open_local(url, timeout=3) as resp:
                 return resp.status == 200
         except Exception:
             return False

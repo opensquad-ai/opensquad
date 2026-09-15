@@ -795,24 +795,9 @@ def _extract_text(response: str) -> str:
         return ""
     import re
 
-    text = response
-    # Remove thought/plan/think/tool_call/tool_result blocks
-    silent_blocks = [
-        "thought",
-        "plan",
-        "think",
-        "tool_call",
-        "tool_result",
-        "to_system",
-        "state",
-        "wake",
-        "sleep",
-        "title",
-        "option",
-        "arguments",
-    ]
-    for tag in silent_blocks:
-        text = re.sub(rf"<{tag}\b[^>]*>.*?</{tag}>", "", text, flags=re.DOTALL | re.IGNORECASE)
+    from opensquad.xml_parser import strip_silent_protocol_blocks
+
+    text = strip_silent_protocol_blocks(response)
     # Keep to_user content
     text = re.sub(r"<to_user\b[^>]*>(.*?)</to_user>", r"\1", text, flags=re.DOTALL | re.IGNORECASE)
     # Remove remaining tags

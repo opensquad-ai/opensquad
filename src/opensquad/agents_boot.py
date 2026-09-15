@@ -277,6 +277,7 @@ TOOL_MODULES = {
     "task_watch": "opensquad.tools.task_watch",
     "agent_mode": "opensquad.tools.agent_mode_tools",
     "choice_tools": "opensquad.tools.choice_tools",
+    "followup_tools": "opensquad.tools.followup_tools",
     "goal": "opensquad.tools.goal_tools",
     # --- Plugin-owned tools: resolved via PluginManager, not direct import here ---
     # websearch        -> plugins/websearch/
@@ -298,6 +299,7 @@ CORE_TOOLS = {
     "collaboration",
     "agent_mode",
     "choice_tools",
+    "followup_tools",
     "goal",
 }
 
@@ -314,6 +316,7 @@ MANDATORY_TOOLS = {
     "task_watch",
     "agent_mode",
     "choice_tools",
+    "followup_tools",
     "goal",
 }
 
@@ -1124,6 +1127,14 @@ def _agent_lock_path(agent_dir: str) -> str:
 
 
 def _agent_pid_alive(pid: int) -> bool:
+    if not pid or pid <= 0:
+        return False
+    try:
+        import psutil
+
+        return bool(psutil.pid_exists(int(pid)))
+    except ImportError:
+        pass
     try:
         os.kill(pid, 0)
         return True
@@ -1131,6 +1142,27 @@ def _agent_pid_alive(pid: int) -> bool:
         return False
     except Exception:
         return False
+
+
+def _lock_owner_is_this_agent(pid: int, agent_dir: str) -> bool:
+    """True only when *pid* is an agents_boot for *this* agent-dir.
+
+    A recycled Windows PID (notepad, leftover python, …) must not block
+    auto-start. If we cannot inspect the command line, treat as stale.
+    """
+    try:
+        import psutil
+
+        proc = psutil.Process(int(pid))
+        cmd = " ".join(proc.cmdline()).lower()
+    except Exception:
+        return False
+    needle = os.path.normcase(os.path.abspath(agent_dir)).lower()
+    if needle and needle in os.path.normcase(cmd):
+        return True
+    base = os.path.basename(agent_dir).lower()
+    looks_boot = "agents_boot" in cmd or "--service agent" in cmd or "--agent-dir" in cmd
+    return looks_boot and base in cmd
 
 
 def _acquire_agent_lock(agent_dir: str) -> bool:
@@ -1158,14 +1190,14 @@ def _acquire_agent_lock(agent_dir: str) -> bool:
                 owner = int(f.read().strip() or "0")
         except Exception:
             owner = 0
-        if owner and _agent_pid_alive(owner):
+        if owner and _agent_pid_alive(owner) and _lock_owner_is_this_agent(owner, agent_dir):
             print(
                 f"[agents_boot] Another agent process (pid {owner}) already boots "
                 f"{agent_dir}; exiting (single-instance guard).",
                 flush=True,
             )
             return False
-        # Stale lock (owner crashed/exited) — take it over.
+        # Stale lock (owner crashed, PID recycled, or not this agent) — take over.
         try:
             os.remove(lock_path)
         except OSError:

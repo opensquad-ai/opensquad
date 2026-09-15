@@ -14,6 +14,21 @@ import { AI_MARKDOWN_CLASS, renderFencedMarkdown } from '../../utils/fencedMarkd
 import { useMermaidHydration } from '../../hooks/useMermaidHydration';
 import { VoicePlayer } from './VoicePlayer';
 import { OpenSquadLoader } from '../OpenSquadLoader';
+import { HoverTooltip } from '../HoverTooltip';
+import { formatDuration, formatFullTimestamp, formatTokenCount, formatTokenExact } from '../../utils/usageFormat';
+
+/** Per-round billed token usage stamped on the round's final assistant message. */
+export interface MessageUsage {
+  /** Prompt tokens billed across the whole round (all tool rounds included). */
+  input_tokens: number;
+  /** Completion tokens billed across the whole round. */
+  output_tokens: number;
+  total_tokens: number;
+  /** Wall-clock duration of the round (user message → final reply). */
+  elapsed_ms: number;
+  started_ms?: number;
+  ended_ms?: number;
+}
 
 /** Structured file attachment on a ChatMessage */
 export interface FileAttachment {
@@ -44,9 +59,11 @@ export interface ChatMessage {
   output_images?: string[];
   /** Complex-task final report — UI folds prior agent process when set. */
   end_task?: boolean;
+  /** This round's total token cost (turn_usage event), rendered as the 消耗 badge. */
+  usage?: MessageUsage;
 }
 
-interface MessageBubbleProps {
+export interface MessageBubbleProps {
   message: ChatMessage;
   isStreaming?: boolean;
   /** Display name shown above the message */
@@ -94,6 +111,18 @@ function isPlausibleFileAttachmentName(name: string): boolean {
   return true;
 }
 
+/**
+ * Coerce a message payload to displayable text.
+ *
+ * Providers and plugins occasionally deliver `null`, or a multimodal content
+ * array, instead of a string. Passing that through crashes every string call
+ * site (`matchAll`, `startsWith`) and makes React refuse to render an object
+ * child — which blanked the entire message list.
+ */
+function normalizeContent(value: unknown): string {
+  return typeof value === 'string' ? value : '';
+}
+
 const MessageBubbleInner: React.FC<MessageBubbleProps> = ({
   message,
   isStreaming,
@@ -105,7 +134,7 @@ const MessageBubbleInner: React.FC<MessageBubbleProps> = ({
   canWithdraw,
   onWithdraw,
 }) => {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
   const [copied, setCopied] = React.useState(false);
   const [ttsState, setTtsState] = React.useState<'idle' | 'loading' | 'playing'>('idle');
   const audioRef = React.useRef<HTMLAudioElement | null>(null);
@@ -113,11 +142,16 @@ const MessageBubbleInner: React.FC<MessageBubbleProps> = ({
   const isSolo = variant === 'solo';
   void _senderAvatar;
 
+  // Defense in depth: non-text payloads (null, or a multimodal array) must not
+  // reach `.matchAll` / `.startsWith` / React children, any of which would
+  // throw and blank the whole message list. Timeline normalizes upstream too.
+  const safeContent = normalizeContent(message.content);
+
   // Parse file attachments from message text (for historical messages loaded
   // from disk that don't have structured attachments).
   const { displayContent, fileAttachments } = useMemo(() => {
     const atts: FileAttachment[] = message.attachments ? [...message.attachments] : [];
-    let content = message.content;
+    let content = safeContent;
 
     // Extract [File: ...] patterns and convert to structured attachments
     // for BOTH user and assistant messages (important for session replay fallback).
@@ -275,7 +309,7 @@ const MessageBubbleInner: React.FC<MessageBubbleProps> = ({
       .trim();
 
     return { displayContent: content, fileAttachments: dedupedAtts };
-  }, [message.content, message.attachments]);
+  }, [safeContent, message.attachments]);
 
   const renderedHtml = useMemo(() => {
     if (isUser) return '';
@@ -293,7 +327,7 @@ const MessageBubbleInner: React.FC<MessageBubbleProps> = ({
 
   const handleCopy = async () => {
     try {
-      await navigator.clipboard.writeText(message.content);
+      await navigator.clipboard.writeText(safeContent);
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
     } catch { /* ignore */ }
@@ -312,14 +346,14 @@ const MessageBubbleInner: React.FC<MessageBubbleProps> = ({
   React.useEffect(() => () => stopTts(), [stopTts]);
 
   const handleSpeak = async () => {
-    if (!agentId || !message.content?.trim()) return;
+    if (!agentId || !safeContent?.trim()) return;
     if (ttsState === 'playing' || ttsState === 'loading') {
       stopTts();
       return;
     }
     setTtsState('loading');
     try {
-      const res = await agentSessionAPI.synthesize(agentId, message.content);
+      const res = await agentSessionAPI.synthesize(agentId, safeContent);
       const url = res.url?.startsWith('http')
         ? res.url
         : `${SERVER_BASE_URL}${res.url?.startsWith('/') ? res.url : `/${res.url}`}`;
@@ -458,13 +492,13 @@ const MessageBubbleInner: React.FC<MessageBubbleProps> = ({
 
   if (message.role === 'system') {
     const isContextSummary = message.type === 'context_summary'
-      || message.content.startsWith('[Context Compression Summary]');
+      || safeContent.startsWith('[Context Compression Summary]');
     if (isContextSummary) {
       const summaryHtml = (() => {
         try {
-          return renderFencedMarkdown(message.content);
+          return renderFencedMarkdown(safeContent);
         } catch {
-          return message.content;
+          return safeContent;
         }
       })();
       return (
@@ -481,13 +515,63 @@ const MessageBubbleInner: React.FC<MessageBubbleProps> = ({
     return (
       <div className="flex justify-center my-2">
         <div className="text-xs text-textMuted bg-bgLight px-3 py-1 rounded-full">
-          {message.content}
+          {safeContent}
         </div>
       </div>
     );
   }
 
   const label = senderName || (isUser ? 'You' : 'Agent');
+
+  // 消耗 badge — reference-UI pill ("9m 34s · 3.0M"): this round's total billed
+  // tokens. Hover/click pops the input / output split directly above the pill.
+  //
+  // Arrow direction is load-bearing: ↓ input (prompt tokens flowing INTO the
+  // model) and ↑ output (completion tokens coming back OUT). It once shipped
+  // reversed (↑ input / ↓ output — the upload/download reading), so the pairing
+  // is pinned by `utils/turnUsageStamp.test.ts`.
+  //
+  // `strategy="anchor"` is load-bearing: the default `fixed` strategy computes
+  // viewport coordinates from getBoundingClientRect(), but a transformed
+  // ancestor re-anchors `position: fixed` — the bubble then rendered far below
+  // the trigger instead of above it.
+  const usageBadge =
+    !isUser && message.usage && (message.usage.total_tokens > 0 || message.usage.elapsed_ms > 0) ? (
+      <HoverTooltip
+        toggleOnClick
+        strategy="anchor"
+        variant="plain"
+        text={`↓ ${t('aiChat.usage.input')} ${formatTokenExact(message.usage.input_tokens)} · ↑ ${t(
+          'aiChat.usage.output',
+        )} ${formatTokenExact(message.usage.output_tokens)}`}
+      >
+        <span
+          data-testid="msg-usage-badge"
+          className="text-[11px] leading-none tabular-nums text-textMuted bg-textMuted/10 rounded-full px-2 py-0.5 ml-1 cursor-pointer hover:bg-textMuted/20"
+        >
+          {message.usage.elapsed_ms > 0 ? formatDuration(message.usage.elapsed_ms) : ''}
+          {message.usage.elapsed_ms > 0 && message.usage.total_tokens > 0 ? ' · ' : ''}
+          {message.usage.total_tokens > 0 ? formatTokenCount(message.usage.total_tokens) : ''}
+        </span>
+      </HoverTooltip>
+    ) : null;
+
+  // Full "2026年9月14日周一 14:24:04" popover for the footer time.
+  // The explicit text-[11px] is load-bearing: this bubble used to inherit its
+  // size (the classic action row sits next to a text-[15px] body wrapper), so
+  // the footer time rendered far larger than the reference UI.
+  const timeWithPopover = message.timestamp ? (
+    <HoverTooltip
+      toggleOnClick
+      strategy="anchor"
+      variant="plain"
+      text={formatFullTimestamp(message.timestamp, i18n.language)}
+    >
+      <span className="text-[11px] leading-none tabular-nums text-textMuted/70 cursor-default hover:text-textMuted">
+        {new Date(message.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+      </span>
+    </HoverTooltip>
+  ) : null;
 
   const mediaAndBody = (
     <>
@@ -579,9 +663,9 @@ const MessageBubbleInner: React.FC<MessageBubbleProps> = ({
           <span className={`text-[11px] font-medium ${isUser ? 'text-primary' : 'text-textMuted'}`}>
             {label}
           </span>
-          {!isStreaming && (message.content || (isUser && canWithdraw && onWithdraw)) && (
+          {!isStreaming && (safeContent || (isUser && canWithdraw && onWithdraw)) && (
             <div className="flex items-center gap-0.5">
-              {message.content ? (
+              {safeContent ? (
               <button
                 onClick={handleCopy}
                 className="opacity-0 group-hover:opacity-100 transition-opacity text-textMuted hover:text-primary p-0.5"
@@ -600,7 +684,7 @@ const MessageBubbleInner: React.FC<MessageBubbleProps> = ({
                   <Undo2 size={12} />
                 </button>
               ) : null}
-              {agentId && message.content ? (
+              {agentId && safeContent ? (
                 <button
                   onClick={() => void handleSpeak()}
                   disabled={ttsState === 'loading'}
@@ -634,9 +718,15 @@ const MessageBubbleInner: React.FC<MessageBubbleProps> = ({
             {mediaAndBody}
           </div>
         )}
-        {message.timestamp && (
-          <div className="text-[10px] text-textMuted mt-1 opacity-60">
-            {new Date(message.timestamp).toLocaleTimeString()}
+        {(usageBadge || message.timestamp) && (
+          <div className="flex items-center mt-1">
+            {usageBadge}
+            {message.timestamp &&
+              (timeWithPopover ?? (
+                <span className="text-[11px] text-textMuted/70">
+                  {new Date(message.timestamp).toLocaleTimeString()}
+                </span>
+              ))}
           </div>
         )}
       </div>
@@ -644,13 +734,13 @@ const MessageBubbleInner: React.FC<MessageBubbleProps> = ({
   }
 
   // Classic: user = right bubble; agent = document stream (no bubble)
-  const actionRow = !isStreaming && (message.content || (isUser && canWithdraw && onWithdraw)) ? (
+  const actionRow = !isStreaming && (safeContent || (isUser && canWithdraw && onWithdraw)) ? (
     <div
       className={`flex items-center gap-0.5 mt-1.5 transition-opacity ${
         ttsState !== 'idle' ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'
       } ${isUser ? 'justify-end' : 'justify-start'}`}
     >
-      {message.content ? (
+      {safeContent ? (
       <button
         onClick={handleCopy}
         className="text-textMuted hover:text-primary p-0.5 border-0 bg-transparent cursor-pointer"
@@ -687,11 +777,8 @@ const MessageBubbleInner: React.FC<MessageBubbleProps> = ({
           )}
         </button>
       )}
-      {message.timestamp && (
-        <span className="text-[11px] text-textMuted/55 ml-1.5 tabular-nums">
-          {new Date(message.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-        </span>
-      )}
+      {usageBadge}
+      {timeWithPopover}
     </div>
   ) : message.timestamp ? (
     <div className={`text-[11px] text-textMuted/55 mt-1.5 tabular-nums ${isUser ? 'text-right' : 'text-left'}`}>
@@ -742,20 +829,50 @@ function sameFileAtts(a?: FileAttachment[], b?: FileAttachment[]): boolean {
   return true;
 }
 
+/**
+ * Compact identity of a message's billed-usage stamp (the 消耗 badge data).
+ * `undefined` and a stamped value must differ.
+ */
+export function usageMemoKey(u?: MessageUsage): string {
+  return u ? `${u.input_tokens}|${u.output_tokens}|${u.total_tokens}|${u.elapsed_ms}` : '';
+}
+
+/**
+ * Prop equality for the memoized bubble.
+ *
+ * This comparator is the ONLY gate for in-place timeline patches: a WS
+ * `turn_usage` frame stamps `message.usage` onto a row that is already mounted,
+ * and a session-history re-hydrate replaces the entry with a freshly built
+ * object (new identity, identical text). Miss a rendered field here and the row
+ * silently keeps its stale markup forever — which is exactly how the 消耗 badge
+ * went missing after the first paint.
+ */
+export function areMessageBubblePropsEqual(prev: MessageBubbleProps, next: MessageBubbleProps): boolean {
+  return (
+    prev.isStreaming === next.isStreaming
+    && prev.senderName === next.senderName
+    && prev.variant === next.variant
+    && prev.anchorId === next.anchorId
+    && prev.agentId === next.agentId
+    && prev.canWithdraw === next.canWithdraw
+    // onWithdraw is often an inline lambda — ignore identity.
+    && prev.message.role === next.message.role
+    && normalizeContent(prev.message.content) === normalizeContent(next.message.content)
+    && prev.message.message_id === next.message.message_id
+    && prev.message.type === next.message.type
+    && prev.message.end_task === next.message.end_task
+    // Footer renders the exact timestamp (full-date popover) — must be compared.
+    && prev.message.timestamp === next.message.timestamp
+    // 消耗 badge: stamped in place by the turn_usage WS frame / history rebuild.
+    && usageMemoKey(prev.message.usage) === usageMemoKey(next.message.usage)
+    && sameFileAtts(prev.message.attachments, next.message.attachments)
+    && (prev.message.images?.join('\0') || '') === (next.message.images?.join('\0') || '')
+    // Model-generated media is appended in place (content stays identical), so
+    // these must be compared or TTS output / generated images never re-render.
+    && (prev.message.output_audio?.map((a) => a.url).join('\0') || '') === (next.message.output_audio?.map((a) => a.url).join('\0') || '')
+    && (prev.message.output_images?.join('\0') || '') === (next.message.output_images?.join('\0') || '')
+  );
+}
+
 /** Skip re-renders when parent chat ticks (token ring, timers) but message body is unchanged. */
-export const MessageBubble = React.memo(MessageBubbleInner, (prev, next) => (
-  prev.isStreaming === next.isStreaming
-  && prev.senderName === next.senderName
-  && prev.variant === next.variant
-  && prev.anchorId === next.anchorId
-  && prev.agentId === next.agentId
-  && prev.canWithdraw === next.canWithdraw
-  // onWithdraw is often an inline lambda — ignore identity.
-  && prev.message.role === next.message.role
-  && prev.message.content === next.message.content
-  && prev.message.message_id === next.message.message_id
-  && prev.message.type === next.message.type
-  && prev.message.end_task === next.message.end_task
-  && sameFileAtts(prev.message.attachments, next.message.attachments)
-  && (prev.message.images?.join('\0') || '') === (next.message.images?.join('\0') || '')
-));
+export const MessageBubble = React.memo(MessageBubbleInner, areMessageBubblePropsEqual);

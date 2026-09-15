@@ -108,6 +108,8 @@ export interface AgentWebComposerProps {
   pendingPanel?: React.ReactNode;
   /** Mode-switch / propose-options approval cards — above pending & composer */
   approvalPanel?: React.ReactNode;
+  /** Background-terminals indicator bar — topmost slot above the composer */
+  terminalsPanel?: React.ReactNode;
   availableSkills: SkillInfo[];
   skillsLoading?: boolean;
   /** Prefetch / open skill list (also used when typing `/skill `). */
@@ -176,6 +178,7 @@ export const AgentWebComposer = forwardRef<AgentWebComposerHandle, AgentWebCompo
     planPanel = null,
     pendingPanel = null,
     approvalPanel = null,
+    terminalsPanel = null,
     availableSkills,
     skillsLoading = false,
     onOpenSkills,
@@ -627,7 +630,13 @@ export const AgentWebComposer = forwardRef<AgentWebComposerHandle, AgentWebCompo
         </div>
       ) : null}
 
-      {/* Order: Changes → approvals → pending → Plan (behind) overlapping input (front) */}
+      {/* Order: terminals → Changes → approvals → pending → Plan (behind) overlapping input (front) */}
+      {terminalsPanel ? (
+        <div className="px-2 sm:px-4 pt-2 flex-shrink-0">
+          <div className={columnClass}>{terminalsPanel}</div>
+        </div>
+      ) : null}
+
       {approvalPanel ? (
         <div className="px-2 sm:px-4 pt-2 flex-shrink-0">
           <div className={columnClass}>{approvalPanel}</div>
@@ -715,7 +724,7 @@ export const AgentWebComposer = forwardRef<AgentWebComposerHandle, AgentWebCompo
             ) : null}
 
             <div
-              className={`os-composer-input-layer w-full flex flex-col rounded-[22px] focus-within:ring-1 focus-within:ring-primary/40 relative transition-shadow duration-[420ms] ease-[cubic-bezier(0.22,1,0.36,1)] ${
+              className={`os-composer-input-layer w-full flex flex-col rounded-[22px] border border-boundary focus-within:ring-1 focus-within:ring-primary/40 relative transition-shadow duration-[420ms] ease-[cubic-bezier(0.22,1,0.36,1)] ${
                 landing
                   ? 'shadow-[0_8px_32px_rgba(0,0,0,0.07)]'
                   : 'shadow-[0_4px_24px_rgba(0,0,0,0.06)]'

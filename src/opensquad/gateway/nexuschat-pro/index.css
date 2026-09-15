@@ -18,13 +18,20 @@
   box-shadow: 0 0 0 1px rgb(var(--color-primary, 14 165 233));
 }
 
-/* Fenced code blocks in assistant dialogue + thought Markdown */
+/* Fenced code blocks in assistant dialogue + thought Markdown.
+   The well follows the appearance with the SAME formula the file pane uses
+   (theme-derived well on light pages; the classic near-black well in dark).
+   It used to be a hardcoded near-black in both appearances — black blocks
+   floating on a light themed page. */
 .ai-markdown .ai-code-wrap {
   margin: 0.5rem 0;
   border-radius: 0.5rem;
   border: 1px solid color-mix(in srgb, rgb(var(--color-border, 68 68 68)) 80%, transparent);
-  background: color-mix(in srgb, #0b0f17 92%, transparent);
+  background: color-mix(in srgb, rgb(var(--color-bg)) 88%, rgb(var(--color-text-muted)) 12%);
   overflow: hidden;
+}
+html.dark .ai-markdown .ai-code-wrap {
+  background: color-mix(in srgb, #0b0f17 92%, transparent);
 }
 .ai-markdown .ai-code-lang {
   font-size: 10px;
@@ -49,24 +56,34 @@
   background: transparent !important;
   padding: 0 !important;
   font-size: inherit !important;
+  color: rgb(var(--color-text-main));
+}
+html.dark .ai-markdown .ai-code-block code {
   color: #c8cdd8;
 }
-.ai-markdown .hljs-keyword { color: #c792ea; }
-.ai-markdown .hljs-built_in { color: #82aaff; }
-.ai-markdown .hljs-type { color: #ffcb6b; }
-.ai-markdown .hljs-literal { color: #ff5874; }
-.ai-markdown .hljs-number { color: #f78c6c; }
-.ai-markdown .hljs-string { color: #c3e88d; }
-.ai-markdown .hljs-comment { color: #676e95; font-style: italic; }
+/* Syntax token colours (`.hljs-*`): one source of truth in
+   utils/codeHighlight.ts — GitHub Light for light appearances, Material
+   Palenight under html.dark — injected once via ensureHljsTheme() when the
+   first fenced code block renders. index.css used to pin chat wells to a
+   separate appearance-blind Palenight subset here; it is gone so chat and
+   file display cannot drift apart. The former `.ai-markdown.file-markdown`
+   overrides are also gone: the base rules above already follow the
+   appearance with the exact values those overrides carried. */
 
-/* Mermaid diagrams in Agent Web replies */
-.ai-markdown .ai-mermaid {
+/* Mermaid diagrams + agent-authored SVG in Agent Web replies */
+.ai-markdown .ai-mermaid,
+.ai-markdown .ai-svg {
   margin: 0.75rem 0;
-  padding: 0.5rem;
+  padding: 0.75rem;
   overflow: auto;
-  border-radius: 0.5rem;
-  border: 1px solid rgba(127, 127, 127, 0.25);
-  background: rgba(127, 127, 127, 0.06);
+  border-radius: 0.75rem;
+  border: 1px solid rgba(127, 127, 127, 0.18);
+  background: rgba(127, 127, 127, 0.05);
+}
+/* viewBox-only agent SVG has no intrinsic px size — fit the column. */
+.ai-markdown .ai-mermaid-svg svg:not([width]) {
+  width: 100%;
+  height: auto;
 }
 /* Diagrams render at natural size (wide ones scroll horizontally);
    JS sets explicit px width/height when zooming. */
@@ -109,6 +126,21 @@
   opacity: 0.7;
   min-width: 2.8rem;
   text-align: center;
+}
+
+/* Workspace / files panel source view — follow appearance, not a hardcoded GitHub dark well */
+.file-code-surface {
+  background-color: rgb(var(--color-bg));
+  color: rgb(var(--color-text-main));
+}
+html.dark .file-code-surface {
+  background-color: #0d1117;
+}
+.file-indent-guides {
+  --file-indent-guide: color-mix(in srgb, rgb(var(--color-text-muted)) 32%, transparent);
+}
+html.dark .file-indent-guides {
+  --file-indent-guide: rgba(255, 255, 255, 0.11);
 }
 
 /* Fullscreen diagram viewer (zoom / pan) */
@@ -169,7 +201,8 @@
   display: block;
   max-width: none !important;
 }
-.ai-markdown .ai-mermaid-fallback {
+.ai-markdown .ai-mermaid-fallback,
+.ai-markdown .ai-svg-fallback {
   margin: 0;
   padding: 0.5rem 0.75rem;
   font-size: 11px;
@@ -184,22 +217,6 @@
   color: #f87171;
   margin-bottom: 0.35rem;
 }
-.ai-markdown .hljs-title,
-.ai-markdown .hljs-title.function_ { color: #82aaff; }
-.ai-markdown .hljs-attr { color: #ffcb6b; }
-.ai-markdown .hljs-name { color: #f07178; }
-.ai-markdown .hljs-tag { color: #89ddff; }
-.ai-markdown .hljs-meta { color: #ffcb6b; }
-.ai-markdown .hljs-selector-class { color: #ffcb6b; }
-.ai-markdown .hljs-selector-id { color: #82aaff; }
-.ai-markdown .hljs-attribute { color: #c792ea; }
-.ai-markdown .hljs-variable { color: #f07178; }
-.ai-markdown .hljs-params { color: #a6accd; }
-.ai-markdown .hljs-punctuation { color: #89ddff; }
-.ai-markdown .hljs-operator { color: #89ddff; }
-.ai-markdown .hljs-property { color: #80cbc4; }
-.ai-markdown .hljs-regexp { color: #f07178; }
-.ai-markdown .hljs-subst { color: #a6accd; }
 
 /* Conversation typography (driven by themeStore) */
 .ai-markdown,
@@ -271,13 +288,22 @@
      be silently ignored. */
 }
 
-/* Filled `bg-primary` buttons: in light mode, `text-white` reads fine on a
-   dark primary, but in dark mode the rose preset inverts primary to a light
-   grey and white text would disappear. Use the theme-derived
-   `--color-on-primary` token so labels stay legible without forcing every
-   component to opt in. `!important` is required to win against the
-   explicit `text-white` utility class (same specificity otherwise). */
-.dark .bg-primary {
+/* Filled `bg-primary` surfaces (buttons, dialog headers, toggle tracks) must
+   use the theme-derived `--color-on-primary` for their label — it is the only
+   colour guaranteed to contrast with whatever `primary` currently is, in
+   either appearance.
+   This used to be `.dark .bg-primary`, on the assumption that a light-mode
+   `primary` is always dark (true for every built-in preset). The colour
+   picker breaks that assumption: a user-chosen light accent makes the
+   hard-coded `text-white` label invisible — measured, `primary: #FFFFFF`
+   gives a white label at 1.00:1, while the token would have given 19.67:1.
+   `!important` is needed to beat the explicit `text-white` utility class
+   (identical specificity otherwise).
+   Caveat: only the bare `bg-primary` class matches. State variants
+   (`hover:bg-primary`, `group-hover:bg-primary`, …) compile to different
+   class names and are NOT covered — new components should pair
+   `bg-primary` with `text-onPrimary` instead of `text-white`. */
+.bg-primary {
   color: rgb(var(--color-on-primary)) !important;
 }
 
@@ -511,6 +537,28 @@
   box-shadow: 0 12px 36px rgba(0, 0, 0, 0.5), 0 1px 3px rgba(0, 0, 0, 0.35);
 }
 
+/* Composer popover menus (mode picker / attach / model list): smooth pop
+   instead of an abrupt mount. Direction-aware via --pop-y (up-opening menus
+   slide up from below; down-opening menus use the negative offset). */
+@keyframes os-pop-in {
+  from { opacity: 0; transform: translateY(var(--pop-y, 6px)) scale(0.98); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+@keyframes os-pop-out {
+  from { opacity: 1; transform: translateY(0) scale(1); }
+  to { opacity: 0; transform: translateY(var(--pop-y, 6px)) scale(0.98); }
+}
+.os-pop-menu {
+  animation: os-pop-in 150ms cubic-bezier(0.22, 0.9, 0.32, 1);
+}
+.os-pop-menu-down {
+  --pop-y: -6px;
+}
+.os-pop-menu-out {
+  animation: os-pop-out 120ms ease-in forwards;
+  pointer-events: none;
+}
+
 .os-soft-pop {
   opacity: 0;
   transform: translate3d(0, 3px, 0);
@@ -525,6 +573,66 @@
   transform: translate3d(0, 0, 0);
 }
 
+/* ── Collapsible sidebar groups (置顶 / 通讯 / 最近 / 归档) ─────────────
+   The header is a soft card so the groups read as blocks instead of a run of
+   plain text rows. Its resting wash is deliberately HALF the hover wash used
+   by `.os-interactive` (10 % light / 14 % dark) — i.e. "between the page
+   background and the hover grey" — and it is mixed from `primary`, so it
+   follows the theme hue and appearance like every other hover in the rail.
+   The body folds with the same 220 ms `--ease-soft` the left/right rails use
+   for their width+margin collapse. Height animates via an animatable
+   `grid-template-rows` (1fr <-> 0fr), so no JS measurement is needed; the
+   inner wrapper must carry `overflow: hidden` for `0fr` to actually clip.
+   NB: `0fr` + `opacity: 0` keeps the rows MOUNTED — that is what allows the
+   fold to animate at all, and it also means expanding never remounts rows.
+
+   `.os-collapse` / `.os-fold-chevron` are the shared fold primitive for the
+   WHOLE app (tool call detail, thinking, plan, task process, shell job, file
+   diff …) — always reach them through `components/Collapse.tsx`, never by
+   hand, so no surface can regress to a non-animated conditional unmount. */
+.os-group-header {
+  border-radius: 0.625rem;
+  background: color-mix(in srgb, rgb(var(--color-primary)) 5%, transparent);
+  transition:
+    background-color var(--duration-soft) var(--ease-soft),
+    color var(--duration-soft) var(--ease-soft);
+}
+.dark .os-group-header {
+  background: color-mix(in srgb, rgb(var(--color-primary)) 7%, transparent);
+}
+.os-group-header:hover {
+  background: color-mix(in srgb, rgb(var(--color-primary)) 10%, transparent);
+}
+.dark .os-group-header:hover {
+  background: color-mix(in srgb, rgb(var(--color-primary)) 14%, transparent);
+}
+
+/* One chevron, rotated — swapping `<ChevronRight/>` for `<ChevronDown/>` can
+   never animate because the node identity changes. Used by every fold in the
+   app through `<FoldChevron>` (components/Collapse.tsx). */
+.os-fold-chevron {
+  transition: transform var(--duration-panel) var(--ease-soft);
+}
+.os-fold-chevron.is-open {
+  transform: rotate(90deg);
+}
+
+.os-collapse {
+  display: grid;
+  grid-template-rows: 1fr;
+  transition:
+    grid-template-rows var(--duration-panel) var(--ease-soft),
+    opacity var(--duration-soft) var(--ease-soft);
+}
+.os-collapse.is-closed {
+  grid-template-rows: 0fr;
+  opacity: 0;
+}
+.os-collapse-body {
+  min-height: 0;
+  overflow: hidden;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .os-icon-btn,
   .os-list-row,
@@ -533,7 +641,10 @@
   .os-soft-rail-inner,
   .os-soft-overlay,
   .os-soft-overlay-panel,
-  .os-soft-pop {
+  .os-soft-pop,
+  .os-group-header,
+  .os-fold-chevron,
+  .os-collapse {
     transition: none !important;
     animation: none !important;
   }
@@ -633,27 +744,54 @@
   }
 }
 
-/* ── Agent working: dense purple dots with a clockwise gaussian sweep ──
-   Layout: 31 dots on concentric rings (PulseDotsStatus.tsx). A highlight
-   travels clockwise with random step jitter; JS drives opacity/scale so the
-   highlight fades through neighbors via gaussian falloff. Brand purple
-   #8257CC keeps it in the logo family. */
+/* ── Agent working: 10 purple dots, clockwise sweep (pure CSS) ──
+   JS must not write opacity each frame — inserting a tool row used to
+   interrupt those updates and stall the title shimmer. Brand #8257CC. */
 .os-pulse-orbit {
   position: relative;
   width: 18px;
   height: 18px;
   flex-shrink: 0;
+  contain: layout style;
+  transform: translateZ(0);
 }
 .os-pulse-orbit .os-pulse-cell {
   position: absolute;
   border-radius: 999px;
-  transform: translate(-50%, -50%);
   background: #8257CC;
-  box-shadow: 0 0 4px rgba(130, 87, 204, 0.5);
-  /* JS 每步直接写 opacity/transform；此处 0.2 为初始暗态 */
   opacity: 0.2;
-  /* 亮点逐点推进时平滑交叉淡化，避免跳跃 */
-  transition: opacity 400ms ease, transform 400ms ease;
+  transform: translate(-50%, -50%);
+  animation: os-pulse-sweep 2.4s linear infinite;
+  animation-delay: calc(var(--os-pulse-i, 0) * 0.6s);
+}
+@keyframes os-pulse-sweep {
+  0% {
+    opacity: 1;
+    transform: translate(-50%, -50%) scale(1.55);
+  }
+  12% {
+    opacity: 0.5;
+    transform: translate(-50%, -50%) scale(1.22);
+  }
+  28%,
+  100% {
+    opacity: 0.2;
+    transform: translate(-50%, -50%) scale(1);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .os-pulse-orbit .os-pulse-cell {
+    animation: none;
+    opacity: 0.35;
+    transform: translate(-50%, -50%);
+  }
+}
+
+/* Live workflow title: keep shimmer/orbit on their own layer so a new
+   tool row's layout does not hitch the light sweep. */
+.solo-activity-header {
+  transform: translateZ(0);
+  contain: layout style;
 }
 
 /* ── Composer: Plan behind input with slight overlap ────────────────── */
@@ -691,6 +829,32 @@
    cannot fight programmatic scrollTop (the main scrollbar "shake"). */
 .os-chat-scroll {
   overflow-anchor: none;
+  scroll-behavior: auto;
+  overscroll-behavior: contain;
+  contain: layout style;
+  will-change: scroll-position;
+}
+
+/* Long assistant reports: skip layout/paint for off-screen blocks.
+   `auto` in contain-intrinsic-size remembers the last real height so the
+   main scrollbar does not jump when a heading re-enters the viewport. */
+.os-chat-scroll .ai-markdown > p,
+.os-chat-scroll .ai-markdown > h1,
+.os-chat-scroll .ai-markdown > h2,
+.os-chat-scroll .ai-markdown > h3,
+.os-chat-scroll .ai-markdown > h4,
+.os-chat-scroll .ai-markdown > h5,
+.os-chat-scroll .ai-markdown > h6,
+.os-chat-scroll .ai-markdown > ul,
+.os-chat-scroll .ai-markdown > ol,
+.os-chat-scroll .ai-markdown > table,
+.os-chat-scroll .ai-markdown > pre,
+.os-chat-scroll .ai-markdown > blockquote,
+.os-chat-scroll .ai-markdown > hr,
+.os-chat-scroll .ai-markdown > .ai-code-wrap,
+.os-chat-scroll .ai-markdown > .ai-mermaid {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 4em;
 }
 
 /* Virtualization spacers must NOT use content-visibility — skipped layout
@@ -698,16 +862,4 @@
 .timeline-virt-pad {
   flex-shrink: 0;
   pointer-events: none;
-}
-
-/* Off-screen chat rows skip layout/paint (see TimelineRow.tsx). */
-.timeline-row {
-  content-visibility: auto;
-  contain-intrinsic-size: auto 88px;
-}
-
-/* Live / tail rows keep native height so stick-to-bottom does not jitter. */
-.timeline-row.timeline-row-live {
-  content-visibility: visible;
-  contain-intrinsic-size: unset;
 }

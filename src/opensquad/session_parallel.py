@@ -93,6 +93,23 @@ class ParallelTurnScheduler:
         self._tasks: dict[str, asyncio.Task] = {}
         self._sem = asyncio.Semaphore(max_parallel)
         self._busy_sessions: set[str] = set()
+        # Per-session "turn finished" signals. The dispatcher used to busy-poll
+        # (pop → busy → re-push → sleep 50ms), spamming 2 WS frames per cycle
+        # for the whole duration of a long turn and pinning the event loop.
+        # waiters now sleep on this event instead.
+        self._idle_events: dict[str, asyncio.Event] = {}
+
+    def _signal_idle(self, sid: str) -> None:
+        evt = self._idle_events.get(sid)
+        if evt is not None:
+            evt.set()
+
+    def _idle_event(self, sid: str) -> asyncio.Event:
+        evt = self._idle_events.get(sid)
+        if evt is None:
+            evt = asyncio.Event()
+            self._idle_events[sid] = evt
+        return evt
 
     @property
     def busy_sessions(self) -> set[str]:
@@ -111,10 +128,35 @@ class ParallelTurnScheduler:
                 self._tasks.pop(sid, None)
                 self._busy_sessions.discard(sid)
                 self._sem.release()
+                self._signal_idle(sid)
                 exc = task.exception() if not task.cancelled() else None
                 if exc:
                     logger.error("[ParallelTurnScheduler] turn failed sid=%s: %s", sid, exc, exc_info=exc)
         return done
+
+    async def wait_session_free(self, sid: str, timeout: float = 5.0) -> bool:
+        """Wait until *sid* is no longer running a turn.
+
+        Returns True as soon as the session is free (including immediately),
+        False on timeout. The timeout bounds any missed-notify risk so the
+        dispatcher can never be permanently stalled.
+        """
+        deadline = asyncio.get_running_loop().time() + max(0.0, timeout)
+        while True:
+            self.reap()
+            if not self.is_session_busy(sid):
+                evt = self._idle_event(sid)
+                evt.clear()
+                return True
+            evt = self._idle_event(sid)
+            evt.clear()
+            remaining = deadline - asyncio.get_running_loop().time()
+            if remaining <= 0:
+                return False
+            try:
+                await asyncio.wait_for(evt.wait(), timeout=remaining)
+            except asyncio.TimeoutError:
+                return False
 
     async def acquire_slot(self, sid: str, timeout: float | None = 2.0) -> bool:
         """Wait until a parallel slot is free and this sid is not already running.
@@ -147,6 +189,10 @@ class ParallelTurnScheduler:
                 return await coro
             finally:
                 self._busy_sessions.discard(sid)
+                # Natural completion path — finish()/reap() are not guaranteed
+                # to run for a turn that just returns, and wait_session_free
+                # must not linger until its timeout in that case.
+                self._signal_idle(sid)
 
         task = asyncio.create_task(_wrapped(), name=f"session-turn:{sid}")
         self._tasks[sid] = task
@@ -179,3 +225,5 @@ class ParallelTurnScheduler:
             self._sem.release()
         except ValueError:
             pass
+        # Wake anything waiting in wait_session_free (dispatcher re-push path).
+        self._signal_idle(sid)

@@ -3,7 +3,7 @@
  */
 import React, { useEffect, useRef, useState } from 'react';
 import { Check, ChevronDown } from 'lucide-react';
-import { POPOVER_SURFACE_CLASS } from './popoverSurface';
+import { POPOVER_SURFACE_CLASS, usePopMenuMounted } from './popoverSurface';
 
 export type AgentMode = 'plan' | 'build';
 
@@ -59,12 +59,16 @@ export const ModePicker: React.FC<ModePickerProps> = ({
         />
       </button>
 
-      {open && (
+      {usePopMenuMounted(open) && (
         <div
-          className={`absolute bottom-[calc(100%+8px)] left-0 z-50 w-[200px] rounded-xl border border-border ${POPOVER_SURFACE_CLASS} overflow-hidden`}
+          className={`absolute bottom-[calc(100%+8px)] left-0 z-50 w-[176px] origin-bottom-left rounded-xl border border-border ${POPOVER_SURFACE_CLASS} overflow-hidden ${
+            open ? 'os-pop-menu' : 'os-pop-menu-out'
+          }`}
           role="listbox"
         >
-          <div className="py-1">
+          {/* No vertical padding: rows must run flush to the panel edges so the
+              hover/selected fill has no white strip above/below (overflow-hidden
+              clips the first/last row into the panel's rounded corners). */}
             {MODES.map((m) => {
               const selected = m.id === mode;
               return (
@@ -73,25 +77,24 @@ export const ModePicker: React.FC<ModePickerProps> = ({
                   type="button"
                   role="option"
                   aria-selected={selected}
+                  title={m.hint}
                   onClick={() => {
                     if (m.id !== mode) onSelect(m.id);
                     setOpen(false);
                   }}
-                  className={`w-full flex items-center gap-2 px-3 py-2 text-left text-[13px] transition-colors border-0 cursor-pointer ${
+                  className={`w-full flex items-center gap-2 px-3 py-1.5 text-left text-[12px] transition-colors border-0 cursor-pointer ${
                     selected
-                      ? 'bg-primary/10 text-primary'
-                      : 'bg-transparent text-textMain hover:bg-primary/10'
+                      ? 'bg-black/[0.06] dark:bg-white/[0.08] text-blue-600 dark:text-blue-400'
+                      : 'bg-transparent text-textMain hover:bg-black/[0.06] dark:hover:bg-white/[0.10]'
                   }`}
                 >
-                  <div className="flex-1 min-w-0">
-                    <div className="font-medium">{m.label}</div>
-                    <div className="text-[10px] text-textMuted truncate">{m.hint}</div>
-                  </div>
-                  {selected ? <Check size={14} className="shrink-0 text-primary" /> : null}
+                  <span className="w-4 shrink-0 flex items-center justify-center">
+                    {selected ? <Check size={13} className="text-blue-600 dark:text-blue-400" /> : null}
+                  </span>
+                  <span className="flex-1 min-w-0 truncate font-medium">{m.label}</span>
                 </button>
               );
             })}
-          </div>
         </div>
       )}
     </div>

@@ -256,8 +256,40 @@ def filter_tools_for_mode(tools: list[dict] | None, mode: str) -> list[dict] | N
     return out
 
 
+_PROMPT_FOLLOWUP = """
+
+FOLLOW-UP SUGGESTIONS (对话后续预期 — important, applies in every mode):
+Right before you write your final answer to the user — i.e. once your tool flow
+is finished and no further tool call remains for this turn — call
+`followup_tools__suggest_followups` **once** with 1–3 `suggestions`: the most
+likely things the user will ask or instruct next, phrased in their own voice
+(short, self-contained and actionable — never filler like "还需要什么吗？").
+The Agent Web UI renders them as light-theme chips under your final answer, and
+clicking one sends that text as the user's next message.
+This is an offer only: do NOT wait for a reply, do NOT ask the user to pick, and
+still write your complete final answer immediately after calling it. Skip it for
+trivial chit-chat, or when the turn already ends with a blocking question you put
+to the user (stop-and-ask flows).
+"""
+
+
+_PROMPT_VISUALIZE = """
+VISUAL AIDS (结构可视化 — applies in every mode):
+When presenting a project structure, architecture, module relationships, or any
+complex hierarchy / flow to the user, pick the right visual based on the actual
+task — do not default to plain text bullet lists:
+- ```mermaid fenced block: mindmap for project / module structure, flowchart for
+  processes, sequence or ER diagrams for interactions and relationships.
+- ```svg fenced block: free-form vector illustration (layered architecture,
+  custom layouts, branded diagrams) when Mermaid is not expressive enough.
+Keep diagrams compact and readable (avoid huge node counts), and always pair
+them with a short text explanation so the answer stands on its own.
+"""
+
+
 def mode_prompt_section(mode: str) -> str:
-    return _PROMPT_PLAN if normalize_mode(mode) == MODE_PLAN else _PROMPT_BUILD
+    base = _PROMPT_PLAN if normalize_mode(mode) == MODE_PLAN else _PROMPT_BUILD
+    return base + _PROMPT_VISUALIZE + _PROMPT_FOLLOWUP
 
 
 def plan_block_message(tool_name: str) -> str:

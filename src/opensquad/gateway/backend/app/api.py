@@ -2,6 +2,7 @@
 API route definitions
 """
 
+import asyncio
 import enum
 import json
 import logging
@@ -31,6 +32,8 @@ from app.models import (
     UserStatus,
     beijing_now,
     group_members,
+    utc_epoch_ms,
+    utc_iso,
 )
 
 _log = logging.getLogger("app.api")
@@ -731,10 +734,17 @@ async def get_user_groups(current_user: User = Depends(get_current_user_dep), db
         .subquery()
     )
 
+    # Two messages in one group can share a timestamp. Order by id and keep the
+    # first row per group so the pick is deterministic instead of depending on
+    # whatever row order the database happens to return.
     last_msgs_result = await db.execute(
-        select(Message).join(subq, and_(Message.group_id == subq.c.group_id, Message.timestamp == subq.c.max_ts))
+        select(Message)
+        .join(subq, and_(Message.group_id == subq.c.group_id, Message.timestamp == subq.c.max_ts))
+        .order_by(Message.group_id, desc(Message.id))
     )
-    last_msgs_map = {msg.group_id: msg for msg in last_msgs_result.scalars().all()}
+    last_msgs_map: dict[str, Message] = {}
+    for msg in last_msgs_result.scalars().all():
+        last_msgs_map.setdefault(msg.group_id, msg)
 
     # 4. Assemble response data
     group_list = []
@@ -750,7 +760,7 @@ async def get_user_groups(current_user: User = Depends(get_current_user_dep), db
             last_message_data = {
                 "id": last_msg.id,
                 "content": last_msg.content[:100] if last_msg.type == MessageType.TEXT else f"[{last_msg.type}]",
-                "timestamp": last_msg.timestamp.isoformat(),
+                "timestamp": utc_epoch_ms(last_msg.timestamp),
                 "sender_id": last_msg.sender_id,
             }
 
@@ -765,7 +775,7 @@ async def get_user_groups(current_user: User = Depends(get_current_user_dep), db
                 is_private=group.is_private,
                 notification_sound_enabled=notification_enabled,
                 last_message=last_message_data,
-                created_at=group.created_at.isoformat() if group.created_at else None,
+                created_at=utc_iso(group.created_at),
             )
         )
 
@@ -1396,18 +1406,12 @@ def format_message_response(msg: Message, *, sender_name: str | None = None) -> 
         time_since_sent = beijing_now() - _utc_aware(msg.timestamp)
         can_undo = time_since_sent.total_seconds() < 120
 
-    # Convert datetime to timestamp (milliseconds), ensure JSON serializable
-    def dt_to_timestamp(dt):
-        if dt is None:
-            return None
-        return int(dt.timestamp() * 1000)
-
     return MessageResponse(
         id=str(msg.id),
         sender_id=str(msg.sender_id),
         group_id=str(msg.group_id),
         content=str(msg.content) if msg.content else "",
-        timestamp=dt_to_timestamp(msg.timestamp),
+        timestamp=utc_epoch_ms(msg.timestamp),
         type=msg.type,
         sender_name=resolved_name,
         attachments=attachments_list,
@@ -1416,7 +1420,7 @@ def format_message_response(msg: Message, *, sender_name: str | None = None) -> 
         is_edited=bool(msg.is_edited) if msg.is_edited else False,
         is_deleted=is_deleted,
         can_undo=can_undo,
-        deleted_at=dt_to_timestamp(msg.deleted_at),
+        deleted_at=utc_epoch_ms(msg.deleted_at),
         mentions=mentions,
     )
 
@@ -1551,11 +1555,13 @@ async def send_message(
         import re as _re
 
         mention_names = _re.findall(r"@([\w\u4e00-\u9fff][\w\u4e00-\u9fff\-]*)", message_data.content)
-        for name in mention_names:
-            user_result = await db.execute(select(User).where(User.name == name))
-            user = user_result.scalar_one_or_none()
-            if user and user.id != current_user.id:
-                mentioned_ids.append(user.id)
+        # Resolve all @names in one IN query instead of one SELECT per name
+        unique_names = set(mention_names)
+        if unique_names:
+            users_result = await db.execute(select(User).where(User.name.in_(unique_names)))
+            for user in users_result.scalars().all():
+                if user.id != current_user.id and user.id not in mentioned_ids:
+                    mentioned_ids.append(user.id)
 
     message_id = f"m_{datetime.now().timestamp()}"
     new_message = Message(
@@ -1617,11 +1623,14 @@ async def send_message(
             and_(UserGroupSettings.group_id == group_id, UserGroupSettings.user_id != current_user.id)
         )
     )
+    unread_notifications = []
     for settings in settings_batch.scalars().all():
         settings.unread_count += 1
         if settings.user_id in mentioned_set:
             settings.has_unread_mention = True
-        await notify_unread_update(settings.user_id, group_id, settings.unread_count, settings.has_unread_mention)
+        unread_notifications.append(
+            notify_unread_update(settings.user_id, group_id, settings.unread_count, settings.has_unread_mention)
+        )
 
     # Manually build response, completely independent of ORM relation attributes
     mentions = json.loads(new_message.mentions) if new_message.mentions else []
@@ -1631,15 +1640,12 @@ async def send_message(
         time_since_sent = beijing_now() - _utc_aware(new_message.timestamp)
         can_undo = time_since_sent.total_seconds() < 120
 
-    def _dt_to_ts(dt):
-        return int(dt.timestamp() * 1000) if dt else None
-
     formatted = MessageResponse(
         id=str(new_message.id),
         sender_id=str(new_message.sender_id),
         group_id=str(new_message.group_id),
         content=str(new_message.content) if new_message.content else "",
-        timestamp=_dt_to_ts(new_message.timestamp),
+        timestamp=utc_epoch_ms(new_message.timestamp),
         type=new_message.type,
         sender_name=(current_user.name or "").strip() or None,
         attachments=attachments_for_response,
@@ -1648,11 +1654,18 @@ async def send_message(
         is_edited=bool(new_message.is_edited) if new_message.is_edited else False,
         is_deleted=is_deleted,
         can_undo=can_undo,
-        deleted_at=_dt_to_ts(new_message.deleted_at) if hasattr(new_message, "deleted_at") else None,
+        deleted_at=utc_epoch_ms(getattr(new_message, "deleted_at", None)),
         mentions=mentions,
     )
 
+    # Commit before notifying: otherwise a client can receive an unread-count update
+    # for a message that is not persisted yet.
     await db.commit()
+
+    if unread_notifications:
+        # Deliver concurrently - the previous serial loop made the send latency
+        # scale with the number of group members.
+        await asyncio.gather(*unread_notifications, return_exceptions=True)
 
     # Use unified message notification function, ensure type is "new_message"
     from app.json_utils import make_json_safe
@@ -1715,8 +1728,9 @@ async def delete_message(
             "type": "message_recalled",
             "data": {
                 "message_id": message_id,
+                "group_id": str(message.group_id),
                 "can_undo": message.can_undo,
-                "deleted_at": int(message.deleted_at.timestamp() * 1000),
+                "deleted_at": utc_epoch_ms(message.deleted_at),
             },
         },
     )
@@ -2439,24 +2453,37 @@ async def upload_folder_as_zip(files: list[UploadFile] = File(...), current_user
     folder_name = files[0].filename.split("/")[0] if files and "/" in files[0].filename else "folder"
     zip_filename = f"{folder_name}_{hashlib.md5(f'{folder_name}{datetime.now()}'.encode(), usedforsecurity=False).hexdigest()[:16]}.zip"
     zip_path = upload_dir / zip_filename
-    file_list = []
     # SEC-7: cap total uploaded bytes per request and sanitise arcnames
     # (basename only) to prevent zip traversal / archive abuse.
     MAX_UPLOAD_BYTES = 50 * 1024 * 1024
     total_bytes = 0
-    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zipf:
-        for file in files:
-            content = await file.read(MAX_UPLOAD_BYTES + 1)
-            if len(content) > MAX_UPLOAD_BYTES:
-                raise HTTPException(status_code=413, detail="File too large (max 50MB per file)")
-            total_bytes += len(content)
-            if total_bytes > MAX_UPLOAD_BYTES:
-                raise HTTPException(status_code=413, detail="Upload batch too large (max 50MB)")
-            arcname = os.path.basename(file.filename.replace("\\", "/"))
-            if not arcname:
-                arcname = f"file_{len(file_list)}"
-            zipf.writestr(arcname, content)
-            file_list.append({"name": arcname, "size": f"{len(content) / 1024:.1f}KB"})
+    entries: list[tuple[str, bytes]] = []
+    # Read the uploads first (these genuinely need the event loop), then do the
+    # blocking compression off-loop in one shot.
+    for file in files:
+        content = await file.read(MAX_UPLOAD_BYTES + 1)
+        if len(content) > MAX_UPLOAD_BYTES:
+            raise HTTPException(status_code=413, detail="File too large (max 50MB per file)")
+        total_bytes += len(content)
+        if total_bytes > MAX_UPLOAD_BYTES:
+            raise HTTPException(status_code=413, detail="Upload batch too large (max 50MB)")
+        arcname = os.path.basename(file.filename.replace("\\", "/"))
+        if not arcname:
+            arcname = f"file_{len(entries)}"
+        entries.append((arcname, content))
+
+    def _write_zip() -> None:
+        """Blocking DEFLATE compression — see the to_thread call for why."""
+        with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zipf:
+            for arcname, content in entries:
+                zipf.writestr(arcname, content)
+
+    # Up to 50MB of DEFLATE is CPU- and IO-bound: compressing inline freezes the
+    # gateway's single event loop, and with it every concurrent WS push and API
+    # request, for the whole (multi-second) write.
+    await asyncio.to_thread(_write_zip)
+
+    file_list = [{"name": arcname, "size": f"{len(content) / 1024:.1f}KB"} for arcname, content in entries]
     zip_size = zip_path.stat().st_size
     size_str = (
         f"{zip_size}B"
@@ -2535,7 +2562,7 @@ async def send_direct_message(
                 "title": title,
                 "content": content,
                 "attachments": json.loads(attachments) if attachments else [],
-                "timestamp": new_dm.timestamp.isoformat(),
+                "timestamp": utc_iso(new_dm.timestamp),
                 "is_read": False,
             },
         },
@@ -2597,9 +2624,9 @@ async def get_direct_messages(
                 "sender": sender.name if sender and not is_s else "You",
                 "sender_avatar": sender.avatar if sender and not is_s else None,
                 "recipient": recipient.name if recipient and is_s else "You",
-                "timestamp": msg.timestamp,
+                "timestamp": utc_epoch_ms(msg.timestamp),
                 "is_read": msg.is_read,
-                "read_at": msg.read_at,
+                "read_at": utc_epoch_ms(msg.read_at),
                 "is_sender": is_s,
                 "other_party": recipient.name if recipient and is_s else (sender.name if sender else "Unknown"),
                 "attachments": json.loads(msg.attachments) if msg.attachments else [],

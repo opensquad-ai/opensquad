@@ -30,6 +30,7 @@ from __future__ import annotations
 import json
 import os
 import secrets
+import urllib.request
 from typing import Any
 
 # ── Workspace resolution ───────────────────────────────────────────────
@@ -317,3 +318,26 @@ def async_result_ttl() -> int:
 
 def default_agent_id() -> str:
     return os.environ.get("DEFAULT_AGENT_ID") or get("defaults", "agent_id", "pm-001")
+
+
+# ── Loopback HTTP (mirror opensquad.utils.local_http.open_local) ────────
+# Service processes must not ``import opensquad``: Agent Python does not have
+# the package. Keep this opener in sync with ``opensquad.utils.local_http``.
+
+_NO_PROXY_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+
+def open_local(
+    url: str,
+    *,
+    timeout: float,
+    method: str = "GET",
+    data: bytes | None = None,
+    headers: dict[str, str] | None = None,
+) -> Any:
+    """Open ``url`` while bypassing any configured HTTP(S) proxy.
+
+    Only use this for loopback endpoints (reranker health, sidecar POST, …).
+    """
+    request = urllib.request.Request(url, data=data, headers=headers or {}, method=method)
+    return _NO_PROXY_OPENER.open(request, timeout=timeout)

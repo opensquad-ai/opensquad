@@ -42,7 +42,7 @@ def test_bridge_login_registers_with_node_secret(monkeypatch):
 
     calls: list[tuple] = []
 
-    def fake_post(url, json=None, headers=None, timeout=None):
+    def fake_post(_self, url, json=None, headers=None, timeout=None):
         calls.append((url, json, headers or {}))
         if url.endswith("/api/auth/login") and len([c for c in calls if c[0].endswith("/login")]) == 1:
             return _Resp(401, {"detail": "Incorrect email or password"})
@@ -53,7 +53,7 @@ def test_bridge_login_registers_with_node_secret(monkeypatch):
             return _Resp(200, {"access_token": "tok", "user": {"id": "99", "name": "Bot", "avatar": ""}})
         return _Resp(500, {"detail": "unexpected"})
 
-    monkeypatch.setattr("opensquad.bridge.requests.post", fake_post)
+    monkeypatch.setattr("opensquad.bridge.requests.Session.post", fake_post)
     monkeypatch.setattr("opensquad.bridge.syscfg.node_secret", lambda: "test-node-secret")
 
     b = ChatProBridge(base_url="http://gw", email="bot@ai", password="secret", agent_name="Bot")
@@ -68,7 +68,7 @@ def test_bridge_login_does_not_reset_when_register_400_not_exists(monkeypatch):
 
     posts = []
 
-    def fake_post(url, json=None, headers=None, timeout=None):
+    def fake_post(_self, url, json=None, headers=None, timeout=None):
         posts.append(url)
         if url.endswith("/login"):
             return _Resp(401, {"detail": "Incorrect"})
@@ -81,7 +81,7 @@ def test_bridge_login_does_not_reset_when_register_400_not_exists(monkeypatch):
             pytest.fail("password reset must not run for non-exists 400")
         return _Resp(500)
 
-    monkeypatch.setattr("opensquad.bridge.requests.post", fake_post)
+    monkeypatch.setattr("opensquad.bridge.requests.Session.post", fake_post)
     monkeypatch.setattr("opensquad.bridge.syscfg.node_secret", lambda: "secret")
 
     b = ChatProBridge(base_url="http://gw", email="ai@ai", password="aaaaaa", agent_name="ai")

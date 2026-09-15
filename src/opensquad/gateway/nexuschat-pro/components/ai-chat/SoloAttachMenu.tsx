@@ -6,7 +6,7 @@ import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { BookOpen, Check, ChevronRight, Image as ImageIcon, Paperclip, Plus, Upload, Volume2 } from 'lucide-react';
 import type { SkillInfo } from '../../services/api';
-import { POPOVER_SURFACE_CLASS } from './popoverSurface';
+import { POPOVER_SURFACE_CLASS, usePopMenuMounted } from './popoverSurface';
 
 export interface SoloAttachMenuProps {
   disabled?: boolean;
@@ -57,10 +57,7 @@ export const SoloAttachMenu: React.FC<SoloAttachMenuProps> = ({
   }, [open]);
 
   useLayoutEffect(() => {
-    if (!open) {
-      setMenuPos(null);
-      return;
-    }
+    if (!open) return; // keep last position while the exit animation plays
     const sync = () => {
       const trigger = triggerRef.current;
       if (!trigger) return;
@@ -111,21 +108,31 @@ export const SoloAttachMenu: React.FC<SoloAttachMenuProps> = ({
     fn();
   };
 
+  // Stay mounted briefly after close so the pop-out animation can play.
+  const menuMounted = usePopMenuMounted(open);
+  const skillsMounted = usePopMenuMounted(skillsOpen);
+
   const attachItems = [
     { key: 'files', label: 'Upload files', icon: Paperclip, onClick: onUploadFiles },
     { key: 'folder', label: 'Upload folder', icon: Upload, onClick: onUploadFolder },
     { key: 'images', label: 'Upload images', icon: ImageIcon, onClick: onUploadImages },
   ] as const;
 
-  const menu = open ? (
+  const menu = menuMounted ? (
     <div
       ref={menuRef}
       className="fixed z-[220] flex items-end gap-1"
       style={menuPos ? { bottom: menuPos.bottom, left: menuPos.left } : { visibility: 'hidden' }}
       onMouseLeave={() => setSkillsOpen(false)}
     >
-      <div className={`min-w-[200px] rounded-xl border border-border ${POPOVER_SURFACE_CLASS} overflow-hidden py-1`}>
-        <div className="px-3 py-1.5 text-[11px] text-textMuted/70 truncate">
+      {/* Flush rows (no py-1): hover/selected fill must reach the panel edges.
+          The header row is the only non-interactive strip and keeps breathing room. */}
+      <div
+        className={`min-w-[184px] origin-bottom-left rounded-xl border border-border ${POPOVER_SURFACE_CLASS} overflow-hidden ${
+          open ? 'os-pop-menu' : 'os-pop-menu-out'
+        }`}
+      >
+        <div className="px-3 py-1 text-[11px] text-textMuted/70 truncate">
           Add agents, context, tools…
         </div>
         {attachItems.map((item) => {
@@ -135,33 +142,37 @@ export const SoloAttachMenu: React.FC<SoloAttachMenuProps> = ({
               key={item.key}
               type="button"
               onClick={() => run(item.onClick)}
-              className="w-full flex items-center gap-2.5 px-3 py-2 text-left text-[13px] text-textMain hover:bg-black/[0.06] dark:hover:bg-white/[0.10] transition-colors border-0 bg-transparent cursor-pointer"
+              className="w-full flex items-center gap-2 px-3 py-1.5 text-left text-[12px] text-textMain hover:bg-black/[0.06] dark:hover:bg-white/[0.10] transition-colors border-0 bg-transparent cursor-pointer"
             >
-              <Icon size={15} className="text-textMuted" />
-              <span>{item.label}</span>
+              <span className="w-4 shrink-0 flex items-center justify-center">
+                <Icon size={14} className="text-textMuted" />
+              </span>
+              <span className="flex-1 min-w-0 truncate font-medium">{item.label}</span>
             </button>
           );
         })}
         {onToggleAutoSpeech && (
           <>
-            <div className="my-1 h-px bg-border/60" />
+            <div className="my-0.5 h-px bg-border/60" />
             <button
               type="button"
               onClick={() => onToggleAutoSpeech(!autoSpeechEnabled)}
-              className={`w-full flex items-center gap-2.5 px-3 py-2 text-left text-[13px] transition-colors border-0 cursor-pointer ${
+              className={`w-full flex items-center gap-2 px-3 py-1.5 text-left text-[12px] transition-colors border-0 cursor-pointer ${
                 autoSpeechEnabled
-                  ? 'bg-primary/10 text-primary'
+                  ? 'bg-black/[0.06] dark:bg-white/[0.08] text-blue-600 dark:text-blue-400'
                   : 'bg-transparent text-textMain hover:bg-black/[0.06] dark:hover:bg-white/[0.10]'
               }`}
               title="Automatically speak each final agent reply"
             >
-              <Volume2 size={15} className={autoSpeechEnabled ? 'text-primary' : 'text-textMuted'} />
-              <span className="flex-1">Auto speech</span>
-              {autoSpeechEnabled ? <Check size={14} className="text-primary" /> : null}
+              <span className="w-4 shrink-0 flex items-center justify-center">
+                <Volume2 size={14} className={autoSpeechEnabled ? 'text-blue-600 dark:text-blue-400' : 'text-textMuted'} />
+              </span>
+              <span className="flex-1 min-w-0 truncate font-medium">Auto speech</span>
+              {autoSpeechEnabled ? <Check size={13} className="text-blue-600 dark:text-blue-400" /> : null}
             </button>
           </>
         )}
-        <div className="my-1 h-px bg-border/60" />
+        <div className="my-0.5 h-px bg-border/60" />
         <button
           type="button"
           onMouseEnter={() => {
@@ -173,24 +184,30 @@ export const SoloAttachMenu: React.FC<SoloAttachMenuProps> = ({
             setSkillsOpen((v) => !v);
             onOpenSkills?.();
           }}
-          className={`w-full flex items-center gap-2.5 px-3 py-2 text-left text-[13px] transition-colors border-0 cursor-pointer ${
+          className={`w-full flex items-center gap-2 px-3 py-1.5 text-left text-[12px] transition-colors border-0 cursor-pointer ${
             skillsOpen
               ? 'bg-black/[0.06] dark:bg-white/[0.08] text-textMain'
               : 'bg-transparent text-textMain hover:bg-black/[0.06] dark:hover:bg-white/[0.10]'
           }`}
         >
-          <BookOpen size={15} className="text-textMuted" />
-          <span className="flex-1">Skills</span>
-          <ChevronRight size={14} className="text-textMuted" />
+          <span className="w-4 shrink-0 flex items-center justify-center">
+            <BookOpen size={14} className="text-textMuted" />
+          </span>
+          <span className="flex-1 min-w-0 truncate font-medium">Skills</span>
+          <ChevronRight size={13} className="text-textMuted/50" />
         </button>
       </div>
 
-      {skillsOpen && (
-        <div className={`min-w-[260px] max-w-[320px] max-h-[320px] overflow-y-auto rounded-xl border border-border ${POPOVER_SURFACE_CLASS} py-1`}>
+      {skillsMounted && (
+        <div
+          className={`min-w-[240px] max-w-[320px] max-h-[320px] overflow-y-auto origin-left rounded-xl border border-border ${POPOVER_SURFACE_CLASS} ${
+            skillsOpen ? 'os-pop-menu' : 'os-pop-menu-out'
+          }`}
+        >
           {skillsLoading && skills.length === 0 ? (
-            <div className="px-3 py-3 text-[12px] text-textMuted">Loading skills…</div>
+            <div className="px-3 py-4 text-[12px] text-textMuted text-center">Loading skills…</div>
           ) : skills.length === 0 ? (
-            <div className="px-3 py-3 text-[12px] text-textMuted">No skills installed</div>
+            <div className="px-3 py-4 text-[12px] text-textMuted text-center">No skills installed</div>
           ) : (
             skills.map((skill) => {
               const id = skill.dir || skill.name;
@@ -201,12 +218,12 @@ export const SoloAttachMenu: React.FC<SoloAttachMenuProps> = ({
                   key={id}
                   type="button"
                   onClick={() => run(() => onSelectSkill(skill))}
-                  className="w-full text-left px-3 py-2 hover:bg-black/[0.06] dark:hover:bg-white/[0.10] transition-colors border-0 bg-transparent cursor-pointer"
+                  className="w-full text-left px-3 py-1.5 hover:bg-black/[0.06] dark:hover:bg-white/[0.10] transition-colors border-0 bg-transparent cursor-pointer"
                   title={desc || title}
                 >
-                  <div className="text-[13px] font-medium text-textMain truncate">{title}</div>
+                  <div className="text-[12px] font-medium text-textMain truncate">{title}</div>
                   {desc ? (
-                    <div className="text-[11px] text-textMuted truncate mt-0.5">{desc}</div>
+                    <div className="text-[10px] text-textMuted truncate mt-0.5">{desc}</div>
                   ) : null}
                 </button>
               );

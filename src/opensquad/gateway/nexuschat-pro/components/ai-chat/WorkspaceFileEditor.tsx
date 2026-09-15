@@ -363,7 +363,7 @@ export const WorkspaceFileEditor: React.FC<WorkspaceFileEditorProps> = ({
       ) : error ? (
         <div className="px-3 py-4 text-[12px] text-red-400">{error}</div>
       ) : imageSrc ? (
-        <div className="flex-1 min-h-0 overflow-auto flex items-center justify-center p-4 bg-[#0d1117]">
+        <div className="flex-1 min-h-0 overflow-auto flex items-center justify-center p-4 bg-bgLight">
           <img src={imageSrc} alt={basename(relPath)} className="max-w-full max-h-full object-contain" />
         </div>
       ) : viewMode === 'diff' ? (

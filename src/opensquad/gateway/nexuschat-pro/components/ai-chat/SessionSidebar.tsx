@@ -1,9 +1,11 @@
 /**
- * SessionSidebar — sessions for the active workspace, grouped by 置顶 / 最近 / 归档.
+ * SessionSidebar — sessions for the active workspace, grouped by
+ * 置顶 / 通讯 / 最近 / 归档.
  */
 import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 import { OpenSquadLoader } from '../OpenSquadLoader';
+import { Collapse, FoldChevron } from '../Collapse';
 import {
   Trash2,
   Check,
@@ -16,13 +18,13 @@ import {
   Puzzle,
   UserCircle,
   Archive,
-  ChevronDown,
   ChevronRight,
   BookOpen,
   Code2,
   MessageCircle,
   LayoutGrid,
   Clock,
+  ListTodo,
   Search,
 } from 'lucide-react';
 import { agentSessionAPI, AgentSession } from '../../services/api';
@@ -41,6 +43,11 @@ import {
 } from '../../utils/sessionTimelineCache';
 import { buildTimelineFromSession } from '../../utils/aiChatTimeline';
 import { pathsEqual } from '../../utils/workspaceStore';
+import {
+  groupSessionsForSidebar,
+  resolveCommsSessionId,
+  withCommsSession,
+} from '../../utils/sessionSidebarGroups';
 import { SOFT_PRESENCE_MS, useSoftPresence } from '../../utils/useSoftPresence';
 import { formatRelativeAge } from '../../utils/time';
 import { PulseDotsOrbit } from './PulseDotsStatus';
@@ -56,13 +63,15 @@ interface SessionSidebarProps {
   workspaceId: string | null;
   onViewSession: (sessionId: string) => void;
   onNewSession: (projectPath?: string) => void;
-  onSwitchAndReply: (sessionId: string) => void;
+  /** @deprecated double-click now toggles batch-select mode. */
+  onSwitchAndReply?: (sessionId: string) => void;
   /** Optional override for delete (e.g. abandon empty current via new_session first). */
   onDeleteSession?: (sessionId: string) => Promise<void>;
   onOpenSkills?: () => void;
   onOpenPlugins?: () => void;
   onOpenRoles?: () => void;
   onOpenScheduledTasks?: () => void;
+  onOpenTasks?: () => void;
   onOpenSearch?: () => void;
   /** Highlight Skill 库 when the in-chat skills panel is open. */
   skillsActive?: boolean;
@@ -153,16 +162,25 @@ const SidebarSection: React.FC<{
   children: React.ReactNode;
 }> = ({ title, count, open, onToggle, children }) => (
   <div className="mb-1">
-    <button
-      type="button"
-      className="w-full flex items-center gap-1 px-2.5 py-1 text-[10px] font-semibold uppercase tracking-wide text-textMuted hover:text-textMain"
-      onClick={onToggle}
-    >
-      {open ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
-      <span className="flex-1 text-left">{title}</span>
-      <span className="tabular-nums opacity-70">{count}</span>
-    </button>
-    {open ? children : null}
+    {/* The header is a theme-tinted card (see `.os-group-header`) and is wrapped
+        in `px-1.5` instead of using `w-full` + `mx-1.5`: the wrapper keeps the
+        card aligned with the session rows, which use `mx-1.5` themselves. */}
+    <div className="px-1.5">
+      <button
+        type="button"
+        aria-expanded={open}
+        className="os-group-header w-full flex items-center gap-1 px-2 py-1 text-[10px] font-semibold uppercase tracking-wide text-textMuted hover:text-textMain"
+        onClick={onToggle}
+      >
+        <FoldChevron open={open} />
+        <span className="flex-1 text-left">{title}</span>
+        <span className="tabular-nums opacity-70">{count}</span>
+      </button>
+    </div>
+    {/* Shared fold primitive: an animatable grid row so opening/closing eases
+        like the left/right rails. Rows stay mounted on purpose — unmounting
+        would make it a snap, and it would remount on every expand. */}
+    <Collapse open={open}>{children}</Collapse>
   </div>
 );
 
@@ -173,12 +191,12 @@ const SessionSidebarInner: React.FC<SessionSidebarProps> = ({
   workspaceId,
   onViewSession,
   onNewSession,
-  onSwitchAndReply,
   onDeleteSession,
   onOpenSkills,
   onOpenPlugins,
   onOpenRoles,
   onOpenScheduledTasks,
+  onOpenTasks,
   onOpenSearch,
   skillsActive = false,
   pluginsActive = false,
@@ -208,10 +226,20 @@ const SessionSidebarInner: React.FC<SessionSidebarProps> = ({
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [confirmingDeleteId, setConfirmingDeleteId] = useState<string | null>(null);
+  const [confirmingBatchDelete, setConfirmingBatchDelete] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editingTitle, setEditingTitle] = useState('');
   const [renaming, setRenaming] = useState(false);
-  const [sectionOpen, setSectionOpen] = useState({ pinned: true, recent: true, archive: true });
+  // 批量标记模式：双击进入，行首出现空心圆点，点击变灰实心标记，
+  // 对已标记会话点归档/删除时批量作用于全部标记会话。
+  const [selectMode, setSelectMode] = useState(false);
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(() => new Set());
+  const [sectionOpen, setSectionOpen] = useState({
+    pinned: true,
+    comms: true,
+    recent: true,
+    archive: true,
+  });
   const [sidebarWidth, setSidebarWidth] = useState(loadSidebarWidth);
   const editInputRef = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
@@ -397,9 +425,39 @@ const SessionSidebarInner: React.FC<SessionSidebarProps> = ({
   useEffect(() => {
     if (!isOpen) {
       setConfirmingDeleteId(null);
+      setConfirmingBatchDelete(false);
       setEditingId(null);
+      setSelectMode(false);
+      setSelectedIds(new Set());
     }
   }, [isOpen]);
+
+  // Esc 退出批量标记模式
+  useEffect(() => {
+    if (!selectMode) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return;
+      setSelectMode(false);
+      setSelectedIds(new Set());
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [selectMode]);
+
+  const toggleSelect = useCallback((id: string) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }, []);
+
+  const exitSelectMode = useCallback(() => {
+    setSelectMode(false);
+    setConfirmingBatchDelete(false);
+    setSelectedIds(new Set());
+  }, []);
 
   const { mounted: softMounted, visible: softVisible } = useSoftPresence(isOpen, SOFT_PRESENCE_MS);
   const [railToggling, setRailToggling] = useState(false);
@@ -514,45 +572,66 @@ const SessionSidebarInner: React.FC<SessionSidebarProps> = ({
     };
   }, [agentId, loadSessions]);
 
-  const filtered = useMemo(() => {
-    return sessions.filter((s) => belongsToWorkspace(metaMap[s.id], workspaceRootPath, workspaceId));
-  }, [sessions, metaMap, workspaceRootPath, workspaceId]);
+  const commsId = useMemo(
+    () => resolveCommsSessionId(sessions, primarySessionId, pendingPrimarySessionId),
+    [sessions, primarySessionId, pendingPrimarySessionId],
+  );
 
-  const sections = useMemo(() => {
-    // 置顶 / 最近 / 归档 are independent filters (not mutually exclusive):
-    // - 置顶: pinned flag
-    // - 最近: not archived (includes pinned sessions)
-    // - 归档: archived flag (may also be pinned)
-    const pinned: AgentSession[] = [];
-    const recent: AgentSession[] = [];
-    const archive: AgentSession[] = [];
-    for (const s of filtered) {
-      const m = metaMap[s.id];
-      if (m?.pinned) pinned.push(s);
-      if (!m?.archived) recent.push(s);
-      if (m?.archived) archive.push(s);
-    }
-    const byUpdated = (a: AgentSession, b: AgentSession) =>
-      String(b.last_updated || '').localeCompare(String(a.last_updated || ''));
-    pinned.sort(byUpdated);
-    recent.sort(byUpdated);
-    archive.sort(byUpdated);
-    return { pinned, recent, archive };
-  }, [filtered, metaMap]);
+  const filtered = useMemo(() => {
+    const inWorkspace = sessions.filter((s) =>
+      belongsToWorkspace(metaMap[s.id], workspaceRootPath, workspaceId),
+    );
+    return withCommsSession(inWorkspace, sessions, commsId);
+  }, [sessions, metaMap, workspaceRootPath, workspaceId, commsId]);
+
+  useEffect(() => {
+    const pid = (primarySessionId || '').trim();
+    if (!pid) return;
+    setSessions((prev) => {
+      let changed = false;
+      const next = prev.map((s) => {
+        const primary = s.id === pid;
+        if (!!s.primary === primary) return s;
+        changed = true;
+        return { ...s, primary };
+      });
+      return changed ? next : prev;
+    });
+  }, [primarySessionId]);
+
+  const sections = useMemo(
+    () => groupSessionsForSidebar(filtered, metaMap, commsId),
+    [filtered, metaMap, commsId],
+  );
 
   const handleDeleteConfirm = async (e: React.MouseEvent, sessionId: string) => {
     e.stopPropagation();
     setConfirmingDeleteId(null);
-    try {
-      if (onDeleteSession) {
-        await onDeleteSession(sessionId);
-      } else {
-        await agentSessionAPI.deleteSession(agentId, sessionId);
+    // 批量：确认删除的是已标记会话时，作用于全部标记会话。
+    const ids = selectedIds.has(sessionId) ? [...selectedIds] : [sessionId];
+    await runBatchDelete(ids);
+  };
+
+  /** 批量删除/单删共用：删除后从列表移除并退出批量模式。 */
+  const runBatchDelete = async (ids: string[]) => {
+    let failed = false;
+    for (const id of ids) {
+      try {
+        if (onDeleteSession) {
+          await onDeleteSession(id);
+        } else {
+          await agentSessionAPI.deleteSession(agentId, id);
+        }
+      } catch {
+        failed = true;
       }
-      setSessions((prev) => prev.filter((s) => s.id !== sessionId));
-    } catch (err: any) {
-      setError(err.message || t('aiChat.sessionSidebar.deleteSessionFailed'));
     }
+    setSessions((prev) => prev.filter((s) => !ids.includes(s.id)));
+    if (failed) {
+      setError(t('aiChat.sessionSidebar.deleteSessionFailed'));
+      void loadSessions({ silent: true });
+    }
+    exitSelectMode();
   };
 
   const startRename = (e: React.MouseEvent, session: AgentSession) => {
@@ -583,7 +662,8 @@ const SessionSidebarInner: React.FC<SessionSidebarProps> = ({
   const renderRow = (session: AgentSession, rowKey: string) => {
     // Highlight follows UI selection only — never backend session.current (stale "live" flag).
     const isCurrent = !!currentSessionId && session.id === currentSessionId;
-    const isPrimary = !!session.primary || session.id === primarySessionId;
+    const isPrimary = !!commsId && session.id === commsId;
+    const isPendingPrimary = !!pendingPrimarySessionId && session.id === pendingPrimarySessionId;
     const meta = metaMap[session.id];
     const pinned = !!meta?.pinned;
     const archived = !!meta?.archived;
@@ -591,25 +671,49 @@ const SessionSidebarInner: React.FC<SessionSidebarProps> = ({
     const unseenComplete = !busy && !isCurrent && unseenCompleteSessionIds.includes(session.id);
     const confirming = confirmingDeleteId === session.id;
     const editing = editingId === session.id;
+    const marked = selectMode && selectedIds.has(session.id);
 
     return (
       <div
         key={rowKey}
+        title={session.title || session.id}
         className={`group os-interactive flex items-center gap-1 mx-1.5 px-2.5 py-1.5 rounded-xl cursor-pointer text-[12px] text-textMain ${
           isCurrent ? 'is-active' : ''
-        }`}
-        onClick={() => {
+        } ${marked ? 'bg-black/[0.04] dark:bg-white/[0.06]' : ''}`}
+        onClick={(e) => {
           if (editing || confirming) return;
+          if (selectMode) {
+            toggleSelect(session.id);
+            return;
+          }
+          // 双击的第二下 click 不触发打开（交给 onDoubleClick 进入批量模式）
+          if (e.detail > 1) return;
           onViewSession(session.id);
         }}
         onMouseEnter={() => prefetchSessionTimeline(session.id)}
         onDoubleClick={(e) => {
           e.stopPropagation();
-          onSwitchAndReply(session.id);
+          if (selectMode) exitSelectMode();
+          else setSelectMode(true);
         }}
       >
         {busy ? (
           <PulseDotsOrbit size={14} className="shrink-0" />
+        ) : selectMode ? (
+          <button
+            type="button"
+            aria-label={t('aiChat.sessionSidebar.markSession')}
+            title={t('aiChat.sessionSidebar.markSession')}
+            className={`w-3.5 h-3.5 rounded-full border shrink-0 transition-colors ${
+              marked
+                ? 'bg-textMuted border-textMuted'
+                : 'bg-transparent border-border hover:border-textMuted/70'
+            }`}
+            onClick={(e) => {
+              e.stopPropagation();
+              toggleSelect(session.id);
+            }}
+          />
         ) : (
           <span
             className={`w-1.5 h-1.5 rounded-full shrink-0 ${
@@ -639,19 +743,19 @@ const SessionSidebarInner: React.FC<SessionSidebarProps> = ({
             <>
               <div className="truncate font-normal flex items-center gap-1">
                 <span className="truncate">{session.title || session.id}</span>
-                {isPrimary ? (
-                  <span
-                    className="shrink-0 text-[9px] px-1 rounded bg-amber-500/20 text-amber-700 dark:text-amber-300"
-                    title={t('aiChat.sessionSidebar.externalBadgeTitle')}
-                  >
-                    {t('aiChat.sessionSidebar.externalBadge')}
-                  </span>
-                ) : session.id === pendingPrimarySessionId ? (
+                {isPendingPrimary ? (
                   <span
                     className="shrink-0 text-[9px] px-1 rounded bg-black/5 dark:bg-white/10 text-textMuted"
                     title={t('aiChat.sessionSidebar.setExternalPending')}
                   >
                     …
+                  </span>
+                ) : isPrimary ? (
+                  <span
+                    className="shrink-0 text-[9px] px-1 rounded bg-amber-500/20 text-amber-700 dark:text-amber-300"
+                    title={t('aiChat.sessionSidebar.externalBadgeTitle')}
+                  >
+                    {t('aiChat.sessionSidebar.externalBadge')}
                   </span>
                 ) : null}
               </div>
@@ -671,6 +775,10 @@ const SessionSidebarInner: React.FC<SessionSidebarProps> = ({
                 className="p-0.5 rounded hover:bg-primary/10 disabled:opacity-40"
                 onClick={(e) => {
                   e.stopPropagation();
+                  if (archived) {
+                    setSessionArchived(agentId, session.id, false);
+                    reloadMeta();
+                  }
                   onSetPrimarySession(session.id);
                 }}
               >
@@ -695,8 +803,11 @@ const SessionSidebarInner: React.FC<SessionSidebarProps> = ({
               title={archived ? t('aiChat.unarchive') : t('aiChat.archive')}
               onClick={(e) => {
                 e.stopPropagation();
-                setSessionArchived(agentId, session.id, !archived);
+                // 批量：操作的是已标记会话时，作用于全部标记会话。
+                const ids = selectedIds.has(session.id) ? [...selectedIds] : [session.id];
+                for (const id of ids) setSessionArchived(agentId, id, !archived);
                 reloadMeta();
+                if (ids.length > 1) exitSelectMode();
               }}
             >
               <Archive size={11} />
@@ -839,6 +950,15 @@ const SessionSidebarInner: React.FC<SessionSidebarProps> = ({
         </button>
         <button
           type="button"
+          disabled={!workspaceRootPath}
+          onClick={() => onOpenTasks?.()}
+          className="w-full flex items-center gap-2 px-2 py-1.5 rounded-lg text-[14px] font-normal text-textMain os-interactive disabled:opacity-40"
+        >
+          <ListTodo size={16} className="text-textMuted/70" />
+          {t('taskPanel.title')}
+        </button>
+        <button
+          type="button"
           onClick={() => onOpenSkills?.()}
           className={`w-full flex items-center gap-2 px-2 py-1.5 rounded-lg text-[14px] font-normal os-interactive ${
             skillsActive
@@ -875,6 +995,88 @@ const SessionSidebarInner: React.FC<SessionSidebarProps> = ({
         </button>
       </div>
 
+      {selectMode ? (
+        <div className="px-3 py-1.5 border-b border-border/60 flex items-center justify-between text-[11px] text-textMuted shrink-0 gap-2">
+          {confirmingBatchDelete ? (
+            <>
+              <span className="text-rose-500 truncate">
+                {t('aiChat.sessionSidebar.batchDeleteConfirm', { count: selectedIds.size })}
+              </span>
+              <div className="flex items-center gap-1 shrink-0">
+                <button
+                  type="button"
+                  className="p-1 rounded bg-rose-500 text-white"
+                  title={t('common.confirm')}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setConfirmingBatchDelete(false);
+                    void runBatchDelete([...selectedIds]);
+                  }}
+                >
+                  <Check size={11} />
+                </button>
+                <button
+                  type="button"
+                  className="p-1 rounded hover:bg-primary/15"
+                  title={t('common.cancel')}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setConfirmingBatchDelete(false);
+                  }}
+                >
+                  <X size={11} />
+                </button>
+              </div>
+            </>
+          ) : (
+            <>
+              <span className="truncate">
+                {t('aiChat.sessionSidebar.batchSelected', { count: selectedIds.size })}
+              </span>
+              <div className="flex items-center gap-1 shrink-0">
+                <button
+                  type="button"
+                  disabled={selectedIds.size === 0}
+                  className="flex items-center gap-0.5 px-1.5 py-0.5 rounded hover:bg-primary/10 disabled:opacity-40"
+                  title={t('aiChat.sessionSidebar.batchArchive')}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    const ids = [...selectedIds];
+                    if (!ids.length) return;
+                    for (const id of ids) setSessionArchived(agentId, id, true);
+                    reloadMeta();
+                    exitSelectMode();
+                  }}
+                >
+                  <Archive size={11} />
+                  <span>{t('aiChat.sessionSidebar.batchArchive')}</span>
+                </button>
+                <button
+                  type="button"
+                  disabled={selectedIds.size === 0}
+                  className="flex items-center gap-0.5 px-1.5 py-0.5 rounded text-rose-500 hover:bg-rose-500/15 disabled:opacity-40"
+                  title={t('common.delete')}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setConfirmingBatchDelete(true);
+                  }}
+                >
+                  <Trash2 size={11} />
+                  <span>{t('common.delete')}</span>
+                </button>
+                <button
+                  type="button"
+                  className="hover:text-textMain"
+                  onClick={exitSelectMode}
+                >
+                  {t('aiChat.sessionSidebar.batchExit')}
+                </button>
+              </div>
+            </>
+          )}
+        </div>
+      ) : null}
+
       <div
         ref={listRef}
         onScroll={handleListScroll}
@@ -896,6 +1098,20 @@ const SessionSidebarInner: React.FC<SessionSidebarProps> = ({
                 <div className="px-3 py-1 text-[10px] text-textMuted/50">{t('aiChat.none')}</div>
               ) : (
                 sections.pinned.map((s) => renderRow(s, `pinned:${s.id}`))
+              )}
+            </SidebarSection>
+            <SidebarSection
+              title={t('aiChat.sessionSidebar.comms')}
+              count={sections.comms.length}
+              open={sectionOpen.comms}
+              onToggle={() => setSectionOpen((s) => ({ ...s, comms: !s.comms }))}
+            >
+              {sections.comms.length === 0 ? (
+                <div className="px-3 py-1 text-[10px] text-textMuted/50">
+                  {t('aiChat.sessionSidebar.noCommsSession')}
+                </div>
+              ) : (
+                sections.comms.map((s) => renderRow(s, `comms:${s.id}`))
               )}
             </SidebarSection>
             <SidebarSection

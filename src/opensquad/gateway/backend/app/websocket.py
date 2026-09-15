@@ -2,6 +2,8 @@
 WebSocket connection management and real-time communication
 """
 
+import asyncio
+
 from fastapi import WebSocket, WebSocketDisconnect
 from sqlalchemy import and_, select
 
@@ -115,29 +117,49 @@ class ConnectionManager:
         for websocket in disconnected:
             await self.disconnect(websocket, user_id)
 
+    async def _send_payload_to_user(self, user_id: str, payload: str) -> list[WebSocket]:
+        """Send an already-serialized payload to every device of one user.
+
+        Returns the connections that failed. The caller disconnects them serially:
+        disconnect() mutates shared dicts and awaits status broadcasts, so it must
+        not run concurrently.
+        """
+        dead: list[WebSocket] = []
+        for websocket in list(self.active_connections.get(user_id, [])):
+            try:
+                await websocket.send_text(payload)
+            except Exception:
+                dead.append(websocket)
+        return dead
+
     async def broadcast_to_group(self, group_id: str, message: dict, exclude_user: str | None = None):
-        """Broadcast a message to a group - sends to all devices of each user"""
+        """Broadcast a message to a group - sends to all devices of each user.
+
+        Different users are delivered concurrently so that one slow client cannot
+        delay everybody else (same pattern as ai_web's broadcast_to_agent).
+        """
         if group_id not in self.group_subscriptions:
             return
 
-        user_ids = list(self.group_subscriptions[group_id])
         payload = dumps_json_safe(message)
+        targets = [
+            uid
+            for uid in list(self.group_subscriptions[group_id])
+            if uid != exclude_user and uid in self.active_connections
+        ]
+        if not targets:
+            return
 
-        for user_id in user_ids:
-            if user_id == exclude_user:
+        results = await asyncio.gather(
+            *[self._send_payload_to_user(uid, payload) for uid in targets],
+            return_exceptions=True,
+        )
+
+        for uid, dead in zip(targets, results, strict=True):
+            if isinstance(dead, Exception):
                 continue
-
-            if user_id in self.active_connections:
-                conns = self.active_connections[user_id]
-                disconnected = []
-                for websocket in conns:
-                    try:
-                        await websocket.send_text(payload)
-                    except Exception:
-                        disconnected.append(websocket)
-
-                for websocket in disconnected:
-                    await self.disconnect(websocket, user_id)
+            for websocket in dead:
+                await self.disconnect(websocket, uid)
 
     async def broadcast_presence(self, user_id: str, status: str):
         """Broadcast a user's status change to all devices of all users"""

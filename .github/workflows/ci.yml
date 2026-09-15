@@ -100,7 +100,7 @@ jobs:
             python-version: ${{ matrix.python-version }}
 
         - name: Sync dependencies with uv
-          run: uv sync --extra dev --extra websearch --python ${{ matrix.python-version }}
+          run: uv sync --extra dev --extra websearch --extra telegram --python ${{ matrix.python-version }}
 
         - name: Verify opensquad imports
           run: uv run python -c "import opensquad; print('OK')"
@@ -130,22 +130,26 @@ jobs:
             python-version: ${{ matrix.python-version }}
 
         - name: Sync dependencies with uv
-          run: uv sync --extra dev --extra websearch --python ${{ matrix.python-version }}
+          run: uv sync --extra dev --extra websearch --extra telegram --extra google --python ${{ matrix.python-version }}
 
         - name: Run tests
           env:
             PYTHONPATH: src
           # Legacy failures are xfailed via tests/known_failures.txt (conftest).
-          # New failures fail this job. Coverage floor is the next (advisory) step
-          # so --cov-fail-under cannot hollow-out the pytest gate.
+          # New failures fail this job. Coverage is *collected* here; the floor
+          # is enforced by the dedicated step below so that a coverage miss and a
+          # test failure are reported separately.
           run: uv run pytest tests/ -v --tb=short --cov=opensquad --cov-report=term-missing --cov-report=html --cov-fail-under=0
 
-        - name: Coverage floor (advisory)
+        - name: Coverage floor (ratchet)
+          # Blocking on purpose. This step used to be `continue-on-error: true`
+          # while pyproject claimed an 80% floor — the gate was decorative.
+          # fail_under in pyproject.toml is the measured baseline (21%); it may
+          # be raised as tests are added, never silently dropped.
           if: always() && matrix.python-version == '3.11'
-          continue-on-error: true
           env:
             PYTHONPATH: src
-          run: uv run coverage report --fail-under=80
+          run: uv run coverage report
 
         - name: Upload coverage report
           if: matrix.python-version == '3.11'
@@ -203,10 +207,17 @@ jobs:
           run: uv sync --extra dev --python 3.11
 
         - name: Run mypy
-          # Repo-wide mypy debt (~270 errors) predates this release; keep the
-          # job visible but non-blocking until the debt is paid down.
-          continue-on-error: true
-          run: uv run mypy src/opensquad/ --ignore-missing-imports --warn-unused-ignores
+          # Repo-wide mypy debt is large and predates this release (see
+          # scripts/mypy-baseline.txt). A clean run is not achievable in one
+          # step, so instead of `continue-on-error` — which is how this check
+          # stopped meaning anything — the error count is captured and compared
+          # against a recorded budget in the step below. The `|| true` keeps
+          # mypy's own exit code from masking which step actually failed.
+          run: |
+            uv run mypy src/opensquad/ --ignore-missing-imports --warn-unused-ignores 2>&1 | tee mypy-out.txt || true
+
+        - name: Check mypy error budget
+          run: python scripts/check_mypy_budget.py mypy-out.txt
 
     secrets-scan:
       name: secrets scan (gitleaks)
@@ -243,10 +254,17 @@ jobs:
           run: pip install bandit
 
         - name: Run bandit
-          # Remaining findings (md5 fingerprints, intentional shell=True) are
-          # pre-existing; keep visible but non-blocking.
-          continue-on-error: true
-          run: bandit -r src/ --skip B101 --quiet --severity-level high --confidence-level high
+          # Blocking. Previously `continue-on-error: true` and unscoped, so the
+          # 14 high-severity hits inside the vendored frozen runtime under
+          # gateway/nexuschat-pro/ drowned out the handful of real first-party
+          # findings. Vendored trees are excluded; the remaining first-party
+          # sites are either fixed (usedforsecurity=False) or carry an explicit
+          # `# nosec B602` with a written justification.
+          run: |
+            bandit -r src/ \
+              --skip B101 \
+              --exclude '*/nexuschat-pro/*' \
+              --quiet --severity-level high --confidence-level high
 
     sca:
       name: pip-audit dependency scan

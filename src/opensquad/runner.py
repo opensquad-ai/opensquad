@@ -104,6 +104,39 @@ def _get_state_manager():
     return _state_module.state_manager
 
 
+def _looks_like_auth_failure(text: str) -> bool:
+    """True when ChatAPI stuffed a 401/credits error into the assistant text."""
+    t = (text or "").lower()
+    return any(
+        token in t
+        for token in (
+            "authenticationerror",
+            "error code: 401",
+            "creditserror",
+            "insufficient balance",
+            "invalid api key",
+            "unauthorized",
+        )
+    )
+
+
+def _auth_error_detail(text: str, *, limit: int = 300) -> str:
+    """Pull the provider's own error blurb out of an assistant text blob.
+
+    ChatAPI stuffs the upstream failure into the reply as ``[Error: <type> -
+    <body>]``. Without extracting it, every auth/credit failure collapses into
+    one generic sentence and the operator cannot tell 402 Insufficient Balance
+    from 401 invalid key. Returns "" when nothing usable is found.
+    """
+    t = (text or "").strip()
+    if not t:
+        return ""
+    m = re.search(r"\[Error:\s*(.+?)\]\s*$", t, flags=re.DOTALL)
+    detail = (m.group(1) if m else t).strip()
+    detail = re.sub(r"\s+", " ", detail)
+    return detail[:limit]
+
+
 # Module-level runner reference for tool hot-reload (each agent is an independent process, singleton-safe)
 _active_runner: AgentRunner | None = None
 
@@ -1382,17 +1415,119 @@ class AgentRunner:
         # Unknown agent command — ignore
         logger.info("[Runner] Ignoring agent-level command: %s", content[:80])
 
+    def _notify_external_turn_failed(self, text: str) -> None:
+        """Best-effort ChatPro notice so a group @mention is not silent on LLM 401."""
+        from opensquad.session_model import should_use_agent_default
+
+        if not should_use_agent_default(
+            getattr(self, "_current_input_source", ""),
+            getattr(self, "_current_channel", ""),
+        ):
+            return
+        targets = list(getattr(self, "_current_group_targets", None) or [])
+        gid = str(getattr(self, "_current_group_id", "") or "").strip()
+        if gid and not any(str(t.get("id") or "") == gid for t in targets):
+            targets.append({"id": gid, "type": "group"})
+        if not targets:
+            return
+        try:
+            from opensquad.bridge import bridge
+        except Exception as e:
+            logger.warning("[Runner] group failure notice skipped (no bridge): %s", e)
+            return
+        for t in targets:
+            tid = str(t.get("id") or "").strip()
+            if not tid:
+                continue
+            kind = str(t.get("type") or "group")
+            try:
+                ok = bridge.send_message(text, target_id=tid, target_type=kind, retries=1)
+                logger.info("[Runner] group failure notice sid target=%s ok=%s", tid, ok)
+            except Exception as e:
+                logger.warning("[Runner] group failure notice failed target=%s: %s", tid, e)
+
+    def _drain_parallel_session_supplements(self, sid: str) -> int:
+        """Pull messages that arrived for *sid* while its turn was running.
+
+        Serial mode has the mid-work supplement checkpoint (``_run_serial``:
+        ``input_hub.get_all_pending()`` → ``event_pipeline`` → role=tool), but
+        the parallel turn loop had NO equivalent: a force-sent message just sat
+        in the dispatcher's re-push cycle until the whole turn (potentially an
+        autonomous multi-hour loop) ended — the model never saw it mid-flow,
+        and if the agent restarted first it was gone (in-memory queue).
+
+        Text goes into the session's event_pipeline bucket so the shared tool
+        path (_turn_loop drains per tool call) delivers it as role=tool and
+        persists + emits user_msg — the same contract the serial checkpoint
+        uses. Images/attachments extend the runner's pending media like the
+        serial checkpoint does.
+        """
+        try:
+            supplements = input_hub.get_session_pending(sid)
+        except Exception:
+            logger.debug("[Runner] session supplement drain failed sid=%s", sid, exc_info=True)
+            return 0
+        if not supplements:
+            return 0
+
+        from opensquad.event_pipeline import event_pipeline
+
+        pushed = 0
+        for item in supplements:
+            content = str(item.get("content", "") or "")
+            # System sentinels / wake markers are not user-visible input.
+            if not content.strip() or content.strip() == "[wakeup-urgent-command]" or content.startswith("__"):
+                continue
+            _sup_imgs = item.get("images") or []
+            if _sup_imgs:
+                self._current_images.extend(_sup_imgs)
+                logger.info(
+                    "[Runner] Mid-turn supplement carried %d image(s) sid=%s",
+                    len(_sup_imgs),
+                    sid,
+                )
+            _sup_atts = item.get("attachments") or []
+            if _sup_atts:
+                self._current_attachments = list(self._current_attachments or []) + list(_sup_atts)
+            event_pipeline.push_nowait(
+                source=item.get("source", "gateway"),
+                content=content,
+                metadata={
+                    "sender_name": item.get("sender_name", ""),
+                    "channel": item.get("channel", ""),
+                    "source": "input_hub",
+                    "images": _sup_imgs,
+                    "attachments": _sup_atts,
+                },
+                session_id=sid,
+            )
+            pushed += 1
+            logger.info(
+                "[Runner] Mid-turn supplement → event_pipeline sid=%s content=%r",
+                sid,
+                content[:80],
+            )
+        return pushed
+
     async def _parallel_session_turn(self, sid: str, item: dict) -> None:
         """Run one user message for *sid* in an isolated TurnLocal (true parallel)."""
-        from opensquad.session_model import bind_for_turn, current_api_card
+        from opensquad.session_model import bind_for_turn, current_api_card, should_use_agent_default
 
+        self._auth_fallback_used = False
         preferred_card = str(item.get("model_card") or "").strip() or None
+        external_turn = should_use_agent_default(item.get("source"), item.get("channel"))
         # Single authority: session_model.bind_for_turn (chat payload → store → API).
-        api = await bind_for_turn(self, sid, preferred_card=preferred_card)
+        # Group/IM ingress must use the agent default, not a pane's stale model_card.
+        api = await bind_for_turn(
+            self,
+            sid,
+            preferred_card=None if external_turn else preferred_card,
+            use_agent_default=external_turn,
+        )
         logger.warning(
             "[Runner] turn bind sid=%s preferred=%s card=%s model=%s base=%s",
             sid,
-            preferred_card or "-",
+            "agent-default" if external_turn else (preferred_card or "-"),
             current_api_card(api) or "-",
             getattr(api, "model", None),
             (getattr(api, "base_url", None) or "")[:60],
@@ -1423,6 +1558,7 @@ class AgentRunner:
         except Exception:
             pass
         token = set_turn_local(tl)
+        _round_usage_start: dict | None = None
         try:
             content = str(item.get("content") or "")
             # Fresh user message: clear THIS sid's Stop latch so a new turn can run.
@@ -1476,6 +1612,8 @@ class AgentRunner:
             self._last_user_input = content
             self._current_round = (self._current_round or 0) + 1
             self._workflow_started_ms = datetime.now().timestamp() * 1000
+            # Round-level billed-usage baseline (turn_usage = delta at teardown).
+            _round_usage_start = self._round_usage_snapshot(sid)
 
             client_id = str(item.get("client_id") or "").strip()
             extra = {}
@@ -1521,6 +1659,20 @@ class AgentRunner:
                     logger.info("[Runner] Stop during parallel turn sid=%s", sid)
                     stopped = True
                     break
+
+                # Mid-turn supplement checkpoint (parallel counterpart of the
+                # serial loop's input_hub drain): messages force-sent while this
+                # turn was running must reach the model on the next tool round,
+                # not after the whole turn ends.
+                if turn > 0:
+                    _n_sup = self._drain_parallel_session_supplements(sid)
+                    if _n_sup:
+                        logger.info(
+                            "[Runner] Injected %d mid-turn supplement(s) sid=%s turn=%s",
+                            _n_sup,
+                            sid,
+                            turn + 1,
+                        )
 
                 self._current_turn = turn + 1
                 self._turn_started_ms = datetime.now().timestamp() * 1000
@@ -1652,6 +1804,49 @@ class AgentRunner:
                 output_media = ai_response.get("output_media")
                 finish_reason = ai_response.get("finish_reason")
                 stream_error = bool(ai_response.get("stream_error"))
+                auth_error = bool(ai_response.get("auth_error"))
+                if auth_error or (stream_error and _looks_like_auth_failure(full_response)):
+                    if not getattr(self, "_auth_fallback_used", False):
+                        from opensquad.session_model import agent_default_card
+
+                        fallback = agent_default_card(self)
+                        current_card = current_api_card(self.chat_api)
+                        if fallback and fallback != current_card:
+                            self._auth_fallback_used = True
+                            logger.warning(
+                                "[Runner] session model auth failed sid=%s card=%s; retry agent default=%s",
+                                sid,
+                                current_card or "-",
+                                fallback,
+                            )
+                            api = await bind_for_turn(self, sid, use_agent_default=True)
+                            tl.chat_api = api
+                            self.chat_api = api
+                            continue
+                    # _notify_external_turn_failed is a plain sync method (it
+                    # calls bridge.send_message synchronously). Awaiting it
+                    # raised "object NoneType can't be used in 'await'
+                    # expression" and REPLACED the real upstream error
+                    # (e.g. DeepSeek 402 Insufficient Balance) with a bogus
+                    # TypeError, so the web only ever saw
+                    # "Task failed: object NoneType ..." and the actual cause
+                    # was invisible. Run it off-loop: sync + blocking network.
+                    await asyncio.to_thread(
+                        self._notify_external_turn_failed,
+                        "模型接口鉴权失败（余额不足或密钥无效），群消息已收到但本轮无法回复。",
+                    )
+                    # The auth branch used to `break` silently: no error frame,
+                    # no user-visible message. Web panes saw an idle agent and
+                    # scheduled tasks were marked "failed" with no reason at
+                    # all. Surface the upstream cause before breaking.
+                    _auth_detail = _auth_error_detail(full_response)
+                    _auth_msg = "模型接口鉴权失败（余额不足或密钥无效）。"
+                    if _auth_detail:
+                        _auth_msg += f" 上游返回：{_auth_detail}"
+                    await self._emit("error", {"message": _auth_msg})
+                    await self._emit("to_user_final", f"[Error] {_auth_msg}")
+                    turn_failed = True
+                    break
 
                 stop, next_input, went_to_sleep = await self._handle_turn_result(
                     full_response,
@@ -1717,6 +1912,7 @@ class AgentRunner:
                     break
 
             _wf_ended_ms = int(datetime.now().timestamp() * 1000)
+            await self._finalize_round_usage(sid, _round_usage_start, started_ms=int(self._workflow_started_ms))
             await self._emit(
                 "turn_elapsed",
                 {"started_ms": int(self._workflow_started_ms), "ended_ms": _wf_ended_ms},
@@ -1742,6 +1938,11 @@ class AgentRunner:
             logger.info("[Runner] Parallel turn cancelled sid=%s", sid)
             try:
                 _wf_ended_ms = int(datetime.now().timestamp() * 1000)
+                await self._finalize_round_usage(
+                    sid,
+                    _round_usage_start,
+                    started_ms=int(getattr(self, "_workflow_started_ms", _wf_ended_ms) or _wf_ended_ms),
+                )
                 await self._emit(
                     "turn_elapsed",
                     {
@@ -1768,6 +1969,11 @@ class AgentRunner:
         except Exception as e:
             logger.error("[Runner] Parallel turn error sid=%s: %s", sid, e, exc_info=True)
             try:
+                await self._finalize_round_usage(
+                    sid,
+                    _round_usage_start,
+                    started_ms=int(getattr(self, "_workflow_started_ms", 0) or 0) or None,
+                )
                 _turn_err = f"Task failed: {str(e)[:300]}"
                 await self._emit("error", {"message": _turn_err})
                 # Emit as a final user-visible message so the web always sees it.
@@ -1826,6 +2032,8 @@ class AgentRunner:
         self._agent_ready = True
         bus.emit("agent_ready", {"agent_id": self._agent_id})
         self._replay_pending()
+        # Round-level billed-usage baseline for the active round (turn_usage).
+        _round_usage_start: dict | None = None
 
         while True:
             # Check wake-up
@@ -2685,6 +2893,8 @@ class AgentRunner:
             )
             # Record the workflow start time (before all turns, set only once)
             self._workflow_started_ms = datetime.now().timestamp() * 1000
+            # Round-level billed-usage baseline (turn_usage = delta at teardown).
+            _round_usage_start = self._round_usage_snapshot(self._turn_sid or "")
             # Persist a workflow start marker so refresh can reconstruct in-progress blocks
             # (including Working elapsed seconds via started_ms).
             _get_session_manager().add_event(
@@ -3775,6 +3985,11 @@ class AgentRunner:
                     )  # Write cumulative stats immediately after conversation completes
                     # Workflow ended (normal completion): send turn_elapsed to ensure frontend closes the workflow timer block
                     _wf_ended_ms = int(datetime.now().timestamp() * 1000)
+                    await self._finalize_round_usage(
+                        self._turn_sid or "",
+                        _round_usage_start,
+                        started_ms=int(self._workflow_started_ms),
+                    )
                     await self._emit(
                         "turn_elapsed", {"started_ms": int(self._workflow_started_ms), "ended_ms": _wf_ended_ms}
                     )
@@ -3802,6 +4017,11 @@ class AgentRunner:
                 # This covers the common path where _handle_turn_result returns went_to_sleep=True
                 # Also emit turn_elapsed for the went_to_sleep path (safety fallback)
                 _wf_ended_ms = int(datetime.now().timestamp() * 1000)
+                await self._finalize_round_usage(
+                    self._turn_sid or "",
+                    _round_usage_start,
+                    started_ms=int(self._workflow_started_ms),
+                )
                 await self._emit(
                     "turn_elapsed", {"started_ms": int(self._workflow_started_ms), "ended_ms": _wf_ended_ms}
                 )
@@ -4455,6 +4675,66 @@ class AgentRunner:
                 if api is not None:
                     return api
         return self.chat_api
+
+    def _round_usage_snapshot(self, sid: str = "") -> dict:
+        """Billed-usage snapshot of the ChatAPI bound to *sid* (turn_usage deltas).
+
+        Identity of the api object travels with the numbers: when a mid-round
+        auth fallback rebinds the ChatAPI the old counters are unreachable and
+        the finalize step falls back to the new api's absolute totals.
+        """
+        api = self._chat_api_for_token_stats(sid or "")
+        return {
+            "api": api,
+            "input": int(getattr(api, "total_input_tokens", 0) or 0),
+            "output": int(getattr(api, "total_output_tokens", 0) or 0),
+        }
+
+    async def _finalize_round_usage(
+        self,
+        sid: str,
+        start: dict | None,
+        *,
+        started_ms: int | None = None,
+    ) -> None:
+        """Persist + broadcast this round's total token usage (``turn_usage``).
+
+        The web UI stamps the payload onto the round's final assistant message
+        (消耗 badge: elapsed · total tokens; hover shows input/output split).
+        Never raises — usage display must not break turn teardown.
+        """
+        try:
+            end = self._round_usage_snapshot(sid or "")
+            api0 = (start or {}).get("api")
+            if api0 is not None and api0 is end["api"]:
+                inp = max(0, end["input"] - int((start or {}).get("input", 0)))
+                outp = max(0, end["output"] - int((start or {}).get("output", 0)))
+            else:
+                inp, outp = end["input"], end["output"]
+            if inp <= 0 and outp <= 0:
+                return  # nothing billed (pure stop / error before LLM call)
+            ended_ms = int(datetime.now().timestamp() * 1000)
+            started = int(started_ms or getattr(self, "_workflow_started_ms", 0) or ended_ms)
+            payload = {
+                "round_id": int(getattr(self, "_current_round", 0) or 0),
+                "turn_id": int(getattr(self, "_current_turn", 0) or 0),
+                "started_ms": started,
+                "ended_ms": ended_ms,
+                "elapsed_ms": max(0, ended_ms - started),
+                "input_tokens": inp,
+                "output_tokens": outp,
+                "total_tokens": inp + outp,
+            }
+            _get_session_manager().add_event(
+                "turn_usage",
+                payload,
+                turn_id=int(getattr(self, "_current_turn", 0) or 0),
+                round_id=int(getattr(self, "_current_round", 0) or 0),
+                sid=(sid or "").strip() or None,
+            )
+            await self._emit("turn_usage", payload, sid=(sid or "").strip() or None)
+        except Exception:
+            logger.debug("[Runner] turn_usage emit skipped", exc_info=True)
 
     def _chat_api_owns_session(self, chat_api, sid: str) -> bool:
         """True when *chat_api* is the live context for *sid*.

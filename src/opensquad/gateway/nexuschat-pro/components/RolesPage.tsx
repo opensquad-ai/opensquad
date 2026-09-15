@@ -5,6 +5,7 @@ import {
   Eye, Pencil, Menu, LayoutGrid, List,
 } from 'lucide-react';
 import { marked } from 'marked';
+import { sanitizeHtml } from '../utils/safeHtml';
 import { adminAPI, roleCardAPI, collabCardAPI, CardInfo, AdminAgent } from '../services/api';
 import { useTranslation } from 'react-i18next';
 import {
@@ -588,9 +589,9 @@ const RolesPage: React.FC<RolesPageProps> = ({ onBack, embedded = false }) => {
                     [&_strong]:font-semibold [&_strong]:text-textMain
                     [&_a]:text-primary [&_a]:underline"
                   dangerouslySetInnerHTML={{
-                    __html: content.trim()
+                    __html: sanitizeHtml(content.trim()
                       ? marked.parse(stripFrontmatter(content), { breaks: true }) as string
-                      : `<p class="text-textMuted italic text-sm">(${t('common.noData')})</p>`,
+                      : `<p class="text-textMuted italic text-sm">(${t('common.noData')})</p>`),
                   }}
                  />
               )}

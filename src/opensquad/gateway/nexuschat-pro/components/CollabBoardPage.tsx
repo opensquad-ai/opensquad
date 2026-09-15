@@ -14,6 +14,7 @@ import {
   X,
 } from 'lucide-react';
 import { marked } from 'marked';
+import { sanitizeHtml } from '../utils/safeHtml';
 import { useTranslation } from 'react-i18next';
 import { OpenSquadLoader } from './OpenSquadLoader';
 import { collabBoardAPI, CollabBoardItem, CollabBoardTask, PlanSnapshot } from '../services/api';
@@ -114,7 +115,7 @@ const MarkdownSection: React.FC<MarkdownSectionProps> = ({
   const renderedHtml = useMemo(() => {
     const src = selectedSnapshot?.content ?? value;
     if (!src?.trim()) return '';
-    return marked.parse(src, { breaks: true }) as string;
+    return sanitizeHtml(marked.parse(src, { breaks: true }) as string);
   }, [value, selectedSnapshot]);
 
   const handleSave = async () => {

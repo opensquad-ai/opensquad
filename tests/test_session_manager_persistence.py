@@ -385,3 +385,53 @@ class TestCompressSession:
         assert any("old-a-" in (m.get("content") or "") for m in archived)
         assert any("old-b-" in (m.get("content") or "") for m in archived)
         assert len(live) + len(archived) == 3
+
+
+class TestAlignHistoryWindow:
+    """get_messages_for_chat_api must not cut a tool_call / tool pair."""
+
+    @staticmethod
+    def _asst(cid: str, name: str = "filesystem.list_directory") -> dict:
+        return {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [{"id": cid, "type": "function", "function": {"name": name, "arguments": "{}"}}],
+        }
+
+    @staticmethod
+    def _tool(cid: str, name: str = "filesystem.list_directory") -> dict:
+        return {"role": "tool", "tool_call_id": cid, "name": name, "content": "ok"}
+
+    def test_naive_last_n_starting_on_tool_is_realigned(self):
+        msgs = [{"role": "user", "content": "检查当前项目"}]
+        for i in range(20):
+            cid = f"call_{i}"
+            msgs.append(self._asst(cid))
+            msgs.append(self._tool(cid))
+        # 41 messages; last 9 starts on a tool (index 32).
+        assert msgs[len(msgs) - 9]["role"] == "tool"
+        window = SessionManager._align_history_window(msgs, 9)
+        assert window[0]["role"] == "user"
+        assert window[0]["content"] == "检查当前项目"
+        assert window[1]["role"] == "assistant"
+        assert window[1]["tool_calls"][0]["id"] == window[2]["tool_call_id"]
+
+    def test_short_history_unchanged(self):
+        msgs = [
+            {"role": "user", "content": "hi"},
+            self._asst("c1"),
+            self._tool("c1"),
+        ]
+        assert SessionManager._align_history_window(msgs, 50) == msgs
+
+    def test_get_messages_for_chat_api_keeps_original_user(self, sm):
+        sm.add_message("user", "检查当前项目")
+        for i in range(20):
+            sm.session_data.setdefault("messages", []).append(self._asst(f"call_{i}"))
+            sm.session_data["messages"].append(self._tool(f"call_{i}"))
+        api_msgs = sm.get_messages_for_chat_api(limit=9)
+        assert api_msgs[0]["role"] == "user"
+        assert api_msgs[0]["content"] == "检查当前项目"
+        assert api_msgs[1]["role"] == "assistant"
+        assert api_msgs[2]["role"] == "tool"
+        assert api_msgs[1]["tool_calls"][0]["id"] == api_msgs[2]["tool_call_id"]

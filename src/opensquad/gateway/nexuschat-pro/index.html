@@ -25,6 +25,11 @@
         --color-stage: 246 243 236;
         --color-panel: 255 254 251;
         --color-border: 230 223 210;
+        /* Floating-surface stroke. Light appearance keeps the same value as
+           --color-border (the dark-mode contrast floor is applied at runtime
+           by the theme engine), so the first paint matches the settled
+           theme and the composer is outlined from the very first frame. */
+        --color-boundary: 230 223 210;
         --color-bubble-self: 232 237 232;
         --color-bubble-other: 255 254 251;
         --color-text-main: 31 42 36;
@@ -100,9 +105,8 @@
       }
 
       /* Solo activity: soft white light sliding across live title text.
-         Base color must be a CSS var — not currentColor — because text fill
-         is transparent for background-clip; currentColor would also be
-         transparent and the glyphs would vanish between shine passes. */
+         Own compositor layer — background-clip text otherwise hitchs when
+         a new tool row is laid out on the main thread. */
       @keyframes solo-text-shimmer {
         0% { background-position: 100% 0; }
         100% { background-position: -100% 0; }
@@ -123,6 +127,18 @@
         -webkit-text-fill-color: transparent;
         color: var(--solo-shimmer-base);
         animation: solo-text-shimmer 1.7s linear infinite;
+        transform: translateZ(0);
+      }
+      .solo-activity-header .solo-text-shimmer {
+        will-change: background-position;
+      }
+      @media (prefers-reduced-motion: reduce) {
+        .solo-text-shimmer {
+          animation: none;
+          will-change: auto;
+          -webkit-text-fill-color: var(--solo-shimmer-base);
+          background-image: none;
+        }
       }
 
       /* ── OpenSquad 四象限加载动画 ───────────────────────────────

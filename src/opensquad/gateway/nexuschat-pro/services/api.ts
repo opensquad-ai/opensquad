@@ -1910,6 +1910,164 @@ export const scheduledTaskAPI = {
 };
 
 // ============================================================
+// Parallel Task Scheduler API (M2)
+// ============================================================
+
+export interface TaskMilestone {
+  id: string;
+  title: string;
+  prompt: string;
+  verify: string;
+  status: 'pending' | 'running' | 'done' | 'blocked';
+  attempts: number;
+  result: string;
+  error: string;
+  started_at: number | null;
+  finished_at: number | null;
+}
+
+export interface TaskBudget {
+  max_tokens: number;
+  max_seconds: number;
+  max_attempts: number;
+}
+
+/** M3 checkpoint. Present (and populated) only for `kind === 'goal'`. */
+export interface TaskPlan {
+  goal: string;
+  status: string;
+  spent_tokens: number;
+  started_at: number | null;
+  finished_at: number | null;
+  blocked_reason: string;
+  plan_done: number;
+  plan_total: number;
+  budget: TaskBudget;
+  milestones: TaskMilestone[];
+}
+
+export interface ParallelTask {
+  task_id: string;
+  session_id: string;
+  agent_id: string;
+  title: string;
+  worktree_path: string;
+  base_dir: string;
+  // 'blocked' = a goal parked on its budget / an unverified milestone. It is
+  // resumable, unlike 'failed'.
+  status: 'queued' | 'running' | 'waiting_approval' | 'blocked' | 'done' | 'failed' | 'aborted' | 'interrupted';
+  origin: string;
+  prompt: string;
+  created_at: number;
+  started_at: number | null;
+  finished_at: number | null;
+  plan_done: number;
+  plan_total: number;
+  cost: { tokens: number; elapsed_ms: number };
+  error: string;
+  result_summary: string;
+  kind?: 'task' | 'goal';
+  plan?: TaskPlan | null;
+}
+
+export interface WorktreeReportFile {
+  status: string;
+  path: string;
+}
+
+export interface WorktreeReport {
+  status: string;
+  task_id?: string;
+  base_ref?: string;
+  base_sha?: string;
+  branch?: string;
+  worktree_path?: string;
+  stat?: string;
+  files?: WorktreeReportFile[];
+  commits?: string[];
+  insertions?: number;
+  deletions?: number;
+  message?: string;
+}
+
+export const taskAPI = {
+  list: async (agentId?: string) => {
+    const q = agentId ? `?agent_id=${encodeURIComponent(agentId)}` : '';
+    return apiRequest<{ status: string; tasks: ParallelTask[] }>(`/tasks${q}`);
+  },
+  submit: async (body: {
+    title: string;
+    prompt: string;
+    agent_id?: string;
+    base_dir?: string;
+    use_worktree?: boolean;
+    // M3 goals: kind='goal' + milestones[] (strings or {title,verify}) + budget.
+    kind?: 'task' | 'goal';
+    goal?: string;
+    milestones?: Array<string | { title?: string; prompt?: string; verify?: string }>;
+    budget?: { max_tokens?: number; max_seconds?: number; max_attempts?: number };
+  }) => {
+    return apiRequest<{ status: string; task: ParallelTask }>(`/tasks`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    });
+  },
+  get: async (taskId: string, agentId?: string) => {
+    const q = agentId ? `?agent_id=${encodeURIComponent(agentId)}` : '';
+    return apiRequest<{ status: string; task: ParallelTask }>(`/tasks/${encodeURIComponent(taskId)}${q}`);
+  },
+  abort: async (taskId: string, agentId?: string) => {
+    const q = agentId ? `?agent_id=${encodeURIComponent(agentId)}` : '';
+    return apiRequest<{ status: string; task?: ParallelTask }>(`/tasks/${encodeURIComponent(taskId)}/abort${q}`, {
+      method: 'POST',
+    });
+  },
+  approve: async (taskId: string, approved: boolean, agentId?: string) => {
+    const q = agentId ? `?agent_id=${encodeURIComponent(agentId)}` : '';
+    return apiRequest<{ status: string; task?: ParallelTask }>(`/tasks/${encodeURIComponent(taskId)}/approve${q}`, {
+      method: 'POST',
+      body: JSON.stringify({ approved }),
+    });
+  },
+  /** M3 — continue a parked goal from its checkpoint. */
+  resume: async (taskId: string, agentId?: string) => {
+    const q = agentId ? `?agent_id=${encodeURIComponent(agentId)}` : '';
+    return apiRequest<{ status: string; task?: ParallelTask }>(`/tasks/${encodeURIComponent(taskId)}/resume${q}`, {
+      method: 'POST',
+    });
+  },
+  remove: async (taskId: string, agentId?: string) => {
+    const q = agentId ? `?agent_id=${encodeURIComponent(agentId)}` : '';
+    return apiRequest<{ status: string }>(`/tasks/${encodeURIComponent(taskId)}${q}`, {
+      method: 'DELETE',
+    });
+  },
+  // M1 worktree change-report / merge-decision surface
+  worktreeList: async (repo: string) => {
+    return apiRequest<{ status: string; repo: string; worktrees: any[] }>(
+      `/tasks/worktree?repo=${encodeURIComponent(repo)}`,
+    );
+  },
+  worktreeReport: async (taskId: string, repo: string) => {
+    return apiRequest<WorktreeReport>(
+      `/tasks/worktree/${encodeURIComponent(taskId)}/report?repo=${encodeURIComponent(repo)}`,
+    );
+  },
+  worktreeMerge: async (taskId: string, repo: string, strategy: string = 'squash') => {
+    return apiRequest<any>(
+      `/tasks/worktree/${encodeURIComponent(taskId)}/merge?repo=${encodeURIComponent(repo)}`,
+      { method: 'POST', body: JSON.stringify({ strategy }) },
+    );
+  },
+  worktreeDiscard: async (taskId: string, repo: string) => {
+    return apiRequest<any>(
+      `/tasks/worktree/${encodeURIComponent(taskId)}/discard?repo=${encodeURIComponent(repo)}`,
+      { method: 'POST' },
+    );
+  },
+};
+
+// ============================================================
 // Role Cards API
 // ============================================================
 

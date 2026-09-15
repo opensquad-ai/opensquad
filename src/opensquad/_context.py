@@ -17,7 +17,7 @@ Migration phases:
 from __future__ import annotations
 
 import logging
-from contextvars import ContextVar
+from contextvars import ContextVar, Token
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -205,14 +205,39 @@ _context_var: ContextVar[AgentContext | None] = ContextVar(
 )
 
 
-def set_current_context(ctx: AgentContext) -> None:
+def set_current_context(ctx: AgentContext | None) -> Token[AgentContext | None]:
     """Set the AgentContext for the current async context (task/thread).
 
     Args:
         ctx: The AgentContext to associate with the current executing
-             asyncio task (``ContextVar`` scoped).
+             asyncio task (``ContextVar`` scoped). ``None`` is accepted so a
+             previous value captured by :func:`get_current_context` can be
+             restored verbatim (``None`` is the ContextVar default).
+
+    Returns:
+        The assignment token. Pass it to :func:`reset_current_context` to
+        restore whatever context was active before this call — the symmetric
+        counterpart of setting it.
     """
-    _context_var.set(ctx)
+    return _context_var.set(ctx)
+
+
+def reset_current_context(token: Token[AgentContext | None]) -> None:
+    """Undo a previous :func:`set_current_context`, restoring the prior context.
+
+    Use this instead of ``set_current_context(None)`` when you have the token:
+    it restores the *exact* previous value rather than blindly clearing.
+
+    Args:
+        token: The token returned by :func:`set_current_context`.
+
+    Raises:
+        ValueError: If *token* was created by a ``set()`` call in a different
+            ``Context`` (``ContextVar.reset`` semantics). Callers that set and
+            reset from the same context — a test fixture, or boot/shutdown
+            inside one task — never hit this.
+    """
+    _context_var.reset(token)
 
 
 def get_current_context() -> AgentContext | None:

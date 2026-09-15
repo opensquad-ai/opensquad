@@ -133,9 +133,11 @@ try:
     )
     from lark_oapi.event.dispatcher_handler import EventDispatcherHandler
     from lark_oapi.ws import Client as FeishuWSClient
-except ImportError:
-    logger.error("Missing lark-oapi SDK. Install with: pip install lark-oapi")
-    sys.exit(1)
+except ImportError as exc:
+    # See plugins/telegram/adapter.py for the full rationale: plugin_manager
+    # catches ImportError to skip an unavailable plugin, but SystemExit escapes
+    # every `except Exception` handler and would tear down the agent process.
+    raise ImportError("Missing lark-oapi SDK. Install with:\n  pip install lark-oapi") from exc
 
 
 # ══════════════════════════════════════════════

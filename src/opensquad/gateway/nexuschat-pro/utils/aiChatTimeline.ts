@@ -24,7 +24,7 @@ const PLAN_STATUS_MARK =
  * User-visible tags are only `to_user` / `to_user_reply` / `to_user_end_task`.
  */
 const PROTOCOL_SILENT_TAG_ALT =
-  'timeout|thought|think|plan|tool_call|tool_calls|tool_result|result|tool_response|' +
+  'timeout|plan|tool_call|tool_calls|tool_result|result|tool_response|' +
   'to_system|state|wake|sleep|title|option|arguments|func|function|forward|' +
   'system_reminder|task_start|task_complete|task_failed|invoke|parameter|' +
   'function_calls|calls|dots_function_call';
@@ -49,11 +49,88 @@ export function stripNamespacedToolXml(content: string): string {
   return out.replace(/\n{3,}/g, '\n\n').trim();
 }
 
+/** Line-start `<thought>` / `<think>` protocol blocks, not mid-sentence mentions. */
+export function stripPromptedThoughtBlocks(content: string): string {
+  if (!content || typeof content !== 'string') return content;
+  return mapOutsideMarkdownFences(content, stripLineStartThoughtBlocks);
+}
+
+function stripLineStartThoughtBlocks(text: string): string {
+  // `(?<!/)>` skips `<thought/>`. `(?! )` keeps `<thought> tags` mentions.
+  const paired =
+    /(^|\n)[ \t]*<(thought|think)\b[^>]*?(?<!\/)>(?! )[\s\S]*?<\/\2\s*>/gi;
+  let out = text.replace(paired, (_m, nl: string) => (nl === '\n' ? '\n' : ''));
+  out = out.replace(
+    /(^|\n)[ \t]*<(thought|think)\b[^>]*?(?<!\/)>(?! )[\s\S]*$/gi,
+    (_m, nl: string) => (nl === '\n' ? '\n' : ''),
+  );
+  return out;
+}
+
+function mapOutsideMarkdownFences(content: string, fn: (chunk: string) => string): string {
+  let i = 0;
+  let out = '';
+  const n = content.length;
+  const openRe = /^[ \t]{0,3}(```+|~~~+)/;
+  while (i < n) {
+    let at = i;
+    let found = -1;
+    let ticks = '';
+    while (at < n) {
+      const lineStart = at === 0 || content.charCodeAt(at - 1) === 10;
+      if (lineStart) {
+        const m = content.slice(at).match(openRe);
+        if (m) {
+          found = at;
+          ticks = m[1];
+          break;
+        }
+      }
+      const nl = content.indexOf('\n', at);
+      if (nl === -1) {
+        out += fn(content.slice(i));
+        return out;
+      }
+      at = nl + 1;
+    }
+    if (found < 0) {
+      out += fn(content.slice(i));
+      return out;
+    }
+    out += fn(content.slice(i, found));
+    const tickCh = ticks[0];
+    const tickLen = ticks.length;
+    let k = content.indexOf('\n', found);
+    k = k === -1 ? n : k + 1;
+    let closed = n;
+    while (k < n) {
+      const lineStart = k === 0 || content.charCodeAt(k - 1) === 10;
+      if (lineStart) {
+        const cm = content.slice(k).match(/^[ \t]{0,3}(```+|~~~+)/);
+        if (cm && cm[1][0] === tickCh && cm[1].length >= tickLen) {
+          const cnl = content.indexOf('\n', k + cm[0].length);
+          closed = cnl === -1 ? n : cnl + 1;
+          break;
+        }
+      }
+      const nl = content.indexOf('\n', k);
+      if (nl === -1) {
+        out += content.slice(found);
+        return out;
+      }
+      k = nl + 1;
+    }
+    out += content.slice(found, closed);
+    i = closed;
+  }
+  return out;
+}
+
 /** Remove protocol XML including inner text so Markdown cannot show the leftovers. */
 export function stripSilentProtocolBlocks(content: string): string {
   if (!content || typeof content !== 'string') return content;
   const names = PROTOCOL_SILENT_TAG_ALT;
-  let out = stripNamespacedToolXml(content);
+  let out = stripPromptedThoughtBlocks(stripNamespacedToolXml(content));
   const paired = new RegExp(`<(${names})\\b[^>]*>[\\s\\S]*?</\\1\\s*>`, 'gi');
   for (let i = 0; i < 8 && paired.test(out); i += 1) {
     paired.lastIndex = 0;
@@ -498,7 +575,7 @@ export function formatUserSkillDisplayContent(content: string): string {
 
 export interface WorkflowEvent {
   _uid?: string;
-  type: 'thought' | 'tool_call' | 'tool_result' | 'info' | 'plan' | 'summary_stream' | 'compression_progress';
+  type: 'thought' | 'tool_call' | 'tool_result' | 'info' | 'plan' | 'summary_stream' | 'compression_progress' | 'process_output';
   content: any;
   timestamp: number;
   result?: any;
@@ -780,6 +857,120 @@ export function mergeAdjacentWorkflowEntries(timeline: TimelineEntry[]): Timelin
   return out;
 }
 
+/**
+ * 中间过程输出降级：turn 内非最后一条的 assistant 文本消息（阶段性总结，
+ * 不是给用户的最终回复）从普通气泡降级为 workflow 里的 'process_output'
+ * 事件（UI 用 💡"过程输出" 行展示，随折叠展开）。
+ *
+ * 挂靠规则：优先挂到其后（同一 turn 内、下一条用户消息之前）最近的
+ * workflow 块首；其后没有 workflow 时挂到其前最近的 workflow 块尾；
+ * 两者皆无（纯文本连续回复）则保持普通消息。
+ * 带媒体（图片/附件/音频）或 end_task 的消息永不降级。
+ */
+export function demoteIntermediateAssistantMessages(timeline: TimelineEntry[]): TimelineEntry[] {
+  const demotableText = (m: ChatMessage): string | null => {
+    if (!m || m.role !== 'assistant' || m.end_task) return null;
+    if (
+      (m.images && m.images.length > 0)
+      || (m.attachments && m.attachments.length > 0)
+      || (m.output_images && m.output_images.length > 0)
+      || (m.output_audio && m.output_audio.length > 0)
+    ) {
+      return null;
+    }
+    const text = typeof m.content === 'string' ? m.content.trim() : '';
+    return text || null;
+  };
+
+  const inserts = new Map<number, { front: WorkflowEvent[]; end: WorkflowEvent[] }>();
+  const removeIdx = new Set<number>();
+
+  for (let i = 0; i < timeline.length; i++) {
+    const entry = timeline[i];
+    if (entry.kind !== 'message') continue;
+    const m = entry.data as ChatMessage;
+    const text = demotableText(m);
+    if (!text) continue;
+
+    // Turn boundary: next user message.
+    let boundary = timeline.length;
+    let isLastAssistantInTurn = true;
+    for (let j = i + 1; j < timeline.length; j++) {
+      const e = timeline[j];
+      if (e.kind !== 'message') continue;
+      const em = e.data as ChatMessage;
+      if (em.role === 'user') {
+        boundary = j;
+        break;
+      }
+      if (em.role === 'assistant') {
+        // Another assistant reply follows in this turn — this one is interim.
+        isLastAssistantInTurn = false;
+        break;
+      }
+    }
+    // The turn's final reply is real user-facing output — never demote.
+    if (isLastAssistantInTurn) continue;
+
+    // Preferred: first workflow after this message within the turn → block front.
+    let target = -1;
+    let atFront = true;
+    for (let j = i + 1; j < boundary; j++) {
+      if (timeline[j].kind === 'workflow') {
+        target = j;
+        break;
+      }
+    }
+    // Fallback: nearest workflow before this message within the turn → block end.
+    if (target < 0) {
+      for (let j = i - 1; j >= 0; j--) {
+        const e = timeline[j];
+        if (e.kind === 'message') {
+          const pm = e.data as ChatMessage;
+          if (pm.role === 'user') break;
+          // Skip other (demotable) intermediate texts; a media bubble blocks attach.
+          if (!demotableText(pm)) break;
+        }
+        if (e.kind === 'workflow') {
+          target = j;
+          atFront = false;
+          break;
+        }
+      }
+    }
+    if (target < 0) continue;
+
+    const ts = m.timestamp ? new Date(m.timestamp).getTime() : NaN;
+    const evt: WorkflowEvent = {
+      _uid: entry._uid || genTimelineUID(),
+      type: 'process_output',
+      content: text,
+      timestamp: Number.isFinite(ts) ? ts : Date.now(),
+    };
+    const slot = inserts.get(target) || { front: [], end: [] };
+    if (atFront) slot.front.push(evt);
+    else slot.end.push(evt);
+    inserts.set(target, slot);
+    removeIdx.add(i);
+  }
+
+  if (removeIdx.size === 0) return timeline;
+  return timeline
+    .map((entry, idx) => {
+      const slot = inserts.get(idx);
+      if (entry.kind !== 'workflow' || !slot) return entry;
+      if (slot.front.length === 0 && slot.end.length === 0) return entry;
+      return {
+        ...entry,
+        data: {
+          ...entry.data,
+          events: [...slot.front, ...entry.data.events, ...slot.end],
+        },
+      };
+    })
+    .filter((_, idx) => !removeIdx.has(idx));
+}
+
 const STOPPED_TURN_REASONS = new Set(['user_stop', 'withdraw', 'agent_crash']);
 const STOPPED_ASSISTANT_RE = /\[Stopped\]/i;
 const STOPPED_STATUS_RE = /task stopped/i;
@@ -988,6 +1179,7 @@ export type TimelineEntry =
   | { kind: 'workflow'; data: WorkflowBlock; _uid: string }
   | { kind: 'prompt'; data: { system_prompt: string; dynamic_prefix: string; changed: boolean; timestamp: string; diff?: string[] }; _uid: string }
   | { kind: 'status_hint'; data: { hintType: 'sleep' | 'wake' | 'state'; content: string | number; timestamp: number }; _uid: string }
+  | { kind: 'model_switch'; data: { model: string; card: string; text: string; session_id?: string; timestamp: number }; _uid: string }
   | { kind: 'archived_section'; data: {
       messageCount: number;
       eventCount: number;
@@ -1034,14 +1226,16 @@ function appendNewIncompleteWorkflow(
   status: string | null,
 ): TimelineEntry[] {
   const sealed = sealWorkflowsFollowedByMessages(prev);
-  return [
+  // 新块之前残留的 assistant 阶段性文本（to_user 已提交、随后才到工具事件）
+  // 降级为 'process_output'，挂到新块首，避免以普通气泡形式出现。
+  return demoteIntermediateAssistantMessages([
     ...sealed,
     {
       kind: 'workflow',
       data: { events: [{ ...event, _uid: genTimelineUID() }], status, completed: false },
       _uid: genTimelineUID(),
     },
-  ];
+  ]);
 }
 
 /**
@@ -1089,7 +1283,8 @@ export function sealWorkflowAndAppendAssistantMessage(
   }
 
   updated.push({ kind: 'message', data: msg, _uid: genTimelineUID() });
-  return updated;
+  // 最终回复之前的同 turn 阶段性 assistant 文本降级为过程输出（与刷新后一致）。
+  return demoteIntermediateAssistantMessages(updated);
 }
 
 /**
@@ -1834,6 +2029,60 @@ export function appendWorkflowEvents(
   return next;
 }
 
+/** 判定持久化/实时 raw 事件是否为模型切换提示（model_card_switched）。 */
+export function isModelSwitchRawEvent(raw: any): boolean {
+  return !!raw
+    && raw.type === 'info'
+    && typeof raw.data === 'object'
+    && raw.data !== null
+    && raw.data.event === 'model_card_switched';
+}
+
+/**
+ * 模型切换提示的落点规则：
+ * - 工作流进行中（存在未完成块）→ 作为 info 事件并入该块（属于工作流过程）；
+ * - 无进行中的工作流 → 落在最外层的独立轻量条目（kind: 'model_switch'），
+ *   绝不创建 workflow 块、不触发"正在工作"统计。
+ */
+export function appendModelSwitchNotice(
+  prev: TimelineEntry[],
+  detailed: Record<string, unknown>,
+): TimelineEntry[] {
+  const updated = [...prev];
+  for (let i = updated.length - 1; i >= 0; i--) {
+    if (updated[i].kind === 'prompt' || updated[i].kind === 'status_hint') continue;
+    if (updated[i].kind === 'workflow') {
+      const entry = updated[i] as Extract<TimelineEntry, { kind: 'workflow' }>;
+      if (entry.data.completed) break;
+      const event: WorkflowEvent = {
+        _uid: genTimelineUID(),
+        type: 'info',
+        content: detailed,
+        timestamp: Date.now(),
+      };
+      const newEvents = appendEventIntoWorkflowBlock(entry.data, event);
+      updated[i] = { ...entry, data: { ...entry.data, events: newEvents } };
+      return updated;
+    }
+    break;
+  }
+  const model = String(detailed.model || '');
+  return [
+    ...updated,
+    {
+      kind: 'model_switch',
+      data: {
+        model,
+        card: String(detailed.card || ''),
+        text: String(detailed.text || (model ? `Model switched to ${model}` : 'Model switched')),
+        session_id: detailed.session_id ? String(detailed.session_id) : undefined,
+        timestamp: Date.now(),
+      },
+      _uid: genTimelineUID(),
+    },
+  ];
+}
+
 /**
  * Live WS batch: parent tool_call while the stream footer still has text.
  *
@@ -1853,9 +2102,14 @@ export function appendLiveWorkflowBatch(
     (it) => it.event.type === 'tool_call' && !it.event.subAgent,
   );
   if (hasParentTool && text) {
+    // 补写的流式文本思考事件必须早于本批工具事件，否则"思考耗时 = 下一
+    // 事件时间 - 思考时间"会算出负数而被跳过（表现为深度思考行没有耗时）。
+    // 取批次首事件时间戳 -1ms，保证时序上位于工具调用之前。
+    const firstTs = items[0]?.event.timestamp;
+    const commitTs = typeof firstTs === 'number' ? firstTs - 1 : Date.now();
     next = appendWorkflowEvent(
       next,
-      { type: 'thought', content: text, timestamp: Date.now() },
+      { type: 'thought', content: text, timestamp: commitTs },
       'Thinking...',
     );
   }
@@ -2062,6 +2316,18 @@ export function buildTimelineFromSession(
   }
 
   const cancelInfo = detectCancelledTurn(messages, events);
+  // turn_usage events are usage DATA, not workflow blocks — pull them out of
+  // the event stream before timeline assembly and stamp them onto their
+  // round's final assistant message afterwards.
+  const turnUsageEvents = (events || []).filter((e: any) => e?.type === 'turn_usage');
+  // turn_summary events are persisted when a turn is stopped (user stop /
+  // crash) — the abort path never emits turn_usage, so the summary's
+  // elapsed_ms is the only duration data for the round's final message.
+  const turnSummaryEvents = (events || []).filter((e: any) => e?.type === 'turn_summary');
+  const workflowEvents =
+    turnUsageEvents.length || turnSummaryEvents.length
+      ? (events || []).filter((e: any) => e?.type !== 'turn_usage' && e?.type !== 'turn_summary')
+      : events;
   const timeline: TimelineEntry[] = [];
   // Strict identity dedup: a message_id / client_id must render only once.
   // Optimistic user bubbles echo back from disk with the same client_id, and
@@ -2076,7 +2342,7 @@ export function buildTimelineFromSession(
 
   // Preserve message array order. Sort events by timestamp (then insertion
   // order) so we can walk them once while iterating messages.
-  const sortedEvents = events
+  const sortedEvents = workflowEvents
     .map((evt, index) => ({ item: evt, ts: getTs(evt), order: index }))
     .sort((a, b) => (a.ts !== b.ts ? a.ts - b.ts : a.order - b.order));
 
@@ -2600,8 +2866,14 @@ export function buildTimelineFromSession(
   // This post-processing pass merges them back into the nearest unmatched
   // tool_call across workflow block boundaries, so the UI shows a complete
   // tool_call card instead of a permanently "running" one.
-  const mergedTimeline = mergeAdjacentWorkflowEntries(
-    mergeOrphanedToolResultsAcrossWorkflows(timeline),
+  const usageStamped = stampTurnUsage(timeline, turnUsageEvents);
+  // Stopped turns have no turn_usage — fall back to the persisted turn_summary
+  // elapsed so the 消耗 badge still shows the round duration.
+  const summaryStamped = stampTurnSummaries(usageStamped, turnSummaryEvents);
+  const mergedTimeline = demoteIntermediateAssistantMessages(
+    mergeAdjacentWorkflowEntries(
+      mergeOrphanedToolResultsAcrossWorkflows(summaryStamped),
+    ),
   );
 
   // Stop / crash already ended the turn. Do not reopen unsettled tools as
@@ -2635,6 +2907,96 @@ export function buildTimelineFromSession(
   });
 
   return applyEndTaskFolds(reopened);
+}
+
+/**
+ * Stamp per-round billed usage (``turn_usage`` session events) onto the
+ * assistant message each round ended with — the 消耗 badge data.
+ *
+ * A turn_usage event is always persisted AFTER its round's final assistant
+ * message, so scanning backwards from the event to the nearest assistant
+ * bubble (stopping at the round boundary = user message) finds the exact
+ * target. Timestamps guard against out-of-order disk arrays; bubbles newer
+ * than the event are skipped.
+ */
+export function stampTurnUsage(timeline: TimelineEntry[], usageEvents: any[]): TimelineEntry[] {
+  if (!timeline.length || !usageEvents.length) return timeline;
+  const parseUsage = (raw: any): ChatMessage['usage'] => {
+    const u = raw && typeof raw.data === 'object' && raw.data !== null ? raw.data : {};
+    const input = Math.max(0, Number(u.input_tokens) || 0);
+    const output = Math.max(0, Number(u.output_tokens) || 0);
+    const started = Number(u.started_ms) || 0;
+    const ended = Number(u.ended_ms) || 0;
+    return {
+      input_tokens: input,
+      output_tokens: output,
+      total_tokens: Number(u.total_tokens) || input + output,
+      elapsed_ms: Number(u.elapsed_ms) || Math.max(0, ended - started),
+      started_ms: started || undefined,
+      ended_ms: ended || undefined,
+    };
+  };
+  const next = [...timeline];
+  for (const ue of usageEvents) {
+    const usage = parseUsage(ue);
+    const ueTs = ue?.timestamp ? new Date(ue.timestamp).getTime() : NaN;
+    // Backwards scan for the chronologically nearest assistant bubble. A user
+    // message must NOT abort the scan: older usage events (replayed batches)
+    // legitimately live behind the next round's user bubble, and the
+    // timestamp guard alone prevents attaching usage to a future bubble.
+    for (let i = next.length - 1; i >= 0; i -= 1) {
+      const entry = next[i];
+      if (entry.kind !== 'message') continue;
+      const m = entry.data as ChatMessage;
+      if (m.role !== 'assistant') continue;
+      const mTs = m.timestamp ? new Date(m.timestamp).getTime() : NaN;
+      if (!Number.isNaN(ueTs) && !Number.isNaN(mTs) && mTs > ueTs) continue;
+      next[i] = { ...entry, kind: 'message', data: { ...m, usage } };
+      break;
+    }
+  }
+  return next;
+}
+
+/**
+ * Stamp stopped-turn durations (persisted ``turn_summary`` events) onto the
+ * assistant message the aborted round ended with. The user-stop path never
+ * emits ``turn_usage`` (tokens are unknown at teardown), so only the
+ * ``elapsed_ms`` from the summary is filled in — the badge renders duration
+ * without a token count. Messages that already carry real usage (a natural
+ * turn_usage stamp) are never overwritten.
+ */
+export function stampTurnSummaries(timeline: TimelineEntry[], summaryEvents: any[]): TimelineEntry[] {
+  if (!timeline.length || !summaryEvents.length) return timeline;
+  const next = [...timeline];
+  for (const se of summaryEvents) {
+    const d = se && typeof se.data === 'object' && se.data !== null ? se.data : {};
+    const elapsed = Math.max(0, Number(d.elapsed_ms) || 0);
+    if (elapsed <= 0) continue;
+    const seTs = se?.timestamp ? new Date(se.timestamp).getTime() : NaN;
+    // Same backwards scan as stampTurnUsage: nearest assistant bubble at or
+    // before the summary timestamp. A message that already has usage stops the
+    // scan — turn_usage data always beats the coarser summary duration.
+    for (let i = next.length - 1; i >= 0; i -= 1) {
+      const entry = next[i];
+      if (entry.kind !== 'message') continue;
+      const m = entry.data as ChatMessage;
+      if (m.role !== 'assistant') continue;
+      if (m.usage && (m.usage.total_tokens > 0 || m.usage.elapsed_ms > 0)) break;
+      const mTs = m.timestamp ? new Date(m.timestamp).getTime() : NaN;
+      if (!Number.isNaN(seTs) && !Number.isNaN(mTs) && mTs > seTs) continue;
+      next[i] = {
+        ...entry,
+        kind: 'message',
+        data: {
+          ...m,
+          usage: { input_tokens: 0, output_tokens: 0, total_tokens: 0, elapsed_ms: elapsed },
+        },
+      };
+      break;
+    }
+  }
+  return next;
 }
 
 /**

@@ -11,7 +11,7 @@ import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 're
 import { createPortal } from 'react-dom';
 import { Check, ChevronDown, ChevronRight, Circle, Plus, Search } from 'lucide-react';
 import type { ModelCardInfo } from '../../services/api';
-import { POPOVER_SURFACE_CLASS } from './popoverSurface';
+import { POPOVER_SURFACE_CLASS, usePopMenuMounted } from './popoverSurface';
 
 export type SoloModelPickerPlacement = 'up' | 'down';
 
@@ -149,8 +149,8 @@ export const SoloModelPicker: React.FC<SoloModelPickerProps> = ({
     if (!trigger) return null;
     const rect = trigger.getBoundingClientRect();
     const gap = 8;
-    const panelW = 220;
-    const flyoutW = 260;
+    const panelW = 200;
+    const flyoutW = 240;
     const vw = window.innerWidth;
     const vh = window.innerHeight;
 
@@ -188,10 +188,7 @@ export const SoloModelPicker: React.FC<SoloModelPickerProps> = ({
   };
 
   useLayoutEffect(() => {
-    if (!open) {
-      setMenuPos(null);
-      return;
-    }
+    if (!open) return; // keep last position while the exit animation plays
     const sync = () => {
       const pos = computeMenuPos();
       if (!pos) return;
@@ -314,15 +311,21 @@ export const SoloModelPicker: React.FC<SoloModelPickerProps> = ({
 
   const flyoutRight = menuPos?.flyoutRight ?? placement === 'down';
 
-  const menuBody = open ? (
+  // Stay mounted briefly after close so the pop-out animation can play.
+  const menuMounted = usePopMenuMounted(open);
+
+  const menuBody = menuMounted ? (
     <div
       ref={menuRef}
       className={
-        portal
+        (portal
           ? 'fixed z-[220]'
           : placement === 'down'
             ? 'absolute top-[calc(100%+8px)] left-0 z-50'
-            : 'absolute bottom-[calc(100%+8px)] right-0 z-50'
+            : 'absolute bottom-[calc(100%+8px)] right-0 z-50') +
+        (open
+          ? ` os-pop-menu ${placement === 'down' ? 'os-pop-menu-down origin-top-left' : 'origin-bottom-right'}`
+          : ' os-pop-menu-out')
       }
       style={
         portal && menuPos
@@ -337,7 +340,7 @@ export const SoloModelPicker: React.FC<SoloModelPickerProps> = ({
       {activeGroup && (
         <div
           ref={flyoutRef}
-          className={`absolute w-[min(260px,calc(100vw-8rem))] rounded-xl border border-border ${POPOVER_SURFACE_CLASS} overflow-hidden ${
+          className={`absolute w-[min(240px,calc(100vw-8rem))] rounded-xl border border-border ${POPOVER_SURFACE_CLASS} overflow-hidden ${
             flyoutRight ? 'left-full ml-1.5' : 'right-full mr-1.5'
           }`}
           style={{ top: flyoutTop }}
@@ -360,14 +363,14 @@ export const SoloModelPicker: React.FC<SoloModelPickerProps> = ({
                       onSelect(card.name);
                       close();
                     }}
-                    className={`w-full flex items-center gap-2 px-3 py-2 text-left text-[13px] transition-colors border-0 cursor-pointer ${
+                    className={`w-full flex items-center gap-2 px-3 py-1.5 text-left text-[12px] transition-colors border-0 cursor-pointer ${
                       selected
-                        ? 'bg-black/[0.06] dark:bg-white/[0.08] text-textMain'
+                        ? 'bg-black/[0.06] dark:bg-white/[0.08] text-blue-600 dark:text-blue-400'
                         : 'bg-transparent text-textMain hover:bg-black/[0.06] dark:hover:bg-white/[0.10]'
                     }`}
                   >
                     <span className="w-4 shrink-0 flex items-center justify-center">
-                      {selected ? <Check size={14} className="text-textMain" /> : null}
+                      {selected ? <Check size={13} className="text-blue-600 dark:text-blue-400" /> : null}
                     </span>
                     <span className="flex-1 min-w-0 truncate font-medium">
                       {card.title || card.model_name || card.name}
@@ -381,15 +384,15 @@ export const SoloModelPicker: React.FC<SoloModelPickerProps> = ({
       )}
 
       {/* Level 1: providers */}
-      <div className={`w-[min(220px,calc(100vw-3rem))] rounded-xl border border-border ${POPOVER_SURFACE_CLASS} overflow-hidden`}>
-        <div className="flex items-center gap-2 px-3 py-2.5 border-b border-border/70">
-          <Search size={14} className="text-textMuted shrink-0" />
+      <div className={`w-[min(200px,calc(100vw-3rem))] rounded-xl border border-border ${POPOVER_SURFACE_CLASS} overflow-hidden`}>
+        <div className="flex items-center gap-2 px-3 py-2 border-b border-border/70">
+          <Search size={13} className="text-textMuted shrink-0" />
           <input
             ref={searchRef}
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             placeholder="搜索供应商 / 模型"
-            className="flex-1 min-w-0 bg-transparent border-0 outline-none text-[13px] text-textMain placeholder:text-textMuted/60"
+            className="flex-1 min-w-0 bg-transparent border-0 outline-none text-[12px] text-textMain placeholder:text-textMuted/60"
           />
         </div>
 
@@ -411,19 +414,19 @@ export const SoloModelPicker: React.FC<SoloModelPickerProps> = ({
                   onMouseEnter={() => setActiveVendor(g.vendor)}
                   onFocus={() => setActiveVendor(g.vendor)}
                   onClick={() => setActiveVendor(g.vendor)}
-                  className={`w-full flex items-center gap-2 px-3 py-2 text-left text-[13px] transition-colors border-0 cursor-pointer ${
+                  className={`w-full flex items-center gap-2 px-3 py-1.5 text-left text-[12px] transition-colors border-0 cursor-pointer ${
                     active
                       ? 'bg-black/[0.06] dark:bg-white/[0.08] text-textMain'
                       : 'bg-transparent text-textMain hover:bg-black/[0.06] dark:hover:bg-white/[0.10]'
                   }`}
                 >
                   <span className="w-4 shrink-0 flex items-center justify-center">
-                    {isCurrent ? <Check size={14} className="text-textMain" /> : null}
+                    {isCurrent ? <Check size={13} className="text-blue-600 dark:text-blue-400" /> : null}
                   </span>
-                  <span className="flex-1 min-w-0 truncate font-medium">
+                  <span className={`flex-1 min-w-0 truncate font-medium ${isCurrent ? 'text-blue-600 dark:text-blue-400' : ''}`}>
                     {vendorLabel(g.vendor)}
                   </span>
-                  <ChevronRight size={14} className="shrink-0 text-textMuted/50" />
+                  <ChevronRight size={13} className="shrink-0 text-textMuted/50" />
                 </button>
               );
             })
@@ -437,9 +440,9 @@ export const SoloModelPicker: React.FC<SoloModelPickerProps> = ({
               close();
               onAddModels();
             }}
-            className="w-full flex items-center gap-2 px-3 py-2.5 text-[13px] text-textMain hover:bg-black/[0.06] dark:hover:bg-white/[0.10] transition-colors border-0 bg-transparent cursor-pointer"
+            className="w-full flex items-center gap-2 px-3 py-2 text-[12px] text-textMain hover:bg-black/[0.06] dark:hover:bg-white/[0.10] transition-colors border-0 bg-transparent cursor-pointer"
           >
-            <Plus size={14} className="text-textMuted" />
+            <Plus size={13} className="text-textMuted" />
             <span className="font-medium">Add Models</span>
           </button>
         </div>
@@ -460,15 +463,15 @@ export const SoloModelPicker: React.FC<SoloModelPickerProps> = ({
             return next;
           });
         }}
-        className="inline-flex items-center gap-1.5 max-w-[220px] sm:max-w-[280px] rounded-full px-2.5 py-1.5 text-[12px] text-textMain bg-black/[0.05] dark:bg-white/[0.08] hover:bg-primary/15 transition-colors disabled:opacity-50 disabled:cursor-not-allowed border-0 cursor-pointer"
+        className="inline-flex items-center gap-1.5 max-w-[200px] sm:max-w-[260px] rounded-full px-2 py-1 text-[11px] text-textMain bg-black/[0.05] dark:bg-white/[0.08] hover:bg-primary/15 transition-colors disabled:opacity-50 disabled:cursor-not-allowed border-0 cursor-pointer"
         title={switching ? 'Applying model…' : 'Switch model'}
       >
-        <Circle size={10} className="shrink-0 text-textMuted fill-textMuted/30" strokeWidth={1.5} />
+        <Circle size={9} className="shrink-0 text-textMuted fill-textMuted/30" strokeWidth={1.5} />
         <span className="truncate font-medium">
           {label}
         </span>
         <ChevronDown
-          size={13}
+          size={12}
           className={`shrink-0 opacity-55 transition-transform ${open ? 'rotate-180' : ''}`}
         />
       </button>

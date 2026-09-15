@@ -49,6 +49,7 @@ _AGENT_OUTPUT_BROADCAST_TYPES = frozenset(
         "status",
         "turn_start",
         "turn_elapsed",
+        "turn_usage",
         "turn_cancelled",
         "token_stats",
         "current_session",
@@ -68,6 +69,10 @@ _AGENT_OUTPUT_BROADCAST_TYPES = frozenset(
         "voice_audio_out",
         "voice_transcript",
         "scheduled_task_turn_done",
+        # M2 parallel task lifecycle — the task panel is a per-agent shared
+        # view; every connected client should receive live status updates.
+        "task_update",
+        "task_removed",
     }
 )
 
@@ -117,6 +122,114 @@ def _check_node_secret(received: str) -> bool:
     if not isinstance(received, str):
         received = received or ""
     return hmac.compare_digest(received, expected)
+
+
+class AgentTaskRPCBridge:
+    """Request/response correlation for task ops sent down an agent WS.
+
+    The Gateway's ``/api/tasks`` REST layer runs in the *gateway* process while
+    the TaskScheduler lives in the *agent* process. This bridge writes a
+    ``type=command, command=task_rpc`` frame to the agent socket and awaits the
+    matching ``task_command_result`` frame — the same pattern as
+    :class:`LauncherWebSocketHandler`, multiplexed over the agent channel.
+
+    Requests are keyed by ``agent_id:req_id`` so a reply can never resolve
+    another agent's pending call.
+    """
+
+    def __init__(self) -> None:
+        self._pending: dict[str, asyncio.Future] = {}
+
+    @staticmethod
+    def _key(agent_id: str, req_id: str) -> str:
+        return f"{agent_id}:{req_id}"
+
+    def pending_count(self, agent_id: str = "") -> int:
+        if not agent_id:
+            return len(self._pending)
+        prefix = f"{agent_id}:"
+        return sum(1 for k in self._pending if k.startswith(prefix))
+
+    def resolve(self, agent_id: str, content: dict) -> bool:
+        """Hand an inbound ``task_command_result`` to its waiting caller.
+
+        Returns False for a late / duplicated / unknown reply so the caller can
+        log it at debug instead of pretending it was delivered.
+        """
+        req_id = str((content or {}).get("req_id") or "")
+        if not req_id:
+            return False
+        fut = self._pending.pop(self._key(agent_id, req_id), None)
+        if fut is None or fut.done():
+            return False
+        fut.set_result(content)
+        return True
+
+    def cancel_agent(self, agent_id: str) -> int:
+        """Fail every outstanding call for a disconnected agent. Returns count."""
+        prefix = f"{agent_id}:"
+        keys = [k for k in self._pending if k.startswith(prefix)]
+        for key in keys:
+            fut = self._pending.pop(key, None)
+            if fut is not None and not fut.done():
+                fut.cancel()
+        return len(keys)
+
+    async def rpc(
+        self,
+        agent_id: str,
+        op: str,
+        params: dict | None = None,
+        *,
+        timeout: float = 20.0,
+    ) -> dict:
+        """Send one task op to ``agent_id`` and await its result envelope.
+
+        Raises ``HTTPException`` (502/504) when the agent is unreachable or
+        silent, so the REST layer can surface a real status instead of an
+        empty list.
+        """
+        ws = registry.connections.get(agent_id)
+        if ws is None:
+            raise HTTPException(502, f"agent '{agent_id}' not connected")
+
+        req_id = str(uuid.uuid4())
+        key = self._key(agent_id, req_id)
+        loop = asyncio.get_running_loop()
+        fut: asyncio.Future = loop.create_future()
+        self._pending[key] = fut
+
+        try:
+            await ws.send_text(
+                json.dumps(
+                    {
+                        "type": "command",
+                        "command": "task_rpc",
+                        # ``data`` is the shape opensquad.gateway_adapter's
+                        # coerce_command_data() prefers over top-level keys.
+                        "data": {"req_id": req_id, "op": op, "params": params or {}},
+                    }
+                )
+            )
+            content = await asyncio.wait_for(fut, timeout=timeout)
+            result = content.get("result")
+            if not isinstance(result, dict):
+                raise HTTPException(502, f"malformed task RPC result for op={op}")
+            return {"req_id": req_id, "op": content.get("op") or op, "result": result}
+        except asyncio.TimeoutError:
+            self._pending.pop(key, None)
+            raise HTTPException(504, f"task RPC timeout (op={op})")
+        except asyncio.CancelledError:
+            self._pending.pop(key, None)
+            raise HTTPException(502, "agent disconnected during task RPC")
+        except HTTPException:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            self._pending.pop(key, None)
+            raise HTTPException(502, f"task RPC error: {exc}")
+
+
+task_rpc_bridge = AgentTaskRPCBridge()
 
 
 class AgentWebSocketHandler:
@@ -200,6 +313,15 @@ class AgentWebSocketHandler:
 
     async def _unregister_agent(self, agent_id: str) -> None:
         """Drop the agent and tell UIs to seal any in-flight turns."""
+        # Fail any /api/tasks RPC still waiting on this agent instead of letting
+        # each caller sit until its own timeout.
+        cancelled = task_rpc_bridge.cancel_agent(agent_id)
+        if cancelled:
+            logger.info(
+                "[Gateway] cancelled %d task RPC(s) for disconnected agent %s",
+                cancelled,
+                agent_id,
+            )
         busy = list(registry.get_busy_sessions(agent_id) or [])
         for sid in busy:
             try:
@@ -229,313 +351,345 @@ class AgentWebSocketHandler:
         try:
             while True:
                 message = await websocket.receive_json()
-                action = message.get("action")
-                msg_type = message.get("type")
+                try:
+                    # Isolate per-message failures. Without this, one malformed
+                    # frame escapes to the outer handler below, which unregisters
+                    # the agent and drops every session's live stream.
+                    action = message.get("action")
+                    msg_type = message.get("type")
 
-                if action == "heartbeat":
-                    # Heartbeat response
-                    stats = message.get("stats", {})
-                    registry.update_heartbeat(agent_id, stats)
-                    await websocket.send_json({"action": "pong"})
+                    if action == "heartbeat":
+                        # Heartbeat response
+                        stats = message.get("stats", {})
+                        registry.update_heartbeat(agent_id, stats)
+                        await websocket.send_json({"action": "pong"})
 
-                elif msg_type == "pong" or action == "pong":
-                    # Application-level pong answering Gateway probe_agent ping.
-                    # Proves the agent *message recv loop* is alive (unlike
-                    # outbound heartbeats which only prove the writer works).
-                    registry.note_pong(agent_id)
+                    elif msg_type == "task_command_result":
+                        # Reply to an /api/tasks RPC this gateway sent down the
+                        # agent channel (see AgentTaskRPCBridge). Purely an
+                        # internal correlation frame: resolve the pending future
+                        # and never forward it to UI clients.
+                        _trc = message.get("content") or message.get("data") or {}
+                        _trc = _trc if isinstance(_trc, dict) else {}
+                        if not task_rpc_bridge.resolve(agent_id, _trc):
+                            logger.debug(
+                                "[Gateway] task_command_result with no waiter agent=%s op=%s",
+                                agent_id,
+                                _trc.get("op"),
+                            )
 
-                elif action == "status" or msg_type == "status":
-                    # Status update (optional per-session).
-                    #
-                    # AgentRunner emits status via `type=status` + `content`
-                    # (busy/online) + `sid` (the turn's disk session id). The
-                    # legacy `action=status` + `status`/`session_id` form is
-                    # also accepted. Without matching `msg_type == "status"`,
-                    # the busy set by send-to-agent below is never cleared and
-                    # the agent stays stuck at "busy" forever.
-                    status_raw = message.get("status")
-                    if status_raw is None:
-                        status_raw = message.get("content")
-                    status = str(status_raw or "online").strip() or "online"
-                    session_id = str(message.get("session_id") or message.get("sid") or "").strip()
-                    if status == "busy":
-                        # Agent (or a session) reports busy.
-                        if session_id:
-                            registry.set_session_busy(agent_id, session_id, True)
-                        else:
-                            registry.set_busy(agent_id, True)
-                    else:
-                        # Agent reports idle. status="online" is emitted by the
-                        # runner only when its busy-session set is empty, so it
-                        # represents a fully idle agent. Force-clear EVERY
-                        # per-session busy marker (they cannot all be matched by
-                        # the single sid carried on this event), otherwise a
-                        # stale marker keeps the agent stuck at "busy" forever.
-                        registry.clear_busy(agent_id)
+                    elif msg_type == "pong" or action == "pong":
+                        # Application-level pong answering Gateway probe_agent ping.
+                        # Proves the agent *message recv loop* is alive (unlike
+                        # outbound heartbeats which only prove the writer works).
+                        registry.note_pong(agent_id)
 
-                elif msg_type in [
-                    "message",
-                    "response",
-                    "thought",
-                    "stream",
-                    "tool_call",
-                    "tool_call_delta",
-                    "tool_result",
-                    "state",
-                    "wake",
-                    "sleep",
-                    "info",
-                    "status",
-                    "turn_start",
-                    "turn_elapsed",
-                    "token_stats",
-                    "current_session",
-                    "history_sync",
-                    "session_list",
-                    "busy_sessions",
-                    "primary_session",
-                    "file_push",
-                    "plan",
-                    "prompt_update",
-                    "output_media",
-                    "summary_stream",
-                    "compression_progress",
-                    "job_stdout",
-                    "job_status",
-                    # StepAudio realtime voice (browser <-> agent bridge)
-                    "voice_realtime_status",
-                    "voice_audio_out",
-                    "voice_transcript",
-                    "scheduled_task_turn_done",
-                ]:
-                    # Agent's response message, forward to user
-                    user_id = message.get("user_id")
-                    # Capture the disk session_id for a scheduled-task execution
-                    # from ANY event the Agent streams back (stream / state /
-                    # thought / current_session / message ...). Every forwarded
-                    # event carries `sid` = the turn's disk session_id (runner
-                    # sets _turn_sid = get_current_session_id()). Relying solely
-                    # on the `current_session` event is fragile: for external
-                    # ingress the turn runs on the PRIMARY session, and the runner
-                    # only emits `current_session` when sid == focused — so for
-                    # scheduled tasks it never fires and session_id stayed null
-                    # ("尚未创建会话"). Capturing from the first event with a
-                    # non-empty sid makes the workflow loadable immediately.
-                    if user_id and isinstance(user_id, str) and user_id.startswith("scheduled-task:"):
-                        _st_exec_id = user_id.split(":", 1)[1]
-                        _st_sess_id = str(message.get("sid") or "").strip()
-                        if not _st_sess_id:
-                            _st_c = message.get("content")
-                            if isinstance(_st_c, dict):
-                                _st_sess_id = str(_st_c.get("id") or _st_c.get("session_id") or "").strip()
-                        if _st_exec_id and _st_sess_id:
-                            try:
-                                from opensquad.scheduled_tasks import set_execution_session_by_exec_id
-
-                                set_execution_session_by_exec_id(_st_exec_id, _st_sess_id)
-                            except Exception as _st_e:
-                                logger.warning("[WS] scheduled-task session capture failed: %s", _st_e)
-
-                    if msg_type == "scheduled_task_turn_done":
-                        try:
-                            from opensquad.scheduled_tasks import mark_execution_done_by_exec_id
-
-                            _pdata = message.get("content") or message.get("data") or {}
-                            if not isinstance(_pdata, dict):
-                                _pdata = {}
-                            _done_exec = str(_pdata.get("exec_id") or "").strip()
-                            if (
-                                not _done_exec
-                                and user_id
-                                and isinstance(user_id, str)
-                                and user_id.startswith("scheduled-task:")
-                            ):
-                                _done_exec = user_id.split(":", 1)[1]
-                            _done_status = str(_pdata.get("status") or "success").strip() or "success"
-                            if _done_status not in ("success", "failed", "stopped"):
-                                _done_status = "success"
-                            if _done_exec:
-                                mark_execution_done_by_exec_id(_done_exec, status=_done_status)
-                        except Exception as _done_e:
-                            logger.warning("[WS] scheduled-task turn done failed: %s", _done_e)
-                    if msg_type == "info":
-                        try:
-                            info_payload = message.get("content") or message.get("data") or {}
-                            if isinstance(info_payload, dict):
-                                evt = info_payload.get("event")
-                                trace_id = info_payload.get("trace_id")
-                                if (evt and str(evt).startswith("context_compress")) or trace_id:
-                                    logger.info(
-                                        "[Gateway] Forward info event=%s trace_id=%s user_id=%s agent_id=%s",
-                                        evt,
-                                        trace_id,
-                                        user_id,
-                                        agent_id,
-                                    )
-                        except Exception:
-                            pass
-                    if msg_type == "summary_stream":
-                        try:
-                            sdata = message.get("content") or message.get("data") or {}
-                            if isinstance(sdata, dict):
-                                logger.info(
-                                    "[Gateway] Forward summary_stream id=%s done=%s delta_len=%s text_len=%s user_id=%s agent_id=%s",
-                                    sdata.get("id"),
-                                    sdata.get("done"),
-                                    len(sdata.get("delta", "") or ""),
-                                    len(sdata.get("text", "") or ""),
-                                    user_id,
-                                    agent_id,
-                                )
-                        except Exception:
-                            pass
-                    if msg_type == "history_sync":
-                        try:
-                            hdata = message.get("content") or message.get("data") or {}
-                            if isinstance(hdata, dict):
-                                logger.info(
-                                    "[Gateway] Forward history_sync session_id=%s messages=%d events=%d reason=%s user_id=%s agent_id=%s",
-                                    hdata.get("session_id"),
-                                    len(hdata.get("messages", []) or []),
-                                    len(hdata.get("events", []) or []),
-                                    hdata.get("reason"),
-                                    user_id,
-                                    agent_id,
-                                )
-                                # Compression / withdraw rewrite current_session
-                                # on disk — drop the cached reader so the next
-                                # HTTP hydrate sees the truncated snapshot.
-                                if hdata.get("reason") in ("compression", "withdraw"):
-                                    from .agent_sessions import invalidate_reader
-
-                                    invalidate_reader(agent_id)
-                        except Exception:
-                            pass
-
-                    if msg_type == "busy_sessions":
-                        try:
-                            from opensquad.scheduled_tasks import reconcile_executions_for_busy_sessions
-
-                            _pdata = message.get("content") or message.get("data") or {}
-                            if isinstance(_pdata, list):
-                                _busy_sids = [str(s) for s in _pdata]
-                            elif isinstance(_pdata, dict):
-                                _busy_sids = [str(s) for s in (_pdata.get("sessions") or [])]
+                    elif action == "status" or msg_type == "status":
+                        # Status update (optional per-session).
+                        #
+                        # AgentRunner emits status via `type=status` + `content`
+                        # (busy/online) + `sid` (the turn's disk session id). The
+                        # legacy `action=status` + `status`/`session_id` form is
+                        # also accepted. Without matching `msg_type == "status"`,
+                        # the busy set by send-to-agent below is never cleared and
+                        # the agent stays stuck at "busy" forever.
+                        status_raw = message.get("status")
+                        if status_raw is None:
+                            status_raw = message.get("content")
+                        status = str(status_raw or "online").strip() or "online"
+                        session_id = str(message.get("session_id") or message.get("sid") or "").strip()
+                        if status == "busy":
+                            # Agent (or a session) reports busy.
+                            if session_id:
+                                registry.set_session_busy(agent_id, session_id, True)
                             else:
-                                _busy_sids = []
-                            reconcile_executions_for_busy_sessions(agent_id, _busy_sids)
-                        except Exception as _busy_e:
-                            logger.warning("[WS] scheduled-task busy reconcile failed: %s", _busy_e)
-
-                    if msg_type == "current_session":
-                        try:
-                            from .agent_sessions import invalidate_reader
-
-                            invalidate_reader(agent_id)
-                        except Exception:
-                            pass
-                        # Track the agent's canonical disk session id so the next
-                        # user `connected` event exposes a real session instead of
-                        # the gateway_session_key fallback (which is not a disk
-                        # session file and breaks HTTP history reads).
-                        _cs = message.get("content")
-                        if isinstance(_cs, dict):
-                            _csid = str(_cs.get("id") or _cs.get("session_id") or "").strip()
+                                registry.set_busy(agent_id, True)
                         else:
-                            _csid = str(_cs or "").strip()
-                        # Only a real user-facing current_session may become the
-                        # agent's canonical current session. A scheduled-task
-                        # parallel-session spawn announces current_session merely
-                        # to bind exec.session_id — recording it here would
-                        # overwrite the user's latest session id and cross-wire
-                        # the user's next connect into the scheduled pane ("串线").
-                        _cs_is_scheduled = isinstance(user_id, str) and user_id.startswith("scheduled-task:")
-                        if _csid and not _cs_is_scheduled:
-                            _agent_current_session_id[agent_id] = _csid
-                        # Also invalidate Gateway in-memory cache so stale
-                        # user messages from previous session aren't served
-                        # on reconnect.
-                        with contextlib.suppress(Exception):
-                            gateway_session_cache.invalidate(user_id, agent_id)
-                        # Correlate the Agent's disk session_id back to the
-                        # scheduled-task execution that triggered this turn.
-                        # user_id is "scheduled-task:{exec_id}" (set by
-                        # ScheduledTaskManager._send_to_agent).
+                            # Agent reports idle. status="online" is emitted by the
+                            # runner only when its busy-session set is empty, so it
+                            # represents a fully idle agent. Force-clear EVERY
+                            # per-session busy marker (they cannot all be matched by
+                            # the single sid carried on this event), otherwise a
+                            # stale marker keeps the agent stuck at "busy" forever.
+                            registry.clear_busy(agent_id)
+
+                    elif msg_type in [
+                        "message",
+                        "response",
+                        "thought",
+                        "stream",
+                        "tool_call",
+                        "tool_call_delta",
+                        "tool_result",
+                        "state",
+                        "wake",
+                        "sleep",
+                        "info",
+                        "status",
+                        "turn_start",
+                        "turn_elapsed",
+                        "turn_usage",
+                        "token_stats",
+                        "current_session",
+                        "history_sync",
+                        "session_list",
+                        "busy_sessions",
+                        "primary_session",
+                        "file_push",
+                        "plan",
+                        "prompt_update",
+                        "output_media",
+                        "summary_stream",
+                        "compression_progress",
+                        "job_stdout",
+                        "job_status",
+                        # StepAudio realtime voice (browser <-> agent bridge)
+                        "voice_realtime_status",
+                        "voice_audio_out",
+                        "voice_transcript",
+                        "scheduled_task_turn_done",
+                        # M2 parallel task lifecycle. These MUST also appear in
+                        # _AGENT_OUTPUT_BROADCAST_TYPES *and* here: the frozenset
+                        # only decides broadcast-vs-directed, while this list is
+                        # what keeps the frame from falling through to the
+                        # "Unknown message from agent" branch and being dropped
+                        # silently (the UI then never updates).
+                        "task_update",
+                        "task_removed",
+                    ]:
+                        # Agent's response message, forward to user
+                        user_id = message.get("user_id")
+                        # Capture the disk session_id for a scheduled-task execution
+                        # from ANY event the Agent streams back (stream / state /
+                        # thought / current_session / message ...). Every forwarded
+                        # event carries `sid` = the turn's disk session_id (runner
+                        # sets _turn_sid = get_current_session_id()). Relying solely
+                        # on the `current_session` event is fragile: for external
+                        # ingress the turn runs on the PRIMARY session, and the runner
+                        # only emits `current_session` when sid == focused — so for
+                        # scheduled tasks it never fires and session_id stayed null
+                        # ("尚未创建会话"). Capturing from the first event with a
+                        # non-empty sid makes the workflow loadable immediately.
                         if user_id and isinstance(user_id, str) and user_id.startswith("scheduled-task:"):
-                            _exec_id = user_id.split(":", 1)[1]
-                            _sess_id = ""
-                            _c = message.get("content")
-                            if isinstance(_c, dict):
-                                _sess_id = str(_c.get("id") or "").strip()
-                            if not _sess_id:
-                                _sess_id = str(message.get("sid") or "").strip()
-                            if _exec_id and _sess_id:
+                            _st_exec_id = user_id.split(":", 1)[1]
+                            _st_sess_id = str(message.get("sid") or "").strip()
+                            if not _st_sess_id:
+                                _st_c = message.get("content")
+                                if isinstance(_st_c, dict):
+                                    _st_sess_id = str(_st_c.get("id") or _st_c.get("session_id") or "").strip()
+                            if _st_exec_id and _st_sess_id:
                                 try:
                                     from opensquad.scheduled_tasks import set_execution_session_by_exec_id
 
-                                    set_execution_session_by_exec_id(_exec_id, _sess_id)
-                                except Exception as e:
-                                    logger.warning("[WS] scheduled-task session capture failed: %s", e)
+                                    set_execution_session_by_exec_id(_st_exec_id, _st_sess_id)
+                                except Exception as _st_e:
+                                    logger.warning("[WS] scheduled-task session capture failed: %s", _st_e)
 
-                    # Persist final assistant replies in Gateway WS history so refresh
-                    # still works when the disk-session HTTP API is slow or unavailable.
-                    # Streaming chunks (stream/thought/tool_*) are NOT saved here.
-                    if user_id and msg_type in ("message", "response", "to_user_end_task"):
-                        content = message.get("content", "")
-                        if isinstance(content, str) and content.strip():
-                            await gateway_session_cache.async_add_message(
-                                user_id,
-                                agent_id,
-                                "assistant",
-                                content,
-                                message_id=message.get("message_id"),
-                                end_task=(msg_type == "to_user_end_task"),
-                            )
+                        if msg_type == "scheduled_task_turn_done":
+                            try:
+                                from opensquad.scheduled_tasks import mark_execution_done_by_exec_id
 
-                    if user_id:
-                        if (
-                            user_id in ("adapter-user",)
-                            or user_id.startswith("feishu_")
-                            # Scheduled-task turns use a synthetic user_id with no
-                            # browser WS. Broadcast so ExecWorkflowView / Agent Web
-                            # panes watching this agent receive live events (sid-
-                            # filtered on the client) instead of HTTP-poll-only lag.
-                            or user_id.startswith("scheduled-task:")
-                            # token_stats must reach every pane on this agent WS
-                            # (parallel sessions / exec view filter by sid).
-                            or msg_type == "token_stats"
-                            # All agent output / workflow events must reach every
-                            # client (TUI + Web, any account) for same-session
-                            # realtime sync; clients filter by sid.
-                            or msg_type in _AGENT_OUTPUT_BROADCAST_TYPES
-                        ):
+                                _pdata = message.get("content") or message.get("data") or {}
+                                if not isinstance(_pdata, dict):
+                                    _pdata = {}
+                                _done_exec = str(_pdata.get("exec_id") or "").strip()
+                                if (
+                                    not _done_exec
+                                    and user_id
+                                    and isinstance(user_id, str)
+                                    and user_id.startswith("scheduled-task:")
+                                ):
+                                    _done_exec = user_id.split(":", 1)[1]
+                                _done_status = str(_pdata.get("status") or "success").strip() or "success"
+                                if _done_status not in ("success", "failed", "stopped"):
+                                    _done_status = "success"
+                                if _done_exec:
+                                    mark_execution_done_by_exec_id(_done_exec, status=_done_status)
+                            except Exception as _done_e:
+                                logger.warning("[WS] scheduled-task turn done failed: %s", _done_e)
+                        if msg_type == "info":
+                            try:
+                                info_payload = message.get("content") or message.get("data") or {}
+                                if isinstance(info_payload, dict):
+                                    evt = info_payload.get("event")
+                                    trace_id = info_payload.get("trace_id")
+                                    if (evt and str(evt).startswith("context_compress")) or trace_id:
+                                        logger.info(
+                                            "[Gateway] Forward info event=%s trace_id=%s user_id=%s agent_id=%s",
+                                            evt,
+                                            trace_id,
+                                            user_id,
+                                            agent_id,
+                                        )
+                            except Exception:
+                                pass
+                        if msg_type == "summary_stream":
+                            try:
+                                sdata = message.get("content") or message.get("data") or {}
+                                if isinstance(sdata, dict):
+                                    logger.info(
+                                        "[Gateway] Forward summary_stream id=%s done=%s delta_len=%s text_len=%s user_id=%s agent_id=%s",
+                                        sdata.get("id"),
+                                        sdata.get("done"),
+                                        len(sdata.get("delta", "") or ""),
+                                        len(sdata.get("text", "") or ""),
+                                        user_id,
+                                        agent_id,
+                                    )
+                            except Exception:
+                                pass
+                        if msg_type == "history_sync":
+                            try:
+                                hdata = message.get("content") or message.get("data") or {}
+                                if isinstance(hdata, dict):
+                                    logger.info(
+                                        "[Gateway] Forward history_sync session_id=%s messages=%d events=%d reason=%s user_id=%s agent_id=%s",
+                                        hdata.get("session_id"),
+                                        len(hdata.get("messages", []) or []),
+                                        len(hdata.get("events", []) or []),
+                                        hdata.get("reason"),
+                                        user_id,
+                                        agent_id,
+                                    )
+                                    # Compression / withdraw rewrite current_session
+                                    # on disk — drop the cached reader so the next
+                                    # HTTP hydrate sees the truncated snapshot.
+                                    if hdata.get("reason") in ("compression", "withdraw"):
+                                        from .agent_sessions import invalidate_reader
+
+                                        invalidate_reader(agent_id)
+                            except Exception:
+                                pass
+
+                        if msg_type == "busy_sessions":
+                            try:
+                                from opensquad.scheduled_tasks import reconcile_executions_for_busy_sessions
+
+                                _pdata = message.get("content") or message.get("data") or {}
+                                if isinstance(_pdata, list):
+                                    _busy_sids = [str(s) for s in _pdata]
+                                elif isinstance(_pdata, dict):
+                                    _busy_sids = [str(s) for s in (_pdata.get("sessions") or [])]
+                                else:
+                                    _busy_sids = []
+                                reconcile_executions_for_busy_sessions(agent_id, _busy_sids)
+                            except Exception as _busy_e:
+                                logger.warning("[WS] scheduled-task busy reconcile failed: %s", _busy_e)
+
+                        if msg_type == "current_session":
+                            try:
+                                from .agent_sessions import invalidate_reader
+
+                                invalidate_reader(agent_id)
+                            except Exception:
+                                pass
+                            # Track the agent's canonical disk session id so the next
+                            # user `connected` event exposes a real session instead of
+                            # the gateway_session_key fallback (which is not a disk
+                            # session file and breaks HTTP history reads).
+                            _cs = message.get("content")
+                            if isinstance(_cs, dict):
+                                _csid = str(_cs.get("id") or _cs.get("session_id") or "").strip()
+                            else:
+                                _csid = str(_cs or "").strip()
+                            # Only a real user-facing current_session may become the
+                            # agent's canonical current session. A scheduled-task
+                            # parallel-session spawn announces current_session merely
+                            # to bind exec.session_id — recording it here would
+                            # overwrite the user's latest session id and cross-wire
+                            # the user's next connect into the scheduled pane ("串线").
+                            _cs_is_scheduled = isinstance(user_id, str) and user_id.startswith("scheduled-task:")
+                            if _csid and not _cs_is_scheduled:
+                                _agent_current_session_id[agent_id] = _csid
+                            # Also invalidate Gateway in-memory cache so stale
+                            # user messages from previous session aren't served
+                            # on reconnect.
+                            with contextlib.suppress(Exception):
+                                gateway_session_cache.invalidate(user_id, agent_id)
+                            # Correlate the Agent's disk session_id back to the
+                            # scheduled-task execution that triggered this turn.
+                            # user_id is "scheduled-task:{exec_id}" (set by
+                            # ScheduledTaskManager._send_to_agent).
+                            if user_id and isinstance(user_id, str) and user_id.startswith("scheduled-task:"):
+                                _exec_id = user_id.split(":", 1)[1]
+                                _sess_id = ""
+                                _c = message.get("content")
+                                if isinstance(_c, dict):
+                                    _sess_id = str(_c.get("id") or "").strip()
+                                if not _sess_id:
+                                    _sess_id = str(message.get("sid") or "").strip()
+                                if _exec_id and _sess_id:
+                                    try:
+                                        from opensquad.scheduled_tasks import set_execution_session_by_exec_id
+
+                                        set_execution_session_by_exec_id(_exec_id, _sess_id)
+                                    except Exception as e:
+                                        logger.warning("[WS] scheduled-task session capture failed: %s", e)
+
+                        # Persist final assistant replies in Gateway WS history so refresh
+                        # still works when the disk-session HTTP API is slow or unavailable.
+                        # Streaming chunks (stream/thought/tool_*) are NOT saved here.
+                        if user_id and msg_type in ("message", "response", "to_user_end_task"):
+                            content = message.get("content", "")
+                            if isinstance(content, str) and content.strip():
+                                await gateway_session_cache.async_add_message(
+                                    user_id,
+                                    agent_id,
+                                    "assistant",
+                                    content,
+                                    message_id=message.get("message_id"),
+                                    end_task=(msg_type == "to_user_end_task"),
+                                )
+
+                        if user_id:
+                            if (
+                                user_id in ("adapter-user",)
+                                or user_id.startswith("feishu_")
+                                # Scheduled-task turns use a synthetic user_id with no
+                                # browser WS. Broadcast so ExecWorkflowView / Agent Web
+                                # panes watching this agent receive live events (sid-
+                                # filtered on the client) instead of HTTP-poll-only lag.
+                                or user_id.startswith("scheduled-task:")
+                                # token_stats must reach every pane on this agent WS
+                                # (parallel sessions / exec view filter by sid).
+                                or msg_type == "token_stats"
+                                # All agent output / workflow events must reach every
+                                # client (TUI + Web, any account) for same-session
+                                # realtime sync; clients filter by sid.
+                                or msg_type in _AGENT_OUTPUT_BROADCAST_TYPES
+                            ):
+                                await user_handler.broadcast_to_agent(agent_id, message)
+                            else:
+                                await user_handler.forward_to_user(user_id, agent_id, message)
+                        else:
                             await user_handler.broadcast_to_agent(agent_id, message)
-                        else:
-                            await user_handler.forward_to_user(user_id, agent_id, message)
+
+                    elif action == "chat_response":
+                        user_id = message.get("user_id")
+                        if user_id:
+                            if (
+                                user_id in ("adapter-user",)
+                                or user_id.startswith("feishu_")
+                                or user_id.startswith("scheduled-task:")
+                            ):
+                                await user_handler.broadcast_to_agent(
+                                    agent_id,
+                                    {"type": "message", "role": "assistant", "content": message.get("content", "")},
+                                )
+                            else:
+                                await user_handler.forward_to_user(
+                                    user_id,
+                                    agent_id,
+                                    {"type": "message", "role": "assistant", "content": message.get("content", "")},
+                                )
+
                     else:
-                        await user_handler.broadcast_to_agent(agent_id, message)
-
-                elif action == "chat_response":
-                    user_id = message.get("user_id")
-                    if user_id:
-                        if (
-                            user_id in ("adapter-user",)
-                            or user_id.startswith("feishu_")
-                            or user_id.startswith("scheduled-task:")
-                        ):
-                            await user_handler.broadcast_to_agent(
-                                agent_id,
-                                {"type": "message", "role": "assistant", "content": message.get("content", "")},
-                            )
-                        else:
-                            await user_handler.forward_to_user(
-                                user_id,
-                                agent_id,
-                                {"type": "message", "role": "assistant", "content": message.get("content", "")},
-                            )
-
-                else:
-                    logger.warning(f"Unknown message from agent {agent_id}: {message}")
+                        logger.warning(f"Unknown message from agent {agent_id}: {message}")
+                except WebSocketDisconnect:
+                    raise
+                except Exception as e:
+                    logger.error(f"Agent {agent_id} message handling error (continuing): {e}")
+                    continue
 
         except WebSocketDisconnect:
             logger.info(f"Agent {agent_id} disconnected")

@@ -72,9 +72,9 @@ async def reset_password(email: str, new_password: str) -> bool:
 
             user_id, user_name, user_email = user_row
 
-            # Generate new password hash (native bcrypt, SEC-4: passlib 1.7.4
-            # is incompatible with bcrypt 5.x — use the same implementation as
-            # gateway/backend/app/auth.py)
+            # Generate new password hash (native bcrypt — passlib is no longer a
+            # dependency: passlib 1.7.4 is incompatible with bcrypt 5.x. This uses
+            # the same implementation as gateway/backend/app/auth.py)
             _pw = new_password.encode("utf-8")[:72]
             new_hashed_password = bcrypt.hashpw(_pw, bcrypt.gensalt()).decode("utf-8")
 

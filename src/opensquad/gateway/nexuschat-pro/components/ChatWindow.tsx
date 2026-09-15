@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState, useLayoutEffect, useCallback, useMemo } from 'react';
+import React, { useEffect, useRef, useState, useLayoutEffect, useCallback, useMemo, useImperativeHandle } from 'react';
 import { createPortal } from 'react-dom';
 import { useTranslation } from 'react-i18next';
 import { MoreHorizontal, Paperclip, Pin, Reply, Trash2, Copy, MessageSquare, Download, Folder, File as FileIcon, X, AtSign, ArrowLeft, Edit2, Check, ChevronLeft, ChevronRight, ChevronUp, ChevronDown, ZoomIn, Image as ImageIcon, RotateCcw, Play, Pause, Film, Mic } from 'lucide-react';
@@ -7,6 +7,7 @@ import { MessageInput } from './MessageInput';
 import { uploadAPI, SERVER_BASE_URL, messageAPI, agentSessionAPI } from '../services/api';
 import { blobToWavFile } from '../utils/mediaDevices';
 import { parse } from 'marked';
+import { sanitizeHtml } from '../utils/safeHtml';
 import { AvatarImg } from './AvatarImg';
 import { OpenSquadLoader } from './OpenSquadLoader';
 import { playGentleNotificationSound } from '../utils/sounds';
@@ -19,6 +20,7 @@ import {
   parseProposeOptions,
 } from './ProposeOptionsCard';
 import { useMobileChatSwipe } from '../hooks/useMobileChatSwipe';
+import { formatLocalClock, parseTimestampMs } from '../utils/time';
 
 // 全局消息位置记忆缓存：groupId -> { messageId, scrollTop }
 // 使用模块级变量，确保组件重新挂载后缓存仍然有效
@@ -171,11 +173,754 @@ const VoicePlayer: React.FC<VoicePlayerProps> = ({ url, duration }) => {
   );
 };
 
+/**
+ * Active downloads: track per-attachment download progress so the user sees an
+ * in-app progress bar instead of having to look at the browser's download shelf
+ * (which is easy to miss in Electron, and invisible in some kiosk-style
+ * deployments).
+ *
+ * Lives at module scope because MessageRow's `setDownloads` action needs the type.
+ */
+interface DownloadState {
+  attId: string;
+  progress: number;   // 0..100
+  fileName: string;
+}
+
+/**
+ * Stable callbacks handed to MessageRow.
+ *
+ * These are built once in ChatWindow from a ref that always points at the newest
+ * closures, so their identity never changes across renders.  That is what lets
+ * React.memo actually skip rows: without it every row's props change on every
+ * render and memoisation is worthless.
+ */
+export interface MessageRowActions {
+  saveEdit: () => void;
+  cancelEdit: () => void;
+  startEditing: (msg: Message) => void;
+  setReplyTo: (msg: Message) => void;
+  copyToClipboard: (text: string) => void;
+  showCopyToast: (text: string) => void;
+  contentClick: (e: React.MouseEvent, msgId: string) => void;
+  loadMessagesAround: (messageId: string, timestamp: number) => Promise<void>;
+  setDownloads: React.Dispatch<React.SetStateAction<DownloadState[]>>;
+  setLightboxImages: React.Dispatch<React.SetStateAction<Array<{ url: string; name: string }>>>;
+  setLightboxIndex: React.Dispatch<React.SetStateAction<number | null>>;
+  setShowLightbox: React.Dispatch<React.SetStateAction<boolean>>;
+  setEditContent: React.Dispatch<React.SetStateAction<string>>;
+  onPinMessage: (id: string) => void;
+  onDeleteMessage: (id: string) => void;
+  onUndoRecall: (id: string) => void;
+  onPermanentDelete: (id: string) => void;
+  onSendMessage: ChatWindowProps['onSendMessage'];
+}
+
+export interface MessageRowProps {
+  msg: Message;
+  isSelf: boolean;
+  sender?: User;
+  isSequence: boolean;
+  isMentioned: boolean;
+  isEditing: boolean;
+  editContent: string;
+  isRecentMessage: boolean;
+  replyTargetMsg: Message | null;
+  replyTargetUserName: string | undefined;
+  groupId: string;
+  parseContent: (content: string, msgId: string) => string;
+  actions: MessageRowActions;
+}
+
+/**
+ * One message row.  Extracted out of ChatWindow's 460-line inline map so it can be
+ * memoised: adding a message used to re-run the whole map (all rows) on every
+ * incoming WebSocket frame.
+ *
+ * The comparator deliberately ignores `actions`, `parseContent` and `editContent`:
+ * the first two are identity-stable by construction, and `editContent` only matters
+ * for the row that is currently being edited (handled by the `isEditing` check).
+ */
+const MessageRowImpl: React.FC<MessageRowProps> = ({
+  msg,
+  isSelf,
+  sender,
+  isSequence,
+  isMentioned,
+  isEditing,
+  editContent,
+  isRecentMessage,
+  replyTargetMsg,
+  replyTargetUserName,
+  groupId,
+  parseContent,
+  actions,
+}) => {
+  const { t } = useTranslation();
+
+  // SYSTEM messages: propose-options resolve tips stay plain text;
+  // other system notes keep the soft banner.
+  if (msg.type === MessageType.SYSTEM) {
+    const plainTip = /^(✅\s*已选择|⏭\s*已忽略|✏️\s*自定义)/.test((msg.content || '').trim());
+    return (
+      <div key={msg.id} id={msg.id} data-mid={msg.id} className="flex justify-center my-2">
+        {plainTip ? (
+          <div className="max-w-[90%] md:max-w-[75%] px-1 py-0.5 text-xs text-textMuted whitespace-pre-wrap break-words text-center">
+            {msg.content}
+          </div>
+        ) : (
+          <div className="max-w-[90%] md:max-w-[75%] px-4 py-3 bg-primary/5 border border-primary/20 rounded-xl text-sm text-textMain whitespace-pre-wrap break-words text-center">
+            <div
+              className="prose prose-sm max-w-full prose-p:my-0 inline-block text-left"
+              dangerouslySetInnerHTML={{ __html: parseContent(msg.content, msg.id) }}
+              onClick={(e) => actions.contentClick(e, msg.id)}
+            />
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  const interactiveApproval =
+    !msg.isDeleted && msg.type === MessageType.TEXT ? parseCollabApproval(msg.content || '') : null;
+  const interactiveProposal =
+    !msg.isDeleted && msg.type === MessageType.TEXT ? parseProposeOptions(msg.content || '') : null;
+  const isInteractiveCard = !!(interactiveApproval || interactiveProposal);
+
+  return (
+    <div
+      id={msg.id}
+      data-mid={msg.id}
+      className={`group flex gap-2 md:gap-3 mb-1 ${isSequence ? 'mt-1' : 'mt-4'} ${isSelf ? 'flex-row-reverse' : ''}`}
+      style={{
+        // Virtualize paint/layout for off-screen rows without unmounting them:
+        // the DOM node (and React state inside it) stays, but the browser
+        // skips layout/paint until the row approaches the viewport. This is
+        // what keeps long sessions scrollable as the loaded list grows.
+        contentVisibility: 'auto',
+        containIntrinsicSize: `auto ${estimateRowHeightPx(msg, isSequence)}px`,
+      } as React.CSSProperties}
+    >
+      {/* Avatar */}
+      <div className="w-8 md:w-10 flex-shrink-0 flex flex-col items-center">
+        {!isSequence && (
+          <AvatarImg
+            avatar={sender?.avatar}
+            seed={sender?.id}
+            label={sender?.name}
+            className="w-8 h-8 md:w-9 h-9 rounded-full object-cover border border-gray-100"
+            title={sender?.name}
+            onDoubleClick={
+              !isSelf && sender?.is_agent
+                ? () => {
+                    if (sender?.status === 'online') {
+                      window.dispatchEvent(
+                        new CustomEvent('openAgentChat', { detail: { agentId: sender.agent_id || sender.id } })
+                      );
+                    } else {
+                      actions.showCopyToast(t('chat.agentOffline'));
+                    }
+                  }
+                : undefined
+            }
+          />
+        )}
+      </div>
+
+      <div className={`flex flex-col max-w-[85%] md:max-w-[70%] min-w-0 ${isSelf ? 'items-end' : 'items-start'}`}>
+        {/* Sender Name & Time */}
+        {!isSequence && (
+          <div className={`flex items-center gap-2 mb-1 ${isSelf ? 'mr-1' : 'ml-1'}`}>
+            {!isSelf && <span className="text-xs md:text-sm font-semibold text-gray-700">{sender?.name}</span>}
+            <span className="text-[10px] md:text-xs text-gray-400">
+              {formatLocalClock(msg.timestamp, { locale: 'zh-CN' })}
+            </span>
+          </div>
+        )}
+
+        {/* Message Bubble (Or Edit Input) */}
+        {isEditing ? (
+          <div className={`relative p-2 shadow-sm rounded-xl border border-primary bg-panel w-full min-w-[200px]`}>
+            <textarea
+              value={editContent}
+              onChange={(e) => actions.setEditContent(e.target.value)}
+              className="w-full text-sm p-2 focus:outline-none resize-none bg-bgLight rounded mb-2 text-textMain"
+              rows={3}
+              autoFocus
+            />
+            <div className="flex justify-end gap-2">
+              <button
+                onClick={actions.cancelEdit}
+                className="p-1.5 text-red-500 hover:bg-red-50 rounded-full transition-colors"
+              >
+                <X size={16} />
+              </button>
+              <button
+                onClick={actions.saveEdit}
+                className="p-1.5 text-green-500 hover:bg-green-50 rounded-full transition-colors"
+              >
+                <Check size={16} />
+              </button>
+            </div>
+          </div>
+        ) : msg.isDeleted ? (
+          /* Recalled: subtle gray hint — no bubble chrome */
+          <div className="px-1 py-0.5 text-xs text-gray-400 italic select-none">{t('chat.messageRecalled')}</div>
+        ) : (
+          <div
+            className={
+              isInteractiveCard
+                ? 'relative text-sm leading-relaxed text-textMain break-all overflow-visible max-w-full'
+                : `relative px-3 md:px-4 py-2 md:py-2.5 shadow-sm text-sm leading-relaxed text-textMain break-all overflow-hidden max-w-full ${
+                    isSelf
+                      ? 'bg-chatBubbleSelf rounded-2xl rounded-tr-sm border border-border'
+                      : isMentioned
+                        ? 'bg-yellow-50 rounded-2xl rounded-tl-sm border border-yellow-300 ring-2 ring-yellow-100'
+                        : 'bg-chatBubbleOther rounded-2xl rounded-tl-sm border border-border'
+                  }`
+            }
+          >
+            {/* Reply Context UI */}
+            {msg.replyToId && (
+              <div
+                className={`mb-2 p-2 rounded text-xs border-l-4 cursor-pointer hover:bg-black/5 transition-colors flex flex-col gap-0.5 max-w-full overflow-hidden
+                    ${isSelf ? 'bg-bgLight border-primary' : 'bg-bgLight border-border'}
+                `}
+                onClick={async () => {
+                  const element = document.getElementById(msg.replyToId!);
+                  if (element) {
+                    element.scrollIntoView({ behavior: 'auto', block: 'center' });
+                    element.classList.add('animate-flash-highlight');
+                    setTimeout(() => element.classList.remove('animate-flash-highlight'), 2000);
+                    return;
+                  }
+                  if (replyTargetMsg) {
+                    await actions.loadMessagesAround(msg.replyToId!, replyTargetMsg.timestamp);
+                  }
+                }}
+              >
+                <span className="font-bold text-primary flex items-center gap-1 truncate max-w-full">
+                  {replyTargetUserName || 'User'}
+                </span>
+                {/* Reply content: render based on message type */}
+                {!replyTargetMsg ? (
+                  <span className="text-textMuted italic text-xs">{t('chat.loadingMessage')}</span>
+                ) : replyTargetMsg.isDeleted ? (
+                  <span className="text-textMuted italic text-xs">{t('chat.messageRecalled')}</span>
+                ) : replyTargetMsg.type === MessageType.IMAGE &&
+                  replyTargetMsg.attachments?.some((a) => a.type === 'image') ? (
+                  <div className="flex items-center gap-1.5">
+                    <img
+                      src={(() => {
+                        const u = replyTargetMsg.attachments!.find((a) => a.type === 'image')!.url;
+                        return u.startsWith('http') ? u : `${SERVER_BASE_URL}${u}`;
+                      })()}
+                      alt="img"
+                      className="h-8 w-8 rounded object-cover flex-shrink-0 border border-border"
+                      loading="lazy"
+                    />
+                    {replyTargetMsg.attachments!.filter((a) => a.type === 'image').length > 1 && (
+                      <span className="text-textMuted text-xs italic">
+                        {t('chat.imageCount', {
+                          count: replyTargetMsg.attachments!.filter((a) => a.type === 'image').length,
+                        })}
+                      </span>
+                    )}
+                  </div>
+                ) : replyTargetMsg.type === MessageType.VIDEO && replyTargetMsg.attachments?.[0] ? (
+                  <div className="flex items-center gap-1 text-textMuted text-xs">
+                    <Film size={12} className="flex-shrink-0" />
+                    <span className="truncate max-w-[120px]">{replyTargetMsg.attachments[0].name}</span>
+                  </div>
+                ) : replyTargetMsg.type === MessageType.VOICE && replyTargetMsg.attachments?.[0] ? (
+                  <div className="flex items-center gap-1 text-textMuted text-xs">
+                    <Mic size={12} className="flex-shrink-0" />
+                    <span className="italic">{t('chat.voiceMessageLabel')}</span>
+                  </div>
+                ) : replyTargetMsg.type === MessageType.FILE && replyTargetMsg.attachments?.[0] ? (
+                  <div className="flex items-center gap-1 text-textMuted text-xs">
+                    <FileIcon size={12} className="flex-shrink-0" />
+                    <span className="truncate max-w-[120px]">{replyTargetMsg.attachments[0].name}</span>
+                  </div>
+                ) : (
+                  <span className="text-textMuted line-clamp-2 italic break-all overflow-hidden max-w-full text-xs">
+                    {replyTargetMsg.content?.replace(/<[^>]+>/g, '') || `[${replyTargetMsg.type}]`}
+                  </span>
+                )}
+              </div>
+            )}
+
+            {/* Content */}
+            {msg.type === MessageType.TEXT ? (
+              <div className="flex flex-col">
+                {(() => {
+                  const approval = !msg.isDeleted ? parseCollabApproval(msg.content || '') : null;
+                  if (approval) {
+                    return (
+                      <CollabStepApprovalCard
+                        payload={approval}
+                        groupId={groupId}
+                        messageId={msg.id}
+                        onResolve={async (action) => {
+                          await messageAPI.resolveCollabApproval(groupId, approval.id, action, {
+                            messageId: msg.id,
+                          });
+                        }}
+                      />
+                    );
+                  }
+                  const proposal = !msg.isDeleted ? parseProposeOptions(msg.content || '') : null;
+                  if (proposal) {
+                    return (
+                      <ProposeOptionsCard
+                        payload={proposal}
+                        groupId={groupId}
+                        messageId={msg.id}
+                        onResolve={async (action, value) => {
+                          await messageAPI.resolveProposeOptions(groupId, proposal.id, action, value, {
+                            messageId: msg.id,
+                          });
+                        }}
+                      />
+                    );
+                  }
+                  return (
+                    <div
+                      className="prose prose-sm max-w-full prose-p:my-0 prose-ul:my-1 break-all"
+                      style={{ wordBreak: 'break-all', overflowWrap: 'break-word' }}
+                      dangerouslySetInnerHTML={{ __html: parseContent(msg.content, msg.id) }}
+                      onClick={(e) => actions.contentClick(e, msg.id)}
+                    />
+                  );
+                })()}
+                {msg.isEdited && !isInteractiveCard && (
+                  <span className="text-[10px] text-gray-400 self-end mt-1 italic">{t('chat.edited')}</span>
+                )}
+              </div>
+            ) : null}
+
+            {/* Attachments */}
+            {!msg.isDeleted &&
+              msg.attachments?.map((att) => {
+                // 构建完整的下载 URL
+                const fullUrl = att.url.startsWith('http') ? att.url : `${SERVER_BASE_URL}${att.url}`;
+
+                // 处理文件下载
+                // Use XHR with onprogress so we can show an in-app
+                // progress bar. The previous <a download> approach
+                // triggered the browser's native downloader, whose
+                // progress is only visible in Chrome's download shelf
+                // — easy to miss in Electron / kiosk deployments.
+                // XHR responseType='blob' streams to disk via the
+                // browser's blob backing store, and onprogress gives
+                // us byte-level progress for the UI.
+                const handleDownload = (e: React.MouseEvent) => {
+                  e.preventDefault();
+                  const attId = att.id;
+                  const fileName = att.name || 'download';
+                  const downloadUrl = `${SERVER_BASE_URL}/api/ai-web/download-file?path=${encodeURIComponent(att.url)}`;
+
+                  // Add a download state entry for in-app progress.
+                  actions.setDownloads((prev) => [...prev, { attId, progress: 0, fileName }]);
+
+                  const xhr = new XMLHttpRequest();
+                  xhr.open('GET', downloadUrl, true);
+                  xhr.responseType = 'blob';
+
+                  xhr.onprogress = (event: ProgressEvent) => {
+                    if (event.lengthComputable) {
+                      const pct = Math.round((event.loaded / event.total) * 100);
+                      actions.setDownloads((prev) =>
+                        prev.map((d) => (d.attId === attId ? { ...d, progress: pct } : d))
+                      );
+                    }
+                  };
+
+                  xhr.onload = () => {
+                    if (xhr.status >= 200 && xhr.status < 300) {
+                      const blob = xhr.response as Blob;
+                      const url = window.URL.createObjectURL(blob);
+                      const link = document.createElement('a');
+                      link.href = url;
+                      link.download = fileName;
+                      document.body.appendChild(link);
+                      link.click();
+                      document.body.removeChild(link);
+                      window.URL.revokeObjectURL(url);
+                    } else {
+                      console.error('Download failed:', xhr.status);
+                      alert(t('chat.downloadFailed'));
+                    }
+                    // Remove the download state after a brief 100% flash.
+                    setTimeout(() => {
+                      actions.setDownloads((prev) => prev.filter((d) => d.attId !== attId));
+                    }, 800);
+                  };
+
+                  xhr.onerror = () => {
+                    console.error('Download network error');
+                    alert(t('chat.downloadFailed'));
+                    actions.setDownloads((prev) => prev.filter((d) => d.attId !== attId));
+                  };
+
+                  xhr.send();
+                };
+
+                return (
+                  <div key={att.id} className="mt-1">
+                    {att.type === 'image' ? (
+                      <div
+                        className="relative group cursor-pointer"
+                        onClick={() => {
+                          // 收集该消息中的所有图片
+                          const images =
+                            msg.attachments
+                              ?.filter((a) => a.type === 'image')
+                              .map((a) => ({
+                                url: a.url.startsWith('http') ? a.url : `${SERVER_BASE_URL}${a.url}`,
+                                name: a.name,
+                              })) || [];
+                          const imgIndex = images.findIndex((img) => img.url === fullUrl);
+                          if (images.length > 0 && imgIndex >= 0) {
+                            actions.setLightboxImages(images);
+                            actions.setLightboxIndex(imgIndex);
+                            actions.setShowLightbox(true);
+                          }
+                        }}
+                      >
+                        <img
+                          src={fullUrl}
+                          alt={att.name}
+                          // Recent (visible-on-load) images load eagerly with high
+                          // priority so they don't pop in after the auto-scroll;
+                          // older images keep native lazy-loading.
+                          loading={isRecentMessage ? 'eager' : 'lazy'}
+                          fetchPriority={isRecentMessage ? 'high' : 'auto'}
+                          // ASYNC for every image. `decoding="sync"` blocks the
+                          // main thread until the bitmap is ready; with a fresh
+                          // set of <img> elements mounted on every group switch
+                          // that is pure downside. `async` decodes off-thread and
+                          // costs at most one frame of paint delay.
+                          decoding="async"
+                          className="max-w-full rounded-lg max-h-80 object-cover hover:opacity-95 transition-opacity"
+                        />
+                        <div className="absolute inset-0 bg-black/0 group-hover:bg-black/20 transition-colors rounded-lg flex items-center justify-center opacity-0 group-hover:opacity-100">
+                          <ZoomIn size={24} className="text-white" />
+                        </div>
+                      </div>
+                    ) : att.type === 'voice' ? (
+                      <VoicePlayer url={fullUrl} duration={att.duration || 0} />
+                    ) : att.type === 'video' ? (
+                      <div className="rounded-lg overflow-hidden max-w-xs">
+                        <video src={fullUrl} controls className="max-w-full max-h-72 rounded-lg" preload="metadata" />
+                        <div className="flex items-center justify-between px-1 pt-1">
+                          <span className="text-xs text-textMuted truncate max-w-[150px]">{att.name}</span>
+                          <button
+                            onClick={handleDownload}
+                            className="p-1 hover:bg-border rounded text-textMuted"
+                            title={t('chat.download')}
+                          >
+                            <Download size={14} />
+                          </button>
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="flex items-center gap-3 p-3 bg-bgLight border border-border rounded-lg">
+                        {att.type === 'folder' ? (
+                          <Folder className="text-primary" />
+                        ) : (
+                          <FileIcon className="text-primary" />
+                        )}
+                        <div className="flex flex-col min-w-0">
+                          <span className="font-medium truncate max-w-[150px] text-textMain">{att.name}</span>
+                          <span className="text-xs text-textMuted">{att.size}</span>
+                        </div>
+                        <button
+                          onClick={handleDownload}
+                          className="p-2 hover:bg-border rounded-full ml-auto text-textMuted"
+                          title={t('chat.download')}
+                        >
+                          <Download size={16} />
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+
+            {/* Status/Pin Indicators */}
+            <div className="flex justify-end gap-1 mt-1">
+              {msg.isPinned && <Pin size={10} className="text-yellow-500" />}
+
+              {/* 消息发送状态指示 */}
+              {isSelf && msg.status && (
+                <span className="text-[9px] text-gray-400 flex items-center gap-1">
+                  {msg.status === 'sending' && (
+                    <>
+                      <OpenSquadLoader size={14} label="发送中" />
+                      {t('chat.sending')}
+                    </>
+                  )}
+                  {msg.status === 'sent' && <span className="text-green-500">{t('chat.sent')}</span>}
+                  {msg.status === 'delivered' && <span className="text-blue-500">{t('chat.delivered')}</span>}
+                  {msg.status === 'failed' && (
+                    <span
+                      className="text-red-500 cursor-pointer hover:underline"
+                      onClick={() => {
+                        // 重新发送逻辑
+                        if (msg.content) {
+                          actions.onSendMessage(msg.content, msg.type, msg.attachments, msg.replyToId);
+                        }
+                      }}
+                    >
+                      {t('chat.sendFailed')}
+                    </span>
+                  )}
+                </span>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* Action Menu */}
+        {!isEditing && (
+          <div
+            className={`flex items-center gap-1 mt-1 opacity-0 group-hover:opacity-100 transition-opacity duration-200 ${isSelf ? 'flex-row-reverse' : ''}`}
+          >
+            {!msg.isDeleted && (
+              <>
+                <button
+                  onClick={() => actions.setReplyTo(msg)}
+                  className="p-1 hover:bg-border rounded text-textMuted"
+                  title={t('common.reply')}
+                >
+                  <Reply size={14} />
+                </button>
+                <button
+                  onClick={() => actions.copyToClipboard(msg.content)}
+                  className="p-1 hover:bg-border rounded text-textMuted"
+                  title={t('common.copy')}
+                >
+                  <Copy size={14} />
+                </button>
+                <button
+                  onClick={() => actions.onPinMessage(msg.id)}
+                  className={`p-1 hover:bg-border rounded text-textMuted ${msg.isPinned ? 'text-yellow-500' : ''}`}
+                  title={t('common.pin')}
+                >
+                  <Pin size={14} />
+                </button>
+              </>
+            )}
+
+            {isSelf && (
+              <>
+                {!msg.isDeleted && msg.type === MessageType.TEXT && (
+                  <button
+                    onClick={() => actions.startEditing(msg)}
+                    className="p-1 hover:bg-border rounded text-textMuted"
+                    title={t('common.edit')}
+                  >
+                    <Edit2 size={14} />
+                  </button>
+                )}
+
+                {msg.isDeleted ? (
+                  <>
+                    {/* 已撤回：显示取消撤回和永久删除 */}
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        actions.onUndoRecall(msg.id);
+                      }}
+                      className="p-1 hover:bg-green-100/50 hover:text-green-600 rounded text-textMuted"
+                      title={t('chat.undoRecall')}
+                    >
+                      <RotateCcw size={14} />
+                    </button>
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        if (confirm(t('chat.deleteConfirm'))) {
+                          actions.onPermanentDelete(msg.id);
+                        }
+                      }}
+                      className="p-1 hover:bg-red-100/50 hover:text-red-600 rounded text-textMuted"
+                      title={t('chat.permanentDelete')}
+                    >
+                      <Trash2 size={14} />
+                    </button>
+                  </>
+                ) : (
+                  // 未撤回：显示撤回按钮
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      actions.onDeleteMessage(msg.id);
+                    }}
+                    className="p-1 hover:bg-orange-100/50 hover:text-orange-500 rounded text-textMuted"
+                    title={t('chat.recall')}
+                  >
+                    <Trash2 size={14} />
+                  </button>
+                )}
+              </>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+};
+
+/**
+ * Rows are skipped when none of the data that affects their markup changed.
+ * `actions`, `parseContent` and `setEditContent` are identity-stable, and
+ * `editContent` only matters for the row currently in edit mode — which is why
+ * `isEditing` forces a re-render on its own.
+ */
+export const areMessageRowPropsEqual = (a: MessageRowProps, b: MessageRowProps): boolean => {
+  if (a.msg !== b.msg) return false;
+  if (a.isSelf !== b.isSelf) return false;
+  if (a.sender !== b.sender) return false;
+  if (a.isSequence !== b.isSequence) return false;
+  if (a.isMentioned !== b.isMentioned) return false;
+  if (a.isRecentMessage !== b.isRecentMessage) return false;
+  if (a.isEditing !== b.isEditing) return false;
+  if (a.isEditing) return false;
+  if (a.replyTargetMsg !== b.replyTargetMsg) return false;
+  if (a.replyTargetUserName !== b.replyTargetUserName) return false;
+  if (a.groupId !== b.groupId) return false;
+  return true;
+};
+
+const MessageRow = React.memo(MessageRowImpl, areMessageRowPropsEqual);
+
+/**
+ * Rough per-row height estimates for `content-visibility: auto`.
+ *
+ * Why type-aware: the prepend scroll-restoration measures `scrollHeight`
+ * deltas, and with content-visibility the not-yet-rendered rows contribute
+ * their estimate instead of their real height. A single flat estimate (e.g.
+ * 88px) is off by hundreds of px for image/code-heavy rows, which made the
+ * view jump on every history prepend. These buckets keep the delta close.
+ * After first render the browser remembers the real height (`auto`), so the
+ * estimate only matters for rows that have never been near the viewport.
+ */
+function estimateRowHeightPx(msg: Message, isSequence: boolean): number {
+  const atts = msg.attachments;
+  if (atts && atts.length > 0) {
+    if (atts.some(a => a.type === 'image' || a.type === 'video')) return 340;
+    return 140;
+  }
+  const len = (msg.content || '').length;
+  if (isSequence) return len > 200 ? 120 : 44;
+  if (len > 500) return 260;
+  if (len > 200) return 150;
+  return 88;
+}
+
+/**
+ * Imperative API for the composer so ChatWindow can append/clear text without
+ * owning the draft state.
+ */
+interface ChatComposerApi {
+  appendText: (text: string) => void;
+  appendTranscript: (text: string) => void;
+  clear: () => void;
+}
+
+interface ChatComposerHostProps {
+  groupId: string;
+  onSend: (text: string) => void;
+  onFileSelect: () => void;
+  onFolderSelect: () => void;
+  onImageSelect: () => void;
+  onVoiceRecord: (blob: Blob, duration: number) => void | Promise<void>;
+  voiceDictating: boolean;
+  onPasteFiles: (files: File[]) => void;
+  hasAttachments: boolean;
+  groupMembers: User[];
+}
+
+/**
+ * Owns the composer draft state so every keystroke re-renders ONLY this small
+ * subtree — previously `inputText` lived on ChatWindow, so each keypress
+ * re-rendered the whole window and reconciled every mounted message row.
+ *
+ * Drafts are kept per group: switching away parks the text under the outgoing
+ * group id, switching back restores it.
+ */
+const ChatComposerHost = React.memo(React.forwardRef<ChatComposerApi, ChatComposerHostProps>(({
+  groupId,
+  onSend,
+  onFileSelect,
+  onFolderSelect,
+  onImageSelect,
+  onVoiceRecord,
+  voiceDictating,
+  onPasteFiles,
+  hasAttachments,
+  groupMembers,
+}, ref) => {
+  const [inputText, setInputText] = useState('');
+  const inputTextRef = useRef(inputText);
+  inputTextRef.current = inputText;
+
+  const draftsRef = useRef<Record<string, string>>({});
+  const draftGroupIdRef = useRef(groupId);
+  useEffect(() => {
+    if (draftGroupIdRef.current === groupId) return;
+    // `inputTextRef.current` still holds the *outgoing* group's text here —
+    // park it under that group, then load this group's draft.
+    draftsRef.current[draftGroupIdRef.current] = inputTextRef.current;
+    draftGroupIdRef.current = groupId;
+    setInputText(draftsRef.current[groupId] ?? '');
+  }, [groupId]);
+
+  const onSendRef = useRef(onSend);
+  useEffect(() => { onSendRef.current = onSend; }, [onSend]);
+
+  useImperativeHandle(ref, () => ({
+    appendText: (text) => setInputText(prev => prev + text),
+    appendTranscript: (text) => setInputText(prev => {
+      if (!prev.trimEnd()) return text;
+      const joiner = /[\s\n]$/.test(prev) ? '' : ' ';
+      return `${prev}${joiner}${text}`;
+    }),
+    clear: () => setInputText(''),
+  }), []);
+
+  const handleSend = useCallback(() => { onSendRef.current(inputTextRef.current); }, []);
+  const handleAddAI = useCallback(() => { setInputText(prev => prev + '@'); }, []);
+
+  return (
+    <MessageInput
+      value={inputText}
+      onChange={setInputText}
+      onSend={handleSend}
+      onAddAI={handleAddAI}
+      onFileSelect={onFileSelect}
+      onFolderSelect={onFolderSelect}
+      onImageSelect={onImageSelect}
+      onVoiceRecord={onVoiceRecord}
+      voiceDictating={voiceDictating}
+      onPasteFiles={onPasteFiles}
+      hasAttachments={hasAttachments}
+      placeholder=""
+      groupMembers={groupMembers}
+    />
+  );
+}));
+ChatComposerHost.displayName = 'ChatComposerHost';
+
 export const ChatWindow: React.FC<ChatWindowProps> = ({
   group, groups, messages, users, currentUser, onSendMessage, onDeleteMessage, onUndoRecall, onPermanentDelete, onEditMessage, onPinMessage, onPrependMessages, onConsumeMention, toggleRightPanel, onOpenGroupSettings, filter, onBack, shouldJumpToMention, onReplaceMessages, onLoadMessagesAround, isMessagesLoading
 }) => {
   const { t } = useTranslation();
-  const [inputText, setInputText] = useState('');
+  // Composer draft lives inside ChatComposerHost (see above) so keystrokes do
+  // not re-render the whole window. Use composerRef to append/clear text.
+  const composerRef = useRef<ChatComposerApi>(null);
   const [sttDictating, setSttDictating] = useState(false);
   const [isDragging, setIsDragging] = useState(false);
   const [replyTo, setReplyTo] = useState<Message | null>(null);
@@ -197,15 +942,7 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
   }
   const [stagedItems, setStagedItems] = useState<StagedItem[]>([]);
 
-  // Active downloads: track per-attachment download progress so the user
-  // sees an in-app progress bar instead of having to look at the browser's
-  // download shelf (which is easy to miss in Electron, and invisible in
-  // some kiosk-style deployments).
-  interface DownloadState {
-    attId: string;
-    progress: number;   // 0..100
-    fileName: string;
-  }
+  // Active downloads: see the module-scope DownloadState declaration above.
   const [downloads, setDownloads] = useState<DownloadState[]>([]);
 
   // Bidirectional lazy loading state
@@ -216,8 +953,6 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
 
   // Auto-loading state for jump to message
   const [isAutoLoadingForJump, setIsAutoLoadingForJump] = useState(false);
-  const [autoLoadingTargetId, setAutoLoadingTargetId] = useState<string | null>(null);
-  const [autoLoadingProgress, setAutoLoadingProgress] = useState(0);
 
   // Image lightbox state
   const [lightboxImages, setLightboxImages] = useState<Array<{url: string, name: string}>>([]);
@@ -502,6 +1237,61 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
   const lastScrollBottomRef = useRef(false);
   const lastScrollActiveRef = useRef(false);
 
+  // ---------------------------------------------------------------------------
+  // Per-group state on switch
+  // ---------------------------------------------------------------------------
+  // This component used to be remounted on every group switch (`key={group.id}`
+  // in App), which reset all the group-scoped UI state for free — at the cost of
+  // the user's unsent draft and of re-creating the whole message subtree.
+  //
+  // Measured note: that remount was NOT what made switching feel slow (an A/B
+  // with and without the key landed inside the noise floor). The real cost was
+  // the load path — every switch re-fetched three endpoints and rebuilt every
+  // Message/User object, which forced a full re-render of the list. That is
+  // fixed in App.tsx. We still keep the component mounted because per-group
+  // composer drafts are strictly better than wiping the input on every switch.
+
+  // Composer drafts are kept per group inside ChatComposerHost (it owns the
+  // draft state now) — switching groups parks/restores the text there.
+
+  // Mirrors for reading the latest value from a `[group.id]`-only effect.
+  const stagedItemsRef = useRef<StagedItem[]>([]);
+
+  useEffect(() => {
+    stagedItemsRef.current = stagedItems;
+  }, [stagedItems]);
+
+  useEffect(() => {
+    setEditingId(null);
+    setEditContent('');
+    setReplyTo(null);
+    setShowPinnedMessages(false);
+    setDownloads([]);
+    setShowLightbox(false);
+    setLightboxImages([]);
+    setLightboxIndex(null);
+    setLightboxScale(1);
+    setLightboxOffset({ x: 0, y: 0 });
+    setIsDraggingLightbox(false);
+    setDragStart({ x: 0, y: 0 });
+    setCopyToast({ show: false, message: '' });
+    setManualCopyText(null);
+    setIsDragging(false);
+    setTouchDist(null);
+    setShowLoadedToast(false);
+    setLoadedCount(0);
+    setIsLoadingFuture(false);
+    setIsAutoLoadingForJump(false);
+    setIsLoadingHistory(false);
+    // Release the object URLs of anything staged for the group we just left.
+    for (const item of stagedItemsRef.current) {
+      if (item.localUrl) URL.revokeObjectURL(item.localUrl);
+    }
+    setStagedItems([]);
+    // NOTE: the composer draft is deliberately NOT reset — per-group drafts are
+    // handled inside ChatComposerHost.
+  }, [group.id]);
+
   // Filter messages logic including Date Range — memoized to avoid re-filter on every render
   const filteredMessages = useMemo(() => messages.filter(m => {
     const matchesText = m.content.toLowerCase().includes(filter.text.toLowerCase());
@@ -531,44 +1321,35 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
   // 保存当前滚动位置（在组件卸载或群组切换前）
   const saveScrollPosition = () => {
     const groupIdToSave = currentGroupIdRef.current;
-    if (scrollContainerRef.current && messages.length > 0 && !isRestoringPositionRef.current) {
-      const container = scrollContainerRef.current;
-      const scrollTop = container.scrollTop;
+    const container = scrollContainerRef.current;
+    if (!container || messages.length === 0 || isRestoringPositionRef.current) return;
 
-      // 找到当前视口中最上面的可见消息
-      // 使用所有子元素（消息元素都有 id 属性）
-      const allElements = container.querySelectorAll('[id]');
-      let visibleMessageId: string | null = null;
-      let minDistance = Infinity;
+    const scrollTop = container.scrollTop;
 
-      allElements.forEach((el) => {
-        // 只考虑消息元素（排除其他有 id 的元素）
-        // 消息元素的 ID 是消息 UUID，其他元素可能有不同前缀
-        if (!el.id || el.id.length < 10 || el.id.includes('_')) return;
+    // 只有消息行带 data-mid，因此这里跳过了子树里其他所有 [id]（按钮、上传控件、浮层…）。
+    // containerTop 提到循环外、循环内不写 DOM，浏览器只做一次布局计算。
+    const rows = container.querySelectorAll<HTMLElement>('[data-mid]');
+    const containerTop = container.getBoundingClientRect().top;
+    let visibleMessageId: string | null = null;
+    let minDistance = Infinity;
 
-        const rect = el.getBoundingClientRect();
-        const containerRect = container.getBoundingClientRect();
-        const relativeTop = rect.top - containerRect.top;
+    rows.forEach((el) => {
+      const relativeTop = el.getBoundingClientRect().top - containerTop;
 
-        // 找到在视口内或最接近视口顶部的消息
-        if (relativeTop >= -50 && relativeTop < minDistance) {
-          minDistance = relativeTop;
-          visibleMessageId = el.id;
-        }
-      });
-
-      // 如果没找到可见消息，使用第一条消息
-      if (!visibleMessageId && messages.length > 0) {
-        visibleMessageId = messages[0].id;
+      // 找到在视口内或最接近视口顶部的消息
+      if (relativeTop >= -50 && relativeTop < minDistance) {
+        minDistance = relativeTop;
+        visibleMessageId = el.dataset.mid || el.id;
       }
+    });
 
-      if (visibleMessageId) {
-        globalScrollPositionCache[groupIdToSave] = {
-          messageId: visibleMessageId,
-          scrollTop: scrollTop
-        };
-      }
-    }
+    // 如果没找到可见消息，使用第一条消息
+    if (!visibleMessageId) visibleMessageId = messages[0].id;
+
+    globalScrollPositionCache[groupIdToSave] = {
+      messageId: visibleMessageId,
+      scrollTop: scrollTop
+    };
   };
 
   // ========== Bidirectional Lazy Loading Functions ==========
@@ -582,7 +1363,7 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
         id: p.id,
         senderId: p.sender_id,
         content: p.content,
-        timestamp: new Date(p.timestamp).getTime(),
+        timestamp: parseTimestampMs(p.timestamp),
         type: p.type as MessageType,
         attachments: p.attachments?.map((a: any) => ({
           id: a.id || `att_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
@@ -595,7 +1376,18 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
         isEdited: p.is_edited,
         mentions: p.mentions || []
       }));
-      setPinnedMessages(formattedPinned);
+      // Only re-render when the list actually changed. This effect runs on every
+      // group switch, and handing React a fresh array each time burned a render
+      // of the whole window for no reason.
+      setPinnedMessages(prev => {
+        const unchanged =
+          prev.length === formattedPinned.length &&
+          prev.every((m, i) => {
+            const next = formattedPinned[i];
+            return m.id === next.id && m.content === next.content && m.isPinned === next.isPinned;
+          });
+        return unchanged ? prev : formattedPinned;
+      });
     } catch (error) {
       console.error('Failed to load pinned messages:', error);
     }
@@ -620,7 +1412,7 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
         id: m.id,
         senderId: m.sender_id,
         content: m.content,
-        timestamp: new Date(m.timestamp).getTime(),
+        timestamp: parseTimestampMs(m.timestamp),
         type: m.type as MessageType,
         attachments: m.attachments?.map(a => ({
           id: a.id,
@@ -684,7 +1476,7 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
         id: m.id,
         senderId: m.sender_id,
         content: m.content,
-        timestamp: new Date(m.timestamp).getTime(),
+        timestamp: parseTimestampMs(m.timestamp),
         type: m.type as MessageType,
         attachments: m.attachments?.map(a => ({
           id: a.id,
@@ -1016,13 +1808,24 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
       }
 
       if (targetTimestamp) {
-        // 启动自动加载模式
+        // 一次往返拿到目标 ±20 条并替换窗口，
+        // 替代此前"10 轮 × 20 条 + 每轮固定 sleep"的线性扫描（最坏 ~5s）
         setIsAutoLoadingForJump(true);
-        setAutoLoadingTargetId(messageId);
-        setAutoLoadingProgress(0);
-
-        // 使用连续加载策略，自动向上滚动并加载，直到找到消息
-        await loadMessagesUntilFoundWithProgress(messageId, targetTimestamp);
+        try {
+          await loadMessagesAround(messageId, targetTimestamp);
+          // 等待替换后的列表渲染落位，再滚动并高亮
+          await new Promise(resolve => setTimeout(resolve, 150));
+          const jumpEl = document.getElementById(messageId);
+          if (jumpEl) {
+            jumpEl.scrollIntoView({ behavior: 'auto', block: 'center' });
+            jumpEl.classList.remove('animate-flash-highlight');
+            void jumpEl.offsetWidth;
+            jumpEl.classList.add('animate-flash-highlight');
+            setTimeout(() => jumpEl.classList.remove('animate-flash-highlight'), 2000);
+          }
+        } finally {
+          setIsAutoLoadingForJump(false);
+        }
       }
     };
 
@@ -1084,99 +1887,6 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
     }
 
     isRestoringPositionRef.current = false;
-  };
-
-  // 带进度追踪的连续加载，直到找到目标消息
-  const loadMessagesUntilFoundWithProgress = async (targetId: string, targetTimestamp: number) => {
-    let attempts = 0;
-    const maxAttempts = 10;
-
-    // 标记正在自动加载
-    isRestoringPositionRef.current = true;
-
-    while (attempts < maxAttempts) {
-      // 更新进度
-      setAutoLoadingProgress(attempts + 1);
-
-      // 检查是否已找到消息
-      const element = document.getElementById(targetId);
-      if (element) {
-        // 找到消息，滚动到它
-        element.scrollIntoView({ behavior: 'auto', block: 'center' });
-        element.classList.remove('animate-flash-highlight');
-        void element.offsetWidth;
-        element.classList.add('animate-flash-highlight');
-        setTimeout(() => element.classList.remove('animate-flash-highlight'), 2000);
-
-        // 清理状态
-        setIsAutoLoadingForJump(false);
-        setAutoLoadingTargetId(null);
-        setAutoLoadingProgress(0);
-        isRestoringPositionRef.current = false;
-        return;
-      }
-
-      // 未找到，需要加载更多历史消息
-      setIsLoadingHistory(true);
-
-      try {
-        // 使用 ref 获取最新的 messages 状态，避免闭包问题
-        const currentMessages = messagesRef.current;
-        const earliestMsg = currentMessages[0];
-
-        console.log(`[AutoLoad] Attempt ${attempts + 1}: earliestMsg timestamp = ${earliestMsg?.timestamp}, target = ${targetTimestamp}`);
-
-        if (earliestMsg && earliestMsg.timestamp > targetTimestamp) {
-          // 目标消息比当前最早消息还早，需要加载更多
-          console.log(`[AutoLoad] Loading more history before ${earliestMsg.timestamp}`);
-
-          // 加载更多历史消息
-          const loadedCount = await onPrependMessages(group.id, earliestMsg.timestamp);
-          attempts++;
-
-          console.log(`[AutoLoad] Loaded ${loadedCount} messages`);
-
-          // 等待渲染完成
-          await new Promise(resolve => setTimeout(resolve, 300));
-
-          // 强制滚动到顶部，触发下一次加载（如果有更多）
-          if (scrollContainerRef.current) {
-            scrollContainerRef.current.scrollTop = 0;
-            console.log('[AutoLoad] Scrolled to top for next load');
-          }
-
-          // 再等待一下让用户看到加载的内容
-          await new Promise(resolve => setTimeout(resolve, 200));
-        } else {
-          // 已经加载到目标时间范围，但未找到消息
-          console.log('[AutoLoad] 已加载到目标时间范围，但未找到消息:', targetId);
-          break;
-        }
-      } catch (error) {
-        console.error('[AutoLoad] 自动加载消息失败:', error);
-        break;
-      } finally {
-        setIsLoadingHistory(false);
-      }
-    }
-
-    // 清理状态
-    setIsAutoLoadingForJump(false);
-    setAutoLoadingTargetId(null);
-    setAutoLoadingProgress(0);
-    isRestoringPositionRef.current = false;
-
-    // 最后尝试一次滚动（如果消息已加载）
-    const finalElement = document.getElementById(targetId);
-    if (finalElement) {
-      finalElement.scrollIntoView({ behavior: 'auto', block: 'center' });
-      finalElement.classList.remove('animate-flash-highlight');
-      void finalElement.offsetWidth;
-      finalElement.classList.add('animate-flash-highlight');
-      setTimeout(() => finalElement.classList.remove('animate-flash-highlight'), 2000);
-    } else {
-      console.warn(`经过 ${maxAttempts} 次尝试仍未找到消息:`, targetId);
-    }
   };
 
   // Trigger jump if prop is true
@@ -1382,11 +2092,9 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
     // 当滚动到顶部附近（scrollTop < 50）时加载更多历史消息
     // 但如果正在下拉刷新，不要触发（避免冲突和闪烁）
     if (scrollTop < 50 && !isPulling && !isLoadingHistoryRef.current) {
-      console.log('Scroll triggered load, scrollTop:', scrollTop);
       // 防抖：至少间隔 1 秒才能再次加载
       const now = Date.now();
       if (now - lastLoadTimeRef.current < 1000) {
-        console.log('Load debounced, too soon');
         return;
       }
       lastLoadTimeRef.current = now;
@@ -1397,10 +2105,8 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
       const oldScrollHeight = container.scrollHeight;
 
       try {
-        console.log('Loading via scroll...');
         // 调用父组件传入的函数加载更多历史消息
-        const loadedCount = await onPrependMessages(group.id, messages[0].timestamp);
-        console.log('Scroll load completed, count:', loadedCount);
+        await onPrependMessages(group.id, messages[0].timestamp);
 
         // 加载完成后恢复滚动位置（保持在原位置，不要跳到底部）
         requestAnimationFrame(() => {
@@ -1463,8 +2169,8 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
     }
   };
 
-  const handleSend = () => {
-    const hasText = inputText.trim().length > 0;
+  const handleSend = (text: string) => {
+    const hasText = text.trim().length > 0;
     const hasStaged = stagedItems.length > 0;
     if (!hasText && !hasStaged) return;
 
@@ -1484,8 +2190,8 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
       msgType = allImages ? MessageType.IMAGE : MessageType.FILE;
     }
 
-    onSendMessage(inputText, msgType, attachments.length > 0 ? attachments : undefined, replyTo?.id);
-    setInputText('');
+    onSendMessage(text, msgType, attachments.length > 0 ? attachments : undefined, replyTo?.id);
+    composerRef.current?.clear();
     setStagedItems(prev => {
       prev.forEach(i => URL.revokeObjectURL(i.localUrl));
       return [];
@@ -1494,6 +2200,15 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
     // 播放温和的提示音
     playSendSound();
   };
+
+  // Stable props for the memoized composer host — the real handlers close over
+  // per-render state (stagedItems, replyTo), so mirror them through refs.
+  const handleSendRef = useRef(handleSend);
+  useEffect(() => { handleSendRef.current = handleSend; });
+  const handleSendStable = useCallback((text: string) => handleSendRef.current(text), []);
+  const handleOpenFilePicker = useCallback(() => fileInputRef.current?.click(), []);
+  const handleOpenFolderPicker = useCallback(() => folderInputRef.current?.click(), []);
+  const handleOpenImagePicker = useCallback(() => imageInputRef.current?.click(), []);
 
   // ---- Mobile horizontal swipe navigation (full screen) ----
   const {
@@ -1566,15 +2281,12 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
     if (wasHorizontal) return;
 
     if (!isPulling) {
-      console.log('TouchEnd: not pulling, returning');
       return;
     }
 
-    console.log('TouchEnd: pullTriggered=', pullTriggered, 'messages.length=', messages.length);
     setIsPulling(false);
 
     if (pullTriggered && messages.length > 0) {
-      console.log('Triggering load...');
       // Trigger loading
       isLoadingHistoryRef.current = true;
       setIsLoadingHistory(true);
@@ -1845,7 +2557,7 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
   };
 
   // 语音录制 → ASR 填入发送框（与 Agent 聊听写一致，不再发语音附件）
-  const handleVoiceRecord = async (audioBlob: Blob, _duration: number) => {
+  const handleVoiceRecord = useCallback(async (audioBlob: Blob, _duration: number) => {
     try {
       setSttDictating(true);
       const audioFile = await blobToWavFile(audioBlob, `voice_${Date.now()}.wav`);
@@ -1858,11 +2570,7 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
         alert('未识别到语音内容，请再说一次');
         return;
       }
-      setInputText((prev) => {
-        if (!prev.trimEnd()) return text;
-        const joiner = /[\s\n]$/.test(prev) ? '' : ' ';
-        return `${prev}${joiner}${text}`;
-      });
+      composerRef.current?.appendTranscript(text);
     } catch (error) {
       console.error('Failed to transcribe voice:', error);
       const msg = error instanceof Error ? error.message : String(error || '');
@@ -1875,7 +2583,7 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
     } finally {
       setSttDictating(false);
     }
-  };
+  }, [t]);
 
   const startEditing = (msg: Message) => {
       setEditingId(msg.id);
@@ -1975,8 +2683,6 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
           // Message not in current view, use auto-loading approach
           // 启动自动加载模式并派发事件
           setIsAutoLoadingForJump(true);
-          setAutoLoadingTargetId(mentionMsg.id);
-          setAutoLoadingProgress(0);
 
           window.dispatchEvent(new CustomEvent('jumpToMessage', {
               detail: {
@@ -2000,11 +2706,12 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
       return false;
   };
 
-  const handleMentionButtonClick = () => {
-      setInputText(prev => prev + '@');
-  };
-
-  const groupMembers = group.members.map(id => users[id]).filter(Boolean);
+  // Memoized so the composer host's React.memo actually holds across parent
+  // re-renders (a fresh array every render used to defeat it).
+  const groupMembers = useMemo(
+    () => group.members.map(id => users[id]).filter(Boolean),
+    [group.members, users],
+  );
 
   // 解析消息内容缓存 — 避免每次渲染都重新调用 marked.parse()
   const parsedContentCacheRef = useRef<Map<string, string>>(new Map());
@@ -2021,7 +2728,9 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
   }, [messages]);
 
   // 解析消息内容，将 @提及 转换为可点击的链接
-  const parseMessageContent = (content: string, currentMsgId: string) => {
+  // useCallback([]) 是安全的：内部只用到 parsedContentCacheRef（ref，天然稳定）和模块级的 parse()。
+  // 稳定的引用是 MessageRow 的 memo 比较器能生效的前提（否则每行 props 每次都变）。
+  const parseMessageContent = useCallback((content: string, currentMsgId: string) => {
     // 缓存命中检查
     const cacheKey = currentMsgId + ':' + content;
     const cached = parsedContentCacheRef.current.get(cacheKey);
@@ -2043,13 +2752,20 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
     // 将 @提及 转换为可点击的 span，带有 data-username 属性
     parsed = parsed.replace(/@(\w+)/g, '<span class="mention-link text-primary font-bold cursor-pointer hover:underline" data-username="$1">@$1</span>');
 
-    // 修复链接：在新标签页打开，防止跳转当前页
-    parsed = parsed.replace(/<a\s+href=/g, '<a target="_blank" rel="noopener noreferrer" href=');
+    // Sanitize LAST. `marked` passes raw HTML straight through, and message
+    // content is not trusted: it can originate from another agent, a tool
+    // result, or a relayed message. `data-username` is allowlisted in
+    // utils/safeHtml.ts so the mention spans injected above survive.
+    //
+    // `linksToNewTab` replaces the previous `<a target=_blank>` regex rewrite:
+    // DOMPurify deletes `target` from the parsed output, so the attribute has
+    // to be re-applied from an afterSanitizeAttributes hook (see safeHtml.ts).
+    parsed = sanitizeHtml(parsed, { linksToNewTab: true });
 
     // 存入缓存
     parsedContentCacheRef.current.set(cacheKey, parsed);
     return parsed;
-  };
+  }, []);
 
   // 处理消息内容点击事件（用于 @提及 跳转）
   const handleMessageContentClick = (e: React.MouseEvent, currentMsgId: string) => {
@@ -2081,6 +2797,73 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
       }
     }
   };
+
+  // ---------------------------------------------------------------------------
+  // O4a — MessageRow 接线
+  // ---------------------------------------------------------------------------
+  // 行渲染已经从内联 map 抽成 React.memo 组件（见文件顶部的 MessageRowImpl）。
+  // 但 memo 只有在 props 的**引用**不变时才有意义，而下面这些闭包每次 render
+  // 都会重建（它们捕获了 users / filteredMessages / editingId / onSendMessage …）。
+  //
+  // 解法：每一帧都把最新的闭包塞进 actionImplRef，actions 对象本身只构造一次，
+  // 内部永远从 ref 取最新实现。于是：
+  //   · actions 的引用恒定 → 不会击穿 memo
+  //   · 行为仍然是"最新的" → 不会读到旧 state
+  // 这是经典的 "latest-ref" 模式，也是 React 官方推荐的做法。
+  const actionImplRef = useRef<MessageRowActions | null>(null);
+  actionImplRef.current = {
+    saveEdit,
+    cancelEdit,
+    startEditing,
+    setReplyTo,
+    copyToClipboard,
+    showCopyToast,
+    contentClick: handleMessageContentClick,
+    loadMessagesAround,
+    setDownloads,
+    setLightboxImages,
+    setLightboxIndex,
+    setShowLightbox,
+    setEditContent,
+    onPinMessage,
+    onDeleteMessage,
+    onUndoRecall,
+    onPermanentDelete,
+    onSendMessage,
+  };
+
+  // 故意留空依赖数组：这个对象必须**永远**是同一个引用，否则每行都会重渲染。
+  // 它不捕获任何会变的值 —— 全部经由 actionImplRef 间接取用。
+  const messageRowActions = useMemo<MessageRowActions>(
+    () => ({
+      saveEdit: () => actionImplRef.current!.saveEdit(),
+      cancelEdit: () => actionImplRef.current!.cancelEdit(),
+      startEditing: (msg) => actionImplRef.current!.startEditing(msg),
+      setReplyTo: (msg) => actionImplRef.current!.setReplyTo(msg),
+      copyToClipboard: (text) => {
+        void actionImplRef.current!.copyToClipboard(text);
+      },
+      showCopyToast: (text) => actionImplRef.current!.showCopyToast(text),
+      contentClick: (e, msgId) => actionImplRef.current!.contentClick(e, msgId),
+      loadMessagesAround: (messageId, timestamp) =>
+        actionImplRef.current!.loadMessagesAround(messageId, timestamp),
+      // 下面 5 个是 setState 函数（React 保证引用恒定），但仍旧走 ref 取用，
+      // 一是保持写法统一，二是避免"从首帧对象上摘下来"这种隐式依赖。
+      setDownloads: (value) => actionImplRef.current!.setDownloads(value),
+      setLightboxImages: (value) => actionImplRef.current!.setLightboxImages(value),
+      setLightboxIndex: (value) => actionImplRef.current!.setLightboxIndex(value),
+      setShowLightbox: (value) => actionImplRef.current!.setShowLightbox(value),
+      setEditContent: (value) => actionImplRef.current!.setEditContent(value),
+      onPinMessage: (id) => actionImplRef.current!.onPinMessage(id),
+      onDeleteMessage: (id) => actionImplRef.current!.onDeleteMessage(id),
+      onUndoRecall: (id) => actionImplRef.current!.onUndoRecall(id),
+      onPermanentDelete: (id) => actionImplRef.current!.onPermanentDelete(id),
+      onSendMessage: (content, type, attachments, replyToId) =>
+        actionImplRef.current!.onSendMessage(content, type, attachments, replyToId),
+    }),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    []
+  );
 
   return (
     <div
@@ -2315,7 +3098,7 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
           <div className="bg-primary/90 text-white rounded-full px-4 py-2 shadow-lg flex items-center gap-2">
             <OpenSquadLoader size={16} label="定位中" />
             <span className="text-xs font-medium">
-              {t('chat.locatingMessage', { progress: autoLoadingProgress })}
+              {t('chat.locatingMessage')}
             </span>
           </div>
         </div>
@@ -2411,8 +3194,8 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
             const isSelf = msg.senderId === currentUser.id;
             const sender = users[msg.senderId];
             const prevMsg = messages[index - 1];
-            const isSequence = prevMsg && prevMsg.senderId === msg.senderId && (msg.timestamp - prevMsg.timestamp < 300000);
-            const isMentioned = msg.mentions?.includes(currentUser.id);
+            const isSequence = !!prevMsg && prevMsg.senderId === msg.senderId && (msg.timestamp - prevMsg.timestamp < 300000);
+            const isMentioned = !!msg.mentions?.includes(currentUser.id);
             const isEditing = editingId === msg.id;
 
             // Bottom N messages get eager image loading + high fetch priority
@@ -2421,468 +3204,30 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
             // messages keep native lazy-loading to avoid wasted bandwidth.
             const isRecentMessage = index >= filteredMessages.length - 8;
 
-            const replyContextMsg = msg.replyToId ? messageMap.get(msg.replyToId) ?? null : null;
-            const replyContextUser = replyContextMsg ? users[replyContextMsg.senderId] : null;
-
-            // SYSTEM messages: propose-options resolve tips stay plain text;
-            // other system notes keep the soft banner.
-            if (msg.type === MessageType.SYSTEM) {
-                const plainTip = /^(✅\s*已选择|⏭\s*已忽略|✏️\s*自定义)/.test((msg.content || '').trim());
-                return (
-                    <div key={msg.id} id={msg.id} className="flex justify-center my-2">
-                        {plainTip ? (
-                            <div className="max-w-[90%] md:max-w-[75%] px-1 py-0.5 text-xs text-textMuted whitespace-pre-wrap break-words text-center">
-                                {msg.content}
-                            </div>
-                        ) : (
-                            <div className="max-w-[90%] md:max-w-[75%] px-4 py-3 bg-primary/5 border border-primary/20 rounded-xl text-sm text-textMain whitespace-pre-wrap break-words text-center">
-                                <div
-                                    className="prose prose-sm max-w-full prose-p:my-0 inline-block text-left"
-                                    dangerouslySetInnerHTML={{ __html: parseMessageContent(msg.content, msg.id) }}
-                                    onClick={(e) => handleMessageContentClick(e, msg.id)}
-                                />
-                            </div>
-                        )}
-                    </div>
-                );
-            }
-
-            const interactiveApproval =
-                !msg.isDeleted && msg.type === MessageType.TEXT ? parseCollabApproval(msg.content || '') : null;
-            const interactiveProposal =
-                !msg.isDeleted && msg.type === MessageType.TEXT ? parseProposeOptions(msg.content || '') : null;
-            const isInteractiveCard = !!(interactiveApproval || interactiveProposal);
+            // Reply-context preview data is resolved here rather than inside
+            // MessageRow, so the row stays a pure function of its props (which is
+            // what makes React.memo effective). Note `messageMap` and `users` are
+            // both identity-stable per render pass.
+            const replyTargetMsg = msg.replyToId ? messageMap.get(msg.replyToId) ?? null : null;
+            const replyTargetUserName = replyTargetMsg ? users[replyTargetMsg.senderId]?.name : undefined;
 
             return (
-                <div key={msg.id} id={msg.id} className={`group flex gap-2 md:gap-3 mb-1 ${isSequence ? 'mt-1' : 'mt-4'} ${isSelf ? 'flex-row-reverse' : ''}`}>
-                    {/* Avatar */}
-                    <div className="w-8 md:w-10 flex-shrink-0 flex flex-col items-center">
-                        {!isSequence && (
-                            <AvatarImg
-                                avatar={sender?.avatar}
-                                seed={sender?.id}
-                                label={sender?.name}
-                                className="w-8 h-8 md:w-9 h-9 rounded-full object-cover border border-gray-100"
-                                title={sender?.name}
-                                onDoubleClick={!isSelf && sender?.is_agent ? () => {
-                                    if (sender?.status === 'online') {
-                                        window.dispatchEvent(new CustomEvent('openAgentChat', { detail: { agentId: sender.agent_id || sender.id } }));
-                                    } else {
-                                        showCopyToast(t('chat.agentOffline'));
-                                    }
-                                } : undefined}
-                            />
-                        )}
-                    </div>
-
-                    <div className={`flex flex-col max-w-[85%] md:max-w-[70%] min-w-0 ${isSelf ? 'items-end' : 'items-start'}`}>
-                        {/* Sender Name & Time */}
-                        {!isSequence && (
-                            <div className={`flex items-center gap-2 mb-1 ${isSelf ? 'mr-1' : 'ml-1'}`}>
-                                {!isSelf && <span className="text-xs md:text-sm font-semibold text-gray-700">{sender?.name}</span>}
-                                <span className="text-[10px] md:text-xs text-gray-400">{new Date(msg.timestamp).toLocaleTimeString('zh-CN', {hour: '2-digit', minute:'2-digit', hour12: false})}</span>
-                            </div>
-                        )}
-
-                        {/* Message Bubble (Or Edit Input) */}
-                        {isEditing ? (
-                            <div className={`relative p-2 shadow-sm rounded-xl border border-primary bg-panel w-full min-w-[200px]`}>
-                                <textarea
-                                    value={editContent}
-                                    onChange={(e) => setEditContent(e.target.value)}
-                                    className="w-full text-sm p-2 focus:outline-none resize-none bg-bgLight rounded mb-2 text-textMain"
-                                    rows={3}
-                                    autoFocus
-                                />
-                                <div className="flex justify-end gap-2">
-                                    <button onClick={cancelEdit} className="p-1.5 text-red-500 hover:bg-red-50 rounded-full transition-colors"><X size={16} /></button>
-                                    <button onClick={saveEdit} className="p-1.5 text-green-500 hover:bg-green-50 rounded-full transition-colors"><Check size={16} /></button>
-                                </div>
-                            </div>
-                        ) : msg.isDeleted ? (
-                            /* Recalled: subtle gray hint — no bubble chrome */
-                            <div className="px-1 py-0.5 text-xs text-gray-400 italic select-none">
-                                {t('chat.messageRecalled')}
-                            </div>
-                        ) : (
-                            <div className={
-                                isInteractiveCard
-                                    ? 'relative text-sm leading-relaxed text-textMain break-all overflow-visible max-w-full'
-                                    : `relative px-3 md:px-4 py-2 md:py-2.5 shadow-sm text-sm leading-relaxed text-textMain break-all overflow-hidden max-w-full ${
-                                        isSelf
-                                            ? 'bg-chatBubbleSelf rounded-2xl rounded-tr-sm border border-border'
-                                            : isMentioned
-                                                ? 'bg-yellow-50 rounded-2xl rounded-tl-sm border border-yellow-300 ring-2 ring-yellow-100'
-                                                : 'bg-chatBubbleOther rounded-2xl rounded-tl-sm border border-border'
-                                    }`
-                            }>
-                                 {/* Reply Context UI */}
-                                 {msg.replyToId && (() => {
-                                     const targetMsg = messageMap.get(msg.replyToId!);
-                                     return (
-                                         <div
-                                             className={`mb-2 p-2 rounded text-xs border-l-4 cursor-pointer hover:bg-black/5 transition-colors flex flex-col gap-0.5 max-w-full overflow-hidden
-                                                 ${isSelf ? 'bg-bgLight border-primary' : 'bg-bgLight border-border'}
-                                             `}
-                                             onClick={async () => {
-                                                 const element = document.getElementById(msg.replyToId!);
-                                                 if (element) {
-                                                     element.scrollIntoView({ behavior: 'auto', block: 'center' });
-                                                     element.classList.add('animate-flash-highlight');
-                                                     setTimeout(() => element.classList.remove('animate-flash-highlight'), 2000);
-                                                     return;
-                                                 }
-                                                 if (targetMsg) {
-                                                     await loadMessagesAround(msg.replyToId!, targetMsg.timestamp);
-                                                 }
-                                             }}
-                                         >
-                                             <span className="font-bold text-primary flex items-center gap-1 truncate max-w-full">
-                                                 {users[targetMsg?.senderId || '']?.name || 'User'}
-                                             </span>
-                                             {/* Reply content: render based on message type */}
-                                             {!targetMsg ? (
-                                                 <span className="text-textMuted italic text-xs">{t('chat.loadingMessage')}</span>
-                                             ) : targetMsg.isDeleted ? (
-                                                 <span className="text-textMuted italic text-xs">{t('chat.messageRecalled')}</span>
-                                             ) : targetMsg.type === MessageType.IMAGE && targetMsg.attachments?.some(a => a.type === 'image') ? (
-                                                 <div className="flex items-center gap-1.5">
-                                                     <img
-                                                         src={(() => { const u = targetMsg.attachments!.find(a => a.type === 'image')!.url; return u.startsWith('http') ? u : `${SERVER_BASE_URL}${u}`; })()}
-                                                         alt="img"
-                                                         className="h-8 w-8 rounded object-cover flex-shrink-0 border border-border"
-                                                         loading="lazy"
-                                                     />
-                                                     {targetMsg.attachments!.filter(a => a.type === 'image').length > 1 && (
-                                                         <span className="text-textMuted text-xs italic">{t('chat.imageCount', { count: targetMsg.attachments!.filter(a => a.type === 'image').length })}</span>
-                                                     )}
-                                                 </div>
-                                             ) : targetMsg.type === MessageType.VIDEO && targetMsg.attachments?.[0] ? (
-                                                 <div className="flex items-center gap-1 text-textMuted text-xs">
-                                                     <Film size={12} className="flex-shrink-0" />
-                                                     <span className="truncate max-w-[120px]">{targetMsg.attachments[0].name}</span>
-                                                 </div>
-                                             ) : targetMsg.type === MessageType.VOICE && targetMsg.attachments?.[0] ? (
-                                                 <div className="flex items-center gap-1 text-textMuted text-xs">
-                                                     <Mic size={12} className="flex-shrink-0" />
-                                                     <span className="italic">{t('chat.voiceMessageLabel')}</span>
-                                                 </div>
-                                             ) : targetMsg.type === MessageType.FILE && targetMsg.attachments?.[0] ? (
-                                                 <div className="flex items-center gap-1 text-textMuted text-xs">
-                                                     <FileIcon size={12} className="flex-shrink-0" />
-                                                     <span className="truncate max-w-[120px]">{targetMsg.attachments[0].name}</span>
-                                                 </div>
-                                             ) : (
-                                                 <span className="text-textMuted line-clamp-2 italic break-all overflow-hidden max-w-full text-xs">
-                                                     {targetMsg.content?.replace(/<[^>]+>/g, '') || `[${targetMsg.type}]`}
-                                                 </span>
-                                             )}
-                                         </div>
-                                     );
-                                 })()}
-
-                                 {/* Content */}
-                                {msg.type === MessageType.TEXT ? (
-                                    <div className="flex flex-col">
-                                        {(() => {
-                                            const approval = !msg.isDeleted ? parseCollabApproval(msg.content || '') : null;
-                                            if (approval) {
-                                                return (
-                                                    <CollabStepApprovalCard
-                                                        payload={approval}
-                                                        groupId={group.id}
-                                                        messageId={msg.id}
-                                                        onResolve={async (action) => {
-                                                            await messageAPI.resolveCollabApproval(
-                                                                group.id,
-                                                                approval.id,
-                                                                action,
-                                                                { messageId: msg.id }
-                                                            );
-                                                        }}
-                                                    />
-                                                );
-                                            }
-                                            const proposal = !msg.isDeleted ? parseProposeOptions(msg.content || '') : null;
-                                            if (proposal) {
-                                                return (
-                                                    <ProposeOptionsCard
-                                                        payload={proposal}
-                                                        groupId={group.id}
-                                                        messageId={msg.id}
-                                                        onResolve={async (action, value) => {
-                                                            await messageAPI.resolveProposeOptions(
-                                                                group.id,
-                                                                proposal.id,
-                                                                action,
-                                                                value,
-                                                                { messageId: msg.id }
-                                                            );
-                                                        }}
-                                                    />
-                                                );
-                                            }
-                                            return (
-                                                <div
-                                                    className="prose prose-sm max-w-full prose-p:my-0 prose-ul:my-1 break-all"
-                                                    style={{ wordBreak: 'break-all', overflowWrap: 'break-word' }}
-                                                    dangerouslySetInnerHTML={{ __html: parseMessageContent(msg.content, msg.id) }}
-                                                    onClick={(e) => handleMessageContentClick(e, msg.id)}
-                                                />
-                                            );
-                                        })()}
-                                        {msg.isEdited && !isInteractiveCard && (
-                                            <span className="text-[10px] text-gray-400 self-end mt-1 italic">{t('chat.edited')}</span>
-                                        )}
-                                    </div>
-                                ) : null}
-
-                                 {/* Attachments */}
-                                 {!msg.isDeleted && msg.attachments?.map(att => {
-                                     // 构建完整的下载 URL
-                                     const fullUrl = att.url.startsWith('http') ? att.url : `${SERVER_BASE_URL}${att.url}`;
-
-                                    // 处理文件下载
-                                    // Use XHR with onprogress so we can show an in-app
-                                    // progress bar. The previous <a download> approach
-                                    // triggered the browser's native downloader, whose
-                                    // progress is only visible in Chrome's download shelf
-                                    // — easy to miss in Electron / kiosk deployments.
-                                    // XHR responseType='blob' streams to disk via the
-                                    // browser's blob backing store, and onprogress gives
-                                    // us byte-level progress for the UI.
-                                    const handleDownload = (e: React.MouseEvent) => {
-                                        e.preventDefault();
-                                        const attId = att.id;
-                                        const fileName = att.name || 'download';
-                                        const downloadUrl = `${SERVER_BASE_URL}/api/ai-web/download-file?path=${encodeURIComponent(att.url)}`;
-
-                                        // Add a download state entry for in-app progress.
-                                        setDownloads(prev => [...prev, { attId, progress: 0, fileName }]);
-
-                                        const xhr = new XMLHttpRequest();
-                                        xhr.open('GET', downloadUrl, true);
-                                        xhr.responseType = 'blob';
-
-                                        xhr.onprogress = (event: ProgressEvent) => {
-                                            if (event.lengthComputable) {
-                                                const pct = Math.round((event.loaded / event.total) * 100);
-                                                setDownloads(prev => prev.map(d =>
-                                                    d.attId === attId ? { ...d, progress: pct } : d
-                                                ));
-                                            }
-                                        };
-
-                                        xhr.onload = () => {
-                                            if (xhr.status >= 200 && xhr.status < 300) {
-                                                const blob = xhr.response as Blob;
-                                                const url = window.URL.createObjectURL(blob);
-                                                const link = document.createElement('a');
-                                                link.href = url;
-                                                link.download = fileName;
-                                                document.body.appendChild(link);
-                                                link.click();
-                                                document.body.removeChild(link);
-                                                window.URL.revokeObjectURL(url);
-                                            } else {
-                                                console.error('Download failed:', xhr.status);
-                                                alert(t('chat.downloadFailed'));
-                                            }
-                                            // Remove the download state after a brief 100% flash.
-                                            setTimeout(() => {
-                                                setDownloads(prev => prev.filter(d => d.attId !== attId));
-                                            }, 800);
-                                        };
-
-                                        xhr.onerror = () => {
-                                            console.error('Download network error');
-                                            alert(t('chat.downloadFailed'));
-                                            setDownloads(prev => prev.filter(d => d.attId !== attId));
-                                        };
-
-                                        xhr.send();
-                                    };
-
-                                    return (
-                                        <div key={att.id} className="mt-1">
-                                            {att.type === 'image' ? (
-                                                <div
-                                                    className="relative group cursor-pointer"
-                                                    onClick={() => {
-                                                        // 收集该消息中的所有图片
-                                                        const images = msg.attachments?.filter(a => a.type === 'image').map(a => ({
-                                                            url: a.url.startsWith('http') ? a.url : `${SERVER_BASE_URL}${a.url}`,
-                                                            name: a.name
-                                                        })) || [];
-                                                        const index = images.findIndex(img => img.url === fullUrl);
-                                                        console.log('[ChatWindow] Opening lightbox, images:', images.length, 'index:', index);
-                                                        if (images.length > 0 && index >= 0) {
-                                                            setLightboxImages(images);
-                                                            setLightboxIndex(index);
-                                                            setShowLightbox(true);
-                                                        }
-                                                    }}
-                                                >
-                                                    <img
-                                                        src={fullUrl}
-                                                        alt={att.name}
-                                                        // Recent (visible-on-load) images load eagerly with high
-                                                        // priority so they don't pop in after the auto-scroll;
-                                                        // older images keep native lazy-loading.
-                                                        loading={isRecentMessage ? "eager" : "lazy"}
-                                                        fetchPriority={isRecentMessage ? "high" : "auto"}
-                                                        decoding={isRecentMessage ? "sync" : "async"}
-                                                        className="max-w-full rounded-lg max-h-80 object-cover hover:opacity-95 transition-opacity"
-                                                    />
-                                                    <div className="absolute inset-0 bg-black/0 group-hover:bg-black/20 transition-colors rounded-lg flex items-center justify-center opacity-0 group-hover:opacity-100">
-                                                        <ZoomIn size={24} className="text-white" />
-                                                    </div>
-                                                </div>
-                                            ) : att.type === 'voice' ? (
-                                                <VoicePlayer url={fullUrl} duration={att.duration || 0} />
-                                            ) : att.type === 'video' ? (
-                                                <div className="rounded-lg overflow-hidden max-w-xs">
-                                                    <video
-                                                        src={fullUrl}
-                                                        controls
-                                                        className="max-w-full max-h-72 rounded-lg"
-                                                        preload="metadata"
-                                                    />
-                                                    <div className="flex items-center justify-between px-1 pt-1">
-                                                        <span className="text-xs text-textMuted truncate max-w-[150px]">{att.name}</span>
-                                                        <button
-                                                            onClick={handleDownload}
-                                                            className="p-1 hover:bg-border rounded text-textMuted"
-                                                            title={t('chat.download')}
-                                                        >
-                                                            <Download size={14} />
-                                                        </button>
-                                                    </div>
-                                                </div>
-                                            ) : (
-                                                <div className="flex items-center gap-3 p-3 bg-bgLight border border-border rounded-lg">
-                                                    {att.type === 'folder' ? <Folder className="text-primary" /> : <FileIcon className="text-primary" />}
-                                                    <div className="flex flex-col min-w-0">
-                                                        <span className="font-medium truncate max-w-[150px] text-textMain">{att.name}</span>
-                                                        <span className="text-xs text-textMuted">{att.size}</span>
-                                                    </div>
-                                                    <button
-                                                        onClick={handleDownload}
-                                                        className="p-2 hover:bg-border rounded-full ml-auto text-textMuted"
-                                                        title={t('chat.download')}
-                                                    >
-                                                        <Download size={16} />
-                                                    </button>
-                                                </div>
-                                            )}
-                                        </div>
-                                    );
-                                })}
-
-                                {/* Status/Pin Indicators */}
-                                <div className="flex justify-end gap-1 mt-1">
-                                    {msg.isPinned && <Pin size={10} className="text-yellow-500" />}
-
-                                    {/* 消息发送状态指示 */}
-                                    {isSelf && msg.status && (
-                                        <span className="text-[9px] text-gray-400 flex items-center gap-1">
-                                            {msg.status === 'sending' && (
-                                                <>
-                                                    <OpenSquadLoader size={14} label="发送中" />
-                                                    {t('chat.sending')}
-                                                </>
-                                            )}
-                                            {msg.status === 'sent' && (
-                                                <span className="text-green-500">{t('chat.sent')}</span>
-                                            )}
-                                            {msg.status === 'delivered' && (
-                                                <span className="text-blue-500">{t('chat.delivered')}</span>
-                                            )}
-                                            {msg.status === 'failed' && (
-                                                <span className="text-red-500 cursor-pointer hover:underline" onClick={() => {
-                                                    // 重新发送逻辑
-                                                    if (msg.content) {
-                                                        onSendMessage(msg.content, msg.type, msg.attachments, msg.replyToId);
-                                                    }
-                                                }}>
-                                                    {t('chat.sendFailed')}
-                                                </span>
-                                            )}
-                                        </span>
-                                    )}
-                                </div>
-
-                            </div>
-                        )}
-
-                        {/* Action Menu */}
-                        {!isEditing && (
-                            <div className={`flex items-center gap-1 mt-1 opacity-0 group-hover:opacity-100 transition-opacity duration-200 ${isSelf ? 'flex-row-reverse' : ''}`}>
-                                {!msg.isDeleted && (
-                                    <>
-                                        <button onClick={() => setReplyTo(msg)} className="p-1 hover:bg-border rounded text-textMuted" title={t('common.reply')}><Reply size={14}/></button>
-                                        <button onClick={() => copyToClipboard(msg.content)} className="p-1 hover:bg-border rounded text-textMuted" title={t('common.copy')}><Copy size={14}/></button>
-                                        <button onClick={() => onPinMessage(msg.id)} className={`p-1 hover:bg-border rounded text-textMuted ${msg.isPinned ? 'text-yellow-500' : ''}`} title={t('common.pin')}><Pin size={14}/></button>
-                                    </>
-                                )}
-
-                                {isSelf && (
-                                    <>
-                                        {!msg.isDeleted && msg.type === MessageType.TEXT && (
-                                            <button
-                                                onClick={() => startEditing(msg)}
-                                                className="p-1 hover:bg-border rounded text-textMuted"
-                                                title={t('common.edit')}
-                                            >
-                                                <Edit2 size={14} />
-                                            </button>
-                                        )}
-
-                                        {msg.isDeleted ? (
-                                            <>
-                                                {/* 已撤回：显示取消撤回和永久删除 */}
-                                                <button
-                                                    onClick={(e) => {
-                                                        e.stopPropagation();
-                                                        onUndoRecall(msg.id);
-                                                    }}
-                                                    className="p-1 hover:bg-green-100/50 hover:text-green-600 rounded text-textMuted"
-                                                    title={t('chat.undoRecall')}
-                                                >
-                                                    <RotateCcw size={14} />
-                                                </button>
-                                                <button
-                                                    onClick={(e) => {
-                                                        e.stopPropagation();
-                                                        if (confirm(t('chat.deleteConfirm'))) {
-                                                            onPermanentDelete(msg.id);
-                                                        }
-                                                    }}
-                                                    className="p-1 hover:bg-red-100/50 hover:text-red-600 rounded text-textMuted"
-                                                    title={t('chat.permanentDelete')}
-                                                >
-                                                    <Trash2 size={14} />
-                                                </button>
-                                            </>
-                                        ) : (
-                                            // 未撤回：显示撤回按钮
-                                            <button
-                                                onClick={(e) => {
-                                                    e.stopPropagation();
-                                                    onDeleteMessage(msg.id);
-                                                }}
-                                                className="p-1 hover:bg-orange-100/50 hover:text-orange-500 rounded text-textMuted"
-                                                title={t('chat.recall')}
-                                            >
-                                                <Trash2 size={14} />
-                                            </button>
-                                        )}
-                                    </>
-                                )}
-                            </div>
-                        )}
-                    </div>
-                </div>
+                <MessageRow
+                    key={msg.id}
+                    msg={msg}
+                    isSelf={isSelf}
+                    sender={sender}
+                    isSequence={isSequence}
+                    isMentioned={isMentioned}
+                    isEditing={isEditing}
+                    editContent={editContent}
+                    isRecentMessage={isRecentMessage}
+                    replyTargetMsg={replyTargetMsg}
+                    replyTargetUserName={replyTargetUserName}
+                    groupId={group.id}
+                    parseContent={parseMessageContent}
+                    actions={messageRowActions}
+                />
             );
         })}
         <div ref={messagesEndRef} />
@@ -3034,20 +3379,19 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
             </div>
         )}
 
-        {/* Message Input */}
-        <MessageInput
-            value={inputText}
-            onChange={setInputText}
-            onSend={handleSend}
-            onAddAI={() => setInputText(prev => prev + '@')}
-            onFileSelect={() => fileInputRef.current?.click()}
-            onFolderSelect={() => folderInputRef.current?.click()}
-            onImageSelect={() => imageInputRef.current?.click()}
+        {/* Message Input — draft state lives inside the host so typing does
+            not re-render this window / reconcile the message list. */}
+        <ChatComposerHost
+            ref={composerRef}
+            groupId={group.id}
+            onSend={handleSendStable}
+            onFileSelect={handleOpenFilePicker}
+            onFolderSelect={handleOpenFolderPicker}
+            onImageSelect={handleOpenImagePicker}
             onVoiceRecord={handleVoiceRecord}
             voiceDictating={sttDictating}
             onPasteFiles={handleStageFiles}
             hasAttachments={stagedItems.length > 0}
-            placeholder=""
             groupMembers={groupMembers}
         />
 

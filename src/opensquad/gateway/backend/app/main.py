@@ -15,6 +15,7 @@ from contextlib import asynccontextmanager
 import httpx
 from fastapi import FastAPI, Request, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import Response
 from fastapi.staticfiles import StaticFiles
 
@@ -80,6 +81,8 @@ from app.websocket import handle_websocket
 # Wire up WS tunnel so remote session reads go through the Launcher WS tunnel
 # instead of plain HTTP (which would be unreachable when Gateway is on cloud).
 _set_ws_handler(launcher_handler.rpc, launcher_handler.get_any_node_id)
+from app.task_api import router as task_worktree_router  # M1: task worktree API
+from app.tasks_api import router as tasks_router  # M2: parallel task scheduler API
 from app.workspace_api import router as workspace_router  # Added: workspace management API
 
 # ── Log file setup (via dictConfig) ──────────────────────────────────────
@@ -515,6 +518,8 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+# Compress dist JS/CSS for remote browsers (Electron local load is unaffected).
+app.add_middleware(GZipMiddleware, minimum_size=1024)
 # Restrict credentials=True services (plugin_registry, jsondb, external_api) to localhost only.
 
 # Readiness middleware: returns 503 until DB + default data init completes
@@ -529,6 +534,8 @@ app.include_router(router, prefix="/api")
 app.include_router(bot_router, prefix="/api")
 app.include_router(ai_web_router)  # AI Web API routes
 app.include_router(workspace_router)  # Workspace management API
+app.include_router(task_worktree_router)  # Task worktree (M1) API
+app.include_router(tasks_router)  # Parallel task scheduler (M2) API
 
 
 # Group chat WebSocket endpoint

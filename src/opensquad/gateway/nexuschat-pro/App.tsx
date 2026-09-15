@@ -20,6 +20,7 @@ import { OpenSquadLoader } from './components/OpenSquadLoader';
 import { setLanguage } from './i18n';
 import { isSettingsAppView } from './utils/appNavItems';
 import { flushHostUiPrefs, schedulePushHostUiPrefs } from './utils/hostUiPrefs';
+import { parseTimestampMs } from './utils/time';
 
 // First-launch wizard — driven by the BACKEND, not localStorage.
 //
@@ -40,11 +41,80 @@ import { flushHostUiPrefs, schedulePushHostUiPrefs } from './utils/hostUiPrefs';
 // to "assume a user exists" so the user at least sees the login form).
 type RegistrationStatus = 'unknown' | 'required' | 'closed' | 'error';
 
+/**
+ * Max messages kept in state for a group the user is NOT looking at.
+ * Background streams used to append forever (one array per visited group,
+ * growing for the whole session). The active group is never capped; a
+ * background group's older pages are re-fetched from the server on demand
+ * (prepend pagination / messages-around), so trimming only costs a refetch,
+ * never data loss.
+ */
+const BACKGROUND_GROUP_MESSAGE_CAP = 50;
+
 // 路由级懒加载页面组件
 const AIChatPage = React.lazy(() => import('./components/AIChatPage').then(m => ({ default: m.AIChatPage })));
+// The agent chat stays mounted (hidden) when the user is on the group chat view,
+// so it re-renders on *every* App state change unless we memoise it. It has no
+// dependency on the group list, so memoising is free — and it takes ~25-40ms of
+// main-thread time out of each group switch.
+const MemoAIChatPage = React.memo(AIChatPage);
 const AgentManagerPage = React.lazy(() => import('./components/AgentManagerPage').then(m => ({ default: m.AgentManagerPage })));
 const CollabBoardPage = React.lazy(() => import('./components/CollabBoardPage').then(m => ({ default: m.CollabBoardPage })));
 const SystemConfigPage = React.lazy(() => import('./components/SystemConfigPage').then(m => ({ default: m.SystemConfigPage })));
+
+/**
+ * Shallow-structural comparison of two Message objects.
+ *
+ * Why it exists: `React.memo(MessageRow)` can only skip a row when the Message
+ * object is the *same reference*. Re-fetching a group's messages rebuilds every
+ * object, so a plain switch re-rendered the whole list even when nothing had
+ * changed. Comparing first lets us keep the old object and skip the render.
+ */
+function sameMessage(a: Message, b: Message): boolean {
+  if (a === b) return true;
+  if (
+    a.id !== b.id ||
+    a.senderId !== b.senderId ||
+    a.content !== b.content ||
+    a.timestamp !== b.timestamp ||
+    a.type !== b.type ||
+    a.status !== b.status ||
+    a.replyToId !== b.replyToId ||
+    a.isPinned !== b.isPinned ||
+    a.isEdited !== b.isEdited ||
+    a.isDeleted !== b.isDeleted ||
+    a.canUndo !== b.canUndo ||
+    a.deletedAt !== b.deletedAt
+  ) {
+    return false;
+  }
+
+  const aMentions = a.mentions;
+  const bMentions = b.mentions;
+  if ((aMentions?.length ?? 0) !== (bMentions?.length ?? 0)) return false;
+  if (aMentions && bMentions && aMentions.some((x, i) => x !== bMentions[i])) return false;
+
+  const aAtt = a.attachments;
+  const bAtt = b.attachments;
+  if ((aAtt?.length ?? 0) !== (bAtt?.length ?? 0)) return false;
+  if (aAtt && bAtt) {
+    for (let i = 0; i < aAtt.length; i++) {
+      const x = aAtt[i];
+      const y = bAtt[i];
+      if (
+        x.id !== y.id ||
+        x.name !== y.name ||
+        x.size !== y.size ||
+        x.url !== y.url ||
+        x.type !== y.type ||
+        x.duration !== y.duration
+      ) {
+        return false;
+      }
+    }
+  }
+  return true;
+}
 
 const App: React.FC = () => {
   const { t, i18n } = useTranslation();
@@ -302,7 +372,6 @@ const App: React.FC = () => {
   // uncached group switches. Cached groups (e.g. after a hover-prefetch)
   // never flip this to true, so the user sees zero loading UI.
   const [isMessagesLoading, setIsMessagesLoading] = useState(false);
-  const [users, setUsers] = useState<Record<string, User>>({});
 
   const [state, setState] = useState<ChatState>({
     activeGroupId: null,
@@ -313,6 +382,62 @@ const App: React.FC = () => {
     isRightPanelOpen: false,
     searchQuery: { text: '', userId: null, dateFrom: null, dateTo: null }
   });
+
+  // Latest messages, readable from stable callbacks. loadMessages must NOT list
+  // state.messages as a dependency: its identity would change on every incoming
+  // message, which in turn invalidates handlePrefetchGroup and hover-prefetch.
+  const messagesRef = useRef(state.messages);
+  useEffect(() => {
+    messagesRef.current = state.messages;
+  }, [state.messages]);
+
+  // Coalesce incoming WS messages into a single state update per animation frame.
+  // Multi-agent groups deliver messages in bursts; without this every frame caused a
+  // full App re-render (NavPanel + ChatWindow + header).
+  const pendingMessagesRef = useRef<Record<string, Message[]>>({});
+  const pendingFlushRef = useRef<number | null>(null);
+
+  const flushPendingMessages = useCallback(() => {
+    pendingFlushRef.current = null;
+    const batch = pendingMessagesRef.current;
+    pendingMessagesRef.current = {};
+    const groupIds = Object.keys(batch);
+    if (groupIds.length === 0) return;
+
+    const activeGid = activeGroupIdRef.current;
+    setState(prev => {
+      const nextMessages = { ...prev.messages };
+      let changed = false;
+      for (const gid of groupIds) {
+        const existing = nextMessages[gid] || [];
+        const knownIds = new Set(existing.map(m => m.id));
+        const incoming = batch[gid].filter(m => !knownIds.has(m.id));
+        if (incoming.length > 0) {
+          let merged = [...existing, ...incoming];
+          // Background groups: keep only the newest page-worth of messages.
+          // The full list is only needed while the group is open (older pages
+          // re-fetch via prepend / messages-around); letting every visited
+          // group's stream accumulate here grew state.messages without bound —
+          // memory, plus an ever-larger dedupe Set on every flush.
+          if (gid !== activeGid && merged.length > BACKGROUND_GROUP_MESSAGE_CAP) {
+            merged = merged.slice(-BACKGROUND_GROUP_MESSAGE_CAP);
+          }
+          nextMessages[gid] = merged;
+          changed = true;
+        }
+      }
+      return changed ? { ...prev, messages: nextMessages } : prev;
+    });
+  }, []);
+
+  const enqueueIncomingMessage = useCallback((groupId: string, msg: Message) => {
+    const pending = pendingMessagesRef.current;
+    if (!pending[groupId]) pending[groupId] = [];
+    pending[groupId].push(msg);
+    if (pendingFlushRef.current === null) {
+      pendingFlushRef.current = requestAnimationFrame(flushPendingMessages);
+    }
+  }, [flushPendingMessages]);
 
   const loadGroups = useCallback(async (showAlert = false) => {
     try {
@@ -326,7 +451,7 @@ const App: React.FC = () => {
         unreadCount: g.unread_count,
         hasUnreadMention: g.has_unread_mention,
         isPrivate: g.is_private,
-        createdAt: new Date(g.created_at || Date.now()).getTime(),
+        createdAt: parseTimestampMs(g.created_at) || Date.now(),
         notificationSoundEnabled: g.notification_sound_enabled,
         pinnedMessageId: g.pinned_message_id ?? undefined,
       }));
@@ -339,7 +464,7 @@ const App: React.FC = () => {
             id: g.last_message.id,
             senderId: g.last_message.sender_id,
             content: g.last_message.content,
-            timestamp: new Date(g.last_message.timestamp).getTime(),
+            timestamp: parseTimestampMs(g.last_message.timestamp),
             type: MessageType.TEXT, // Default to text for preview
             attachments: [],
             isPinned: false,
@@ -361,27 +486,60 @@ const App: React.FC = () => {
   }, [t]);
 
 
-  const loadGroupDetails = async (groupId: string) => {
+  // useCallback: stable identity so memoized children (ChatList) are not
+  // re-rendered just because some unrelated App state ticked.
+  const loadGroupDetails = useCallback(async (groupId: string) => {
     try {
       const group = await groupAPI.getGroup(groupId);
       const memberIds = group.members.map(m => m.id);
-      const newUsers: Record<string, User> = {};
-      group.members.forEach(m => {
-        newUsers[m.id] = {
-          id: m.id,
-          name: m.name,
-          avatar: m.avatar || '',
-          status: m.status as 'online' | 'offline' | 'busy',
-          is_agent: m.is_agent ?? false,
-          agent_id: m.agent_id ?? undefined
+      setState(prev => {
+        // Rebuild the user map while REUSING the previous User object whenever
+        // the payload is unchanged.
+        //
+        // This matters more than it looks: `users[senderId]` is a prop of every
+        // MessageRow, so handing out a fresh object per member on every switch
+        // silently defeated the row memoisation and re-rendered the entire
+        // message list — on every single group click.
+        let usersChanged = false;
+        const users = { ...prev.users };
+        for (const m of group.members) {
+          const old = users[m.id];
+          const unchanged =
+            old &&
+            old.name === m.name &&
+            old.avatar === (m.avatar || '') &&
+            old.status === m.status &&
+            old.is_agent === (m.is_agent ?? false) &&
+            old.agent_id === (m.agent_id ?? undefined);
+          if (unchanged) continue;
+          users[m.id] = {
+            id: m.id,
+            name: m.name,
+            avatar: m.avatar || '',
+            status: m.status as 'online' | 'offline' | 'busy',
+            is_agent: m.is_agent ?? false,
+            agent_id: m.agent_id ?? undefined,
+          };
+          usersChanged = true;
+        }
+
+        const prevGroup = prev.groups.find(g => g.id === groupId);
+        const membersChanged =
+          !prevGroup ||
+          prevGroup.members.length !== memberIds.length ||
+          prevGroup.members.some((id, i) => id !== memberIds[i]);
+
+        // Nothing actually moved: bail out so React skips the render entirely.
+        if (!usersChanged && !membersChanged) return prev;
+
+        return {
+          ...prev,
+          users: usersChanged ? users : prev.users,
+          groups: membersChanged
+            ? prev.groups.map(g => (g.id === groupId ? { ...g, members: memberIds } : g))
+            : prev.groups,
         };
       });
-      setUsers(prev => ({ ...prev, ...newUsers }));
-      setState(prev => ({
-        ...prev,
-        users: { ...prev.users, ...newUsers },
-        groups: prev.groups.map(g => g.id === groupId ? { ...g, members: memberIds } : g)
-      }));
     } catch (error: any) {
       const status = error?.status;
       if (status === 404 || status === 403) {
@@ -397,7 +555,7 @@ const App: React.FC = () => {
         console.error('Failed to load group details:', error);
       }
     }
-  };
+  }, []);
 
   // Tracks in-flight loadMessages(groupId) promises to dedupe rapid clicks/
   // prefetches for the same group. Without this, hovering a group while a
@@ -408,7 +566,19 @@ const App: React.FC = () => {
   // handler still calls loadMessages which dedupes via inFlightMessagesRef.
   const prefetchedRef = useRef<Set<string>>(new Set());
 
-  const loadMessages = useCallback(async (groupId: string) => {
+  // Groups we have actually fetched once. Needed because the old "cached.length > 1"
+  // heuristic treated a group that legitimately holds a single message as
+  // "never loaded" — so every visit to it re-fetched and flashed a skeleton.
+  const loadedGroupsRef = useRef<Set<string>>(new Set());
+
+  /** Do we already have real content for this group, i.e. can we paint without waiting? */
+  const hasCachedMessages = useCallback((groupId: string) => {
+    if (loadedGroupsRef.current.has(groupId)) return true;
+    const cached = messagesRef.current[groupId];
+    return !!cached && cached.length > 1;
+  }, []);
+
+  const loadMessages = useCallback(async (groupId: string, opts?: { force?: boolean }) => {
     // In-flight dedup: share the promise if a fetch for this group is already
     // running. This is what makes hover-prefetch + click safe — both paths
     // converge on the same promise.
@@ -418,9 +588,13 @@ const App: React.FC = () => {
     // Only flip the loading flag if the cache has no real messages yet.
     // Cached groups (e.g. from a previous visit or from a hover-prefetch that
     // already completed) render instantly with no skeleton flash.
-    const cached = state.messages[groupId];
-    const needsLoading = !cached || cached.length <= 1;
-    if (needsLoading) setIsMessagesLoading(true);
+    const hasCache = hasCachedMessages(groupId);
+    if (!hasCache) setIsMessagesLoading(true);
+
+    // Already cached and nobody asked for a forced refresh → nothing to do.
+    // The caller (handleSelectGroup) renders straight from the cache and
+    // schedules a *deferred* refresh, so the switch never waits on the network.
+    if (hasCache && !opts?.force) return;
 
     const promise = (async () => {
       try {
@@ -429,7 +603,7 @@ const App: React.FC = () => {
           id: m.id,
           senderId: m.sender_id,
           content: m.content,
-          timestamp: new Date(m.timestamp).getTime(),
+          timestamp: parseTimestampMs(m.timestamp),
           type: m.type as MessageType,
           attachments: m.attachments?.map(a => ({
             id: a.id,
@@ -444,20 +618,32 @@ const App: React.FC = () => {
           isEdited: m.is_edited,
           isDeleted: m.is_deleted,
           canUndo: m.can_undo,
-          deletedAt: m.deleted_at ? new Date(m.deleted_at).getTime() : undefined,
+          deletedAt: m.deleted_at ? parseTimestampMs(m.deleted_at) : undefined,
           mentions: m.mentions
         }));
         setState(prev => {
           const existing = prev.messages[groupId] || [];
+          const existingById = new Map(existing.map(m => [m.id, m]));
           const merged = new Map<string, Message>();
-          // HTTP 数据先入 map
-          for (const m of formattedMessages) merged.set(m.id, m);
+          // HTTP 数据先入 map。内容未变的沿用**旧对象**，否则每次刷新都会换掉
+          // 全部 Message 引用 → MessageRow 的 memo 全部失效 → 整列表重渲染。
+          for (const m of formattedMessages) {
+            const old = existingById.get(m.id);
+            merged.set(m.id, old && sameMessage(old, m) ? old : m);
+          }
           // 已有 state 中不在 HTTP 结果里的消息（WS 实时推送的新消息）保留
           for (const m of existing) if (!merged.has(m.id)) merged.set(m.id, m);
           const combined = Array.from(merged.values()).sort((a, b) => a.timestamp - b.timestamp);
+
+          // 长度一致且逐位同引用 → 什么都没变，返回 prev 让 React 直接跳过这次 render。
+          // 这就是"后台静默刷新"能做到零代价的原因。
+          if (combined.length === existing.length && combined.every((m, i) => m === existing[i])) {
+            return prev;
+          }
           return { ...prev, messages: { ...prev.messages, [groupId]: combined } };
         });
         // 群聊首屏加载完成，放行导航面板预加载（只触发一次）
+        loadedGroupsRef.current.add(groupId);
         if (!chatReadySetRef.current) {
           chatReadySetRef.current = true;
           setChatReady(true);
@@ -477,9 +663,9 @@ const App: React.FC = () => {
       await promise;
     } finally {
       inFlightMessagesRef.current.delete(groupId);
-      if (needsLoading) setIsMessagesLoading(false);
+      if (!hasCache) setIsMessagesLoading(false);
     }
-  }, [state.messages]);
+  }, []);
 
   useEffect(() => {
     const init = async () => {
@@ -532,13 +718,12 @@ const App: React.FC = () => {
   useEffect(() => {
     // 注册 WebSocket 消息处理器
     const unsubscribeNewMessage = wsService.on('new_message', (message) => {
-      console.log('[WebSocket] Received new_message:', message);
       const msg = message.data;
       const formattedMsg: Message = {
         id: msg.id,
         senderId: msg.sender_id,
         content: msg.content,
-        timestamp: typeof msg.timestamp === 'number' ? msg.timestamp : new Date(msg.timestamp).getTime(),
+        timestamp: parseTimestampMs(msg.timestamp),
         type: msg.type as MessageType,
         attachments: msg.attachments?.map((a: any) => ({
           id: a.id,
@@ -553,29 +738,15 @@ const App: React.FC = () => {
         isEdited: msg.is_edited,
         isDeleted: msg.is_deleted,
         canUndo: msg.can_undo,
-        deletedAt: msg.deleted_at ? new Date(msg.deleted_at).getTime() : undefined,
+        deletedAt: msg.deleted_at ? parseTimestampMs(msg.deleted_at) : undefined,
         mentions: msg.mentions
       };
 
-      setState(prev => {
-        const groupMessages = prev.messages[msg.group_id] || [];
-        // 避免重复添加
-        if (groupMessages.some(m => m.id === formattedMsg.id)) {
-          return prev;
-        }
-        console.log('[WebSocket] Adding message to state:', formattedMsg.id);
-        return {
-          ...prev,
-          messages: {
-            ...prev.messages,
-            [msg.group_id]: [...groupMessages, formattedMsg]
-          }
-        };
-      });
+      // Dedupe happens on flush, not here: just queue for the next animation frame.
+      enqueueIncomingMessage(msg.group_id, formattedMsg);
     });
 
     const unsubscribeUpdateMessage = wsService.on('message_updated', (message) => {
-      console.log('[WebSocket] Received message_updated:', message);
       const msg = message.data;
       setState(prev => {
         const groupMessages = prev.messages[msg.group_id] || [];
@@ -597,16 +768,21 @@ const App: React.FC = () => {
     });
 
     const unsubscribeRecallMessage = wsService.on('message_recalled', (message) => {
-      console.log('[WebSocket] Received message_recalled:', message);
-      const { message_id, deleted_at, can_undo } = message.data;
+      const { message_id, deleted_at, can_undo, group_id } = message.data;
       setState(prev => {
-        const newMessages = { ...prev.messages };
-        for (const gid in newMessages) {
-          newMessages[gid] = newMessages[gid].map(m =>
-            m.id === message_id ? { ...m, isDeleted: true, deletedAt: deleted_at, canUndo: can_undo } : m
-          );
-        }
-        return { ...prev, messages: newMessages };
+        const groupMessages = prev.messages[group_id];
+        if (!groupMessages) return prev;
+        // Only rebuild the group that owns this message. The previous version mapped
+        // over every group's message array on every recall event.
+        return {
+          ...prev,
+          messages: {
+            ...prev.messages,
+            [group_id]: groupMessages.map(m =>
+              m.id === message_id ? { ...m, isDeleted: true, deletedAt: deleted_at, canUndo: can_undo } : m
+            )
+          }
+        };
       });
     });
 
@@ -622,7 +798,6 @@ const App: React.FC = () => {
     const unsubscribeMemberJoin = wsService.on('member_join', async (message) => {
       const groupId = message?.data?.group_id;
       if (groupId) {
-        console.log('[App] Member joined group', groupId, message.data);
         try {
           const groupDetail = await groupAPI.getGroup(groupId);
           setState(prev => ({
@@ -640,7 +815,6 @@ const App: React.FC = () => {
     const unsubscribeMemberLeave = wsService.on('member_leave', async (message) => {
       const groupId = message?.data?.group_id;
       if (groupId) {
-        console.log('[App] Member left group', groupId, message.data);
         try {
           const groupDetail = await groupAPI.getGroup(groupId);
           setState(prev => ({
@@ -689,6 +863,11 @@ const App: React.FC = () => {
     });
 
     return () => {
+      // Drop any queued frame so a flush cannot run against an unmounted tree
+      if (pendingFlushRef.current !== null) {
+        cancelAnimationFrame(pendingFlushRef.current);
+        pendingFlushRef.current = null;
+      }
       unsubscribeNewMessage();
       unsubscribeUpdateMessage();
       unsubscribeRecallMessage();
@@ -699,7 +878,7 @@ const App: React.FC = () => {
       unsubscribeUserOnline();
       unsubscribeUserOffline();
     };
-  }, []);
+  }, [enqueueIncomingMessage]);
 
   const handleLogin = async (email: string, password: string) => {
     let lastError: any;
@@ -761,7 +940,7 @@ const App: React.FC = () => {
     throw lastError;
   };
 
-  const handleLogout = () => {
+  const handleLogout = useCallback(() => {
     authAPI.logout();
     wsService.disconnect();
     setCurrentUser(null);
@@ -779,7 +958,7 @@ const App: React.FC = () => {
         setRegistrationStatus('error');
       }
     })();
-  };
+  }, []);
 
   // First-launch wizard: user picked a language on LanguageSelectScreen.
   // Persist the choice (drives i18n) and flip the per-session flag so the
@@ -789,7 +968,7 @@ const App: React.FC = () => {
     setLangPicked(true);
   }, []);
 
-  const handleUpdateUser = async (updatedUser: User) => {
+  const handleUpdateUser = useCallback(async (updatedUser: User) => {
     try {
       const user = await userAPI.updateUser({
         name: updatedUser.name,
@@ -805,41 +984,105 @@ const App: React.FC = () => {
     } catch (error) {
       console.error('Failed to update user:', error);
     }
-  };
+  }, []);
 
-  const handleSelectGroup = async (id: string, jumpToMention = false) => {
+  // Deferred, non-blocking refresh of a group we already have cached.
+  //
+  // A plain group switch used to await three HTTP round-trips
+  // (/messages, /groups/{id}, /pinned-messages) and their resulting setState
+  // waves *before* the new group could paint. Now the cached messages render
+  // immediately and this refresh runs afterwards, off the critical path.
+  // Because loadMessages merges by identity, a refresh that finds nothing new
+  // costs zero renders.
+  const deferredRefreshRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Lets the deferred refresh below check "is the user still here?" without
+  // pulling state into a timeout callback.
+  const activeGroupIdRef = useRef<string | null>(null);
+  useEffect(() => {
+    activeGroupIdRef.current = state.activeGroupId;
+  }, [state.activeGroupId]);
+
+  useEffect(() => () => {
+    if (deferredRefreshRef.current) clearTimeout(deferredRefreshRef.current);
+  }, []);
+
+  const scheduleDeferredRefresh = useCallback((groupId: string) => {
+    if (deferredRefreshRef.current) clearTimeout(deferredRefreshRef.current);
+    deferredRefreshRef.current = setTimeout(() => {
+      deferredRefreshRef.current = null;
+      // Only refresh if the user is still looking at this group.
+      if (activeGroupIdRef.current !== groupId) return;
+      void loadMessages(groupId, { force: true });
+    }, 400);
+  }, [loadMessages]);
+
+  const handleSelectGroup = useCallback(async (id: string, jumpToMention = false) => {
     setShouldJumpToMention(jumpToMention);
-    setState(prev => ({
-      ...prev,
-      activeGroupId: id,
-      groups: prev.groups.map(g => g.id === id ? { ...g, unreadCount: 0 } : g)
-    }));
+    setState(prev => {
+      const target = prev.groups.find(g => g.id === id);
+      // Only rebuild the groups array when there is actually an unread badge to
+      // clear. `activeGroupId` alone is enough otherwise, and skipping the new
+      // array saves a full App render (the group list and every message row).
+      if (!target || target.unreadCount === 0) {
+        return prev.activeGroupId === id ? prev : { ...prev, activeGroupId: id };
+      }
+      return {
+        ...prev,
+        activeGroupId: id,
+        groups: prev.groups.map(g => (g.id === id ? { ...g, unreadCount: 0 } : g)),
+      };
+    });
     localStorage.setItem('nexus_active_group', id);
     wsService.subscribe(id);      // 先订阅，避免加载期间丢失新消息
-    loadGroupDetails(id);          // 懒加载成员信息，不 await（不阻塞消息显示）
-    await loadMessages(id);
-  };
+    // 成员信息不 await；现在它只在数据真的变了时才 setState，所以顺带也就
+    // 不再每次切群都把 users 换一批新对象（那会让消息行的 memo 全部失效）。
+    loadGroupDetails(id);
+
+    if (hasCachedMessages(id)) {
+      // 复访：先用缓存立刻渲染，刷新放到切群之后，不占关键路径。
+      scheduleDeferredRefresh(id);
+    } else {
+      // 首访：没有可渲染的数据，只能等这次请求。
+      await loadMessages(id);
+    }
+  }, [loadGroupDetails, hasCachedMessages, scheduleDeferredRefresh, loadMessages]);
 
   // Hover-prefetch a group's messages in the background. By the time the user
   // actually clicks, the messages are already in state and the click renders
-  // instantly with no skeleton flash. Prefetched set ensures we only fetch
-  // each group once per session for prefetch purposes.
+  // instantly with no skeleton flash.
+  //
+  // Debounced: `onPointerEnter` fires for every row the cursor crosses, so
+  // sweeping the mouse down the list used to kick off one /messages request
+  // (and its resulting state update) per row passed over. Waiting ~150ms means
+  // only the group the user actually lingers on gets prefetched.
+  const prefetchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => () => {
+    if (prefetchTimerRef.current) clearTimeout(prefetchTimerRef.current);
+  }, []);
+
   const handlePrefetchGroup = useCallback((id: string) => {
     if (prefetchedRef.current.has(id)) return;
-    prefetchedRef.current.add(id);
-    loadMessages(id);
+    if (prefetchTimerRef.current) clearTimeout(prefetchTimerRef.current);
+    prefetchTimerRef.current = setTimeout(() => {
+      prefetchTimerRef.current = null;
+      if (prefetchedRef.current.has(id)) return;
+      prefetchedRef.current.add(id);
+      void loadMessages(id);
+    }, 150);
   }, [loadMessages]);
 
-  const handleJoinGroup = async (groupId: string) => {
+  const handleJoinGroup = useCallback(async (groupId: string) => {
     try {
       await groupAPI.joinGroup(groupId);
       await loadGroups();
       handleSelectGroup(groupId);
     } catch (error) {
       console.error('Failed to join group:', error);
-        alert(t('chat.joinFailed'));
+      alert(t('chat.joinFailed'));
     }
-  };
+  }, [loadGroups, handleSelectGroup, t]);
 
   const handleSendMessage = async (content: string, type: MessageType, attachments?: Attachment[], replyToId?: string) => {
     if (!state.activeGroupId || !currentUser) return;
@@ -851,9 +1094,7 @@ const App: React.FC = () => {
         id: response.id,
         senderId: response.sender_id,
         content: response.content,
-        timestamp: typeof response.timestamp === 'number'
-          ? response.timestamp
-          : new Date(response.timestamp).getTime(),
+        timestamp: parseTimestampMs(response.timestamp),
         type: response.type as MessageType,
         attachments: response.attachments?.map(a => ({
           id: a.id,
@@ -868,7 +1109,7 @@ const App: React.FC = () => {
         isEdited: response.is_edited,
         isDeleted: response.is_deleted,
         canUndo: response.can_undo,
-        deletedAt: response.deleted_at ? new Date(response.deleted_at).getTime() : undefined,
+        deletedAt: response.deleted_at ? parseTimestampMs(response.deleted_at) : undefined,
         mentions: response.mentions,
       };
       setState(prev => {
@@ -903,14 +1144,19 @@ const App: React.FC = () => {
     }
   };
 
-  const handleOpenProfile = () => {
+  // useCallback so the memoised <AIChatPage> below can actually skip its
+  // re-render when App state changes for unrelated reasons (e.g. a group switch).
+  const handleOpenProfile = useCallback(() => {
     if (currentUser) {
         setEditName(currentUser.name);
         setEditAvatar(currentUser.avatar);
         setSelectedFile(null);
         setIsProfileOpen(true);
     }
-  };
+  }, [currentUser]);
+
+  const handleAIChatBack = useCallback(() => setCurrentView('admin'), []);
+  const handleOpenSettings = useCallback(() => setIsSettingsOpen(true), []);
 
   const handleSaveProfile = async () => {
     if (!currentUser) return;
@@ -944,6 +1190,45 @@ const App: React.FC = () => {
     });
     return map;
   }, [state.groups, state.messages, t]);
+
+  // Stable callbacks for the memoized ChatList — inline arrows here used to
+  // defeat React.memo on every single App render.
+  const handleCreateGroup = useCallback(async (name: string) => {
+    try {
+        const g = await groupAPI.createGroup(name);
+        // 立即把新群插入列表顶部，不等待 loadGroups，避免竞态丢失
+        setState(prev => ({
+            ...prev,
+            groups: [{
+                id: g.id,
+                name: g.name,
+                avatar: g.avatar || '',
+                description: g.description || '',
+                members: [],
+                unreadCount: 0,
+                hasUnreadMention: false,
+                isPrivate: g.is_private,
+                createdAt: Date.now(),
+                notificationSoundEnabled: true,
+            }, ...prev.groups]
+        }));
+        handleSelectGroup(g.id);
+        // 后台静默刷新，拉取完整数据（含 unread、排序等）
+        loadGroups();
+    } catch (error) {
+        console.error('Failed to create group:', error);
+        alert(t('chat.createFailed'));
+    }
+  }, [handleSelectGroup, loadGroups, t]);
+
+  const handleToggleGroupSound = useCallback(async (id: string) => {
+    const g = state.groups.find(x => x.id === id);
+    if (g) await groupAPI.updateGroup(id, { notification_sound_enabled: !g.notificationSoundEnabled });
+    await loadGroups(true);
+  }, [state.groups, loadGroups]);
+
+  // (handleOpenSettings already exists above, next to handleAIChatBack.)
+  const handleOpenCollabBoard = useCallback(() => setIsCollabBoardOpen(true), []);
 
   // Render gates — derived from (isLoading, currentUser, registrationStatus,
   // langPicked). No explicit stage state machine.
@@ -1061,38 +1346,8 @@ const App: React.FC = () => {
               activeGroupId={state.activeGroupId}
               onSelectGroup={handleSelectGroup}
               onJoinGroup={handleJoinGroup}
-              onCreateGroup={async (name) => {
-                  try {
-                      const g = await groupAPI.createGroup(name);
-                      // 立即把新群插入列表顶部，不等待 loadGroups，避免竞态丢失
-                      setState(prev => ({
-                          ...prev,
-                          groups: [{
-                              id: g.id,
-                              name: g.name,
-                              avatar: g.avatar || '',
-                              description: g.description || '',
-                              members: [],
-                              unreadCount: 0,
-                              hasUnreadMention: false,
-                              isPrivate: g.is_private,
-                              createdAt: Date.now(),
-                              notificationSoundEnabled: true,
-                          }, ...prev.groups]
-                      }));
-                      handleSelectGroup(g.id);
-                      // 后台静默刷新，拉取完整数据（含 unread、排序等）
-                      loadGroups();
-                  } catch (error) {
-                      console.error('Failed to create group:', error);
-                      alert(t('chat.createFailed'));
-                  }
-              }}
-              onToggleGroupSound={async (id) => {
-                  const g = state.groups.find(x => x.id === id);
-                  if (g) await groupAPI.updateGroup(id, { notification_sound_enabled: !g.notificationSoundEnabled });
-          await loadGroups(true);
-              }}
+              onCreateGroup={handleCreateGroup}
+              onToggleGroupSound={handleToggleGroupSound}
               lastMessages={lastMessages}
                currentUser={currentUser}
 
@@ -1100,24 +1355,31 @@ const App: React.FC = () => {
               onLogout={handleLogout}
               onSwitchView={setCurrentView}
               onPrefetchGroup={handlePrefetchGroup}
-              onOpenSettings={() => setIsSettingsOpen(true)}
-              onOpenCollabBoard={() => setIsCollabBoardOpen(true)}
+              onOpenSettings={handleOpenSettings}
+              onOpenCollabBoard={handleOpenCollabBoard}
             />
           </div>
           <div className={`${!state.activeGroupId ? 'hidden md:flex' : 'flex'} flex-1 h-full min-w-0`}>
             {activeGroup ? (
               <ChatWindow
+                // NOTE: deliberately no `key={activeGroup.id}`. Remounting the
+                // window on every switch threw away all group-scoped UI state
+                // (including the user's unsent draft) and re-created the whole
+                // message subtree. ChatWindow now stays mounted and resets its
+                // group-scoped state itself, keeping a composer draft per group.
+                // (Measured: the remount was NOT the switch bottleneck — the
+                //  redundant load path in handleSelectGroup / loadMessages was.)
                 group={activeGroup}
                 groups={state.groups}
                 messages={activeMessages}
                 users={state.users}
                 currentUser={currentUser}
                 onSendMessage={handleSendMessage}
-                onDeleteMessage={async (id) => { await messageAPI.deleteMessage(id); await loadMessages(activeGroup.id); }}
-                onUndoRecall={async (id) => { await messageAPI.undoRecall(id); await loadMessages(activeGroup.id); }}
-                onPermanentDelete={async (id) => { await messageAPI.permanentDeleteMessage(id); await loadMessages(activeGroup.id); }}
-                onEditMessage={async (id, content) => { await messageAPI.editMessage(id, content); await loadMessages(activeGroup.id); }}
-                onPinMessage={async (id) => { await messageAPI.pinMessage(id); await loadMessages(activeGroup.id); }}
+                onDeleteMessage={async (id) => { await messageAPI.deleteMessage(id); await loadMessages(activeGroup.id, { force: true }); }}
+                onUndoRecall={async (id) => { await messageAPI.undoRecall(id); await loadMessages(activeGroup.id, { force: true }); }}
+                onPermanentDelete={async (id) => { await messageAPI.permanentDeleteMessage(id); await loadMessages(activeGroup.id, { force: true }); }}
+                onEditMessage={async (id, content) => { await messageAPI.editMessage(id, content); await loadMessages(activeGroup.id, { force: true }); }}
+                onPinMessage={async (id) => { await messageAPI.pinMessage(id); await loadMessages(activeGroup.id, { force: true }); }}
                 onPrependMessages={async (gid, ts) => {
                     const firstMsg = state.messages[gid]?.[0];
                     if (!firstMsg) return 0;
@@ -1128,7 +1390,7 @@ const App: React.FC = () => {
                             id: m.id,
                             senderId: m.sender_id,
                             content: m.content,
-                            timestamp: new Date(m.timestamp).getTime(),
+                            timestamp: parseTimestampMs(m.timestamp),
                             type: m.type as MessageType,
                             attachments: m.attachments?.map((a: any) => ({
                                 id: a.id,
@@ -1143,7 +1405,7 @@ const App: React.FC = () => {
                             isEdited: m.is_edited,
                             isDeleted: m.is_deleted,
                             canUndo: m.can_undo,
-                            deletedAt: m.deleted_at ? new Date(m.deleted_at).getTime() : undefined,
+                            deletedAt: m.deleted_at ? parseTimestampMs(m.deleted_at) : undefined,
                             mentions: m.mentions
                         }));
 
@@ -1192,7 +1454,7 @@ const App: React.FC = () => {
                     id: m.id,
                     senderId: m.sender_id,
                     content: m.content,
-                    timestamp: new Date(m.timestamp).getTime(),
+                    timestamp: parseTimestampMs(m.timestamp),
                     type: m.type as MessageType,
                     attachments: m.attachments?.map((a: any) => ({
                       id: a.id,
@@ -1206,7 +1468,7 @@ const App: React.FC = () => {
                     isEdited: m.is_edited,
                     isDeleted: m.is_deleted,
                     canUndo: m.can_undo,
-                    deletedAt: m.deleted_at ? new Date(m.deleted_at).getTime() : undefined,
+                    deletedAt: m.deleted_at ? parseTimestampMs(m.deleted_at) : undefined,
                     mentions: m.mentions
                   }));
 
@@ -1292,12 +1554,12 @@ const App: React.FC = () => {
             <Suspense fallback={
               <div className="w-full h-full flex items-center justify-center bg-bgLight text-textMuted"><OpenSquadLoader size={72} /></div>
             }>
-            <AIChatPage
+            <MemoAIChatPage
               agentId={agentId}
-              onBack={() => setCurrentView('admin')}
+              onBack={handleAIChatBack}
               currentUser={currentUser}
               onOpenProfile={handleOpenProfile}
-              onOpenSettings={() => setIsSettingsOpen(true)}
+              onOpenSettings={handleOpenSettings}
             />
             </Suspense>
           </div>

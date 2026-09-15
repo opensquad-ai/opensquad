@@ -10,7 +10,11 @@ import sys
 import threading
 import time
 import urllib.error
-import urllib.request
+
+try:
+    from plugins._service_runtime import open_local
+except ImportError:
+    from _service_runtime import open_local
 
 _reranker_proc: subprocess.Popen | None = None
 
@@ -51,7 +55,10 @@ def _port_open(port: int, host: str = "127.0.0.1") -> bool:
 
 def _health_ok(timeout: float = 1.0) -> bool:
     try:
-        with urllib.request.urlopen(f"{_reranker_base_url()}/health", timeout=timeout) as resp:
+        # open_local: an ambient HTTP_PROXY must not intercept this loopback
+        # probe, or a healthy reranker sidecar looks down and reranking silently
+        # degrades to a no-op.
+        with open_local(f"{_reranker_base_url()}/health", timeout=timeout) as resp:
             return 200 <= resp.status < 300
     except (urllib.error.URLError, TimeoutError, OSError, ValueError):
         return False

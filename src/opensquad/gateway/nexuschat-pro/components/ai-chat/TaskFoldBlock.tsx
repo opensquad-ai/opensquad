@@ -1,8 +1,12 @@
 /**
  * Outer fold for a complex-task process (between last user message and
  * to_user_end_task report). Text-style toggle — no card chrome.
+ *
+ * The body can hold the whole run (dozens of tool blocks), so it mounts lazily;
+ * the shared fold primitive still animates the very first expansion.
  */
-import React, { useState } from 'react';
+import React from 'react';
+import { Collapse, useFold } from '../Collapse';
 
 export interface TaskFoldBlockProps {
   title?: string;
@@ -21,7 +25,7 @@ export const TaskFoldBlock: React.FC<TaskFoldBlockProps> = ({
   isSolo = false,
   children,
 }) => {
-  const [open, setOpen] = useState(!defaultCollapsed);
+  const { open, mounted, toggle } = useFold(!defaultCollapsed);
   const parts: string[] = [];
   if (eventCount > 0) parts.push(`${eventCount} step${eventCount === 1 ? '' : 's'}`);
   if (messageCount > 0) parts.push(`${messageCount} notice${messageCount === 1 ? '' : 's'}`);
@@ -32,17 +36,20 @@ export const TaskFoldBlock: React.FC<TaskFoldBlockProps> = ({
     <div className={`my-1 ${isSolo ? 'mx-0' : 'mx-2 sm:mx-9'}`}>
       <button
         type="button"
-        onClick={() => setOpen((v) => !v)}
+        onClick={toggle}
+        aria-expanded={open}
         className="group flex items-baseline gap-1.5 py-0.5 text-left text-[12px] text-black/40 dark:text-white/30 hover:text-black/60 dark:hover:text-white/50 transition-colors"
       >
-        <span className="font-mono select-none opacity-70">{open ? '∨' : '>'}</span>
+        {/* The glyph ROTATES instead of swapping ∨/<  — a changed glyph
+            cannot transition. */}
+        <span className={`os-fold-chevron font-mono select-none opacity-70 leading-none${open ? ' is-open' : ''}`}>
+          &gt;
+        </span>
         <span>{label}</span>
       </button>
-      {open && (
-        <div className="mt-1 pl-4 border-l border-border/60">
-          {children}
-        </div>
-      )}
+      <Collapse open={open}>
+        {mounted ? <div className="mt-1 pl-4 border-l border-border/60">{children}</div> : null}
+      </Collapse>
     </div>
   );
 };

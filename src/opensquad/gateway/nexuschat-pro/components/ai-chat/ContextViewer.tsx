@@ -11,11 +11,13 @@
  */
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import {
-  X, ChevronDown, ChevronUp, Copy, Check,
+  X, Copy, Check,
   User, Bot, Wrench, Brain, Info, List, Layers, FileText,
   Moon, Bell, Zap, FolderOpen,
 } from 'lucide-react';
+import { ControlledFold, FoldChevron } from '../Collapse';
 import { agentSessionAPI } from '../../services/api';
+import type { SoloTokenStats } from './SoloContextFooter';
 import { useTranslation } from 'react-i18next';
 
 // ---- 传入的扁平化上下文条目 ----
@@ -41,7 +43,9 @@ export interface ContextEntry {
 interface TokenStatsShape {
   used: number;
   max: number;
-  breakdown?: { system?: number; user: number; thought: number; tool: number; tool_defs?: number; response: number; overhead?: number };
+  // Reuse the single source of truth: a locally re-declared breakdown shape had
+  // drifted out of sync with SoloTokenStats and broke assignment at the call site.
+  breakdown?: SoloTokenStats['breakdown'];
   model?: string;
 }
 
@@ -394,12 +398,12 @@ export const ContextViewer: React.FC<ContextViewerProps> = ({
                               : '—'}
                           </span>
                           <span className="text-textMuted flex-shrink-0 ml-1">
-                            {isExpanded ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
+                            <FoldChevron open={isExpanded} />
                           </span>
                         </button>
 
-                        {/* 展开内容 */}
-                        {isExpanded && (
+                        {/* 展开内容 — 共享折叠原语（懒挂载 + 高度过渡） */}
+                        <ControlledFold open={isExpanded}>
                           <div className="bg-bgPage border-t border-border/40 px-3 py-3">
                             {/* 元数据区 */}
                             <div className="text-[10px] text-textMuted font-mono space-y-0.5 mb-2.5 leading-relaxed">
@@ -514,7 +518,7 @@ export const ContextViewer: React.FC<ContextViewerProps> = ({
                               </>
                             )}
                           </div>
-                        )}
+                        </ControlledFold>
                       </div>
                     );
                   })}

@@ -36,6 +36,29 @@ def beijing_timestamp() -> int:
     return int(datetime.now(timezone.utc).timestamp() * 1000)
 
 
+def utc_epoch_ms(dt: datetime | None) -> int | None:
+    """Convert a DB datetime to Unix milliseconds.
+
+    SQLite DateTime columns are timezone-naive; storage policy is UTC wall
+    clock. ``datetime.timestamp()`` on naive values uses the *process* local
+    TZ, which on a China machine turns 13:03 CST into a displayed 05:03.
+    """
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return int(dt.timestamp() * 1000)
+
+
+def utc_iso(dt: datetime | None) -> str | None:
+    """UTC ISO-8601 with ``Z``, safe for ``Date.parse`` / ``new Date()``."""
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.isoformat().replace("+00:00", "Z")
+
+
 # Association table: many-to-many relationship between users and groups
 group_members = Table(
     "group_members",

@@ -182,17 +182,20 @@ def _try_graceful_launcher_shutdown(launcher_port: int | None, timeout_s: float 
         return
     try:
         import socket
-        import urllib.request
+
+        from opensquad.utils.local_http import open_local
 
         with socket.create_connection(("127.0.0.1", int(launcher_port)), timeout=0.3):
             pass
-        req = urllib.request.Request(
+        # open_local: an ambient HTTP_PROXY must not swallow this loopback POST,
+        # otherwise the old launcher is force-killed instead of drained.
+        open_local(
             f"http://127.0.0.1:{int(launcher_port)}/api/shutdown",
             method="POST",
             data=json.dumps({"timeout": 2}).encode("utf-8"),
             headers={"Content-Type": "application/json"},
+            timeout=timeout_s,
         )
-        urllib.request.urlopen(req, timeout=timeout_s)
     except Exception:
         pass
 

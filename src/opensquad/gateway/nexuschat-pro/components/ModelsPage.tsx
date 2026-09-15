@@ -17,6 +17,7 @@ import {
   adminHeaderTitle,
 } from './admin/adminShellStyles';
 import { type VoiceRole } from '../utils/voiceCardRole';
+import { matchPresetProvider, planVendorSync } from '../utils/vendorSync';
 import { OpenSquadLoader } from './OpenSquadLoader';
 
 // ── Preset types ──────────────────────────────────────────────────────────────
@@ -351,6 +352,23 @@ const ModelsPage: React.FC<ModelsPageProps> = ({ onBack }) => {
   const [expandedVendors, setExpandedVendors] = useState<Set<string>>(() => new Set());
   // 行内二次删除确认：正在等待确认删除的供应商名（null = 未在确认）
   const [confirmingDeleteProvider, setConfirmingDeleteProvider] = useState<string | null>(null);
+
+  // 更新厂商（按预设对齐本地卡片）：diff 先算好放进弹窗，用户勾选后才执行。
+  // 见 `openVendorSync` —— 重连只补新增、永不删除，预设里下架/改名的模型会
+  // 永久留在本地，这里补上「以预设为准」的增删。
+  const [syncProvider, setSyncProvider]     = useState<string | null>(null);
+  const [syncVendor, setSyncVendor]         = useState<ProviderPreset | null>(null);
+  const [syncSource, setSyncSource]         = useState<string>('');
+  const [syncPlan, setSyncPlan]             = useState<{
+    toAdd: ModelPreset[];
+    toDelete: ModelCardInfo[];
+    matched: ModelCardInfo[];
+  } | null>(null);
+  const [syncDoAdd, setSyncDoAdd]           = useState(true);
+  const [syncDoDelete, setSyncDoDelete]     = useState(true);
+  const [syncDoRefresh, setSyncDoRefresh]   = useState(false);
+  const [syncing, setSyncing]               = useState(false);
+  const [syncError, setSyncError]           = useState<string | null>(null);
 
   // Custom provider modal: "新建" 入口 + 连接厂商里的 "自定义" 入口都跳这里。
   const [customOpen, setCustomOpen]             = useState(false);
@@ -764,6 +782,17 @@ const ModelsPage: React.FC<ModelsPageProps> = ({ onBack }) => {
     });
   };
 
+  // 分组用的 `list` 来自 `filtered`（搜索 / 收藏 / 厂商筛选都会裁剪它），而删除与
+  // 更新必须针对该厂商的**全部**卡片：只删被筛出来的那些会漏删，而「更新」会把
+  // 已存在但被筛掉的模型当成新增再写一遍 —— 那会覆盖用户手改过的参数。
+  const cardsOfProvider = useCallback(
+    (provider: string) => {
+      const key = (provider || '').trim() || '__none__';
+      return cards.filter(c => ((c.provider || '').trim() || '__none__') === key);
+    },
+    [cards],
+  );
+
   // Selecting a vendor chip in the top filter also auto-expands that provider.
   const selectVendor = (v: string) => {
     if (activeVendor === v) {
@@ -818,6 +847,117 @@ const ModelsPage: React.FC<ModelsPageProps> = ({ onBack }) => {
       showToast(t('modelsPage.deleteProviderDone', { name: providerName, count: names.length }));
       await loadCards();
     } catch { showToast(t('modelsPage.deleteFailed'), false); }
+  };
+
+  // ── Update Provider（按预设对齐该厂商的本地卡片）──────────────────────────
+  // 重连厂商（`createAllProviderCards`）只会补预设新增的模型 + 换 api_key，**从不删除**：
+  // 预设里下架/改名的模型会永久留在本地，直到真正调用时才由上游报 model not found，
+  // 而列表里看不出它已经过时。这里做一次「预设 ⇄ 本地」的 diff，交给用户确认后再执行。
+  const findPresetForProvider = useCallback(
+    (provider: string): ProviderPreset | null => matchPresetProvider(provider, providerPresets),
+    [providerPresets],
+  );
+
+  const openVendorSync = (provider: string, list: ModelCardInfo[]) => {
+    const vendor = findPresetForProvider(provider);
+    if (!vendor) {
+      showToast(t('modelsPage.syncNoPreset', { name: provider }), false);
+      return;
+    }
+    setSyncProvider(provider);
+    setSyncVendor(vendor);
+    // 新增的卡要复用该厂商的 Key —— 同一厂商所有卡共用一个，取现存任意一张。
+    setSyncSource(list[0]?.name || '');
+    // diff 本身是纯函数（`utils/vendorSync`），这里只负责把它渲染出来。
+    setSyncPlan(planVendorSync(vendor.models, list));
+    setSyncDoAdd(true);
+    setSyncDoDelete(true);
+    setSyncDoRefresh(false);
+    setSyncError(null);
+  };
+
+  const closeVendorSync = () => {
+    setSyncProvider(null);
+    setSyncVendor(null);
+    setSyncPlan(null);
+    setSyncError(null);
+    setSyncing(false);
+  };
+
+  // 按预设刷新单张卡的模型参数。保留：api_key、enabled（启用状态是用户意图）、
+  // provider 名（决定分组）、name（文件名）以及预设里没有的字段（如 extra_headers）。
+  const refreshCardFromPreset = async (vendor: ProviderPreset, card: ModelCardInfo, presetModel: ModelPreset) => {
+    const full = await modelCardAPI.getCard(card.name);
+    if (!full.card) return;
+    await modelCardAPI.saveCard(card.name, {
+      ...full.card,
+      name: card.name,
+      provider: card.provider,
+      model_name: presetModel.model_name,
+      title: presetModel.title,
+      base_url: vendor.base_url,
+      api_protocol: vendor.api_protocol,
+      token_max: presetModel.token_max,
+      temperature: presetModel.temperature,
+      tool_call_mode: presetModel.tool_call_mode as ModelCardDetail['tool_call_mode'],
+      is_think: presetModel.is_think,
+      is_image: presetModel.is_image,
+      is_video: presetModel.is_video,
+      api_key: full.card.api_key,
+      enabled: full.card.enabled,
+    });
+  };
+
+  const submitVendorSync = async () => {
+    if (!syncVendor || !syncPlan) return;
+    setSyncing(true);
+    setSyncError(null);
+    try {
+      const wantAdd = syncDoAdd && syncPlan.toAdd.length > 0;
+      let apiKey = '';
+      if (wantAdd && syncSource) {
+        try {
+          const src = await modelCardAPI.getCard(syncSource);
+          apiKey = (src.card?.api_key || '').trim();
+        } catch {
+          setSyncError(t('modelsPage.syncNoKey'));
+          setSyncing(false);
+          return;
+        }
+      }
+      let removed = 0;
+      let refreshed = 0;
+      let added = 0;
+      // 先删后加：预设里改名的模型（旧名删、新名加）不会互相挡路。
+      if (syncDoDelete) {
+        for (const c of syncPlan.toDelete) {
+          await modelCardAPI.deleteCard(c.name);
+          removed++;
+        }
+      }
+      if (syncDoRefresh) {
+        const byName = new Map((syncVendor.models || []).map((m) => [m.model_name, m]));
+        for (const c of syncPlan.matched) {
+          const presetModel = byName.get(c.model_name);
+          if (!presetModel) continue;
+          await refreshCardFromPreset(syncVendor, c, presetModel);
+          refreshed++;
+        }
+      }
+      if (wantAdd) {
+        for (const m of syncPlan.toAdd) {
+          const { name, card } = buildModelCardDict(syncVendor, apiKey, m);
+          await modelCardAPI.saveCard(name, card);
+          added++;
+        }
+      }
+      showToast(t('modelsPage.syncDone', { added, removed, refreshed }));
+      closeVendorSync();
+      await loadCards();
+    } catch (e: any) {
+      setSyncError(e?.message || t('modelsPage.saveFailed'));
+      setSyncing(false);
+    }
   };
 
   // ── Connect Provider ─────────────────────────────────────────────────────
@@ -1263,12 +1403,22 @@ const ModelsPage: React.FC<ModelsPageProps> = ({ onBack }) => {
                         >
                           <Plus size={14} />
                         </button>
+                        {findPresetForProvider(provider) && (
+                          <button
+                            type="button"
+                            onClick={(e) => { e.stopPropagation(); openVendorSync(provider, cardsOfProvider(provider)); }}
+                            title={t('modelsPage.updateProvider')}
+                            className="p-1.5 rounded-lg text-textMuted hover:bg-primary/10 hover:text-primary transition-colors flex-shrink-0"
+                          >
+                            <RefreshCw size={14} />
+                          </button>
+                        )}
                         {confirmingDeleteProvider === provider ? (
                           <span className="flex items-center gap-1 flex-shrink-0" onClick={(e) => e.stopPropagation()}>
                             <button
                               type="button"
                               title={t('common.confirm')}
-                              onClick={() => void handleDeleteProvider(provider, list.map(c => c.name))}
+                              onClick={() => void handleDeleteProvider(provider, cardsOfProvider(provider).map(c => c.name))}
                               className="w-6 h-6 rounded-md bg-rose-500 text-white flex items-center justify-center hover:bg-rose-600 transition-colors"
                             >
                               <Check size={13} />
@@ -1483,7 +1633,7 @@ const ModelsPage: React.FC<ModelsPageProps> = ({ onBack }) => {
                 </div>
                 {/* Tool Output Max Chars */}
                 <div>
-                  <label className={labelCls} title={t('modelsPage.toolOutputMaxHint') || 'Per-tool-call output char limit (0=unlimited)'}>
+                  <label className={labelCls} title={t('modelsPage.toolOutputMaxHint', { defaultValue: 'Per-tool-call output char limit (0=unlimited)' })}>
                     Tool Output Limit <span className="text-textMuted font-normal text-[10px]">(chars)</span>
                   </label>
                   <input className={inputCls} type="number" min="0" step="100"
@@ -1899,6 +2049,145 @@ const ModelsPage: React.FC<ModelsPageProps> = ({ onBack }) => {
                   </div>
                 </>
               )}
+            </div>
+          </div>
+        </>
+      )}
+
+      {/* Update Provider dialog：按预设对齐该厂商的本地卡片（增 / 删 / 可选刷新参数） */}
+      {syncProvider && syncVendor && (
+        <>
+          <div className="fixed inset-0 bg-black/30 z-40 backdrop-blur-sm" onClick={closeVendorSync} />
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+            <div className="w-full max-w-lg bg-panel border border-border rounded-2xl shadow-2xl flex flex-col max-h-[85vh] overflow-hidden">
+              <div className="flex items-center justify-between px-5 py-3.5 border-b border-border shrink-0">
+                <h2 className="text-base font-semibold text-textMain truncate">
+                  {t('modelsPage.syncTitle', { name: syncVendor.label })}
+                </h2>
+                <button
+                  onClick={closeVendorSync}
+                  className="p-1.5 rounded-lg text-textMuted hover:bg-hover transition-colors"
+                  title={t('common.close', { defaultValue: 'Close' })}
+                >
+                  <X size={18} />
+                </button>
+              </div>
+
+              <div className="px-5 py-4 flex flex-col gap-3.5 overflow-y-auto">
+                <div className="flex items-center gap-3">
+                  <VendorIcon iconUrl={syncVendor.icon_url} label={syncVendor.label} size={26} />
+                  <p className="text-xs text-textMuted flex-1">
+                    {t('modelsPage.syncCounts', {
+                      preset: (syncVendor.models || []).length,
+                      local: syncPlan ? syncPlan.toDelete.length + syncPlan.matched.length : 0,
+                    })}
+                  </p>
+                </div>
+
+                {syncPlan && syncPlan.toAdd.length > 0 && (
+                  <div className="rounded-lg border border-border overflow-hidden">
+                    <label className="flex items-start gap-2 px-3 py-2.5 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        className="accent-primary w-3.5 h-3.5 shrink-0 mt-0.5"
+                        checked={syncDoAdd}
+                        onChange={(e) => setSyncDoAdd(e.target.checked)}
+                      />
+                      <span className="flex-1 min-w-0">
+                        <span className="block text-sm text-textMain">
+                          {t('modelsPage.syncAddLabel', { count: syncPlan.toAdd.length })}
+                        </span>
+                        <span className="block text-[11px] text-textMuted mt-0.5">
+                          {t('modelsPage.syncAddHint')}
+                        </span>
+                      </span>
+                    </label>
+                    <div className="max-h-28 overflow-y-auto border-t border-border px-3 py-2 flex flex-col gap-0.5">
+                      {syncPlan.toAdd.map((m) => (
+                        <span key={m.model_name} className="text-[11px] text-textMuted font-mono truncate">
+                          {m.model_name}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {syncPlan && syncPlan.toDelete.length > 0 && (
+                  <div className="rounded-lg border border-red-400/30 overflow-hidden">
+                    <label className="flex items-start gap-2 px-3 py-2.5 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        className="accent-primary w-3.5 h-3.5 shrink-0 mt-0.5"
+                        checked={syncDoDelete}
+                        onChange={(e) => setSyncDoDelete(e.target.checked)}
+                      />
+                      <span className="flex-1 min-w-0">
+                        <span className="block text-sm text-textMain">
+                          {t('modelsPage.syncDeleteLabel', { count: syncPlan.toDelete.length })}
+                        </span>
+                        <span className="block text-[11px] text-red-400 mt-0.5">
+                          {t('modelsPage.syncDeleteHint')}
+                        </span>
+                      </span>
+                    </label>
+                    <div className="max-h-28 overflow-y-auto border-t border-red-400/30 px-3 py-2 flex flex-col gap-0.5">
+                      {syncPlan.toDelete.map((c) => (
+                        <span key={c.name} className="text-[11px] text-textMuted font-mono truncate">
+                          {c.model_name || c.name}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {syncPlan && syncPlan.matched.length > 0 && (
+                  <label className="flex items-start gap-2 rounded-lg border border-border px-3 py-2.5 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      className="accent-primary w-3.5 h-3.5 shrink-0 mt-0.5"
+                      checked={syncDoRefresh}
+                      onChange={(e) => setSyncDoRefresh(e.target.checked)}
+                    />
+                    <span className="flex-1 min-w-0">
+                      <span className="block text-sm text-textMain">
+                        {t('modelsPage.syncRefreshLabel', { count: syncPlan.matched.length })}
+                      </span>
+                      <span className="block text-[11px] text-textMuted mt-0.5">
+                        {t('modelsPage.syncRefreshHint')}
+                      </span>
+                    </span>
+                  </label>
+                )}
+
+                {syncPlan && syncPlan.toAdd.length === 0 && syncPlan.toDelete.length === 0 && (
+                  <p className="text-xs text-textMuted">{t('modelsPage.syncUpToDate')}</p>
+                )}
+
+                {syncError && <p className="text-xs text-red-400">{syncError}</p>}
+              </div>
+
+              <div className="flex items-center justify-end gap-2 px-5 py-3.5 border-t border-border shrink-0">
+                <button
+                  onClick={closeVendorSync}
+                  className="text-sm px-3 py-1.5 rounded-lg text-textMuted hover:bg-hover transition-colors"
+                >
+                  {t('common.cancel', { defaultValue: 'Cancel' })}
+                </button>
+                <button
+                  onClick={() => void submitVendorSync()}
+                  disabled={
+                    syncing ||
+                    !syncPlan ||
+                    (syncPlan.toAdd.length === 0 && syncPlan.toDelete.length === 0 && !syncDoRefresh)
+                  }
+                  className="text-sm px-3 py-2 bg-primary text-white rounded-lg hover:opacity-90 disabled:opacity-50 transition-all flex items-center justify-center gap-1.5"
+                >
+                  {syncing ? <OpenSquadLoader size={16} /> : null}
+                  {syncDoDelete && syncPlan && syncPlan.toDelete.length > 0
+                    ? t('modelsPage.syncConfirmDelete', { count: syncPlan.toDelete.length })
+                    : t('modelsPage.syncConfirm')}
+                </button>
+              </div>
             </div>
           </div>
         </>

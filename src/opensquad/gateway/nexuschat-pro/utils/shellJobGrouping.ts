@@ -1,13 +1,16 @@
 /**
  * Group system shell/job tools into CMD-style live panels (like DelegateFold).
  */
-import type { WorkflowEvent } from './aiChatTimeline';
+import type { WorkflowBlock, WorkflowEvent } from './aiChatTimeline';
 import { extractToolResultText, isToolResultFailure } from './aiChatTimeline';
+import { buildDisplayWorkflowItems } from './delegateGrouping';
 
 export interface ShellJobBundle {
   id: string;
   parent: WorkflowEvent;
   command: string;
+  /** Agent 提供的本次调用目的说明（工具流标题展示；缺省回退到命令展示） */
+  description?: string;
   jobId?: string;
   sessionId?: string;
   shellType?: string;
@@ -22,7 +25,8 @@ export type DisplayWorkflowItemWithShell =
   | { kind: 'delegation'; bundle: import('./delegateGrouping').DelegateBundle; key: string }
   | { kind: 'shell_job'; bundle: ShellJobBundle; key: string };
 
-const SHELL_JOB_RE = /(?:^|[.__])(start_job|run_session_job)$/i;
+const SHELL_JOB_RE =
+  /(?:^|[.__])(start_job|run_session_job|shell|terminal|cmd|bash|powershell)$/i;
 const SHELL_POLL_RE = /(?:^|[.__])check_job$/i;
 
 function normalizeToolName(name: unknown): string {
@@ -87,6 +91,15 @@ export function extractShellCommand(evt: WorkflowEvent): string {
   return typeof cmd === 'string' ? cmd : String(cmd || '').trim();
 }
 
+/** Agent 在调用 shell 工具时提供的本次目的说明（description/purpose/reason）。 */
+export function extractShellDescription(evt: WorkflowEvent): string {
+  const data = typeof evt.content === 'object' && evt.content ? evt.content : {};
+  const args = parseArgsObject(data.arguments ?? data.args ?? data.input);
+  const desc = args.description ?? args.purpose ?? args.reason;
+  const s = typeof desc === 'string' ? desc.trim() : '';
+  return s ? s.slice(0, 120) : '';
+}
+
 function tryParseJson(text: string): Record<string, unknown> | null {
   const t = text.trim();
   if (!t.startsWith('{') && !t.startsWith('[')) return null;
@@ -118,15 +131,158 @@ export function parseJobIdFromShellResult(result: unknown): string {
   return '';
 }
 
+/** Placeholder values the backend writes into `output` when a job produced no stdout. */
+const SHELL_OUTPUT_PLACEHOLDERS = new Set(['(no output)', '(no stdout)', '']);
+
+function unescapeShellValue(v: string): string {
+  return v
+    .replace(/\\r\\n/g, '\n')
+    .replace(/\\n/g, '\n')
+    .replace(/\\t/g, '\t')
+    .replace(/\\(["'])/g, '$1')
+    .replace(/\\\\/g, '\\');
+}
+
+/** Python-repr style result dicts (`{'status': 'success', ...}` with single
+ *  quotes / True / False) are not valid JSON — scan the real stdout out of
+ *  them tolerantly. Metadata-only dicts yield '' so the fold shows the empty
+ *  terminal instead of a raw dict blob. */
+function extractPythonDictOutput(raw: string): string {
+  const looksLikeDict = /^\{/.test(raw.trim()) && /['"](status|job_id|return_code)['"]/.test(raw);
+  const m = raw.match(/(^|[^\w])['"]output['"]\s*:\s*(?:"((?:[^"\\]|\\.)*)"|'((?:[^'\\]|\\.)*)')/);
+  if (!m) return looksLikeDict ? '' : raw;
+  const val = unescapeShellValue(m[2] ?? m[3] ?? '');
+  return SHELL_OUTPUT_PLACEHOLDERS.has(val.trim()) ? '' : val;
+}
+
 export function extractShellOutputFromResult(result: unknown): string {
   if (result == null) return '';
   const raw = typeof result === 'string' ? result : String(result);
   const o = tryParseJson(raw);
-  if (!o) return raw;
-  if (typeof o.output === 'string') return o.output;
+  if (!o) return extractPythonDictOutput(raw);
+  if (typeof o.output === 'string') {
+    return SHELL_OUTPUT_PLACEHOLDERS.has(o.output.trim()) ? '' : o.output;
+  }
   if (typeof o.data === 'string') return o.data;
   if (typeof o.partial_data === 'string') return o.partial_data;
   return raw;
+}
+
+/** Exit code from a sealed shell result (JSON or python-repr dict), if present. */
+export function extractShellExitCode(result: unknown): number | null {
+  if (result == null) return null;
+  const raw = typeof result === 'string' ? result : String(result);
+  const o = tryParseJson(raw);
+  if (o && typeof o.return_code === 'number') return o.return_code;
+  const m = raw.match(/['"]return_code['"]\s*:\s*(-?\d+)/);
+  return m ? parseInt(m[1], 10) : null;
+}
+
+/** Running background terminal for the composer-top indicator bar. */
+export interface RunningShellJobInfo {
+  /** call_id — also the shellStreams key */
+  id: string;
+  command: string;
+  jobId?: string;
+  sessionId?: string;
+  shellType?: string;
+  /** Event timestamp of the originating tool_call */
+  startedMs?: number;
+  running: boolean;
+  errored: boolean;
+  /** Merged live stdout (stream wins over sealed bundle output) */
+  output: string;
+  stream: ShellStreamState | null;
+}
+
+/** All still-running background shell jobs across a timeline, deduped by call_id.
+ *  Recurses into task_fold / archived_section — a job keeps running even after
+ *  its workflow block gets folded away. */
+export function collectRunningShellJobs(
+  timeline: Array<{ kind?: string; data?: unknown }>,
+  shellStreams: Record<string, ShellStreamState> = {},
+): RunningShellJobInfo[] {
+  const out: RunningShellJobInfo[] = [];
+  const seen = new Set<string>();
+  collectRunningShellJobsFromEntries(timeline, shellStreams, out, seen);
+  return out;
+}
+
+function collectRunningShellJobsFromEntries(
+  timeline: Array<{ kind?: string; data?: unknown }>,
+  shellStreams: Record<string, ShellStreamState>,
+  out: RunningShellJobInfo[],
+  seen: Set<string>,
+): void {
+  for (const entry of timeline) {
+    const kind = (entry as { kind?: string }).kind;
+    if (kind === 'archived_section' || kind === 'task_fold') {
+      const nested = (entry as { data?: { entries?: unknown[] } }).data?.entries;
+      if (Array.isArray(nested)) {
+        collectRunningShellJobsFromEntries(nested as Array<{ kind?: string; data?: unknown }>, shellStreams, out, seen);
+      }
+      continue;
+    }
+    if (kind !== 'workflow') continue;
+    const block = (entry as { data?: WorkflowBlock }).data;
+    if (!block || !Array.isArray(block.events)) continue;
+    const items = attachShellJobsToDisplayItems(buildDisplayWorkflowItems(block.events), shellStreams);
+    for (const item of items) {
+      if (item.kind !== 'shell_job') continue;
+      const b = item.bundle as ShellJobBundle;
+      if (seen.has(b.id)) continue;
+      const stream = shellStreams[b.id] || null;
+      const streamDone = !!stream
+        && (stream.state === 'done' || stream.state === 'error' || stream.state === 'aborted');
+      const running = !streamDone && (!!b.running || stream?.state === 'running');
+      if (!running) continue;
+      seen.add(b.id);
+      out.push({
+        id: b.id,
+        command: stream?.command || b.command,
+        jobId: stream?.jobId || b.jobId,
+        sessionId: stream?.sessionId || b.sessionId,
+        shellType: stream?.shellType || b.shellType,
+        startedMs: typeof b.parent?.timestamp === 'number' ? b.parent.timestamp : undefined,
+        running,
+        errored:
+          stream?.state === 'error' || stream?.state === 'aborted' || (!streamDone && b.errored),
+        output: stream?.output && stream.output.length > 0 ? stream.output : b.output,
+        stream,
+      });
+    }
+  }
+}
+
+/** Compact status for a finished (or failed) CMD/shell fold.
+ *  Pass `t` to localize; falls back to English labels (used by unit tests). */
+export function shellJobDoneLabel(
+  running: boolean,
+  errored: boolean,
+  result?: unknown,
+  stream?: ShellStreamState | null,
+  t?: (key: string, opts?: { defaultValue?: string }) => string,
+): string {
+  const tr = (key: string, fallback: string) => (t ? t(key, { defaultValue: fallback }) : fallback);
+  if (running) return `${tr('aiChat.toolFlow.shell.running', 'Running')}…`;
+  if (!errored) return tr('aiChat.toolFlow.shell.completed', 'Completed');
+  const raw = typeof result === 'string' ? result : result != null ? String(result) : '';
+  const o = tryParseJson(raw) || (typeof result === 'object' && result ? (result as Record<string, unknown>) : null);
+  const msg = String(o?.message || '');
+  const reason = String(stream?.reason || o?.reason || '');
+  if (o?.timed_out === true || reason === 'timeout' || /timed out/i.test(msg) || /timed out/i.test(raw)) {
+    return tr('aiChat.toolFlow.shell.timedOut', 'Timed out');
+  }
+  if (
+    o?.aborted === true
+    || stream?.state === 'aborted'
+    || reason === 'user_stop'
+    || reason === 'shell_exited'
+    || /^Command aborted\b/i.test(msg)
+  ) {
+    return tr('aiChat.toolFlow.shell.aborted', 'Aborted');
+  }
+  return tr('aiChat.toolFlow.shell.statusFailed', 'Failed');
 }
 
 export interface ShellStreamState {
@@ -138,6 +294,8 @@ export interface ShellStreamState {
   sessionId?: string;
   shellType?: string;
   returnCode?: number | null;
+  /** timeout | user_stop | shell_exited */
+  reason?: string;
 }
 
 export function applyJobStdout(
@@ -200,6 +358,7 @@ export function applyJobStatus(
         typeof payload.return_code === 'number'
           ? payload.return_code
           : existing?.returnCode ?? null,
+      reason: typeof payload.reason === 'string' ? payload.reason : existing?.reason,
     },
   };
 }
@@ -269,11 +428,13 @@ export function attachShellJobsToDisplayItems(
       const callId = parentCallId(evt);
       const stream = streams[callId];
       const command = extractShellCommand(evt) || stream?.command || 'command';
+      const description = extractShellDescription(evt) || undefined;
       const bundle = refreshShellBundle(
         {
           id: callId || item.key,
           parent: evt,
           command,
+          description,
           jobId: stream?.jobId || parseJobIdFromShellResult(evt.result) || undefined,
           sessionId: stream?.sessionId,
           shellType: stream?.shellType,
@@ -332,17 +493,30 @@ export function sealShellStreamFromResult(
   const fromResult = extractShellOutputFromResult(result);
   const failed = isToolResultFailure(result);
   const jobId = existing?.jobId || parseJobIdFromShellResult(result) || undefined;
+  const raw = typeof result === 'string' ? result : result != null ? String(result) : '';
+  const parsed = tryParseJson(raw);
+  const timedOut = parsed?.timed_out === true || /timed out/i.test(String(parsed?.message || ''));
+  const aborted = parsed?.aborted === true;
+  const state: ShellStreamState['state'] = still
+    ? 'running'
+    : aborted
+      ? 'aborted'
+      : failed
+        ? 'error'
+        : 'done';
+  const reason = timedOut ? 'timeout' : aborted ? 'user_stop' : existing?.reason;
   return {
     ...prev,
     [callId]: {
       callId,
       output: (existing?.output && existing.output.length > 0 ? existing.output : fromResult) || '',
-      state: still ? 'running' : failed ? 'error' : 'done',
+      state,
       command: existing?.command,
       jobId,
       sessionId: existing?.sessionId,
       shellType: existing?.shellType,
       returnCode: existing?.returnCode ?? null,
+      reason,
     },
   };
 }

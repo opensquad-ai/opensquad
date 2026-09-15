@@ -86,6 +86,231 @@ def protocol_silent_handlers() -> dict[str, Callable[[str], None]]:
     return {name: _discard_protocol_tag for name in PROTOCOL_SILENT_TAGS}
 
 
+# Line-start <thought>/<think> blocks (native reasoning_content already exists).
+_THOUGHT_OPEN_RE = re.compile(r"[ \t]*<(thought|think)\b[^>]*>", re.IGNORECASE)
+_FENCE_LINE_RE = re.compile(r"[ \t]{0,3}(```+|~~~+)")
+_THOUGHT_CLOSE_HOLD = 16
+
+
+def _maybe_thought_open_prefix(s: str) -> bool:
+    """True if *s* (at line start) could still grow into a thought/think open tag."""
+    i = 0
+    while i < len(s) and s[i] in " \t":
+        i += 1
+    rest = s[i:]
+    if not rest:
+        return True
+    if rest[0] != "<":
+        return False
+    lower = rest.lower()
+    for token in ("<thought", "<think"):
+        if token.startswith(lower):
+            return True
+        if lower.startswith(token):
+            return ">" not in rest
+    return False
+
+
+def _maybe_fence_prefix(s: str) -> bool:
+    """True if *s* (at line start) could still grow into a ``` / ~~~ fence."""
+    i = 0
+    while i < len(s) and s[i] in " \t" and i < 3:
+        i += 1
+    rest = s[i:]
+    if not rest:
+        return True
+    if rest[0] not in "`~":
+        return False
+    ch = rest[0]
+    n = 0
+    while n < len(rest) and rest[n] == ch:
+        n += 1
+    return n < 3 and n == len(rest)
+
+
+class StreamingThoughtBlockDropper:
+    """Drop line-start ``<thought>`` / ``<think>`` blocks (including inner text).
+
+    Models with native ``reasoning_content`` still dump XML thought wrappers into
+    ``content``. Stripping only the tag names punches holes in prose and code
+    samples that *mention* the tags. This filter removes real protocol blocks
+    that start a line, and leaves mid-sentence mentions and fenced samples intact.
+    """
+
+    def __init__(self) -> None:
+        self._buf = ""
+        self._line_start = True
+        self._in_fence = False
+        self._fence_char = ""
+        self._fence_len = 0
+        self._dropping = False
+        self._drop_name = ""
+
+    def feed(self, chunk: str) -> str:
+        if not chunk:
+            return ""
+        self._buf += chunk
+        return self._consume(flush=False)
+
+    def flush(self) -> str:
+        emitted = self._consume(flush=True)
+        self._buf = ""
+        self._dropping = False
+        self._drop_name = ""
+        return emitted
+
+    def _consume(self, flush: bool) -> str:
+        out: list[str] = []
+        while self._buf:
+            if self._dropping:
+                if self._drain_drop(flush):
+                    continue
+                break
+            if self._in_fence:
+                piece = self._drain_fence(flush)
+                if piece is None:
+                    break
+                if piece:
+                    out.append(piece)
+                continue
+            if self._line_start:
+                action = self._line_start_action(flush)
+                kind = action[0]
+                if kind == "wait":
+                    break
+                if kind == "drop":
+                    _, end, name = action
+                    self._buf = self._buf[end:]
+                    self._dropping = True
+                    self._drop_name = name
+                    self._line_start = False
+                    continue
+                if kind == "skip":
+                    _, end = action
+                    self._buf = self._buf[end:]
+                    self._line_start = False
+                    continue
+                if kind == "fence":
+                    _, end, ch, n = action
+                    out.append(self._buf[:end])
+                    self._buf = self._buf[end:]
+                    self._in_fence = True
+                    self._fence_char = ch
+                    self._fence_len = n
+                    self._line_start = False
+                    continue
+                _, n = action
+                out.append(self._buf[:n])
+                self._note_line_start(self._buf[:n])
+                self._buf = self._buf[n:]
+                continue
+            nl = self._buf.find("\n")
+            if nl == -1:
+                out.append(self._buf)
+                self._line_start = False
+                self._buf = ""
+                break
+            n = nl + 1
+            out.append(self._buf[:n])
+            self._line_start = True
+            self._buf = self._buf[n:]
+        return "".join(out)
+
+    def _note_line_start(self, emitted: str) -> None:
+        if emitted.endswith("\n") or emitted.endswith("\r"):
+            self._line_start = True
+        else:
+            self._line_start = False
+
+    def _drain_drop(self, flush: bool) -> bool:
+        """Return True if the close tag was consumed and dropping ended."""
+        close = re.search(rf"</{re.escape(self._drop_name)}\s*>", self._buf, re.IGNORECASE)
+        if close:
+            self._buf = self._buf[close.end() :]
+            self._dropping = False
+            self._drop_name = ""
+            self._line_start = False
+            return True
+        if flush:
+            self._buf = ""
+            self._dropping = False
+            self._drop_name = ""
+            return False
+        if len(self._buf) > _THOUGHT_CLOSE_HOLD:
+            self._buf = self._buf[-_THOUGHT_CLOSE_HOLD:]
+        return False
+
+    def _drain_fence(self, flush: bool) -> str | None:
+        """Emit fence body. None means wait for more input."""
+        if self._line_start:
+            fm = _FENCE_LINE_RE.match(self._buf)
+            if fm:
+                ticks = fm.group(1)
+                if ticks[0] == self._fence_char and len(ticks) >= self._fence_len:
+                    if fm.end() == len(self._buf) and not flush:
+                        return None
+                    piece = self._buf[: fm.end()]
+                    self._buf = self._buf[fm.end() :]
+                    self._in_fence = False
+                    self._fence_char = ""
+                    self._fence_len = 0
+                    self._line_start = False
+                    return piece
+            if not flush and _maybe_fence_prefix(self._buf):
+                return None
+        nl = self._buf.find("\n")
+        if nl == -1:
+            if not flush and self._line_start and _maybe_fence_prefix(self._buf):
+                return None
+            piece = self._buf
+            self._buf = ""
+            self._line_start = False
+            return piece
+        n = nl + 1
+        piece = self._buf[:n]
+        self._buf = self._buf[n:]
+        self._line_start = True
+        return piece
+
+    def _line_start_action(self, flush: bool) -> tuple:
+        s = self._buf
+        m = _THOUGHT_OPEN_RE.match(s)
+        if m:
+            raw = m.group(0)
+            if raw.rstrip().endswith("/>"):
+                return ("skip", m.end())
+            # Need the next char: a space means a mention ("<thought> tags"),
+            # not a protocol block.
+            if m.end() == len(s) and not flush:
+                return ("wait",)
+            if m.end() < len(s) and s[m.end()] == " ":
+                pass
+            else:
+                return ("drop", m.end(), m.group(1).lower())
+        fm = _FENCE_LINE_RE.match(s)
+        if fm:
+            ticks = fm.group(1)
+            if fm.end() == len(s) and not flush:
+                return ("wait",)
+            return ("fence", fm.end(), ticks[0], len(ticks))
+        if not flush and (_maybe_thought_open_prefix(s) or _maybe_fence_prefix(s)):
+            return ("wait",)
+        if flush:
+            return ("emit", len(s))
+        if s[0] not in " \t<`~":
+            nl = s.find("\n")
+            return ("emit", len(s) if nl == -1 else nl + 1)
+        return ("emit", 1)
+
+
+def strip_prompted_thought_blocks(text: str) -> str:
+    """Drop line-start thought/think XML blocks from a complete assistant body."""
+    if not text:
+        return text
+    dropper = StreamingThoughtBlockDropper()
+    return dropper.feed(text) + dropper.flush()
+
+
 @functools.lru_cache(maxsize=64)
 def _silent_tag_patterns(tag: str) -> tuple[re.Pattern[str], re.Pattern[str], re.Pattern[str]]:
     escaped = re.escape(tag)
@@ -108,7 +333,12 @@ def strip_silent_protocol_blocks(text: str) -> str:
         result = nxt
     result = _NAMESPACED_TOOL_UNCLOSED.sub("", result)
     result = _NAMESPACED_TOOL_ORPHAN.sub("", result)
+    # thought/think mentions in prose/code must not be hole-punched; only
+    # line-start protocol blocks are dropped (native reasoning already exists).
+    result = strip_prompted_thought_blocks(result)
     for tag in PROTOCOL_SILENT_TAGS:
+        if tag in ("thought", "think"):
+            continue
         paired, self_closing, unclosed = _silent_tag_patterns(tag)
         result = paired.sub("", result)
         result = self_closing.sub("", result)
@@ -233,6 +463,7 @@ class StreamingTagParser:
         self._tag_attrs: dict[str, str] = {}
         self._unclosed_commit: dict | None = None
         self._commit_progress_callback: Callable[[str, str, dict[str, str]], None] | None = None
+        self._passthrough_tags: set[str] = set()
 
         # Sliding window: used only for end-tag detection
         self._cycle_len: int = 0
@@ -263,6 +494,7 @@ class StreamingTagParser:
         self._buffer = ""
         self._tag_attrs = {}
         self._in_protected_tag = False
+        self._passthrough_tags = set()
         self._update_cycle_len()
 
     # -- Public API --
@@ -271,6 +503,18 @@ class StreamingTagParser:
         for ch in data:
             self._feed(ch)
         self._fire_commit_progress()
+
+    def set_passthrough_tags(self, tags: list[str] | tuple[str, ...] | set[str] | None) -> None:
+        """Emit these tag wrappers as literal text instead of claiming them as protocol.
+
+        Used when native reasoning_content already carries thought, so leftover
+        ``<thought>`` mentions in the body must not be swallowed or hole-punched.
+        """
+        self._passthrough_tags = {t.lower() for t in (tags or [])}
+
+    def _passthrough_head(self, head: str) -> bool:
+        proto = re.match(r"</?([a-zA-Z0-9_]+)", (head or "").strip())
+        return bool(proto and proto.group(1).lower() in self._passthrough_tags)
 
     def set_commit_progress_callback(self, callback: Callable[[str, str, dict[str, str]], None] | None) -> None:
         """Called once per feed() while a tool commit-tag is open (live UI preview)."""
@@ -381,7 +625,9 @@ class StreamingTagParser:
                     self._buffer = ""
 
         elif self._state == "IN_TAG_HEAD":
-            if not _is_swallowed_markup_head(self._head_buf) and not _is_swallowed_markup_head(self._head_buf + ">"):
+            if self._passthrough_head(self._head_buf) or (
+                not _is_swallowed_markup_head(self._head_buf) and not _is_swallowed_markup_head(self._head_buf + ">")
+            ):
                 self._emit_default(self._head_buf)
 
         elif self._state == "POTENTIAL_LAZY_TAG":
@@ -473,6 +719,8 @@ class StreamingTagParser:
             raw_tag_name = match.group(1)
             tag_name = raw_tag_name.split(":")[-1] if ":" in raw_tag_name else raw_tag_name
             key = tag_name.lower()
+            if key in self._passthrough_tags:
+                return None
             if key in self._handlers or key in PROTOCOL_SILENT_TAGS:
                 return raw_tag_name, key
         ns = _NAMESPACED_TOOL_OPEN.match(self._head_buf)
@@ -553,6 +801,9 @@ class StreamingTagParser:
                 elif _is_swallowed_markup_head(self._head_buf):
                     # Orphan </||DSML||calls> after the wrapper already closed,
                     # or a close tag whose bars/spacing don't match the opener.
+                    # Native-thought passthrough must keep mention/code-sample tags.
+                    if self._passthrough_head(self._head_buf):
+                        self._emit_default(self._head_buf)
                     self._head_buf = ""
                     self._state = "OUT"
                 else:

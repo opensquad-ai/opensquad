@@ -41,10 +41,20 @@ logger = logging.getLogger(__name__)
 
 
 def _ensure_genai() -> bool:
-    """Import google.generativeai on first use. Returns True if available."""
+    """Import google.generativeai on first use. Returns True if available.
+
+    ``_genai_mod`` is the source of truth, not the cached flag. If something
+    rebinds ``_genai_mod`` without touching ``_GENAI_AVAILABLE`` (a test double
+    restoring the attribute, a module reload), the flag can end up claiming
+    "available" while the reference is ``None`` -- and every caller then does
+    ``_genai_mod.configure(...)`` on ``None``. Re-probe whenever the two
+    disagree so the pair can never desynchronise.
+    """
     global _genai_mod, _GENAI_AVAILABLE
-    if _GENAI_AVAILABLE is not None:
-        return _GENAI_AVAILABLE
+    if _GENAI_AVAILABLE is True and _genai_mod is not None:
+        return True
+    if _GENAI_AVAILABLE is False:
+        return False
     try:
         import google.generativeai as genai
 

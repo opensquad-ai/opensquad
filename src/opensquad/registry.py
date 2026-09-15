@@ -79,6 +79,7 @@ _BARE_NAME_NS_PRIORITY: tuple[str, ...] = (
     "help",
     "agent_mode",
     "choice_tools",
+    "followup_tools",
     "goal",
     "collaboration",
     "agent_setup",
@@ -95,6 +96,149 @@ _BARE_TOOL_PREFERRED_NS: dict[str, tuple[str, ...]] = {
     "memory_log": ("memory", "long_memory"),
     "memory_find_chain": ("memory", "long_memory"),
 }
+
+
+def _alias_ns(ns: str, names: tuple[str, ...], target: str) -> dict[str, str]:
+    out: dict[str, str] = {}
+    for n in names:
+        out[n] = target
+        out[f"{ns}.{n}"] = target
+    return out
+
+
+# Cheap models invent prompt/UI names (``shell``, ``grep``, ``read``) instead of
+# ``namespace.function``. Map those shorthands before dispatch so they do not
+# die as ``Error: Invalid format …``. Values are dotted names.
+_TOOL_NAME_ALIASES: dict[str, str] = {}
+_TOOL_NAME_ALIASES.update(
+    _alias_ns(
+        "system",
+        (
+            "shell",
+            "terminal",
+            "cmd",
+            "bash",
+            "powershell",
+            "run_command",
+            "execute_command",
+            "exec_command",
+            "execute",
+            "exec",
+        ),
+        "system.run_session_job",
+    )
+)
+_TOOL_NAME_ALIASES.update(
+    _alias_ns(
+        "filesystem",
+        ("read", "view_file", "read_multiple_files", "cat", "type"),
+        "filesystem.read_file",
+    )
+)
+_TOOL_NAME_ALIASES.update(_alias_ns("filesystem", ("grep",), "filesystem.search_files"))
+_TOOL_NAME_ALIASES.update(_alias_ns("filesystem", ("glob",), "filesystem.find_files"))
+_TOOL_NAME_ALIASES.update(
+    _alias_ns("filesystem", ("ls", "list_dir", "listdir", "list_files"), "filesystem.list_directory")
+)
+_TOOL_NAME_ALIASES.update(
+    _alias_ns(
+        "filesystem",
+        ("edit_file", "str_replace", "apply_diff", "patch", "edit"),
+        "filesystem.replace_in_file",
+    )
+)
+_TOOL_NAME_ALIASES.update(_alias_ns("filesystem", ("create_file",), "filesystem.write_file"))
+_TOOL_NAME_ALIASES.update(_alias_ns("filesystem", ("mkdir",), "filesystem.create_directory"))
+_TOOL_NAME_ALIASES.update(_alias_ns("filesystem", ("rm", "unlink"), "filesystem.delete_file"))
+_TOOL_NAME_ALIASES.update(_alias_ns("websearch", ("search", "web_search", "google", "bing"), "websearch.search"))
+_TOOL_NAME_ALIASES.update(_alias_ns("websearch", ("webfetch", "fetch_url", "browse", "open_url"), "websearch.fetch"))
+_TOOL_NAME_ALIASES.update(
+    {
+        "执行命令": "system.run_session_job",
+        "读取文件": "filesystem.read_file",
+        "写入文件": "filesystem.write_file",
+        "浏览目录": "filesystem.list_directory",
+        "列出文件": "filesystem.list_directory",
+        "文件搜索": "filesystem.search_files",
+        "网络搜索": "websearch.search",
+        "list_tools": "help.get_tool_help",
+        "list-tools": "help.get_tool_help",
+        "listtools": "help.get_tool_help",
+        "webfetch.fetch": "websearch.fetch",
+        "webfetch.search": "websearch.search",
+    }
+)
+
+# Invented argument keys → real parameter names (only applied when the dest
+# exists on the target function and the dest is not already set).
+_ARG_KEY_ALIASES: dict[str, str] = {
+    "file_path": "path",
+    "filepath": "path",
+    "target_file": "path",
+    "filename": "path",
+    "target_directory": "path",
+    "directory": "path",
+    "contents": "content",
+    "old_string": "old_str",
+    "oldString": "old_str",
+    "new_string": "new_str",
+    "newString": "new_str",
+    "glob_pattern": "pattern",
+    "regex": "pattern",
+    "cmd": "command",
+    "q": "query",
+    "url": "urls",
+    "glob": "include",
+}
+
+
+def _apply_arg_aliases(func: Any, args: dict[str, Any]) -> dict[str, Any]:
+    """Rename invented arg keys onto the target function's real parameters."""
+    if not args:
+        return args
+    try:
+        params = set(inspect.signature(func).parameters)
+    except (TypeError, ValueError):
+        return args
+    out = dict(args)
+    if "path" in params and "path" not in out and "paths" in out:
+        paths = out.get("paths")
+        if isinstance(paths, list) and paths:
+            out["path"] = paths[0]
+        elif isinstance(paths, str) and paths:
+            out["path"] = paths
+    for src, dst in _ARG_KEY_ALIASES.items():
+        if src in out and dst in params and dst not in out and src not in params:
+            out[dst] = out.pop(src)
+    return out
+
+
+def _filter_call_args(func: Any, args: dict[str, Any]) -> dict[str, Any]:
+    """Drop kwargs the target function does not accept (e.g. job_name, stat)."""
+    if not args:
+        return args
+    try:
+        sig = inspect.signature(func)
+    except (TypeError, ValueError):
+        return args
+    if any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()):
+        return args
+    allowed = {
+        name
+        for name, p in sig.parameters.items()
+        if p.kind
+        in (
+            inspect.Parameter.POSITIONAL_ONLY,
+            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+            inspect.Parameter.KEYWORD_ONLY,
+        )
+        and name not in ("self", "cls")
+    }
+    dropped = [k for k in args if k not in allowed]
+    if not dropped:
+        return args
+    logger.debug("[registry] dropping unknown kwargs for %s: %s", getattr(func, "__name__", func), dropped)
+    return {k: v for k, v in args.items() if k in allowed}
 
 
 class ToolRegistry:
@@ -227,8 +371,14 @@ class ToolRegistry:
             logger.info(line)
         return namespaces
 
-    def get_tool_help(self, namespace: str) -> str:
+    def get_tool_help(self, namespace: str = "") -> str:
         """Get detailed documentation for a specific tool set"""
+        ns = (namespace or "").strip()
+        if not ns:
+            with self._lock:
+                names = list(self._tools.keys())
+            listed = ", ".join(names) if names else "(none)"
+            return f"Available tool namespaces: {listed}. Call help.get_tool_help(namespace='<name>') for details."
         with self._lock:
             if namespace in self._tools:
                 info = self._tools[namespace]
@@ -320,6 +470,7 @@ class ToolRegistry:
             "task_watch",
             "reminder",
             "choice_tools",
+            "followup_tools",
             "goal",
             "agent_mode",
             "plugin_admin",
@@ -599,6 +750,7 @@ class ToolRegistry:
         Returns:
             JSON Schema type definition
         """
+        import types as _types
         from typing import get_args, get_origin
 
         # Basic type mapping
@@ -627,8 +779,13 @@ class ToolRegistry:
         elif origin is dict:
             return {"type": "object"}
 
-        # Optional type (Union[X, None])
-        elif origin is Union:
+        # Optional / union type. Both spellings must be handled: `typing.Optional[X]`
+        # has origin `typing.Union`, but PEP 604 `X | None` has origin
+        # `types.UnionType`. Matching only the former silently degraded every
+        # `float | None` / `list[str] | None` parameter to {"type": "string"} —
+        # the model then passed a quoted number for numeric args, and a bare
+        # string where an array was expected. First non-None member wins.
+        elif origin is Union or origin is _types.UnionType:
             args = get_args(py_type)
             # Filter out NoneType
             non_none_args = [arg for arg in args if arg is not type(None)]
@@ -790,11 +947,36 @@ class ToolRegistry:
         module = self._ensure_module(info)
         if module is None:
             return None
-        for cand in ("search", "query", "run"):
+        for cand in ("search", "query", "run", "get_tool_help"):
             fn = getattr(module, cand, None)
             if callable(fn):
                 return f"{name}.{cand}"
         return None
+
+    def resolve_tool_alias(self, tool_name: str, args: dict[str, Any] | None = None) -> str | None:
+        """Map invented names (``shell``, ``grep``, ``system.shell``) to a real tool."""
+        raw = (tool_name or "").strip()
+        if not raw or raw.startswith("mcp__"):
+            return None
+        keys = [raw]
+        if "." not in raw and "__" in raw:
+            ns, fn = raw.split("__", 1)
+            keys.append(f"{ns}.{fn}")
+        if " " in raw and "." not in raw and "__" not in raw:
+            parts = raw.split()
+            if len(parts) == 2:
+                keys.append(f"{parts[0]}.{parts[1]}")
+                keys.append(f"{parts[0]}_{parts[1]}")
+                keys.append("".join(parts))
+        hit = None
+        for key in keys:
+            hit = _TOOL_NAME_ALIASES.get(key) or _TOOL_NAME_ALIASES.get(key.lower())
+            if hit:
+                break
+        if hit == "websearch.search" and isinstance(args, dict):
+            if args.get("pattern") and not args.get("query") and not args.get("queries"):
+                return "filesystem.search_files"
+        return hit
 
     async def call(self, tool_name: str, args: str | dict[str, Any]) -> Any:
         """
@@ -822,17 +1004,21 @@ class ToolRegistry:
 
         args = args or {}
 
-        # Translate bare names (memory_write) before plan-gate / dispatch.
+        # Translate aliases (shell) and bare names (memory_write) before plan-gate.
         if (
             tool_name
-            and "." not in tool_name
-            and "__" not in tool_name
             and not tool_name.startswith("mcp__")
-            and tool_name not in ("event_pipeline", "help.get_tool_help")
+            and tool_name
+            not in (
+                "event_pipeline",
+                "help.get_tool_help",
+            )
         ):
-            resolved_early = self.resolve_bare_tool_name(tool_name)
-            if not resolved_early:
-                resolved_early = self.resolve_namespace_default_call(tool_name)
+            resolved_early = self.resolve_tool_alias(tool_name, args if isinstance(args, dict) else None)
+            if not resolved_early and "." not in tool_name and "__" not in tool_name:
+                resolved_early = self.resolve_bare_tool_name(tool_name)
+                if not resolved_early:
+                    resolved_early = self.resolve_namespace_default_call(tool_name)
             if resolved_early:
                 ns0, fn0 = resolved_early.split(".", 1)
                 tc_log.info(
@@ -864,8 +1050,8 @@ class ToolRegistry:
         except Exception as e:
             logger.debug("[registry.call] Plan gate skipped: %s", e)
 
-        if tool_name == "help.get_tool_help":
-            return self.get_tool_help(args.get("namespace", ""))
+        if tool_name in ("help.get_tool_help", "help__get_tool_help"):
+            return self.get_tool_help(args.get("namespace", "") if isinstance(args, dict) else "")
 
         # Synthetic internal tool — never meant to be called by LLM.
         # Pipeline events are delivered automatically by the runner.
@@ -919,6 +1105,9 @@ class ToolRegistry:
         if not func:
             tc_log.warning("[registry.call] Function %r not found in namespace %r", fn, ns)
             return f"Error: Function {fn} not found"
+
+        args = _apply_arg_aliases(func, args if isinstance(args, dict) else {})
+        args = _filter_call_args(func, args if isinstance(args, dict) else {})
 
         try:
             import asyncio

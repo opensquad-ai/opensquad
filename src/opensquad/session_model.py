@@ -48,6 +48,30 @@ def session_api_map(runner: Any) -> dict[str, Any]:
     return apis
 
 
+def agent_default_card(runner: Any) -> str | None:
+    """Card the agent would use without a per-session override."""
+    root = getattr(runner, "_root_chat_api", None) or getattr(runner, "chat_api", None)
+    card = current_api_card(root)
+    if card:
+        return card
+    cfg = getattr(runner, "_model_config", None)
+    if isinstance(cfg, dict):
+        return str(cfg.get("_card") or "").strip() or None
+    return None
+
+
+def should_use_agent_default(source: str | None, channel: str | None) -> bool:
+    """Group / IM / reminder turns must not inherit an Agent Web pane model_card.
+
+    Primary-session overrides (e.g. a months-old OpenCode card that 401s) would
+    otherwise swallow ChatPro @mentions: the group UI shows the message, the
+    turn starts, and the LLM never runs.
+    """
+    from opensquad.ingress_policy import is_external_ingress
+
+    return is_external_ingress(source, channel)
+
+
 def current_api_card(chat_api: Any) -> str | None:
     if chat_api is None:
         return None
@@ -134,11 +158,15 @@ async def bind_for_turn(
     sid: str,
     *,
     preferred_card: str | None = None,
+    use_agent_default: bool = False,
 ) -> Any:
     """Ensure *sid* has a ChatAPI bound to its session model (or agent default).
 
     Returns the ChatAPI instance to use for this turn. Never silently keeps a
     stale provider when a session/preferred card is set.
+
+    ``use_agent_default`` binds the agent default for this turn only and does
+    **not** persist over the pane's ``model_card`` (external / group ingress).
     """
     from opensquad.model_switch import apply_model_reload, resolve_card
     from opensquad.session_dispatcher import _clone_chat_api
@@ -155,7 +183,7 @@ async def bind_for_turn(
     # default, so that guard would keep old session cards after refresh.)
     # Short-circuit when memory/disk already carry this card so the per-message
     # persist() (full session serialize + double-file write) is skipped entirely.
-    if preferred and get(runner, sid) != preferred:
+    if not use_agent_default and preferred and get(runner, sid) != preferred:
         set_session_card(runner, sid, preferred)
 
     apis = session_api_map(runner)
@@ -167,7 +195,10 @@ async def bind_for_turn(
         api._user_id_provider = lambda: getattr(runner, "_current_user_id", "")
         apis[sid] = api
 
-    desired = preferred or get(runner, sid)
+    if use_agent_default:
+        desired = agent_default_card(runner)
+    else:
+        desired = preferred or get(runner, sid)
     if not desired:
         return api
 

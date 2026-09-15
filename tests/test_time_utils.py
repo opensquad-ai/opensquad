@@ -99,10 +99,24 @@ class TestFormatBeijingIso:
 
 class TestMonotonicMs:
     def test_increases_over_time(self):
+        # Windows' monotonic clock ticks at ~15.6ms (time.get_clock_info
+        # ('monotonic').resolution == 0.015625 here), so a single 10ms sleep can
+        # land inside one tick and leave the ms reading unchanged — this used to
+        # fail ~7 times out of 20. Wait in small steps until the clock has
+        # certainly ticked (bounded, ~10ms per iteration, breaks on the first
+        # advance in practice).
         t1 = monotonic_ms()
-        time.sleep(0.01)
-        t2 = monotonic_ms()
-        assert t2 > t1
+        for _ in range(20):
+            time.sleep(0.01)
+            if monotonic_ms() > t1:
+                break
+        assert monotonic_ms() > t1
+
+    def test_never_goes_backwards(self):
+        values = [monotonic_ms()]
+        for _ in range(50):
+            values.append(monotonic_ms())
+        assert values == sorted(values)
 
     def test_not_affected_by_system_clock_changes(self):
         # We can't actually change system clock, but we verify it's an int

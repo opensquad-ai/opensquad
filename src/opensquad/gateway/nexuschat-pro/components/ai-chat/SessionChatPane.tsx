@@ -4,7 +4,7 @@
  * Replaces SessionHistoryPreview's plain "你/AGENT" list.
  */
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ChevronDown, ChevronUp } from 'lucide-react';
+import { useTranslation } from 'react-i18next';
 import { agentSessionAPI } from '../../services/api';
 import { OpenSquadLoader } from '../OpenSquadLoader';
 import {
@@ -23,6 +23,7 @@ import {
 import { useWorkflowExpandLevel, type WorkflowExpandLevel } from '../../utils/workflowExpandPref';
 import { useTextSelectionFreeze } from '../../hooks/useTextSelectionFreeze';
 import { ChatTimeline } from './ChatTimeline';
+import { ChatScrollComposerHint, ChatScrollHud } from './ChatScrollHud';
 import { SoloMessage } from './SoloMessage';
 import { MessageBubble, type ChatMessage } from './MessageBubble';
 import { SoloActivityRow, mergeWorkflowBlocks } from './SoloActivityRow';
@@ -77,6 +78,7 @@ export const SessionChatPane: React.FC<SessionChatPaneProps> = ({
 }) => {
   const [prefLevel] = useWorkflowExpandLevel();
   const expandLevel = expandLevelProp ?? prefLevel;
+  const { t } = useTranslation();
   const cached = !Array.isArray(liveTimeline)
     ? getCachedSessionTimeline(agentId, sessionId)
     : null;
@@ -86,13 +88,9 @@ export const SessionChatPane: React.FC<SessionChatPaneProps> = ({
   const [showSpinner, setShowSpinner] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [fetched, setFetched] = useState<TimelineEntry[]>(() => cached || []);
-  const [showScrollTop, setShowScrollTop] = useState(false);
-  const [showScrollBottom, setShowScrollBottom] = useState(false);
-  const [scrollActive, setScrollActive] = useState(false);
   const listRef = useRef<HTMLDivElement>(null);
   const endRef = useRef<HTMLDivElement>(null);
   const userScrolledRef = useRef(false);
-  const scrollHideTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // Empty array still counts as Array.isArray — treat it as a miss so we
   // fetch disk history instead of painting a blank pane forever.
   const useLive = Array.isArray(liveTimeline) && liveTimeline.length > 0;
@@ -109,17 +107,9 @@ export const SessionChatPane: React.FC<SessionChatPaneProps> = ({
     isFrozenRef,
   } = useTextSelectionFreeze(listRef, liveOrFetched);
 
-  // Live turns often append events inside the same workflow entry (length
-  // unchanged). Track inner activity so auto-scroll / paint stay in sync.
-  const timelineSig = useMemo(() => {
-    let sig = timeline.length * 1000;
-    for (const e of timeline) {
-      if (e.kind === 'workflow') {
-        sig += (e.data.events?.length || 0) * 3 + (e.data.completed ? 0 : 1);
-      }
-    }
-    return sig;
-  }, [timeline]);
+  const markUnpinnedFromBottom = useCallback((away: boolean) => {
+    userScrolledRef.current = away;
+  }, []);
 
   useEffect(() => {
     // Only show a soft spinner if the first fetch for an uncached session
@@ -326,46 +316,6 @@ export const SessionChatPane: React.FC<SessionChatPaneProps> = ({
     };
   }, [agentId, sessionId, pollIntervalMs]);
 
-  const updateScrollButtons = useCallback(() => {
-    const el = listRef.current;
-    if (!el) return;
-    const { scrollTop, scrollHeight, clientHeight } = el;
-    const distFromBottom = scrollHeight - scrollTop - clientHeight;
-    setShowScrollTop(scrollTop > 200);
-    setShowScrollBottom(distFromBottom > 200);
-    userScrolledRef.current = distFromBottom > 100;
-  }, []);
-
-  const handleScroll = useCallback(() => {
-    updateScrollButtons();
-    setScrollActive(true);
-    if (scrollHideTimerRef.current) clearTimeout(scrollHideTimerRef.current);
-    scrollHideTimerRef.current = setTimeout(() => setScrollActive(false), 1500);
-  }, [updateScrollButtons]);
-
-  const scrollToBottom = useCallback(() => {
-    endRef.current?.scrollIntoView({ behavior: 'smooth' });
-    userScrolledRef.current = false;
-    setShowScrollBottom(false);
-  }, []);
-
-  const scrollToTop = useCallback(() => {
-    listRef.current?.scrollTo({ top: 0, behavior: 'smooth' });
-  }, []);
-
-  // Stick-to-bottom is owned by ChatTimeline (unpinRef). This only refreshes
-  // the jump-button visibility when the live timeline grows.
-  useEffect(() => {
-    if (loading && timeline.length === 0) return;
-    updateScrollButtons();
-  }, [timeline.length, timelineSig, loading, updateScrollButtons]);
-
-  useEffect(() => {
-    return () => {
-      if (scrollHideTimerRef.current) clearTimeout(scrollHideTimerRef.current);
-    };
-  }, []);
-
   const userNavNodes = useMemo(
     () => buildUserNavNodesFromTimeline(timeline),
     [timeline],
@@ -398,40 +348,14 @@ export const SessionChatPane: React.FC<SessionChatPaneProps> = ({
             </div>
           </div>
         )}
-        {(showScrollTop || showScrollBottom) && (
-          <div
-            className="pointer-events-none absolute right-1 bottom-4 z-20 transition-opacity duration-300"
-            style={{ opacity: scrollActive ? 1 : 0, pointerEvents: scrollActive ? undefined : 'none' }}
-          >
-            <div className="pointer-events-auto flex flex-col gap-2">
-              {showScrollTop && (
-                <button
-                  type="button"
-                  onClick={scrollToTop}
-                  className="w-8 h-8 bg-panel border border-border/70 rounded-full shadow-md flex items-center justify-center text-textMuted hover:text-primary hover:bg-primary/10 transition-colors"
-                  title="滚动到顶部"
-                >
-                  <ChevronUp size={18} />
-                </button>
-              )}
-              {showScrollBottom && (
-                <button
-                  type="button"
-                  onClick={scrollToBottom}
-                  className="w-8 h-8 bg-panel border border-border/70 rounded-full shadow-md flex items-center justify-center text-textMuted hover:text-primary hover:bg-primary/10 transition-colors"
-                  title="滚动到底部"
-                >
-                  <ChevronDown size={18} />
-                </button>
-              )}
-            </div>
-          </div>
-        )}
+        <ChatScrollHud
+          scrollRef={listRef}
+          onUnpin={markUnpinnedFromBottom}
+        />
         <ChatTimeline
           scrollRef={listRef}
           entries={timeline}
           className="h-full min-h-0 overflow-y-auto px-2 sm:px-4 py-3 sm:py-4"
-          onScroll={handleScroll}
           columnClass={columnClass}
           unpinRef={userScrolledRef}
           freezeRef={isFrozenRef}
@@ -481,31 +405,29 @@ export const SessionChatPane: React.FC<SessionChatPaneProps> = ({
                 }
                 if (entry.kind === 'workflow') {
                   const curBlock = entry.data as WorkflowBlock;
-                  if (
-                    i > 0 &&
-                    timeline[i - 1].kind === 'workflow' &&
-                    !(timeline[i - 1] as { kind: 'workflow'; data: WorkflowBlock }).data.completed &&
-                    !curBlock.completed
-                  ) {
+                  if (i > 0 && timeline[i - 1].kind === 'workflow') {
                     return null;
                   }
                   const blocks: WorkflowBlock[] = [curBlock];
-                  if (!curBlock.completed) {
-                    let j = i + 1;
-                    while (
-                      j < timeline.length &&
-                      timeline[j].kind === 'workflow' &&
-                      !(timeline[j] as { kind: 'workflow'; data: WorkflowBlock }).data.completed
-                    ) {
-                      blocks.push((timeline[j] as { kind: 'workflow'; data: WorkflowBlock }).data);
-                      j += 1;
-                    }
+                  let j = i + 1;
+                  while (j < timeline.length && timeline[j].kind === 'workflow') {
+                    blocks.push((timeline[j] as { kind: 'workflow'; data: WorkflowBlock }).data);
+                    j += 1;
                   }
                   const merged = blocks.length > 1 ? mergeWorkflowBlocks(blocks) : curBlock;
+                  // 任务已交付判定：工作流组之后紧跟 assistant 最终回复 → 停止动画。
+                  const nextAfterGroup = timeline[j];
+                  const turnDelivered =
+                    !!nextAfterGroup
+                    && nextAfterGroup.kind === 'message'
+                    && (nextAfterGroup.data as ChatMessage).role === 'assistant'
+                    && typeof (nextAfterGroup.data as ChatMessage).content === 'string'
+                    && !!(nextAfterGroup.data as ChatMessage).content.trim();
                   return (
                     <TimelineRow key={entryKey} lockLayout={lockLayout}>
                       <SoloActivityRow
                         block={merged}
+                        turnDelivered={turnDelivered}
                         expandLevel={expandLevel}
                         embedVisualizations={false}
                         uiMode={isSolo ? 'solo' : 'classic'}
@@ -514,26 +436,31 @@ export const SessionChatPane: React.FC<SessionChatPaneProps> = ({
                     </TimelineRow>
                   );
                 }
+                if (entry.kind === 'model_switch') {
+                  // 模型切换提示（独立轻量条目，不属于工作流统计）。
+                  const sw = entry.data;
+                  const label = sw.model
+                    ? t('aiChat.modelSwitched', { model: sw.model })
+                    : sw.text;
+                  return (
+                    <div key={entryKey} className="flex items-center gap-1.5 py-0.5 my-0.5 mx-0">
+                      <div className="flex-1 h-px bg-border/25" />
+                      <span className="text-[10px] text-textMuted/45 font-mono shrink-0">{label}</span>
+                      <div className="flex-1 h-px bg-border/25" />
+                    </div>
+                  );
+                }
                 return null;
           }}
         />
       </div>
 
-      {/* Classic: scroll-to-bottom centered above composer */}
-      {!isSolo && showScrollBottom && (
-        <div className="relative flex-shrink-0 z-20 pointer-events-none h-0">
-          <div className={`${columnClass} relative`}>
-            <button
-              type="button"
-              onClick={scrollToBottom}
-              className="pointer-events-auto absolute left-1/2 -translate-x-1/2 -top-10 w-8 h-8 rounded-full bg-bgLight border border-border/70 shadow-[0_2px_10px_rgba(0,0,0,0.08)] flex items-center justify-center hover:bg-primary/10 transition-opacity duration-300 cursor-pointer"
-              style={{ opacity: scrollActive ? 1 : 0.55 }}
-              title="滚动到底部"
-            >
-              <ChevronDown size={18} className="text-textMuted" />
-            </button>
-          </div>
-        </div>
+      {!isSolo && (
+        <ChatScrollComposerHint
+          scrollRef={listRef}
+          columnClass={columnClass}
+          onUnpin={markUnpinnedFromBottom}
+        />
       )}
     </div>
   );

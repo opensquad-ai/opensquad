@@ -14,6 +14,7 @@ export interface ShellJobPanelProps {
   output: string;
   running?: boolean;
   errored?: boolean;
+  statusLabel?: string;
   shellType?: string;
   jobId?: string;
 }
@@ -26,6 +27,7 @@ export const ShellJobPanel: React.FC<ShellJobPanelProps> = ({
   output,
   running = false,
   errored = false,
+  statusLabel: statusLabelProp,
   shellType,
   jobId,
 }) => {
@@ -54,11 +56,8 @@ export const ShellJobPanel: React.FC<ShellJobPanelProps> = ({
 
   if (!open) return null;
 
-  const statusLabel = running
-    ? 'Running…'
-    : errored
-      ? 'Failed / aborted'
-      : 'Completed';
+  const statusLabel = statusLabelProp
+    || (running ? 'Running…' : errored ? 'Failed' : 'Completed');
 
   const panel = (
     <div

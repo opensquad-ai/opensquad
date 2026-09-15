@@ -49,8 +49,19 @@ module.exports = {
         onPrimary: 'rgb(var(--color-on-primary) / <alpha-value>)',
         bgLight: 'rgb(var(--color-bg) / <alpha-value>)',
         /** One step darker than the page background — used for tooltips,
-         *  progress-bar tracks, badges and embedded panels. */
-        bgDark: 'color-mix(in srgb, rgb(var(--color-text-main)) 6%, rgb(var(--color-bg)))',
+         *  progress-bar tracks, badges and embedded panels.
+         *
+         *  IMPORTANT: the albedo lives in a nested `color-mix`, and the outer
+         *  mix is the one that consumes `<alpha-value>`. A plain
+         *  `color-mix(...)` with no `<alpha-value>` in the string makes
+         *  Tailwind DROP every opacity modifier: `bg-bgDark/60` then emits no
+         *  CSS rule at all, so the element renders with a fully transparent
+         *  background (that is how the chat tooltips, disabled chips and
+         *  diff toggles silently lost their surface). Do not "simplify" this
+         *  back to a single mix — locked by
+         *  `utils/themeTokenAlpha.scan.test.ts`. */
+        bgDark:
+          'color-mix(in srgb, color-mix(in srgb, rgb(var(--color-text-main)) 6%, rgb(var(--color-bg))) calc(<alpha-value> * 100%), transparent)',
         bgPage: 'rgb(var(--color-bg) / <alpha-value>)',
         /** Side rails: session list + workspace files (deeper) */
         rail: 'rgb(var(--color-rail) / <alpha-value>)',
@@ -66,6 +77,11 @@ module.exports = {
         // We wrap them in `rgb()` here so `color-mix` sees a real colour.
         // Use color-mix so opacity modifiers like border-border/60 actually apply
         border: 'color-mix(in srgb, rgb(var(--color-border)) calc(<alpha-value> * 100%), transparent)',
+        /** Containment stroke for floating surfaces (the message composer).
+         *  Distinct from `border`: this one is held to a contrast floor
+         *  against the page surface, because in dark mode the drop shadow
+         *  cannot delineate a card at all. See `BOUNDARY_CONTRAST_FLOOR`. */
+        boundary: 'rgb(var(--color-boundary) / <alpha-value>)',
         textMain: 'rgb(var(--color-text-main) / <alpha-value>)',
         textMuted: 'rgb(var(--color-text-muted) / <alpha-value>)',
       },

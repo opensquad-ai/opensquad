@@ -133,7 +133,10 @@ class ContextBuilder:
         "Do NOT repeat previous sentences or conversational filler. "
         "In a task loop, call a tool or take a new action — do not restate "
         "'I will now execute…'. Long-running servers/background jobs must use "
-        "`system.start_job` (not a blocking shell)."
+        "`system.start_job` (not a blocking shell). "
+        "When calling shell/command tools (run_session_job / start_job), ALWAYS "
+        "pass `description` — one short line stating the purpose of THIS command "
+        '(what it is for, e.g. "查看目录结构以定位配置文件"); it is shown to the user.'
     )
 
     def __init__(

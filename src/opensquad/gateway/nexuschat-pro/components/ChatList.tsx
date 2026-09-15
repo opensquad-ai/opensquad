@@ -6,8 +6,9 @@ import { Group, User } from '../types';
 import { uploadAPI, directMessageAPI } from '../services/api';
 import { OpenSquadLoader } from './OpenSquadLoader';
 import { getAvatarUrl, getLocalAvatarFallback } from '../utils/image';
-import { formatTime } from '../utils/time';
+import { formatTime, parseTimestampMs } from '../utils/time';
 import { parse } from 'marked';
+import { sanitizeHtml } from '../utils/safeHtml';
 import { playGentleNotificationSound, playSendSuccessSound } from '../utils/sounds';
 import { openThemeSettings } from '../utils/themeStore';
 import { AccountRailFooter } from './AccountRailFooter';
@@ -33,7 +34,100 @@ interface ChatListProps {
   onOpenCollabBoard?: () => void;
 }
 
-export const ChatList: React.FC<ChatListProps> = ({
+interface GroupRowProps {
+  group: Group;
+  isActive: boolean;
+  previewContent?: string;
+  previewTimestamp?: number;
+  onSelectGroup: (id: string, jumpToMention?: boolean) => void;
+  onPrefetchGroup?: (id: string) => void;
+  onContextMenu: (e: React.MouseEvent, groupId: string) => void;
+}
+
+/**
+ * One group row. Memoized so that an incoming message / presence change in one
+ * group re-renders only that row instead of the whole list (previously every
+ * App state tick rebuilt all rows — avatars, time labels, previews).
+ */
+const GroupRow = React.memo(function GroupRow({
+  group, isActive, previewContent, previewTimestamp, onSelectGroup, onPrefetchGroup, onContextMenu,
+}: GroupRowProps) {
+  const { t } = useTranslation();
+  return (
+    <div
+      data-testid="chat-list-item"
+      data-group-id={group.id}
+      onClick={() => onSelectGroup(group.id, false)}
+      // Hover/touch prefetch: load the group's messages in the background
+      // so the eventual click renders with no flash. The callback in App
+      // dedupes per session — each group is fetched at most once.
+      onPointerEnter={() => onPrefetchGroup?.(group.id)}
+      onContextMenu={(e) => onContextMenu(e, group.id)}
+      className={`flex items-center gap-3 px-5 py-4 cursor-pointer transition-colors border-l-4 ${
+        isActive
+          ? 'bg-primary/10 border-primary'
+          : 'hover:bg-bgLight border-transparent'
+      }`}
+    >
+      <div className="relative flex-shrink-0">
+          <img
+            src={getAvatarUrl(group.avatar, group.id, group.name)}
+            alt=""
+            className="w-12 h-12 rounded-full object-cover shadow-sm bg-border"
+            loading="lazy"
+            onError={(e) => {
+              const img = e.currentTarget;
+              if (img.dataset.fallbackApplied) return;
+              img.dataset.fallbackApplied = '1';
+              img.src = getLocalAvatarFallback(group.id, group.name);
+            }}
+          />
+          {group.unreadCount > 0 && (
+              <div className="absolute -top-1 -right-1 bg-red-500 text-white text-[10px] font-bold px-1.5 py-0.5 rounded-full border-2 border-panel min-w-[20px] text-center">
+                  {group.unreadCount}
+              </div>
+          )}
+          {/* Visual Cue for Unread Mention - Clickable to jump */}
+          {group.hasUnreadMention && (
+               <div
+                  className="absolute -bottom-1 -right-1 bg-yellow-500 text-white p-0.5 rounded-full border-2 border-panel hover:scale-110 transition-transform cursor-pointer z-10"
+                  title={t('chatList.youWereMentioned')}
+                  onClick={(e) => {
+                      e.stopPropagation();
+                      onSelectGroup(group.id, true);
+                  }}
+               >
+                   <AtSign size={10} />
+               </div>
+          )}
+          {/* Muted Indicator */}
+          {!group.notificationSoundEnabled && (
+              <div className="absolute bottom-0 left-1 bg-border text-textMuted p-0.5 rounded-full border border-panel">
+                  <VolumeX size={8} />
+              </div>
+          )}
+      </div>
+      <div className="flex-1 min-w-0">
+          <div className="flex justify-between items-baseline mb-1">
+              <h3 className={`text-sm font-semibold truncate ${isActive ? 'text-primary' : 'text-textMain'}`}>
+                  {group.name}
+              </h3>
+              <span className="text-[10px] text-textMuted shrink-0 ml-2">
+                  {previewTimestamp != null ? formatTime(previewTimestamp, t) : formatTime(group.createdAt, t)}
+              </span>
+          </div>
+          <p className="text-sm text-textMuted truncate flex items-center gap-1">
+              {group.hasUnreadMention && <span className="text-primary font-bold">@You</span>}
+              <span className="truncate">{previewContent || group.description}</span>
+          </p>
+          {/* Group ID */}
+          <p className="text-[10px] text-textMuted/50 mt-0.5 font-mono">ID: {group.id}</p>
+      </div>
+    </div>
+  );
+});
+
+const ChatListInner: React.FC<ChatListProps> = ({
     groups, activeGroupId, onSelectGroup, onCreateGroup, onJoinGroup, onToggleGroupSound, lastMessages, currentUser, onUpdateUser, onLogout, onSwitchView, onPrefetchGroup, onOpenSettings, onOpenCollabBoard
 }) => {
   const { t } = useTranslation();
@@ -261,7 +355,7 @@ export const ChatList: React.FC<ChatListProps> = ({
               content: msg.content,
               sender: msg.is_sender ? `To: ${msg.other_party}` : msg.sender,
               senderAvatar: msg.sender_avatar ?? undefined,
-              timestamp: new Date(msg.timestamp).getTime(),
+              timestamp: parseTimestampMs(msg.timestamp),
               // 发送者发送的消息应该始终标记为已读，接收者的消息用后端状态
               read: msg.is_sender ? true : msg.is_read,
               attachments: msg.attachments || [],
@@ -318,10 +412,11 @@ export const ChatList: React.FC<ChatListProps> = ({
       }
   };
 
-  const handleContextMenu = (e: React.MouseEvent, groupId: string) => {
+  // Stable identity so memoized GroupRow props hold across re-renders.
+  const handleContextMenu = useCallback((e: React.MouseEvent, groupId: string) => {
       e.preventDefault();
       setContextMenu({ x: e.clientX, y: e.clientY, groupId });
-  };
+  }, []);
 
   const handleOpenProfile = () => {
       if (currentUser) {
@@ -737,77 +832,16 @@ export const ChatList: React.FC<ChatListProps> = ({
 
       <div className="flex-1 overflow-y-auto custom-scrollbar">
         {groups.map(group => (
-          <div
+          <GroupRow
             key={group.id}
-            data-testid="chat-list-item"
-            data-group-id={group.id}
-            onClick={() => onSelectGroup(group.id, false)}
-            // Hover/touch prefetch: load the group's messages in the background
-            // so the eventual click renders with no flash. The callback in App
-            // dedupes per session — each group is fetched at most once.
-            onPointerEnter={() => onPrefetchGroup?.(group.id)}
-            onContextMenu={(e) => handleContextMenu(e, group.id)}
-            className={`flex items-center gap-3 px-5 py-4 cursor-pointer transition-colors border-l-4 ${
-              activeGroupId === group.id
-                ? 'bg-primary/10 border-primary'
-                : 'hover:bg-bgLight border-transparent'
-            }`}
-          >
-            <div className="relative flex-shrink-0">
-                <img
-                  src={getAvatarUrl(group.avatar, group.id, group.name)}
-                  alt=""
-                  className="w-12 h-12 rounded-full object-cover shadow-sm bg-border"
-                  loading="lazy"
-                  onError={(e) => {
-                    const img = e.currentTarget;
-                    if (img.dataset.fallbackApplied) return;
-                    img.dataset.fallbackApplied = '1';
-                    img.src = getLocalAvatarFallback(group.id, group.name);
-                  }}
-                />
-                {group.unreadCount > 0 && (
-                    <div className="absolute -top-1 -right-1 bg-red-500 text-white text-[10px] font-bold px-1.5 py-0.5 rounded-full border-2 border-panel min-w-[20px] text-center">
-                        {group.unreadCount}
-                    </div>
-                )}
-                {/* Visual Cue for Unread Mention - Clickable to jump */}
-                {group.hasUnreadMention && (
-                     <div
-                        className="absolute -bottom-1 -right-1 bg-yellow-500 text-white p-0.5 rounded-full border-2 border-panel hover:scale-110 transition-transform cursor-pointer z-10"
-                        title={t('chatList.youWereMentioned')}
-                        onClick={(e) => {
-                            e.stopPropagation();
-                            onSelectGroup(group.id, true);
-                        }}
-                     >
-                         <AtSign size={10} />
-                     </div>
-                )}
-                {/* Muted Indicator */}
-                {!group.notificationSoundEnabled && (
-                    <div className="absolute bottom-0 left-1 bg-border text-textMuted p-0.5 rounded-full border border-panel">
-                        <VolumeX size={8} />
-                    </div>
-                )}
-            </div>
-            <div className="flex-1 min-w-0">
-                <div className="flex justify-between items-baseline mb-1">
-                    <h3 className={`text-sm font-semibold truncate ${activeGroupId === group.id ? 'text-primary' : 'text-textMain'}`}>
-                        {group.name}
-                    </h3>
-                    <span className="text-[10px] text-textMuted shrink-0 ml-2">
-                        {lastMessages[group.id] ? formatTime(lastMessages[group.id].timestamp, t) : formatTime(group.createdAt, t)}
-                    </span>
-                </div>
-                <p className="text-sm text-textMuted truncate flex items-center gap-1">
-                    {group.hasUnreadMention && <span className="text-primary font-bold">@You</span>}
-                    <span className="truncate">{lastMessages[group.id]?.content || group.description}</span>
-                </p>
-                {/* Group ID */}
-                <p className="text-[10px] text-textMuted/50 mt-0.5 font-mono">ID: {group.id}</p>
-            </div>
-          </div>
+            group={group}
+            isActive={activeGroupId === group.id}
+            previewContent={lastMessages[group.id]?.content}
+            previewTimestamp={lastMessages[group.id]?.timestamp}
+            onSelectGroup={onSelectGroup}
+            onPrefetchGroup={onPrefetchGroup}
+            onContextMenu={handleContextMenu}
+          />
         ))}
       </div>
 
@@ -1264,7 +1298,11 @@ export const ChatList: React.FC<ChatListProps> = ({
                             <div
                                 className="prose prose-sm max-w-none text-textMain whitespace-pre-wrap"
                                 dangerouslySetInnerHTML={{
-                                    __html: typeof parse === 'function' ? parse(selectedMessage.content) : selectedMessage.content
+                                    __html: sanitizeHtml(
+                                        (typeof parse === 'function'
+                                            ? parse(selectedMessage.content)
+                                            : selectedMessage.content) as string
+                                    )
                                 }}
                             />
 
@@ -1528,3 +1566,8 @@ export const ChatList: React.FC<ChatListProps> = ({
     </div>
   );
 };
+
+// Memoized: App re-renders on every WS tick (presence, background-group
+// messages); with stabilized callbacks this skips re-rendering the whole list
+// unless its own props actually changed.
+export const ChatList = React.memo(ChatListInner);

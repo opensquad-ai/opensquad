@@ -137,15 +137,17 @@ def run_launcher():
         print(f"[run] Failed to create import spec for {launcher_path}", file=sys.stderr)
         sys.exit(1)
     mod = importlib.util.module_from_spec(spec)
+    # Register before exec_module so circular imports and the management API's
+    # `from opensquad.launcher_main import _plugin_services` hit THIS copy.
+    # Without the canonical alias, Service Manager lists plugins from disk
+    # but Start 404s on an empty second registry.
+    sys.modules["_opensquad_launcher_entry"] = mod
+    sys.modules["opensquad.launcher_main"] = mod
     spec.loader.exec_module(mod)
 
     if not hasattr(mod, "main"):
         print(f"[run] {launcher_path} has no main() — not a valid launcher entry", file=sys.stderr)
         sys.exit(1)
-
-    # Re-export the module so code that does `from opensquad import launcher`-
-    # style lookups (none currently, but keeps the runtime sane) can find it.
-    sys.modules["_opensquad_launcher_entry"] = mod
 
     print("==========================================")
     print("   OpenSquad Launcher Starting...")
@@ -172,12 +174,21 @@ def run_agent():
     import time
     import traceback
 
-    from opensquad.agents_boot import main as agent_main
+    from opensquad.agents_boot import (
+        _acquire_agent_lock,
+        _agent_lock_path,
+    )
+    from opensquad.agents_boot import (
+        main as agent_main,
+    )
 
     parser = argparse.ArgumentParser(description="Boot an AI agent from config")
     parser.add_argument("--agent-dir", required=True, help="Path to agent directory containing config.json")
     parser.add_argument("--port", type=int, help="Override web server port")
     args = parser.parse_args()
+
+    if not _acquire_agent_lock(args.agent_dir):
+        sys.exit(0)
 
     try:
         asyncio.run(agent_main(args.agent_dir, override_port=args.port))
@@ -207,6 +218,11 @@ def run_agent():
         except Exception:
             pass
         raise
+    finally:
+        try:
+            os.remove(_agent_lock_path(args.agent_dir))
+        except OSError:
+            pass
 
 
 def run_playwright_install(argv: list[str] | None = None):

@@ -135,5 +135,95 @@ async def test_namespace_only_name_defaults_to_search():
     assert result == "hit:福州天气"
 
 
+async def test_shell_alias_dispatches_to_run_session_job():
+    registry = ToolRegistry()
+
+    class SystemTools:
+        @staticmethod
+        def run_session_job(command: str = "", timeout: float = 120.0):
+            return f"ran:{command}"
+
+    registry.register(SystemTools, "system", level="core")
+    assert registry.resolve_tool_alias("shell") == "system.run_session_job"
+    assert registry.resolve_tool_alias("system.shell") == "system.run_session_job"
+    assert registry.resolve_tool_alias("system__shell") == "system.run_session_job"
+    assert registry.resolve_tool_alias("system shell") == "system.run_session_job"
+    assert registry.resolve_tool_alias("执行命令") == "system.run_session_job"
+
+    result = await registry.call("shell", {"command": "dir /b"})
+    assert result == "ran:dir /b"
+    result2 = await registry.call("system.shell", {"command": "echo hi"})
+    assert result2 == "ran:echo hi"
+    result3 = await registry.call("cmd", {"command": "cd /d c:\\tmp && dir /b"})
+    assert result3.startswith("ran:")
+
+
+async def test_filesystem_and_search_aliases():
+    registry = ToolRegistry()
+
+    class FileTools:
+        @staticmethod
+        def read_file(path: str, start_line: int = 1):
+            return f"read:{path}:{start_line}"
+
+        @staticmethod
+        def search_files(path: str = ".", pattern: str = "", include: str = "*"):
+            return f"grep:{path}:{pattern}:{include}"
+
+        @staticmethod
+        def find_files(path: str = ".", pattern: str = "**/*"):
+            return f"glob:{path}:{pattern}"
+
+        @staticmethod
+        def list_directory(path: str = "."):
+            return f"ls:{path}"
+
+        @staticmethod
+        def replace_in_file(path: str, old_str: str, new_str: str, replace_all: bool = False):
+            return f"edit:{path}:{old_str}->{new_str}:{replace_all}"
+
+        @staticmethod
+        def write_file(path: str, content: str):
+            return f"write:{path}:{content}"
+
+    class WebSearchTools:
+        @staticmethod
+        def search(query: str = "", queries=None):
+            return f"web:{query or queries}"
+
+        @staticmethod
+        def fetch(urls=None):
+            return f"fetch:{urls}"
+
+    registry.register(FileTools, "filesystem", level="core")
+    registry.register(WebSearchTools, "websearch", level="core")
+
+    assert "read:" in await registry.call("read", {"file_path": "a.py"})
+    assert "grep:" in await registry.call("grep", {"pattern": "TODO", "path": "src", "glob": "*.py"})
+    assert "glob:" in await registry.call("glob", {"glob_pattern": "**/*.ts"})
+    assert "ls:" in await registry.call("ls", {"path": "."})
+    assert "edit:" in await registry.call(
+        "str_replace",
+        {"path": "a.py", "old_string": "foo", "new_string": "bar"},
+    )
+    assert "write:" in await registry.call("create_file", {"path": "a.py", "contents": "hi"})
+    assert "web:" in await registry.call("search", {"query": "福州天气"})
+    assert "grep:" in await registry.call("search", {"pattern": "TODO"})
+    assert "fetch:" in await registry.call("webfetch", {"url": "https://example.com"})
+    listed = await registry.call("list_tools", {})
+    assert "filesystem" in listed and "websearch" in listed
+
+
+async def test_unknown_kwargs_are_dropped():
+    registry = ToolRegistry()
+    registry.register(SampleTools, "test_tools", level="core")
+    result = await registry.call(
+        "test_tools.sample_function",
+        {"arg1": "hello", "job_name": "x", "stat": True},
+    )
+    assert "Success: arg1=hello" in result
+    assert "Error:" not in result
+
+
 if __name__ == "__main__":
     asyncio.run(test_format_conversion())

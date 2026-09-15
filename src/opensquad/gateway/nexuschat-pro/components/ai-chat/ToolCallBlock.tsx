@@ -14,22 +14,25 @@
  */
 import React, { useState, useMemo } from 'react';
 import {
-  ChevronDown, ChevronRight,
   CheckCircle, XCircle,
   Code2, AlignLeft, List,
 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { marked } from 'marked';
+import { sanitizeHtml, escapeHtml } from '../../utils/safeHtml';
 import { OpenSquadLoader } from '../OpenSquadLoader';
+import { Collapse, FoldChevron, useFold } from '../Collapse';
 import { FileDiffBlock, extractFileEditInfo, parsePartialFileToolArgs, applyEditDiffContext } from './FileDiffBlock';
 
 // ---- Markdown renderer (reuses the app-wide prose styles) ----
 
+// Tool results are the single most untrusted string in the app (they come from
+// MCP servers / shell output / remote files) and were rendered raw. Sanitize.
 function renderMarkdown(text: string): string {
   try {
-    return marked.parse(text, { breaks: true, async: false }) as string;
+    return sanitizeHtml(marked.parse(text, { breaks: true, async: false }) as string);
   } catch {
-    return text;
+    return escapeHtml(text);
   }
 }
 
@@ -145,7 +148,7 @@ interface ToolCallBlockProps {
   onFileClick?: (path: string) => void;
 }
 
-export const ToolCallBlock: React.FC<ToolCallBlockProps> = ({
+const ToolCallBlockInner: React.FC<ToolCallBlockProps> = ({
   toolName,
   args,
   result,
@@ -160,23 +163,28 @@ export const ToolCallBlock: React.FC<ToolCallBlockProps> = ({
 }) => {
   const { t } = useTranslation();
   const storageKey = persistKey ? `tool_call_open_${persistKey}` : null;
-  const [isOpen, setIsOpen] = useState(false);
+  // Fold state lives in the shared primitive so expanding/collapsing eases like
+  // every other fold. The body is mounted lazily (`mounted`) because a tool
+  // result is the heaviest string in the app — Markdown-parsing every collapsed
+  // block on first paint would be a real cost; `useFold` still animates that
+  // very first expansion.
+  const { open: isOpen, mounted: bodyMounted, toggle: toggleOpen, setOpenNow } = useFold(false);
 
-  // Restore persisted open/close state when key changes
+  // Restore persisted open/close state when key changes. `setOpenNow` (not
+  // `setOpen`) — a restored block must appear already open, not animate open
+  // right after paint.
   React.useEffect(() => {
     if (!storageKey) {
-      setIsOpen(false);
+      setOpenNow(false);
       return;
     }
     try {
       const raw = localStorage.getItem(storageKey);
-      if (raw === 'true') setIsOpen(true);
-      else if (raw === 'false') setIsOpen(false);
-      else setIsOpen(false);
+      setOpenNow(raw === 'true');
     } catch {
-      setIsOpen(false);
+      setOpenNow(false);
     }
-  }, [storageKey]);
+  }, [storageKey, setOpenNow]);
 
   // Theme colours: amber for normal tool calls, violet for sub-agent calls
   const borderBg      = subAgent ? 'border-violet-500/20 bg-violet-500/5'  : 'border-amber-500/20 bg-amber-500/5';
@@ -242,10 +250,10 @@ export const ToolCallBlock: React.FC<ToolCallBlockProps> = ({
       {/* Header */}
       <div
         className={`flex items-center gap-1.5 px-2 py-1.5 ${hasDetails ? `cursor-pointer ${hoverBg}` : ''} transition-colors select-none`}
+        aria-expanded={hasDetails ? isOpen : undefined}
         onClick={() => {
           if (!hasDetails) return;
-          const next = !isOpen;
-          setIsOpen(next);
+          const next = toggleOpen();
           if (storageKey) {
             try { localStorage.setItem(storageKey, String(next)); } catch {}
           }
@@ -264,16 +272,13 @@ export const ToolCallBlock: React.FC<ToolCallBlockProps> = ({
             {subTaskLabel}
           </span>
         )}
-        {hasDetails && (
-          isOpen
-            ? <ChevronDown size={12} className="text-textMuted flex-shrink-0" />
-            : <ChevronRight size={12} className="text-textMuted flex-shrink-0" />
-        )}
+        {hasDetails && <FoldChevron open={isOpen} />}
       </div>
 
-      {/* Expanded: Arguments + Result */}
-      {isOpen && (
-        <div className={`border-t ${dividerBorder}`}>
+      {/* Expanded: Arguments + Result — stays mounted so the fold can animate. */}
+      <Collapse open={isOpen}>
+        {bodyMounted ? (
+          <div className={`border-t ${dividerBorder}`}>
           {isWebFilePushTool && hasDeliveryWarning && (
             <div className="mx-2 mt-2 mb-1 rounded-md border border-red-500/30 bg-red-500/10 px-2 py-1.5">
               <div className="text-[10px] text-red-300 font-medium">Delivery warning</div>
@@ -314,8 +319,11 @@ export const ToolCallBlock: React.FC<ToolCallBlockProps> = ({
               <ResultPane result={resultStr} />
             </div>
           )}
-        </div>
-      )}
+          </div>
+        ) : null}
+      </Collapse>
     </div>
   );
 };
+
+export const ToolCallBlock = React.memo(ToolCallBlockInner);

@@ -90,6 +90,23 @@ def test_mode_prompt_section():
     assert "request_switch" in mode_prompt_section("build")
 
 
+def test_followup_offer_rides_both_modes():
+    """对话后续预期: the "offer follow-ups before your final answer" rule must
+    reach the model in EVERY mode.
+
+    plan and build share this one section, so gating it on a single mode (or
+    dropping it from ``mode_prompt_section``) would silently kill the chips
+    with no error anywhere — the tool would still be registered and callable,
+    just never called.
+    """
+    for mode in ("plan", "build", ""):
+        section = mode_prompt_section(mode)
+        assert "followup_tools__suggest_followups" in section, mode
+        # The timing rule is the whole point: end of tool flow, before the answer.
+        assert "final answer" in section, mode
+        assert "1–3" in section, mode
+
+
 @pytest.mark.asyncio
 async def test_apply_agent_mode_nudges_only_on_approval(monkeypatch):
     nudges: list[str] = []

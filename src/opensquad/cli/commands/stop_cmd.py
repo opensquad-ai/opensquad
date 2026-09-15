@@ -737,19 +737,23 @@ def run_stop(args):
             print("[stop] Launcher port not listening, skipping graceful shutdown.")
         else:
             import urllib.error
-            import urllib.request
+
+            from opensquad.utils.local_http import open_local
 
             try:
-                req = urllib.request.Request(
+                # open_local: an ambient HTTP_PROXY must not swallow this
+                # loopback POST, otherwise we force-kill a live launcher and
+                # lose in-flight work instead of draining it.
+                # Short timeout: if the launcher is busy (e.g. slow plugin dep
+                # checks like lark_oapi's ~12s import) and can't answer quickly,
+                # fail fast and let the force-kill below do the cleanup.
+                open_local(
                     f"http://127.0.0.1:{launcher_port}/api/shutdown",
                     method="POST",
                     data=json.dumps({"timeout": 5}).encode("utf-8"),
                     headers={"Content-Type": "application/json"},
+                    timeout=1,
                 )
-                # Short timeout: if the launcher is busy (e.g. slow plugin dep
-                # checks like lark_oapi's ~12s import) and can't answer quickly,
-                # fail fast and let the force-kill below do the cleanup.
-                urllib.request.urlopen(req, timeout=1)
                 print("[stop] Launcher acknowledged shutdown.")
                 # Brief wait for processes to exit gracefully, then verify
                 for _ in range(2):

@@ -3,7 +3,13 @@ import { type RefObject, useEffect, useState } from 'react';
 export const DEFAULT_ESTIMATE = 96;
 export const DEFAULT_OVERSCAN = 14;
 export const ALWAYS_RENDER_TAIL = 8;
-export const WINDOW_AFTER = 48;
+/** Native layout is smoother than estimated spacers; only window huge sessions. */
+export const WINDOW_AFTER = 80;
+/** While the user is dragging the main thumb, mount everything up to this
+ *  count so estimated 96px spacers cannot fight native scrollbar geometry. */
+export const FULL_MOUNT_WHILE_SCROLLING = 240;
+/** Rows kept mounted while stick-to-bottom follow is active. */
+export const FOLLOW_TAIL = 48;
 
 export type VirtualRange = { start: number; end: number };
 
@@ -15,6 +21,58 @@ export type TimelineWindowLayout = {
   tailStart: number;
 };
 
+export function fullTimelineRange(count: number): VirtualRange {
+  return { start: 0, end: Math.max(0, count - 1) };
+}
+
+export function tailTimelineRange(count: number, visible = FOLLOW_TAIL): VirtualRange {
+  if (count <= 0) return { start: 0, end: 0 };
+  return { start: Math.max(0, count - visible), end: count - 1 };
+}
+
+/** Grow the window to cover the viewport. Never shrink — spacer height
+ *  changes against a 96px estimate are what make the main thumb jitter. */
+export function expandTimelineRange(
+  prev: VirtualRange,
+  visStart: number,
+  visEnd: number,
+  count: number,
+): VirtualRange {
+  const start = Math.max(0, Math.min(prev.start, visStart));
+  const end = Math.min(Math.max(0, count - 1), Math.max(prev.end, visEnd));
+  return prev.start === start && prev.end === end ? prev : { start, end };
+}
+
+export function nextTimelineRange(opts: {
+  count: number;
+  prev: VirtualRange;
+  scrolling: boolean;
+  unpin: boolean;
+  visStart: number;
+  visEnd: number;
+  windowAfter?: number;
+  fullMountLimit?: number;
+}): VirtualRange {
+  const windowAfter = opts.windowAfter ?? WINDOW_AFTER;
+  const fullMountLimit = opts.fullMountLimit ?? FULL_MOUNT_WHILE_SCROLLING;
+  if (opts.count <= windowAfter) {
+    const next = fullTimelineRange(opts.count);
+    return opts.prev.start === next.start && opts.prev.end === next.end ? opts.prev : next;
+  }
+  if (opts.scrolling) {
+    if (opts.count <= fullMountLimit) {
+      const next = fullTimelineRange(opts.count);
+      return opts.prev.start === next.start && opts.prev.end === next.end ? opts.prev : next;
+    }
+    return opts.prev;
+  }
+  if (!opts.unpin) {
+    const next = { start: opts.prev.start, end: opts.count - 1 };
+    return opts.prev.start === next.start && opts.prev.end === next.end ? opts.prev : next;
+  }
+  return expandTimelineRange(opts.prev, opts.visStart, opts.visEnd, opts.count);
+}
+
 /**
  * Render only timeline rows near the scrollport. Off-screen rows become
  * fixed-height spacers so long sessions do not mount thousands of bubbles.
@@ -22,49 +80,72 @@ export type TimelineWindowLayout = {
 export function useTimelineVirtualRange(
   scrollRef: RefObject<HTMLElement | null>,
   count: number,
-  estimatePx = DEFAULT_ESTIMATE,
-  overscan = DEFAULT_OVERSCAN,
+  opts?: {
+    estimatePx?: number;
+    overscan?: number;
+    unpinRef?: RefObject<boolean | null>;
+    scrollingRef?: RefObject<boolean>;
+  },
 ): VirtualRange {
-  const [range, setRange] = useState<VirtualRange>(() => ({
-    start: 0,
-    end: Math.max(0, count - 1),
-  }));
+  const estimatePx = opts?.estimatePx ?? DEFAULT_ESTIMATE;
+  const overscan = opts?.overscan ?? DEFAULT_OVERSCAN;
+  const unpinRef = opts?.unpinRef;
+  const scrollingRef = opts?.scrollingRef;
+  const [range, setRange] = useState<VirtualRange>(() =>
+    count <= WINDOW_AFTER ? fullTimelineRange(count) : tailTimelineRange(count),
+  );
 
   useEffect(() => {
     if (count <= WINDOW_AFTER) {
-      setRange({ start: 0, end: Math.max(0, count - 1) });
+      setRange(fullTimelineRange(count));
       return;
     }
     const el = scrollRef.current;
     if (!el) {
-      setRange({ start: Math.max(0, count - 40), end: count - 1 });
+      setRange(tailTimelineRange(count));
       return;
     }
 
+    let raf = 0;
     const update = () => {
       const top = el.scrollTop;
       const h = el.clientHeight || 600;
-      const dist = el.scrollHeight - top - h;
-      // Stick-to-bottom: keep the window locked on the tail so estimate
-      // mismatch cannot remount rows and shake the scrollbar.
-      if (dist < 160) {
-        const visible = Math.ceil(h / estimatePx) + overscan;
-        const start = Math.max(0, count - visible);
-        const end = count - 1;
-        setRange((prev) => (prev.start === start && prev.end === end ? prev : { start, end }));
-        return;
-      }
-      const start = Math.max(0, Math.floor(top / estimatePx) - overscan);
-      const end = Math.min(count - 1, Math.ceil((top + h) / estimatePx) + overscan);
-      setRange((prev) => (prev.start === start && prev.end === end ? prev : { start, end }));
+      const visStart = Math.max(0, Math.floor(top / estimatePx) - overscan);
+      const visEnd = Math.min(count - 1, Math.ceil((top + h) / estimatePx) + overscan);
+      setRange((prev) =>
+        nextTimelineRange({
+          count,
+          prev,
+          scrolling: !!scrollingRef?.current,
+          unpin: !!unpinRef?.current,
+          visStart,
+          visEnd,
+        }),
+      );
+    };
+
+    const onScroll = () => {
+      if (raf) return;
+      raf = requestAnimationFrame(() => {
+        raf = 0;
+        update();
+      });
+    };
+
+    const onPointerDown = () => {
+      if (scrollingRef) scrollingRef.current = true;
+      update();
     };
 
     update();
-    el.addEventListener('scroll', update, { passive: true });
+    el.addEventListener('scroll', onScroll, { passive: true });
+    el.addEventListener('pointerdown', onPointerDown);
     return () => {
-      el.removeEventListener('scroll', update);
+      el.removeEventListener('scroll', onScroll);
+      el.removeEventListener('pointerdown', onPointerDown);
+      if (raf) cancelAnimationFrame(raf);
     };
-  }, [scrollRef, count, estimatePx, overscan]);
+  }, [scrollRef, count, estimatePx, overscan, unpinRef, scrollingRef]);
 
   return range;
 }

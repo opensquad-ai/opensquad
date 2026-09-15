@@ -66,10 +66,12 @@ class Job:
                 env.setdefault("PYTHONUTF8", "1")
                 env.setdefault("PYTHONIOENCODING", "utf-8")
 
-            # Start process with redirected output
+            # Start process with redirected output.
+            # B602 suppressed below: shell execution is this tool's whole
+            # purpose — `shell` is an explicit constructor arg (default True).
             self.process = subprocess.Popen(
                 self.command,
-                shell=self.shell,
+                shell=self.shell,  # nosec B602
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,  # Merge stderr into stdout
                 stdin=subprocess.PIPE,
@@ -131,9 +133,11 @@ class Job:
                 # terminate() may not be sufficient on Windows; kill is more direct
                 if platform.system() == "Windows":
                     # Use taskkill to force-kill including child processes
+                    # B602 suppressed below: the pid is an int taken from our
+                    # own Popen handle, so there is no injection vector here.
                     subprocess.run(
                         f"taskkill /F /T /PID {self.process.pid}",
-                        shell=True,
+                        shell=True,  # nosec B602
                         stdout=subprocess.DEVNULL,
                         stderr=subprocess.DEVNULL,
                     )

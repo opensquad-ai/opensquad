@@ -53,13 +53,13 @@ def attach_xml_tool_preview(parser, emit_with_sid: Callable[[str, Any], None]) -
             args_key = json.dumps(args, sort_keys=True, ensure_ascii=False) if isinstance(args, dict) else str(args)
         except (TypeError, ValueError):
             args_key = str(args)
-        sig = (name, args_key)
+        sig = ("xml_preview_open", name, args_key)
         if sig == last_sig[0] and (now - last_at[0]) < 0.12:
             return
         last_sig[0] = sig
         last_at[0] = now
         payload: dict[str, Any] = {
-            "id": f"xml_preview_{name}",
+            "id": "xml_preview_open",
             "index": 0,
             "name": name,
             "arguments": args_key if isinstance(args, dict) else (args or ""),

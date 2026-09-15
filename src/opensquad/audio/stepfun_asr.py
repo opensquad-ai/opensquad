@@ -8,11 +8,13 @@ transcriptions client exists.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 import logging
 import os
 import struct
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -187,14 +189,18 @@ async def transcribe_file(
     cleanup: str | None = None
     ext = os.path.splitext(audio_path)[1].lower().lstrip(".")
     if ext in ("webm", "ogg", "opus"):
-        converted = _ffmpeg_to_wav(audio_path)
+        # ffmpeg is an external process (timeout=60s). Calling it synchronously
+        # blocks the whole event loop, so every WebSocket push and API request
+        # stalls for the duration.
+        converted = await asyncio.to_thread(_ffmpeg_to_wav, audio_path)
         if converted:
             work_path = converted
             cleanup = converted
 
     try:
-        with open(work_path, "rb") as f:
-            raw = f.read()
+        # Off the event loop: reading a multi-MB recording would otherwise stall
+        # every other request on this worker.
+        raw = await asyncio.to_thread(Path(work_path).read_bytes)
     except Exception as e:
         if cleanup and os.path.isfile(cleanup):
             try:
@@ -211,7 +217,8 @@ async def transcribe_file(
                 pass
         return {"success": False, "error": "ASR returned empty transcript (audio file too small)"}
 
-    b64 = base64.b64encode(raw).decode("ascii")
+    # CPU-bound on large payloads too, so keep it off the loop as well.
+    b64 = await asyncio.to_thread(lambda: base64.b64encode(raw).decode("ascii"))
     try:
         return await _transcribe_b64(
             api_key=api_key,
@@ -297,7 +304,7 @@ async def transcribe_bytes(
     """Transcribe in-memory audio bytes (wav/pcm/mp3 payload as-is)."""
     if not audio:
         return {"success": False, "error": "empty audio"}
-    b64 = base64.b64encode(audio).decode("ascii")
+    b64 = await asyncio.to_thread(lambda: base64.b64encode(audio).decode("ascii"))
     return await _transcribe_b64(
         api_key=api_key,
         base_url=base_url,
@@ -323,7 +330,7 @@ async def transcribe_pcm16le(
     """Transcribe raw PCM16LE by wrapping as WAV."""
     if not pcm or len(pcm) < 320:
         return {"success": False, "error": "PCM too short"}
-    wav = pcm16le_to_wav_bytes(pcm, sample_rate=int(sample_rate) or 24000)
+    wav = await asyncio.to_thread(pcm16le_to_wav_bytes, pcm, sample_rate=int(sample_rate) or 24000)
     return await transcribe_bytes(
         api_key=api_key,
         base_url=base_url,

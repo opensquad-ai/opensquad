@@ -283,3 +283,63 @@ async def test_apply_model_reload_reselects_strategy(monkeypatch):
     assert result is chat_api
     chat_api.reload_model.assert_awaited_once_with(new_model)
     assert called["model"]["model_name"] == new_model["model_name"]
+
+
+def test_should_use_agent_default_for_external_only():
+    assert session_model.should_use_agent_default("group:demo", "chatpro_group") is True
+    assert session_model.should_use_agent_default("chatpro", "chatpro_group") is True
+    assert session_model.should_use_agent_default("gateway", "web") is False
+    assert session_model.should_use_agent_default("", "web") is False
+
+
+@pytest.mark.asyncio
+async def test_bind_use_agent_default_ignores_stale_session_card(monkeypatch):
+    """Group ingress must not 401 on a pane's dead OpenCode override."""
+    session_api = SimpleNamespace(
+        model_config={"_card": "opencode_go__deepseek-v4-flash"},
+        config={"_card": "opencode_go__deepseek-v4-flash"},
+        base_url="https://opencode.ai/zen/go/v1",
+        reasoning_effort="high",
+        req=[],
+    )
+    root = SimpleNamespace(
+        model_config={"_card": "dots-studio_dots-3-note-preview_free"},
+        config={"_card": "dots-studio_dots-3-note-preview_free"},
+        base_url="https://openrouter.ai/api/v1",
+        reasoning_effort="high",
+        req=[],
+    )
+    runner = SimpleNamespace(
+        chat_api=root,
+        _root_chat_api=root,
+        _session_chat_apis={"sid-primary": session_api},
+        _session_model_cards={"sid-primary": "opencode_go__deepseek-v4-flash"},
+        _model_config={"_card": "dots-studio_dots-3-note-preview_free"},
+        _current_user_id="",
+    )
+    persisted: list[tuple[str, str]] = []
+    monkeypatch.setattr(session_model, "persist", lambda sid, card: persisted.append((sid, card)) or True)
+    monkeypatch.setattr(
+        model_switch,
+        "resolve_card",
+        lambda name: {
+            "_card": name,
+            "model_name": name,
+            "base_url": "https://openrouter.ai/api/v1" if "dots" in name else "https://opencode.ai/x",
+            "api_key": "k",
+        },
+    )
+
+    async def fake_apply(r, new_model, *, chat_api=None):
+        chat_api.model_config = dict(new_model)
+        chat_api.config = dict(new_model)
+        chat_api.base_url = new_model.get("base_url")
+        return chat_api
+
+    monkeypatch.setattr(model_switch, "apply_model_reload", fake_apply)
+
+    out = await session_model.bind_for_turn(runner, "sid-primary", use_agent_default=True)
+    assert session_model.current_api_card(out) == "dots-studio_dots-3-note-preview_free"
+    assert out.base_url.startswith("https://openrouter.ai")
+    assert persisted == []
+    assert runner._session_model_cards["sid-primary"] == "opencode_go__deepseek-v4-flash"

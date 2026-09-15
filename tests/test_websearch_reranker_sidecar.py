@@ -6,8 +6,11 @@ import time
 from unittest.mock import MagicMock
 
 _SERVICE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "src", "plugins", "websearch", "service"))
+_PLUGINS_DIR = os.path.abspath(os.path.join(_SERVICE_DIR, "..", ".."))
 if _SERVICE_DIR not in sys.path:
     sys.path.insert(0, _SERVICE_DIR)
+if _PLUGINS_DIR not in sys.path:
+    sys.path.insert(0, _PLUGINS_DIR)
 
 import reranker_sidecar
 

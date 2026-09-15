@@ -509,8 +509,10 @@ async def market_install_plugin(
     # 4. Extract zip to plugins/{plugin_id}/ (overwrite all files)
     zip_size_kb = len(zip_bytes) / 1024
     os.makedirs(PLUGINS_DIR, exist_ok=True)
-    file_count = 0
-    try:
+
+    def _extract() -> int:
+        """Blocking zip extraction — see the to_thread call for why."""
+        count = 0
         buf = io.BytesIO(zip_bytes)
         with zipfile.ZipFile(buf) as zf:
             for member in zf.infolist():
@@ -525,7 +527,14 @@ async def market_install_plugin(
                 if not member.is_dir():
                     with zf.open(member) as src, open(dest_path, "wb") as dst:
                         shutil.copyfileobj(src, dst)
-                    file_count += 1
+                    count += 1
+        return count
+
+    try:
+        # A plugin archive carrying node_modules is thousands of files: doing
+        # this inline freezes the gateway's single event loop (and with it every
+        # WS push / API request) for the whole extraction.
+        file_count = await asyncio.to_thread(_extract)
     except zipfile.BadZipFile as e:
         raise HTTPException(status_code=422, detail=f"Invalid zip archive: {e}")
     except Exception as e:
@@ -634,7 +643,13 @@ async def market_uninstall_plugin(
                 os.chmod(path, stat.S_IWRITE)
                 func(path)
 
-            shutil.rmtree(plugin_dest, onerror=_remove_readonly)
+            # rmtree walks the whole tree; a plugin carrying node_modules/.git is
+            # tens of thousands of files and takes seconds. This handler runs on
+            # the gateway's single event loop, so doing it inline froze every WS
+            # push and API request until the delete finished. Run it off-loop.
+            # NOTE: onerror must be passed by keyword — rmtree's 2nd positional
+            # parameter is ignore_errors.
+            await asyncio.to_thread(shutil.rmtree, plugin_dest, onerror=_remove_readonly)
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Failed to uninstall plugin: {e}")
 
@@ -931,33 +946,41 @@ async def market_install_skill(
         raise HTTPException(status_code=400, detail="Skill has no download_url")
 
     dest = os.path.join(_SKILLS_DIR, item_id)
-    installed_files: list[str] = []
-    total_size = 0
     try:
         client = _http()
         zip_resp = await client.get(download_url, follow_redirects=True)
         zip_resp.raise_for_status()
         zip_bytes_raw = zip_resp.content
         zip_size_kb = len(zip_bytes_raw) / 1024
-        zip_bytes = io.BytesIO(zip_bytes_raw)
-        with zipfile.ZipFile(zip_bytes) as zf:
-            members = zf.namelist()
-            prefix = members[0] if len(members) > 0 and members[0].endswith("/") else ""
-            os.makedirs(dest, exist_ok=True)
-            for member in members:
-                rel = member[len(prefix) :] if prefix and member.startswith(prefix) else member
-                if not rel:
-                    continue
-                target = os.path.join(dest, rel)
-                if member.endswith("/"):
-                    os.makedirs(target, exist_ok=True)
-                else:
-                    os.makedirs(os.path.dirname(target), exist_ok=True)
-                    with zf.open(member) as src, open(target, "wb") as dst:
-                        data = src.read()
-                        dst.write(data)
-                        installed_files.append(rel)
-                        total_size += len(data)
+
+        def _extract_skill() -> tuple[list[str], int]:
+            """Blocking zip extraction — see the to_thread call for why."""
+            installed: list[str] = []
+            size = 0
+            buf = io.BytesIO(zip_bytes_raw)
+            with zipfile.ZipFile(buf) as zf:
+                members = zf.namelist()
+                prefix = members[0] if len(members) > 0 and members[0].endswith("/") else ""
+                os.makedirs(dest, exist_ok=True)
+                for member in members:
+                    rel = member[len(prefix) :] if prefix and member.startswith(prefix) else member
+                    if not rel:
+                        continue
+                    target = os.path.join(dest, rel)
+                    if member.endswith("/"):
+                        os.makedirs(target, exist_ok=True)
+                    else:
+                        os.makedirs(os.path.dirname(target), exist_ok=True)
+                        with zf.open(member) as src, open(target, "wb") as dst:
+                            data = src.read()
+                            dst.write(data)
+                            installed.append(rel)
+                            size += len(data)
+            return installed, size
+
+        # Same reason as plugin install: a skill zip may carry node_modules, and
+        # writing thousands of files inline freezes the single event loop.
+        installed_files, total_size = await asyncio.to_thread(_extract_skill)
         total_size_kb = total_size / 1024
         logger.info(
             f"[Install] Skill '{item_id}': {zip_size_kb:.1f} KB zip → {len(installed_files)} files ({total_size_kb:.1f} KB) → {dest}"

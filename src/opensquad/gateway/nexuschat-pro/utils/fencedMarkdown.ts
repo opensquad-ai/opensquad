@@ -24,6 +24,11 @@ import csharp from 'highlight.js/lib/languages/csharp';
 import sql from 'highlight.js/lib/languages/sql';
 import ini from 'highlight.js/lib/languages/ini';
 import plaintext from 'highlight.js/lib/languages/plaintext';
+// Sanitizing policy lives in one place — see utils/safeHtml.ts for why.
+import { escapeHtml, sanitizeHtml } from './safeHtml';
+// Syntax-colour theme (GitHub Light / Palenight dark), injected on first use —
+// chat code wells otherwise inherit no token palette at all.
+import { ensureHljsTheme } from './codeHighlight';
 
 let _registered = false;
 
@@ -79,14 +84,6 @@ const LANG_ALIAS: Record<string, string> = {
   plain: 'plaintext',
 };
 
-function escapeHtml(s: string): string {
-  return s
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;');
-}
-
 function decodeBasicEntities(s: string): string {
   return s
     .replace(/&lt;/g, '<')
@@ -107,6 +104,20 @@ function resolveLang(raw: string): string {
   const key = (raw || '').trim().toLowerCase().split(/[\s,{]/)[0] || '';
   if (!key) return 'plaintext';
   return LANG_ALIAS[key] || key;
+}
+
+/** Agent-authored SVG may carry an XML prolog before the root element. */
+function stripSvgProlog(code: string): string {
+  return code
+    .replace(/^\s*<\?[\s\S]*?\?>/, '')
+    .replace(/^\s*<!DOCTYPE[^>]*>/i, '')
+    .trim();
+}
+
+/** True when the fence body is (essentially) a standalone `<svg>` document. */
+export function looksLikeSvgCode(code: string): boolean {
+  const body = stripSvgProlog(code);
+  return /^<svg[\s>]/i.test(body) && /<\/svg>\s*$/i.test(body);
 }
 
 function highlightCode(code: string, langHint: string): string {
@@ -130,6 +141,7 @@ function highlightCode(code: string, langHint: string): string {
  * Convert Markdown (incl. ```lang fences) to HTML with highlighted code blocks.
  */
 export function renderFencedMarkdown(text: string): string {
+  ensureHljsTheme();
   if (!text) return '';
   const src = closeOpenCodeFences(text);
   let html: string;
@@ -146,9 +158,23 @@ export function renderFencedMarkdown(text: string): string {
       const code = decodeBasicEntities(body.replace(/\n$/, ''));
       const langKey = (lang || '').split(/[\s,{]/)[0] || '';
       if (langKey.toLowerCase() === 'mermaid') {
-        // Placeholder for client-side mermaid.render (see mermaidHydrate.ts)
+        // Placeholder: show source until mermaid.render (only after stream complete).
         return (
-          `<div class="ai-mermaid" data-src="${encodeURIComponent(code)}"></div>`
+          `<div class="ai-mermaid" data-src="${encodeURIComponent(code)}">` +
+          `<pre class="ai-mermaid-fallback"><code>${escapeHtml(code)}</code></pre>` +
+          `</div>`
+        );
+      }
+      if (
+        langKey.toLowerCase() === 'svg' ||
+        ((langKey.toLowerCase() === 'xml' || langKey.toLowerCase() === 'html') && looksLikeSvgCode(code))
+      ) {
+        // Placeholder: sanitized + injected as a vector image post-mount
+        // (see hydrateSvgNodes in mermaidHydrate.ts).
+        return (
+          `<div class="ai-svg" data-src="${encodeURIComponent(code)}">` +
+          `<pre class="ai-svg-fallback"><code>${escapeHtml(code)}</code></pre>` +
+          `</div>`
         );
       }
       const highlighted = highlightCode(code, lang);
@@ -176,10 +202,17 @@ export function renderFencedMarkdown(text: string): string {
     },
   );
 
-  return html;
+  // Sanitize last: every branch above returns HTML that is injected verbatim
+  // into the DOM by the caller.
+  return sanitizeHtml(html);
 }
 
 /** Tailwind-friendly classes for prose + fenced code chrome. */
 export const AI_MARKDOWN_CLASS =
   'prose prose-sm prose-invert max-w-none break-words overflow-x-auto ai-markdown ' +
+  'prose-pre:my-2 prose-code:before:content-none prose-code:after:content-none';
+
+/** File pane Markdown: follow appearance (invert only in dark). */
+export const FILE_MARKDOWN_CLASS =
+  'prose prose-sm dark:prose-invert max-w-none break-words overflow-x-auto ai-markdown file-markdown ' +
   'prose-pre:my-2 prose-code:before:content-none prose-code:after:content-none';

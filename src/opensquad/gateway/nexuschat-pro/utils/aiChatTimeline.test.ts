@@ -313,6 +313,30 @@ describe('composeAssistantDisplayContent', () => {
     expect(composeAssistantDisplayContent('<timeout>60')).toBe('');
   });
 
+  it('does not hole-punch prose or code that mentions thought tags', () => {
+    const raw = [
+      'If a model outputs <thought> tags in the content stream, the code only removes the tags themselves:',
+      '```python',
+      'content = content.replace("<thought>", "").replace("</thought>", "")',
+      '```',
+      'That is the bug.',
+    ].join('\n');
+    const out = composeAssistantDisplayContent(raw);
+    expect(out).toContain('<thought> tags in the content stream');
+    expect(out).toContain('replace("<thought>", "")');
+    expect(out).toContain('replace("</thought>", "")');
+    expect(out).toContain('That is the bug.');
+  });
+
+  it('strips line-start thought blocks but keeps the surrounding reply', () => {
+    const raw = 'Hello\n<thought>\nduplicate dump\n</thought>\nDone.';
+    const out = composeAssistantDisplayContent(raw);
+    expect(out).toContain('Hello');
+    expect(out).toContain('Done.');
+    expect(out).not.toContain('duplicate dump');
+    expect(out).not.toMatch(/<\/?thought>/i);
+  });
+
   it('strips namespaced tool-as-tag XML so refresh does not dump shell commands', () => {
     const leaked = [
       '<system.run_session_job>',
@@ -757,20 +781,17 @@ describe('buildTimelineFromSession', () => {
     expect(tl.some((e) => e.kind === 'task_fold')).toBe(true);
     const fold = tl.find((e) => e.kind === 'task_fold');
     const nested = fold && fold.kind === 'task_fold' ? fold.data.entries : [];
-    const nestedKinds = nested.map((e) =>
-      e.kind === 'message' ? `msg:${e.data.role}:${String(e.data.content).slice(0, 8)}` : e.kind,
-    );
-    const firstProgress = nestedKinds.findIndex((x) => x.includes('已获取早盘'));
-    const noonProgress = nestedKinds.findIndex((x) => x.includes('已获取午盘'));
-    expect(firstProgress).toBeGreaterThanOrEqual(0);
-    expect(noonProgress).toBeGreaterThan(firstProgress);
-    const firstWf = nestedKinds.indexOf('workflow');
-    expect(firstWf).toBeGreaterThanOrEqual(0);
-    expect(firstWf).toBeLessThan(firstProgress);
-    const wfIndexes = nestedKinds
-      .map((x, i) => (x === 'workflow' ? i : -1))
-      .filter((i) => i >= 0);
-    expect(wfIndexes.some((i) => i > noonProgress)).toBe(true);
+    // 中间过程输出已降级为 workflow 内的 process_output 事件（不再以气泡出现）。
+    const wfBlocks = nested.filter((e) => e.kind === 'workflow') as Array<
+      Extract<TimelineEntry, { kind: 'workflow' }>
+    >;
+    expect(wfBlocks.length).toBeGreaterThanOrEqual(2);
+    const wf2 = wfBlocks[wfBlocks.length - 1];
+    const wf2Process = wf2.data.events.filter((ev) => ev.type === 'process_output');
+    expect(wf2Process.length).toBe(2);
+    // 两条过程输出按顺序挂在后一工作流块首（早盘 → 午盘）。
+    expect(String(wf2Process[0].content)).toContain('已获取早盘');
+    expect(String(wf2Process[1].content)).toContain('已获取午盘');
     expect(
       tl.some((e) => e.kind === 'message' && String(e.data.content).includes('最终报告')),
     ).toBe(true);
@@ -1073,9 +1094,16 @@ describe('task_fold / to_user_end_task', () => {
     if (tl[1].kind === 'task_fold') {
       expect(tl[1].data.collapsed).toBe(true);
       expect(tl[1].data.entries.some((e) => e.kind === 'workflow')).toBe(true);
-      expect(tl[1].data.entries.some((e) => e.kind === 'message' && e.data.content === 'mid notice')).toBe(
-        true,
-      );
+      // 中间输出 "mid notice" 已降级为 workflow 内的 process_output 事件。
+      expect(
+        tl[1].data.entries.some(
+          (e) =>
+            e.kind === 'workflow'
+            && e.data.events.some(
+              (ev) => ev.type === 'process_output' && String(ev.content).includes('mid notice'),
+            ),
+        ),
+      ).toBe(true);
       // Sub-agent thoughts after mid progress stay in the fold (later workflow).
       expect(
         tl[1].data.entries.some(

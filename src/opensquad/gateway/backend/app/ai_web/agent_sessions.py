@@ -317,6 +317,9 @@ class AgentSessionReader:
         polling) do not re-parse large history JSON files. ``limit``/``offset``
         let the sidebar render the newest page first and load older pages on
         demand instead of scanning every history file at startup.
+
+        The unique external-reply (comms) session is always included on page 0
+        even when it is older than the newest ``limit`` files.
         """
         self._reload()
         sessions: list[dict[str, Any]] = []
@@ -529,6 +532,32 @@ class AgentSessionReader:
                         self._list_meta_cache.pop(k, None)
             except Exception as e:
                 logger.error(f"Error scanning history: {e}")
+
+        # Page 0 must include the comms/primary session even if it is older
+        # than the newest `limit` files (sidebar only loads the first page
+        # until the user scrolls).
+        if offset == 0 and primary_id and all(s.get("id") != primary_id for s in sessions):
+            pinned_entry: dict[str, Any] | None = None
+            fp = os.path.join(self.history_dir, f"{primary_id}.json")
+            if os.path.isfile(fp):
+                meta = _get_list_meta(primary_id, fp)
+                if not _hidden(primary_id, origin=str(meta.get("origin") or "")):
+                    pinned_entry = {
+                        "id": primary_id,
+                        "title": meta.get("title") or primary_id,
+                        "preview": meta.get("preview") or "",
+                        "current": False,
+                        "primary": True,
+                        "created_at": meta.get("created_at"),
+                        "last_updated": meta.get("last_updated"),
+                    }
+                    if meta.get("origin"):
+                        pinned_entry["origin"] = meta.get("origin")
+            if pinned_entry is not None:
+                insert_at = 1 if sessions and sessions[0].get("current") else 0
+                sessions.insert(insert_at, pinned_entry)
+                if limit is not None and len(sessions) > limit:
+                    del sessions[limit:]
 
         return sessions
 

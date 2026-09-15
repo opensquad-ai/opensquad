@@ -248,6 +248,37 @@ class TestAgentSessionReader:
         assert [s["id"] for s in first] == ["cur-1", "hist-2"]
         assert [s["id"] for s in second] == ["hist-1", "hist-0"]
 
+    def test_get_session_list_pins_primary_on_first_page(self, tmp_path):
+        """Oldest comms/primary session still appears on page 0."""
+        save_dir = tmp_path / "sessions"
+        history_dir = tmp_path / "history"
+        os.makedirs(save_dir, exist_ok=True)
+        os.makedirs(history_dir, exist_ok=True)
+        (save_dir / "current_session.json").write_text(
+            json.dumps({"id": "cur-1", "title": "Current", "messages": []}),
+            encoding="utf-8",
+        )
+        (save_dir / "primary_session.json").write_text(
+            json.dumps({"primary_session_id": "hist-0"}),
+            encoding="utf-8",
+        )
+        for idx in range(3):
+            path = history_dir / f"hist-{idx}.json"
+            path.write_text(
+                json.dumps({"id": f"hist-{idx}", "title": f"Hist {idx}", "messages": []}),
+                encoding="utf-8",
+            )
+            ts = 1_700_000_000 + idx
+            os.utime(path, (ts, ts))
+
+        reader = AgentSessionReader(str(save_dir), str(history_dir))
+        first = reader.get_session_list(limit=2, offset=0)
+        ids = [s["id"] for s in first]
+        assert ids[0] == "cur-1"
+        assert "hist-0" in ids
+        assert any(s.get("primary") for s in first if s["id"] == "hist-0")
+        assert len(first) == 2
+
     def test_current_session_log_reload_avoids_snapshot_reread(self, tmp_path, monkeypatch):
         """New incremental log lines replay without re-opening current_session.json."""
         save_dir = tmp_path / "sessions"

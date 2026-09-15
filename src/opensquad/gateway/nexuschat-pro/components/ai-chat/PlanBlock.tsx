@@ -4,16 +4,15 @@
  * Header: Plan · done/total · chevron
  * Steps: green check (done+strike) · primary arrow (running) · dashed circle (pending)
  */
-import React, { useEffect, useState } from 'react';
+import React, { useEffect } from 'react';
 import {
   ListTodo,
-  ChevronDown,
-  ChevronRight,
   CircleDashed,
   ArrowRightCircle,
   CheckCircle2,
   XCircle,
 } from 'lucide-react';
+import { Collapse, FoldChevron, useFold } from '../Collapse';
 
 export interface PlanStep {
   content: string;
@@ -49,11 +48,11 @@ export const PlanBlock: React.FC<PlanBlockProps> = ({
   defaultOpen = true,
 }) => {
   const hasRunning = steps.some((s) => s.status === 'running');
-  const [isOpen, setIsOpen] = useState(defaultOpen || hasRunning);
+  const { open: isOpen, toggle, setOpen } = useFold(defaultOpen || hasRunning);
 
   useEffect(() => {
-    if (defaultOpen || hasRunning) setIsOpen(true);
-  }, [defaultOpen, hasRunning]);
+    if (defaultOpen || hasRunning) setOpen(true);
+  }, [defaultOpen, hasRunning, setOpen]);
 
   if (!steps || steps.length === 0) return null;
 
@@ -69,8 +68,9 @@ export const PlanBlock: React.FC<PlanBlockProps> = ({
     >
       <button
         type="button"
+        aria-expanded={isOpen}
         className="w-full flex items-center gap-2 px-3.5 py-2 cursor-pointer hover:bg-primary/10 transition-colors select-none text-left bg-transparent border-0"
-        onClick={() => setIsOpen(!isOpen)}
+        onClick={toggle}
       >
         <ListTodo size={14} className="text-primary/85 flex-shrink-0" />
         <span className="text-[13px] text-textMain font-medium flex-1 truncate">
@@ -79,14 +79,10 @@ export const PlanBlock: React.FC<PlanBlockProps> = ({
         <span className="text-[11px] text-textMuted tabular-nums">
           {doneCount}/{total}
         </span>
-        {isOpen ? (
-          <ChevronDown size={14} className="text-textMuted flex-shrink-0" />
-        ) : (
-          <ChevronRight size={14} className="text-textMuted flex-shrink-0" />
-        )}
+        <FoldChevron open={isOpen} size={14} />
       </button>
 
-      {isOpen && (
+      <Collapse open={isOpen}>
         <div className="border-t border-border/50 px-3.5 py-2 space-y-1.5">
           {steps.map((step, i) => (
             <div key={i} className="flex items-start gap-2">
@@ -112,7 +108,7 @@ export const PlanBlock: React.FC<PlanBlockProps> = ({
             </div>
           ))}
         </div>
-      )}
+      </Collapse>
     </div>
   );
 };

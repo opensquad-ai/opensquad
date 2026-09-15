@@ -43,10 +43,22 @@ export interface ThemePalette {
   stage: string;
   panel: string;
   border: string;
+  /** Containment stroke for a *floating* surface (the message composer).
+   *  `border` is intentionally faint — dividers and card edges read better
+   *  soft — which leaves a floating surface with no boundary at all once the
+   *  drop shadow stops working (black-on-near-black). This one is held to
+   *  `BOUNDARY_CONTRAST_FLOOR` against the page surface instead. */
+  boundary: string;
   bubbleSelf: string;
   bubbleOther: string;
   textMain: string;
   textMuted: string;
+  /** Achieved (measured) contrast ratio of `textMain` against the page
+   *  surface. Exposed so the settings panel can show the real number instead
+   *  of echoing the requested target back at the user. */
+  contrastMain: number;
+  /** Achieved contrast ratio of `textMuted` against the page surface. */
+  contrastMuted: number;
 }
 
 export interface SurfacePair {
@@ -128,14 +140,23 @@ export const PRESET_METAS: PresetMeta[] = [
     i18nDescKey: 'themeSettings.presets.rose.desc',
   },
   {
-    // True white in light mode; true black in dark mode. Both keep the
+    // True white in light mode; near-black in dark mode. Both keep the
     // surface on the same monochromatic family so the only visual
-    // change between modes is the inversion of bg / text. No `darkPrimary`
-    // override needed — the primary stays a deep neutral in both modes
-    // because the button background only ever shows on the matching
-    // surface (white in light, black in dark).
+    // change between modes is the inversion of bg / text.
+    //
+    // `darkPrimary` is required here for the same reason as `rose`: the
+    // accent is not only a *fill*. It is also painted as text and
+    // iconography straight onto the page — `text-primary`, the app-wide
+    // `.dark .prose code` rule (agent inline code such as `chat_api.py:1204`),
+    // `.prose a`, focus rings, slider fills. The previous "no override
+    // needed" note assumed the accent only ever appeared as a button
+    // background on a matching surface; that is false for text. Without
+    // the override the near-black accent sat on the near-black dark
+    // surface at 1.15:1, making agent-emitted file references invisible
+    // in this preset's dark mode (13.2:1 with it).
     id: 'pure-white',
     primary: '#1F1F1F',
+    darkPrimary: '#E6E6E6',
     surfaceHue: 0,
     light: { bg: '#FFFFFF', panel: '#FFFFFF', border: '#F0F0F0' },
     dark: { bg: '#0A0A0B', panel: '#131316', border: '#26262B' },
@@ -310,20 +331,146 @@ export function resolveAppearance(mode: AppearanceMode): 'light' | 'dark' {
   return 'light';
 }
 
-function adjustTextForContrast(
-  startHex: string,
-  bg: string,
+/** Secondary text must still be readable — 4.5:1 is the WCAG AA threshold
+ *  for normal body copy, and it applies at *every* contrast setting (see
+ *  `mutedTarget`). Previously `textMuted` was a fixed 45/50% mix toward the
+ *  rail, which measured 2.97:1 (light) / 4.20:1 (dark) no matter what the
+ *  contrast slider said. */
+const MUTED_CONTRAST_FLOOR = 4.5;
+
+/**
+ * Lightness bands for body / secondary copy, per appearance.
+ *
+ * `contrast` interpolates between `soft` (CONTRAST_MIN) and `firm`
+ * (CONTRAST_MAX). A single fixed start lightness cannot serve the whole range:
+ * the previous implementation started light-mode text at L≈20 and dark-mode
+ * text at L≈90 with a 'lighten' direction, so the loop satisfied its target on
+ * the very first iteration for every setting — the slider was inert (measured:
+ * dark-mode `textMain` stayed pinned at `#E7E6E4` for contrast 3, 7.5 and 12).
+ *
+ * The midpoints reproduce the previous default appearance (light L≈18, dark
+ * L≈90 at contrast 7.5), so existing users see no shift at the default.
+ */
+const TEXT_LIGHTNESS_BAND: Record<
+  'light' | 'dark',
+  { main: { soft: number; firm: number }; muted: { soft: number; firm: number } }
+> = {
+  light: { main: { soft: 26, firm: 10 }, muted: { soft: 44, firm: 30 } },
+  dark: { main: { soft: 84, firm: 96 }, muted: { soft: 68, firm: 84 } },
+};
+
+/**
+ * Minimum contrast between a floating surface's stroke and the surface it
+ * sits on.
+ *
+ * Elevation in this UI is carried by a drop shadow. That works in light mode
+ * (a black shadow under a card on a light page) and is worthless in dark mode,
+ * where the shadow is black on near-black — so over there the stroke is the
+ * *only* thing that can say "this is a card". Measured before this floor
+ * existed, the dark `border` against the page surface is **1.03–1.31:1** for
+ * every preset (rose is the worst at 1.03), i.e. the composer was
+ * indistinguishable from the page until focus drew its ring — reported from a
+ * pair of screenshots showing exactly that.
+ *
+ * `border` cannot simply be raised to fix it: it is deliberately mixed 70%
+ * toward the panel so card edges stop reading as white lines, and that
+ * softness is what dividers want. Hence a separate stroke with a floor.
+ *
+ * 2.4 clears the perceptual threshold for a 1px hairline while staying below
+ * the focus ring (measured 3.3–3.7:1), so "focused" still reads as stronger
+ * than "at rest" instead of the two collapsing into one another.
+ */
+export const BOUNDARY_CONTRAST_FLOOR = 2.4;
+
+/**
+ * Walk lightness away from the background until the candidate clears `target`
+ * against *every* reference surface, then return that lightness.
+ *
+ * Checking all refs (rail *and* panel) matters: in dark mode the panel is
+ * lighter than the rail, so a colour that only satisfies the rail can still
+ * fall short where the copy actually sits.
+ */
+function fitLightness(
+  hue: number,
+  sat: number,
+  startL: number,
+  refs: string[],
   target: number,
   direction: 'darken' | 'lighten',
-): string {
-  const rgb = hexToRgb(startHex);
-  let { h, s, l } = rgbToHsl(rgb.r, rgb.g, rgb.b);
-  for (let i = 0; i < 16; i++) {
-    const candidate = hslToHex(h, s, l);
-    if (contrastRatioHex(candidate, bg) >= target) return candidate;
-    l = direction === 'darken' ? Math.max(4, l - 3) : Math.min(98, l + 2);
+): number {
+  const step = direction === 'darken' ? -1 : 1;
+  let l = startL;
+  for (let i = 0; i < 101; i++) {
+    const candidate = hslToHex(hue, sat, l);
+    if (refs.every((ref) => contrastRatioHex(candidate, ref) >= target)) return l;
+    const next = l + step;
+    if (next < 0 || next > 100) break;
+    l = next;
   }
-  return hslToHex(h, s, l);
+  return l;
+}
+
+/**
+ * Containment stroke for a floating surface, derived from the preset's own
+ * `border` so the hue/saturation stay in the design's family — but walked
+ * away from the surface until it clears `BOUNDARY_CONTRAST_FLOOR`.
+ *
+ * `fitLightness` returns the start lightness unchanged when it already
+ * satisfies the target, so presets that ship a strong enough dark border are
+ * left alone; only the ones that collapse (all of them, currently) move, and
+ * they move by the fewest steps that clear the floor rather than snapping to
+ * white.
+ *
+ * Light appearance returns `border` untouched on purpose: there the shadow
+ * does carry the elevation and the panel is already lighter than the page, so
+ * nothing needs repainting.
+ */
+function deriveBoundary(border: string, surface: string, appearance: 'light' | 'dark'): string {
+  if (appearance === 'light') return border;
+  const { r, g, b } = hexToRgb(border);
+  const { h, s, l } = rgbToHsl(r, g, b);
+  const fitted = fitLightness(h, s, l, [surface], BOUNDARY_CONTRAST_FLOOR, 'lighten');
+  return hslToHex(h, s, fitted);
+}
+
+/**
+ * Derive body + secondary text for an appearance from the contrast setting.
+ * `contrast` moves the text through its comfort band; the WCAG-ish target is
+ * enforced as a *floor*, so the measured ratio always meets or exceeds what
+ * the settings panel reports.
+ */
+function deriveTextColors(opts: {
+  appearance: 'light' | 'dark';
+  surfaceHue: number;
+  cT: number;
+  cTarget: number;
+  refs: string[];
+  /** Force grayscale (pure-white preset must stay monochrome). */
+  neutral?: boolean;
+}): { textMain: string; textMuted: string } {
+  const dark = opts.appearance === 'dark';
+  const direction: 'darken' | 'lighten' = dark ? 'lighten' : 'darken';
+  const band = TEXT_LIGHTNESS_BAND[opts.appearance];
+  const at = (b: { soft: number; firm: number }) => b.soft + (b.firm - b.soft) * opts.cT;
+  const mainSat = opts.neutral ? 0 : dark ? 4 + opts.cT * 4 : 10 + opts.cT * 8;
+  const mutedSat = opts.neutral ? 0 : dark ? 2 + opts.cT * 3 : 4 + opts.cT * 5;
+  // Secondary text keeps its own accessibility floor and it is NOT capped by
+  // the slider: at the lowest setting the band alone lands around 3.8:1, so
+  // capping at `cTarget` would silently drop secondary copy below WCAG AA.
+  // Reading order beats fidelity to a low slider value here.
+  const mutedTarget = Math.max(MUTED_CONTRAST_FLOOR, opts.cTarget * 0.62);
+  return {
+    textMain: hslToHex(
+      opts.surfaceHue,
+      mainSat,
+      fitLightness(opts.surfaceHue, mainSat, at(band.main), opts.refs, opts.cTarget, direction),
+    ),
+    textMuted: hslToHex(
+      opts.surfaceHue,
+      mutedSat,
+      fitLightness(opts.surfaceHue, mutedSat, at(band.muted), opts.refs, mutedTarget, direction),
+    ),
+  };
 }
 
 /** Derive light/dark page surfaces from an arbitrary primary (custom / random). */
@@ -396,11 +543,20 @@ export function buildPalette(opts: {
     const onPrimary = contrastRatioHex('#FFFFFF', primary) >= 4.5
       ? '#FFFFFF'
       : (contrastRatioHex('#0B0B0C', primary) >= 4.5 ? '#0B0B0C' : primary);
-    // Light mode → dark text on white surface. Dark mode → light text
-    // on near-black surface. Both pairs are well above the WCAG 4.5:1
-    // body-text threshold against the matching panel colour.
-    const textMain = opts.appearance === 'dark' ? '#F2F2F2' : '#1F1F1F';
-    const textMuted = opts.appearance === 'dark' ? '#9A9A9E' : '#6B6B6E';
+    // pure-white inverts surface AND text together between light and dark
+    // modes: light mode is white bg + dark text, dark mode is near-black
+    // bg + light text — so the text must follow the appearance.
+    // `neutral: true` keeps the preset monochrome; the contrast slider is
+    // still honoured (these two colours used to be hard-coded constants that
+    // ignored the setting entirely).
+    const { textMain, textMuted } = deriveTextColors({
+      appearance: opts.appearance,
+      surfaceHue: 0,
+      cT,
+      cTarget,
+      refs: [base.bg, base.panel],
+      neutral: true,
+    });
     return {
       primary,
       onPrimary,
@@ -410,10 +566,15 @@ export function buildPalette(opts: {
       stage: base.bg,
       panel: base.panel,
       border: base.border,
+      // pure-white collapses rail/nest/stage onto `base.bg`, so that is the
+      // surface a floating card sits on.
+      boundary: deriveBoundary(base.border, base.bg, opts.appearance),
       bubbleSelf: base.panel,
       bubbleOther: base.panel,
       textMain,
       textMuted,
+      contrastMain: contrastRatioHex(textMain, base.bg),
+      contrastMuted: contrastRatioHex(textMuted, base.bg),
     };
   }
 
@@ -460,13 +621,13 @@ export function buildPalette(opts: {
       clamp(railHsl.s * 0.4 + 1.5 + tint * 4, 5, 18),
       clamp(railHsl.l + 5.2 + (1 - tint) * 0.6, 95.5, 98.2),
     );
-    const textMain = adjustTextForContrast(
-      hslToHex(sh, 10 + cT * 8, 20 - cT * 4),
-      rail,
+    const { textMain, textMuted } = deriveTextColors({
+      appearance: 'light',
+      surfaceHue: sh,
+      cT,
       cTarget,
-      'darken',
-    );
-    const textMuted = mixHex(textMain, rail, 0.45);
+      refs: [rail, panel],
+    });
     return {
       primary,
       onPrimary,
@@ -476,10 +637,13 @@ export function buildPalette(opts: {
       stage,
       panel,
       border,
+      boundary: deriveBoundary(border, stage, 'light'),
       bubbleSelf: mixHex(primary, stage, 0.82),
       bubbleOther: panel,
       textMain,
       textMuted,
+      contrastMain: contrastRatioHex(textMain, rail),
+      contrastMuted: contrastRatioHex(textMuted, rail),
     };
   }
 
@@ -493,12 +657,17 @@ export function buildPalette(opts: {
   const rail = bg;
   const nest = mixHex(rail, '#000000', 0.18);
   const stage = mixHex(bg, panel, 0.4);
-  const textMain = adjustTextForContrast(hslToHex(sh, 6, 90), rail, cTarget, 'lighten');
-  const textMuted = mixHex(textMain, rail, 0.5);
   // Pull dark-mode borders much closer to the panel so they don't read as
   // "white lines" against the dark surface (user feedback on the rose
   // preset in dark mode, but applies broadly). 0.7 = 70% panel + 30% original.
   border = mixHex(border, panel, 0.7);
+  const { textMain, textMuted } = deriveTextColors({
+    appearance: 'dark',
+    surfaceHue: sh,
+    cT,
+    cTarget,
+    refs: [rail, panel],
+  });
   return {
     primary,
     onPrimary,
@@ -508,10 +677,13 @@ export function buildPalette(opts: {
     stage,
     panel,
     border,
+    boundary: deriveBoundary(border, stage, 'dark'),
     bubbleSelf: mixHex(primary, panel, 0.55),
     bubbleOther: mixHex(panel, primary, 0.06),
     textMain,
     textMuted,
+    contrastMain: contrastRatioHex(textMain, rail),
+    contrastMuted: contrastRatioHex(textMuted, rail),
   };
 }
 
@@ -530,4 +702,15 @@ export function getPresetSurfaceHue(id: ThemePresetId): number {
 
 export function formatContrastLabel(contrast: number): string {
   return `${clamp(contrast, CONTRAST_MIN, CONTRAST_MAX).toFixed(1)}:1`;
+}
+
+/**
+ * Format a *measured* contrast ratio for display.
+ *
+ * `formatContrastLabel` clamps into the slider's own 3–12 range, which is
+ * correct for the requested target but would silently flatten a measured
+ * ratio above 12 (dark-mode body copy routinely lands around 13:1).
+ */
+export function formatRatioLabel(ratio: number): string {
+  return `${(Number.isFinite(ratio) ? ratio : 0).toFixed(1)}:1`;
 }

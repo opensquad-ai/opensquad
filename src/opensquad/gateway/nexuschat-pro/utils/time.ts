@@ -23,6 +23,20 @@ export const formatTime = (timestamp: number, t: any): string => {
   return `${date.getFullYear()}/${date.getMonth() + 1}/${date.getDate()}`;
 };
 
+/** Local wall-clock HH:mm for chat bubbles (never UTC). */
+export function formatLocalClock(
+  input: string | number | Date | null | undefined,
+  opts?: { locale?: string },
+): string {
+  const ts = parseTimestampMs(input);
+  if (!Number.isFinite(ts)) return '';
+  return new Date(ts).toLocaleTimeString(opts?.locale || undefined, {
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  });
+}
+
 /**
  * Parse session/API timestamps to epoch ms.
  *

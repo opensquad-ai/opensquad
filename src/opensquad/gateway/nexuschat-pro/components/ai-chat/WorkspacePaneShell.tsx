@@ -8,6 +8,7 @@ import { ContentTabBar, type ContentTabLabel } from './ContentTabBar';
 import { WorkspaceFileEditor } from './WorkspaceFileEditor';
 import { ComposerLandingDock } from './ComposerLandingDock';
 import { ScheduledTasksPage } from './ScheduledTasksPage';
+import { TaskPanelPage } from './TaskPanelPage';
 import type { ComposerSendPayload } from './AgentWebComposer';
 import type { SoloTokenStats } from './SoloContextFooter';
 import type { TimelineEntry } from '../../utils/aiChatTimeline';
@@ -91,6 +92,9 @@ export const WorkspacePaneShell: React.FC<WorkspacePaneShellProps> = ({
       if (tab.kind === 'scheduled-tasks') {
         return { tab, title: tabTitles[tab.id]?.trim() || t('aiChat.scheduledTasks') };
       }
+      if (tab.kind === 'tasks') {
+        return { tab, title: tabTitles[tab.id]?.trim() || t('taskPanel.title') };
+      }
       const title = tabTitles[tab.id]?.trim() || tab.id;
       return { tab, title };
     });
@@ -140,6 +144,7 @@ export const WorkspacePaneShell: React.FC<WorkspacePaneShellProps> = ({
   const showSessions = !!active && active.kind === 'session';
   const showFiles = !!active && active.kind === 'file';
   const showScheduled = !!active && active.kind === 'scheduled-tasks';
+  const showTasks = !!active && active.kind === 'tasks';
 
   // Active session tab → claim watch + refresh token stats for this sid.
   useEffect(() => {
@@ -240,6 +245,10 @@ export const WorkspacePaneShell: React.FC<WorkspacePaneShellProps> = ({
               ensureSessionWatched: handlers.ensureSessionWatched,
             }}
           />
+        ) : null}
+
+        {showTasks ? (
+          <TaskPanelPage agentName={agentId} rootPath={rootPath} />
         ) : null}
 
         {/* Session shell stays mounted while any session tab is open, so

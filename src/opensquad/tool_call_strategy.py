@@ -174,6 +174,25 @@ class NativeToolCallStrategy(ToolCallStrategy):
         n = (tool_name or "").lower().replace(".", "__")
         return any(h in n for h in cls._STREAM_ARG_HINTS)
 
+    def _resolve_tool_call_index(self, tc: Any) -> int:
+        """Normalize a streamed tool-call delta to a non-negative buffer slot.
+
+        Two provider quirks must be tolerated here:
+
+        * ``index`` may be absent (``None``) or non-integer on some proxies;
+        * parallel tool calls may arrive out of order (``index=1`` first).
+
+        When ``index`` is missing we treat the chunk as a continuation of the
+        most recently buffered call so incremental argument deltas keep
+        accumulating into the same slot, which keeps single-tool streams intact.
+        """
+        raw_index = getattr(tc, "index", None)
+        if isinstance(raw_index, int) and raw_index >= 0:
+            return raw_index
+        if self._tool_calls_buffer:
+            return len(self._tool_calls_buffer) - 1
+        return 0
+
     def _emit_args_delta(self, index: int, *, force: bool = False) -> None:
         """Push throttled partial tool args to the gateway (file write/edit only)."""
         if not self._delta_callback:
@@ -269,17 +288,25 @@ class NativeToolCallStrategy(ToolCallStrategy):
             # Check if this chunk contains tool_calls
             if hasattr(delta, "tool_calls") and delta.tool_calls:
                 for tc in delta.tool_calls:
-                    # Buffer the tool call data
-                    if tc.index >= len(self._tool_calls_buffer):
+                    tc_index = self._resolve_tool_call_index(tc)
+
+                    # Buffer the tool call data. Grow to cover the slot instead
+                    # of appending a single entry: providers may stream parallel
+                    # tool calls out of order (index=1 arriving before index=0),
+                    # which used to raise IndexError and abort the whole stream.
+                    while len(self._tool_calls_buffer) <= tc_index:
                         self._tool_calls_buffer.append(
                             {
-                                "id": getattr(tc, "id", None),
-                                "type": getattr(tc, "type", "function"),
+                                "id": None,
+                                "type": "function",
                                 "function": {"name": "", "arguments": ""},
                             }
                         )
 
-                    buf = self._tool_calls_buffer[tc.index]
+                    buf = self._tool_calls_buffer[tc_index]
+                    tc_type = getattr(tc, "type", None)
+                    if tc_type:
+                        buf["type"] = tc_type
                     # Keep first non-empty id from the stream
                     if getattr(tc, "id", None) and not buf.get("id"):
                         buf["id"] = tc.id
@@ -299,7 +326,7 @@ class NativeToolCallStrategy(ToolCallStrategy):
                             args_grew = True
 
                     if name_just_set or args_grew:
-                        self._emit_args_delta(tc.index, force=name_just_set)
+                        self._emit_args_delta(tc_index, force=name_just_set)
 
             # Check if stream finished (finish_reason present)
             finish_reason = getattr(api_response.choices[0], "finish_reason", None)

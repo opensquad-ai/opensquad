@@ -20,6 +20,14 @@ import {
   CheckSquare,
   Folder,
   Wrench,
+  Zap,
+  Lightbulb,
+  Server,
+  MessageCircleQuestion,
+  Users,
+  Database,
+  Target,
+  Image,
 } from 'lucide-react';
 import type { WorkflowBlock, WorkflowEvent } from '../../utils/aiChatTimeline';
 import { isToolResultFailure } from '../../utils/aiChatTimeline';
@@ -34,6 +42,7 @@ import {
 } from '../../utils/shellJobGrouping';
 import { DelegateFold } from './DelegateFold';
 import { ShellJobFold } from './ShellJobFold';
+import { Collapse, useFold } from '../Collapse';
 import { parsePlanContent, PlanBlock, type PlanStep } from './PlanBlock';
 import { FollowScrollBox } from './FollowScrollBox';
 import { MarkdownScrollBody } from './MarkdownScrollBody';
@@ -47,26 +56,44 @@ import {
 /** When Solo workflow step count exceeds this, nest lines in a scroll box. */
 const SOLO_STEPS_SCROLL_THRESHOLD = 10;
 const SOLO_STEPS_SCROLL_MAX_CLASS = 'max-h-[280px]';
-/** Window the inner step list so dozens of tool headers stay cheap to paint. */
-const STEP_VIRT_AFTER = 20;
-const STEP_EST_PX = 28;
-const STEP_OVERSCAN = 6;
+/** Collapsed headers scroll smoothly natively; window only huge lists. */
+const STEP_VIRT_AFTER = 80;
+const STEP_EST_PX = 26;
+const STEP_OVERSCAN = 18;
 
-function stepVirtRange(
-  length: number,
-  atBottom: boolean,
-  stored: { start: number; end: number },
-  clientH: number,
-): { start: number; end: number } {
+function virtTailWindow(length: number, clientH = 280): { start: number; end: number } {
   const visible = Math.ceil((clientH || 280) / STEP_EST_PX) + STEP_OVERSCAN * 2;
-  if (atBottom) {
-    return { start: Math.max(0, length - visible), end: length };
-  }
-  return stored;
+  return { start: Math.max(0, length - visible), end: length };
+}
+
+/** Grow the rendered window to cover the viewport. Never shrink while scrolling
+ *  — changing spacer height with a fixed row estimate is what makes the thumb jitter. */
+function expandVirtWindow(
+  n: number,
+  scrollTop: number,
+  clientH: number,
+  current: { start: number; end: number },
+): { start: number; end: number } {
+  const visStart = Math.max(0, Math.floor(scrollTop / STEP_EST_PX));
+  const visEnd = Math.min(n, Math.ceil((scrollTop + (clientH || 280)) / STEP_EST_PX));
+  const start = Math.min(
+    Math.max(0, Math.min(current.start, n)),
+    Math.max(0, visStart - STEP_OVERSCAN),
+  );
+  const end = Math.max(
+    Math.min(n, Math.max(current.end, 0)),
+    Math.min(n, visEnd + STEP_OVERSCAN),
+  );
+  return { start, end: Math.max(start, end) };
 }
 
 interface SoloActivityRowProps {
   block: WorkflowBlock;
+  /**
+   * 任务已交付（该工作流组之后已有 assistant 最终回复）→ 即使块仍
+   * completed=false / 有未闭合工具，也不再播放"执行中"动画与流光。
+   */
+  turnDelivered?: boolean;
   /**
    * Progressive auto-expand for thought / plan / tool folds.
    * Only seeds defaults; never overrides a fold the user has toggled.
@@ -123,31 +150,37 @@ function formatResult(result: unknown): string {
   }
 }
 
+const PRETTY_JSON_MAX = 12_000;
+
 function prettyJson(value: unknown): string {
+  let out = '';
   if (value == null) return '';
   if (typeof value === 'string') {
     try {
-      return JSON.stringify(JSON.parse(value), null, 2);
+      out = JSON.stringify(JSON.parse(value), null, 2);
     } catch {
-      return value;
+      out = value;
+    }
+  } else {
+    try {
+      out = JSON.stringify(value, null, 2);
+    } catch {
+      out = String(value);
     }
   }
-  try {
-    return JSON.stringify(value, null, 2);
-  } catch {
-    return String(value);
+  if (out.length > PRETTY_JSON_MAX) {
+    return `${out.slice(0, PRETTY_JSON_MAX)}\n… (${out.length - PRETTY_JSON_MAX} more chars)`;
   }
+  return out;
 }
 
-function thoughtLabel(text: string): { primary: string; secondary: string } {
-  const trimmed = text.trim();
-  if (!trimmed) return { primary: 'Thought', secondary: '' };
-  if (trimmed.length < 40) return { primary: 'Thought', secondary: 'briefly' };
-  if (trimmed.length < 120) return { primary: 'Thought', secondary: 'for a moment' };
-  return { primary: 'Thought', secondary: 'for a bit' };
+/** Every thinking segment presents as "深度思考" — the per-segment duration
+ *  is appended by buildLines from neighbouring event timestamps. */
+function thoughtLabel(t: TFunction): { primary: string; secondary: string } {
+  return { primary: t('aiChat.toolFlow.line.thoughtDeep'), secondary: '' };
 }
 
-type LineKind = 'thought' | 'tool' | 'info' | 'summary' | 'progress' | 'delegation' | 'plan' | 'shell_job';
+type LineKind = 'thought' | 'tool' | 'info' | 'summary' | 'progress' | 'delegation' | 'plan' | 'shell_job' | 'process';
 
 interface ActivityLine {
   key: string;
@@ -156,6 +189,8 @@ interface ActivityLine {
   secondary: string;
   detail: string;
   running?: boolean;
+  /** Live trailing thought: epoch ms the thought started — row ticks elapsed locally. */
+  elapsedStartMs?: number;
   /** Structured tool payload for rich Solo expand panels */
   toolName?: string;
   toolArgs?: Record<string, unknown> | null;
@@ -190,6 +225,7 @@ function fileEditEqual(a?: FileEditInfo | null, b?: FileEditInfo | null): boolea
 }
 
 function activityLineEqual(a: ActivityLine, b: ActivityLine): boolean {
+  if (a === b) return true;
   return (
     a.key === b.key
     && a.kind === b.kind
@@ -202,6 +238,7 @@ function activityLineEqual(a: ActivityLine, b: ActivityLine): boolean {
     && a.toolStatus === b.toolStatus
     && a.summaryDone === b.summaryDone
     && a.summaryPending === b.summaryPending
+    && a.elapsedStartMs === b.elapsedStartMs
     && a.delegation === b.delegation
     && a.shellJob === b.shellJob
     && a.planSteps === b.planSteps
@@ -216,7 +253,7 @@ function eventToLines(evt: WorkflowEvent, key: string, blockCompleted: boolean, 
   if (evt.type === 'thought') {
     const text = thoughtText(evt);
     if (!text.trim()) return lines;
-    const { primary, secondary } = thoughtLabel(text);
+    const { primary, secondary } = thoughtLabel(t);
     lines.push({ key, kind: 'thought', primary, secondary, detail: text });
     return lines;
   }
@@ -230,10 +267,10 @@ function eventToLines(evt: WorkflowEvent, key: string, blockCompleted: boolean, 
       key,
       kind: 'summary',
       primary: done
-        ? (text ? 'Context summary' : 'Compression completed')
-        : (pending ? 'Waiting for compression' : 'Compressing context'),
-      secondary: done ? 'done' : 'live',
-      detail: pending ? '' : (text || (done ? '' : 'Summarizing…')),
+        ? (text ? t('aiChat.toolFlow.line.summaryContext') : t('aiChat.toolFlow.line.summaryDone'))
+        : (pending ? t('aiChat.toolFlow.line.summaryWaiting') : t('aiChat.toolFlow.line.summaryCompressing')),
+      secondary: done ? t('aiChat.toolFlow.line.done') : t('aiChat.toolFlow.line.live'),
+      detail: pending ? '' : (text || (done ? '' : t('aiChat.toolFlow.line.summarizing'))),
       running: !done,
       summaryDone: done,
       summaryPending: pending,
@@ -260,11 +297,28 @@ function eventToLines(evt: WorkflowEvent, key: string, blockCompleted: boolean, 
     return lines;
   }
 
+  if (evt.type === 'process_output') {
+    // 中间过程输出（非最终回复的阶段性总结）—— 💡"过程输出" 折叠行。
+    const text =
+      typeof evt.content === 'string'
+        ? evt.content
+        : String((evt.content as any)?.text || (evt.content as any)?.message || '');
+    if (!text.trim()) return lines;
+    lines.push({
+      key,
+      kind: 'process',
+      primary: t('aiChat.toolFlow.line.processOutput'),
+      secondary: '',
+      detail: text,
+    });
+    return lines;
+  }
+
   if (evt.type === 'tool_call') {
-    // Open tools stay "running" even if the block was wrongly sealed (disk
-    // hydrate / mid-turn to_user). Otherwise long Agent Web turns flip to
-    // "Worked" and look frozen while websearch etc. are still in flight.
-    const running = !evt.result;
+    // Open tools are running only while the fold is live. A completed fold
+    // with missing results is a cancelled/stopped turn (refresh after Stop).
+    // Mid-turn hydrate that wrongly sealed is reopened in buildTimelineFromSession.
+    const running = !evt.result && !blockCompleted;
     const name = toolNameOf(evt);
     const content = typeof evt.content === 'object' && evt.content ? evt.content : {};
     const rawArgs = content.arguments ?? content.args ?? content.input;
@@ -295,23 +349,23 @@ function eventToLines(evt: WorkflowEvent, key: string, blockCompleted: boolean, 
     if (fileEdit) {
       if (fileEdit.kind === 'read') {
         primary = running
-          ? `Reading ${fileEdit.fileName}`
+          ? t('aiChat.toolFlow.line.reading', { name: fileEdit.fileName })
           : failed
-            ? `Failed read ${fileEdit.fileName}`
-            : `Read ${fileEdit.fileName}`;
+            ? t('aiChat.toolFlow.line.readFailed', { name: fileEdit.fileName })
+            : t('aiChat.toolFlow.line.read', { name: fileEdit.fileName });
         secondary = fileEdit.lineRange || '';
       } else if (fileEdit.kind === 'write') {
         primary = running
-          ? `Writing ${fileEdit.fileName}`
+          ? t('aiChat.toolFlow.line.writing', { name: fileEdit.fileName })
           : failed
-            ? `Failed write ${fileEdit.fileName}`
-            : `Wrote ${fileEdit.fileName}`;
+            ? t('aiChat.toolFlow.line.writeFailed', { name: fileEdit.fileName })
+            : t('aiChat.toolFlow.line.wrote', { name: fileEdit.fileName });
       } else {
         primary = running
-          ? `Editing ${fileEdit.fileName}`
+          ? t('aiChat.toolFlow.line.editing', { name: fileEdit.fileName })
           : failed
-            ? `Failed edit ${fileEdit.fileName}`
-            : `Edited ${fileEdit.fileName}`;
+            ? t('aiChat.toolFlow.line.editFailed', { name: fileEdit.fileName })
+            : t('aiChat.toolFlow.line.edited', { name: fileEdit.fileName });
       }
     } else if (failed) {
       secondary = 'fail';
@@ -363,10 +417,15 @@ function eventToLines(evt: WorkflowEvent, key: string, blockCompleted: boolean, 
     if (/^New session started$/i.test(String(text).trim()) || /^Workflow started$/i.test(String(text).trim())) {
       return lines;
     }
+    // 模型切换（工作流进行中并入块的 info 事件）→ 本地化文案。
+    const infoAny = typeof evt.content === 'object' && evt.content ? (evt.content as any) : null;
+    const label = infoAny?.event === 'model_card_switched' && infoAny?.model
+      ? t('aiChat.modelSwitched', { model: String(infoAny.model) })
+      : text;
     lines.push({
       key,
       kind: 'info',
-      primary: text.length > 60 ? `${text.slice(0, 60)}…` : text,
+      primary: label.length > 60 ? `${label.slice(0, 60)}…` : label,
       secondary: '',
       detail: text,
     });
@@ -392,21 +451,24 @@ function eventToLines(evt: WorkflowEvent, key: string, blockCompleted: boolean, 
   return lines;
 }
 
-function buildLines(
+/** 导出仅供单元测试：构建工作流块的行列表（含深度思考耗时推断）。 */
+export function buildLines(
   block: WorkflowBlock,
   shellStreams: Record<string, ShellStreamState> = {},
   t: TFunction,
+  lineCache?: WeakMap<WorkflowEvent, ActivityLine[]>,
 ): ActivityLine[] {
   const lines: ActivityLine[] = [];
   const baseItems = buildDisplayWorkflowItems(block.events);
   const items = attachShellJobsToDisplayItems(baseItems, shellStreams);
 
-  for (const item of items) {
+  for (let i = 0; i < items.length; i++) {
+    const item = items[i];
     if (item.kind === 'delegation') {
       lines.push({
         key: item.key,
         kind: 'delegation',
-        primary: item.bundle.running ? 'Exploring' : 'Explored',
+        primary: item.bundle.running ? t('aiChat.toolFlow.line.exploring') : t('aiChat.toolFlow.line.explored'),
         secondary: item.bundle.label,
         detail: '',
         running: item.bundle.running,
@@ -415,11 +477,17 @@ function buildLines(
       continue;
     }
     if (item.kind === 'shell_job') {
+      // 优先展示 agent 提供的调用目的说明；缺省回退到"已执行命令 + 命令"。
+      const desc = (item.bundle.description || '').trim();
       lines.push({
         key: item.key,
         kind: 'shell_job',
-        primary: item.bundle.running ? 'Running' : item.bundle.errored ? 'Shell failed' : 'Ran',
-        secondary: item.bundle.command,
+        primary: desc || (item.bundle.running
+          ? t('aiChat.toolFlow.shell.running')
+          : item.bundle.errored
+            ? t('aiChat.toolFlow.shell.failed')
+            : t('aiChat.toolFlow.shell.ran')),
+        secondary: desc ? '' : item.bundle.command,
         detail: item.bundle.output,
         running: item.bundle.running,
         shellJob: item.bundle,
@@ -429,7 +497,62 @@ function buildLines(
     // Skip orphan sub-agent events that somehow weren't nested (still hide from main stream
     // when they carry the flag — they belong in a delegate window).
     if (item.event.subAgent) continue;
-    lines.push(...eventToLines(item.event, item.key, !!block.completed, t));
+    let built = lineCache?.get(item.event);
+    if (!built) {
+      built = eventToLines(item.event, item.key, !!block.completed, t);
+      lineCache?.set(item.event, built);
+    }
+    for (const l of built) {
+      if (l.kind === 'thought') {
+        // Deep-think duration = time from this thought until the next event
+        // arrived (copy, never mutate — `built` is cached per event).
+        const ts = item.event.timestamp;
+        const isLastItem = i === items.length - 1;
+        const next = items[i + 1];
+        // Next item may be a folded shell/delegate job — its parent event carries the timestamp.
+        const nextEvt =
+          next && 'event' in next ? next.event : next && 'bundle' in next ? next.bundle?.parent : undefined;
+        let nextTs = nextEvt?.timestamp;
+        // 历史数据防御：flush 补写的思考事件时间戳可能晚于其后的工具事件
+        // （时间戳倒挂）。向前扫描第一个更晚的事件作为耗时终点。
+        if (typeof ts === 'number' && typeof nextTs === 'number' && nextTs <= ts) {
+          for (let k = i + 2; k < items.length; k++) {
+            const later = items[k];
+            const laterEvt =
+              later && 'event' in later ? later.event : later && 'bundle' in later ? later.bundle?.parent : undefined;
+            const laterTs = laterEvt?.timestamp;
+            if (typeof laterTs === 'number' && laterTs > ts) {
+              nextTs = laterTs;
+              break;
+            }
+          }
+        }
+        if (typeof ts === 'number' && typeof nextTs === 'number' && nextTs > ts) {
+          lines.push({ ...l, secondary: formatElapsedAtLeastOneSecond(nextTs - ts) });
+          continue;
+        }
+        if (typeof ts === 'number' && isLastItem) {
+          if (!block.completed) {
+            // Live trailing thought: duration grows in real time. The row
+            // component ticks it locally (LiveElapsed) — buildLines stays
+            // static so text bodies are not rebuilt/reselected every second.
+            lines.push({ ...l, running: true, elapsedStartMs: ts, secondary: '' });
+            continue;
+          }
+          // Completed turn where the thought was the last item: freeze at the
+          // block end (started + elapsed) so the duration does not vanish.
+          const blockEnd =
+            typeof block.started_ms === 'number' && typeof block.elapsed_ms === 'number'
+              ? block.started_ms + block.elapsed_ms
+              : undefined;
+          if (typeof blockEnd === 'number' && blockEnd > ts) {
+            lines.push({ ...l, secondary: formatElapsedAtLeastOneSecond(blockEnd - ts) });
+            continue;
+          }
+        }
+      }
+      lines.push(l);
+    }
   }
 
   return lines;
@@ -459,7 +582,9 @@ function frozenElapsedMs(block: WorkflowBlock, turnStartedMs?: number): number |
  * Work-mode tool categories — each maps a tool name to a user-facing action so
  * the outer fold can read like "已读取 3 个文件，搜索 2 次文件" in real time.
  */
-type WorkToolCategory = 'read' | 'search' | 'edit' | 'terminal' | 'web' | 'skill' | 'task' | 'file' | 'other';
+type WorkToolCategory =
+  | 'read' | 'search' | 'edit' | 'list' | 'terminal' | 'web' | 'skill' | 'task'
+  | 'interaction' | 'collab' | 'memory' | 'goal' | 'media' | 'mcp' | 'other';
 
 /** Tool names arrive as `namespace__function` (e.g. websearch__search,
  *  filesystem__read_file, system__run_session_job, mcp__server__tool). */
@@ -478,24 +603,40 @@ function splitToolName(name: string): { ns: string; fn: string } {
 
 function classifyWorkTool(name: string): WorkToolCategory {
   const { ns, fn } = splitToolName(name);
+  // MCP 工具（mcp__server__tool）走专用的 Server 图标分类。
+  if (ns === 'mcp') return 'mcp';
   if (ns.startsWith('skill')) return 'skill';
   if (ns === 'websearch' || ns === 'web' || ns === 'bocha') return 'web';
+  // 用户交互：确认卡 / 追问建议 / 模式切换。
+  if (ns === 'choice_tools' || ns === 'followup_tools' || ns === 'agent_mode') return 'interaction';
+  // 多智能体协作与消息：delegate_task 通常已被 delegation 折叠消费，兜底归协作。
+  if (ns === 'collaboration' || ns === 'delegate_task' || ns === 'im' || ns === 'task_watch') return 'collab';
+  if (ns === 'memory') return 'memory';
+  if (ns === 'goal') return 'goal';
+  // 多媒体（插件）：图像理解 / 媒体生成 / 语音转写。
+  if (ns === 'vision' || ns === 'media' || ns.startsWith('whisper')) return 'media';
   if (ns === 'filesystem') {
-    if (/\b(read|view|cat)\b/.test(fn) || fn.includes('list_director')) return 'read';
-    if (/\b(grep|search|find|glob)\b/.test(fn)) return 'search';
-    if (/\b(write|edit|replace|patch|str_replace|apply_diff|create|delete|rename)\b/.test(fn)) return 'edit';
-    return 'file';
-  }
-  if (ns === 'system') {
-    if (/\b(session|job|run|bash|shell|command|exec)\b/.test(fn)) return 'terminal';
-    if (/\b(write|binary)\b/.test(fn)) return 'edit';
+    // '_' is a \w char so \b never matches inside snake_case — segment-match
+    // on (^|_)…($|_) instead. Edit runs before list so create_directory
+    // doesn't trip the directory-listing pattern. Only true strangers fall
+    // through to 'other'.
+    if (/(^|_)(read_file|read_multiple_files|view_file|read|cat|view)($|_)/.test(fn)) return 'read';
+    if (/(^|_)(search_files|find_files|grep|search|glob)($|_)/.test(fn)) return 'search';
+    if (/(^|_)(write_file|edit_file|replace_in_file|str_replace|apply_diff|patch|write|edit|create_file|create_directory|mkdir|delete_file|rename|move)($|_)/.test(fn)) return 'edit';
+    if (/(^|_)(ls|tree)($|_)/.test(fn) || /(^|_)list(_|$)/.test(fn)) return 'list';
     return 'other';
   }
-  if (/\b(read_file|read_multiple_files|view_file|read)\b/.test(fn)) return 'read';
-  if (/\b(grep|search_files|find_files|search|glob)\b/.test(fn)) return 'search';
-  if (/\b(write_file|edit_file|replace_in_file|str_replace|patch|apply_diff|write|edit|replace)\b/.test(fn)) return 'edit';
-  if (/\b(bash|run_command|run_session_job|start_job|terminal|exec)\b/.test(fn)) return 'terminal';
-  if (/\b(todo|update_task_progress|batch_update_tasks|add_task|update_todo|task)\b/.test(fn)) return 'task';
+  if (ns === 'system') {
+    if (/shell|session|job|(^|_)(run|bash|exec|command|terminal)($|_)/.test(fn)) return 'terminal';
+    if (/(^|_)(write|binary)($|_)/.test(fn)) return 'edit';
+    return 'other';
+  }
+  if (/(^|_)(read_file|read_multiple_files|view_file|read|cat|view)($|_)/.test(fn)) return 'read';
+  if (/(^|_)(grep|search_files|find_files|search|glob)($|_)/.test(fn)) return 'search';
+  if (/(^|_)(write_file|edit_file|replace_in_file|str_replace|patch|apply_diff|write|edit|replace)($|_)/.test(fn)) return 'edit';
+  if (/terminal|(^|_)(bash|run_command|run_session_job|start_job|job|shell|session|exec|command|run)($|_)/.test(fn)) return 'terminal';
+  if (/(^|_)(todo|update_task_progress|batch_update_tasks|add_task|update_todo|task)($|_)/.test(fn)) return 'task';
+  if (/(^|_)(ls|tree)($|_)/.test(fn) || /(^|_)list(_|$)/.test(fn)) return 'list';
   if (fn.includes('skill')) return 'skill';
   return 'other';
 }
@@ -527,7 +668,13 @@ function toolIcon(name: string): React.ReactNode {
     case 'terminal': return <Terminal size={size} className={cls} />;
     case 'skill': return <Sparkles size={size} className={cls} />;
     case 'task': return <CheckSquare size={size} className={cls} />;
-    case 'file': return <Folder size={size} className={cls} />;
+    case 'list': return <Folder size={size} className={cls} />;
+    case 'mcp': return <Server size={size} className={cls} />;
+    case 'interaction': return <MessageCircleQuestion size={size} className={cls} />;
+    case 'collab': return <Users size={size} className={cls} />;
+    case 'memory': return <Database size={size} className={cls} />;
+    case 'goal': return <Target size={size} className={cls} />;
+    case 'media': return <Image size={size} className={cls} />;
     default: return <Wrench size={size} className={cls} />;
   }
 }
@@ -548,7 +695,7 @@ function summarizeWorkTools(block: WorkflowBlock, t: TFunction): string {
     counts.set(cat, (counts.get(cat) || 0) + 1);
   }
   const parts: string[] = [];
-  for (const cat of ['read', 'search', 'edit', 'terminal', 'web', 'skill', 'task', 'file', 'other'] as WorkToolCategory[]) {
+  for (const cat of ['read', 'search', 'edit', 'list', 'terminal', 'web', 'skill', 'task', 'interaction', 'collab', 'memory', 'goal', 'media', 'mcp', 'other'] as WorkToolCategory[]) {
     const n = counts.get(cat);
     if (!n) continue;
     parts.push(t(`aiChat.toolFlow.summary.${cat}`, { n }));
@@ -590,43 +737,49 @@ function outerSummary(
     elapsedMs != null ? formatElapsedAtLeastOneSecond(elapsedMs) : null;
 
   if (liveSummary) {
-    if (elapsedLabel != null) return { primary: `Compressing for ${elapsedLabel}`, secondary: '' };
-    return { primary: 'Compressing context', secondary: '' };
+    if (elapsedLabel != null) return { primary: t('aiChat.toolFlow.outer.compressingFor', { time: elapsedLabel }), secondary: '' };
+    return { primary: t('aiChat.toolFlow.outer.compressing'), secondary: '' };
   }
   // Summary finished (even if workflow block not yet marked completed).
   if (summaries.length > 0 && summaries.every((l) => !l.running) && block.completed) {
-    return { primary: 'Context compressed', secondary: '' };
+    return { primary: t('aiChat.toolFlow.outer.compressed'), secondary: '' };
   }
   // Work mode: live Chinese tool summary headline ("读取 3 个文件，搜索 2 次文件")
-  // updates in real time while the agent works — replaces both "Working for …"
-  // (active) and "Worked for …" (completed) generic headlines.
+  // updates in real time while the agent works, with a live-ticking elapsed
+  // ("… · 7s → · 8s") joined by "·" — the label freezes at the final elapsed
+  // once the block completes.
   if (uiMode === 'classic' && tools > 0) {
     const summary = summarizeWorkTools(block, t);
-    if (summary) return { primary: summary, secondary: '' };
+    if (summary) {
+      return {
+        primary: elapsedLabel != null ? `${summary} · ${elapsedLabel}` : summary,
+        secondary: '',
+      };
+    }
   }
   if (liveTool || livePlan || (hasLiveLine && !block.completed)) {
-    if (elapsedLabel != null) return { primary: `Working for ${elapsedLabel}`, secondary: '' };
-    return { primary: 'Working', secondary: '' };
+    if (elapsedLabel != null) return { primary: t('aiChat.toolFlow.outer.workingFor', { time: elapsedLabel }), secondary: '' };
+    return { primary: t('aiChat.toolFlow.outer.working'), secondary: '' };
   }
   // Incomplete block = still working (even between tool rounds / without turnStartedMs).
   if (!block.completed) {
-    if (elapsedLabel != null) return { primary: `Working for ${elapsedLabel}`, secondary: '' };
-    return { primary: 'Working', secondary: '' };
+    if (elapsedLabel != null) return { primary: t('aiChat.toolFlow.outer.workingFor', { time: elapsedLabel }), secondary: '' };
+    return { primary: t('aiChat.toolFlow.outer.working'), secondary: '' };
   }
-  if (tools > 0 && elapsedLabel != null) return { primary: `Worked for ${elapsedLabel}`, secondary: '' };
-  if (tools > 0) return { primary: 'Worked', secondary: '' };
+  if (tools > 0 && elapsedLabel != null) return { primary: t('aiChat.toolFlow.outer.workedFor', { time: elapsedLabel }), secondary: '' };
+  if (tools > 0) return { primary: t('aiChat.toolFlow.outer.worked'), secondary: '' };
   if (plans.length > 0) {
     const n = plans.reduce((sum, l) => sum + (l.planSteps?.length || 0), 0);
-    if (n > 0) return { primary: 'plan', secondary: String(n) };
-    return { primary: 'Planned', secondary: '' };
+    if (n > 0) return { primary: t('aiChat.toolFlow.outer.plan'), secondary: String(n) };
+    return { primary: t('aiChat.toolFlow.outer.planned'), secondary: '' };
   }
   if (thoughts > 0) {
     if (elapsedMs != null && elapsedMs >= 2000 && elapsedLabel != null) {
-      return { primary: 'Thought', secondary: `for ${elapsedLabel}` };
+      return { primary: t('aiChat.toolFlow.outer.thoughtFor', { time: elapsedLabel }), secondary: '' };
     }
-    return { primary: 'Thought', secondary: 'for a bit' };
+    return { primary: t('aiChat.toolFlow.line.thoughtDeep'), secondary: '' };
   }
-  return { primary: 'Activity', secondary: '' };
+  return { primary: t('aiChat.toolFlow.outer.activity'), secondary: '' };
 }
 
 /** Soft white-light sweep across live activity title text. */
@@ -637,7 +790,7 @@ const ShimmerLabel: React.FC<{
 }> = ({ children, color, className }) => (
   <span
     className={`solo-text-shimmer ${className || ''}`}
-    style={{ ['--solo-shimmer-base' as string]: color, color }}
+    style={{ ['--solo-shimmer-base' as string]: color }}
   >
     {children}
   </span>
@@ -670,10 +823,20 @@ const NextPlanningPlaceholder: React.FC<{
   );
 };
 
+/** Self-ticking elapsed label for a live trailing thought ("深度思考 4s…"). */
+const LiveElapsed: React.FC<{ fromMs: number }> = React.memo(({ fromMs }) => {
+  const [, force] = useState(0);
+  useEffect(() => {
+    const iv = window.setInterval(() => force((n) => n + 1), 1000);
+    return () => window.clearInterval(iv);
+  }, []);
+  return <>{formatElapsedAtLeastOneSecond(Math.max(0, Date.now() - fromMs))}</>;
+});
+
 /** Cursor-like faint activity chrome: outer slightly stronger, nested lighter. */
 const TextChevronToggle: React.FC<{
   primary: string;
-  secondary?: string;
+  secondary?: React.ReactNode;
   open: boolean;
   onToggle: () => void;
   running?: boolean;
@@ -692,7 +855,8 @@ const TextChevronToggle: React.FC<{
   leadingPulse?: boolean;
   /** Category icon rendered before the title (tool lines only) */
   leadingIcon?: React.ReactNode;
-}> = ({ primary, secondary, open, onToggle, running, shimmer, depth = 0, addedLines, removedLines, errored, fileLabel, onFileClick, leadingPulse, leadingIcon }) => {
+}> = React.memo(({ primary, secondary, open, onToggle, running, shimmer, depth = 0, addedLines, removedLines, errored, fileLabel, onFileClick, leadingPulse, leadingIcon }) => {
+  const { t } = useTranslation();
   // Inline color-mix: Tailwind opacity utilities were not reliably fading
   // primary labels (inherited theme muted stayed too strong).
   const faint = errored
@@ -737,7 +901,7 @@ const TextChevronToggle: React.FC<{
       {secondary ? (
         <span className={errored && secondary === 'fail' ? 'font-medium' : undefined}>
           {' '}
-          {secondary}
+          {secondary === 'fail' ? t('aiChat.toolFlow.line.fail') : secondary}
         </span>
       ) : null}
     </>
@@ -747,8 +911,10 @@ const TextChevronToggle: React.FC<{
   <button
     type="button"
     onClick={onToggle}
-    style={{ color: faint }}
-    className="group inline-flex items-center gap-1.5 py-0.5 text-left max-w-full bg-transparent border-0 p-0 cursor-pointer"
+    style={{ color: faint, ['--solo-shimmer-base' as string]: faint }}
+    className={`group inline-flex items-center gap-1.5 py-0.5 text-left max-w-full bg-transparent border-0 p-0 cursor-pointer${
+      depth === 0 && (shimmer || leadingPulse) ? ' solo-activity-header' : ''
+    }`}
   >
     {leadingPulse ? <PulseDotsOrbit size={depth === 0 ? 16 : 14} /> : null}
     {leadingIcon ? (
@@ -773,11 +939,11 @@ const TextChevronToggle: React.FC<{
       </span>
     ) : null}
     <span className="text-[13px] font-normal leading-relaxed shrink-0" style={{ color: faint }}>
-      {open ? '⌄' : '>'}
+      {(open ? '⌄' : '>')}
     </span>
   </button>
   );
-};
+});
 
 const SoloToolExpandPanel: React.FC<{
   toolName: string;
@@ -900,7 +1066,14 @@ const SoloEventLine = React.memo(function SoloEventLine({
   const isSummary = line.kind === 'summary';
   const isProgress = line.kind === 'progress';
   // Keep compression summary open while streaming so text is visible live.
-  const [open, setOpen] = useState(defaultOpen || !!(isSummary && line.running));
+  // useFold keeps the body mounted after the first expansion and animates
+  // open/close via <Collapse> (same primitive as the sidebar groups).
+  const {
+    open,
+    mounted,
+    toggle: foldToggle,
+    setOpen: foldSetOpen,
+  } = useFold(defaultOpen || !!(isSummary && line.running));
   /** Once the user toggles this fold, preference changes must not fight them. */
   const userTouchedRef = useRef(false);
   const isThought = line.kind === 'thought';
@@ -915,23 +1088,23 @@ const SoloEventLine = React.memo(function SoloEventLine({
   useEffect(() => {
     if (userTouchedRef.current) return;
     if (defaultOpen) {
-      setOpen(true);
+      foldSetOpen(true);
       return;
     }
     // Keep compression summary open while streaming. Do NOT auto-open file
     // diffs — streaming Myers + highlight on every delta is the main jank source.
     if (isSummary && line.running) {
-      setOpen(true);
+      foldSetOpen(true);
       return;
     }
     // Tools just landed in this stream: collapse thoughts so the tool row
     // is not pushed out of the 280px step box by an open thought body.
-    if (isThought) setOpen(false);
-  }, [defaultOpen, isSummary, isThought, line.running]);
+    if (isThought) foldSetOpen(false);
+  }, [defaultOpen, isSummary, isThought, line.running, foldSetOpen]);
 
   const toggleOpen = () => {
     userTouchedRef.current = true;
-    setOpen((v) => !v);
+    foldToggle();
   };
 
   const added = line.fileEdit?.addedLines;
@@ -980,11 +1153,11 @@ const SoloEventLine = React.memo(function SoloEventLine({
   return (
     <div
       className="w-full select-text"
-      data-tool-expanded={open && line.kind === 'tool' ? true : undefined}
+      data-tool-expanded={line.kind === 'tool' && open ? true : undefined}
     >
       <TextChevronToggle
         primary={line.primary}
-        secondary={line.secondary}
+        secondary={line.elapsedStartMs != null ? <LiveElapsed fromMs={line.elapsedStartMs} /> : line.secondary}
         open={open}
         onToggle={toggleOpen}
         running={line.running}
@@ -1002,103 +1175,120 @@ const SoloEventLine = React.memo(function SoloEventLine({
         leadingIcon={
           line.kind === 'tool'
             ? toolIcon(line.toolName || line.primary)
-            : undefined
+            : line.kind === 'thought'
+              ? <Zap size={13} className="shrink-0 opacity-70" />
+              : line.kind === 'process'
+                ? <Lightbulb size={13} className="shrink-0 opacity-70" />
+                : undefined
         }
       />
 
-      {/* Thought body only — title stays outside the faded panel (same as thought-only fold). */}
-      {open && isThought && line.detail && (
-        <div className="mt-0.5 pl-4 pr-1 rounded-sm bg-bgLight py-1">
-          <MarkdownScrollBody
-            text={line.detail}
-            follow={!!line.running}
-            muted
-            maxHeightClass="max-h-[320px]"
-          />
-        </div>
-      )}
-
-      {/* Context compression summary — live streaming text (classic-parity). */}
-      {open && isSummary && (line.detail || line.running) && (
-        <div
-          className={`mt-0.5 pl-4 pr-1 py-1.5 rounded-md border ${
-            line.summaryDone
-              ? 'border-emerald-500/25 bg-emerald-500/[0.04]'
-              : 'border-indigo-500/25 bg-indigo-500/[0.04]'
-          }`}
-        >
-          {line.summaryPending && !line.detail ? (
-            <div
-              className="text-[12px] animate-pulse"
-              style={{ color: 'color-mix(in srgb, rgb(var(--color-text-muted)) 55%, transparent)' }}
-            >
-              Waiting for context compression…
+      {/* Bodies stay mounted after first expansion — <Collapse> animates the
+          height (grid 1fr→0fr) instead of snapping via conditional unmount. */}
+      {mounted ? (
+        <Collapse open={open}>
+          {/* Thought body only — title stays outside the faded panel (same as thought-only fold). */}
+          {isThought && line.detail && (
+            <div className="mt-0.5 pl-4 pr-1 rounded-sm bg-bgLight py-1">
+              <MarkdownScrollBody
+                text={line.detail}
+                follow={!!line.running}
+                muted
+                maxHeightClass="max-h-[320px]"
+              />
             </div>
-          ) : (
-            <FollowScrollBox
-              as="pre"
-              contentKey={(line.detail || '').length}
-              follow={!!line.running}
-              className="text-[12px] leading-relaxed whitespace-pre-wrap break-words font-sans m-0 bg-transparent border-0 p-0 max-h-[360px] overflow-y-auto"
-              style={{ color: 'color-mix(in srgb, rgb(var(--color-text-muted)) 70%, transparent)' }}
-            >
-              {line.detail || 'Summarizing…'}
-              {line.running && !line.summaryPending ? (
-                <span className="inline-block w-1.5 h-3.5 bg-indigo-400/50 animate-pulse ml-0.5 align-middle" />
-              ) : null}
-            </FollowScrollBox>
           )}
-        </div>
-      )}
 
-      {open && isFileEdit && line.fileEdit && (
-        <div className="mt-1 mb-1.5 pl-4">
-          <FileDiffBlock
-            info={line.fileEdit}
-            status={line.toolStatus || 'success'}
-            note={
-              line.toolResult
-                ? line.toolResult.split('\n').map((l) => l.trim()).find((l) => l.length > 0)?.slice(0, 120)
-                : undefined
-            }
-            embedded
-          />
-        </div>
-      )}
+          {/* 过程输出 body — intermediate assistant summary inside the workflow fold. */}
+          {line.kind === 'process' && line.detail && (
+            <div className="mt-0.5 pl-4 pr-1 rounded-sm bg-bgLight py-1">
+              <MarkdownScrollBody text={line.detail} muted maxHeightClass="max-h-[320px]" />
+            </div>
+          )}
 
-      {open && isFileRead && line.fileEdit && (
-        <div className="mt-1 mb-1.5 pl-4">
-          <FileDiffBlock
-            info={line.fileEdit}
-            status={line.toolStatus || 'success'}
-            resultContent={line.toolResult}
-            embedded
-          />
-        </div>
-      )}
+          {/* Context compression summary — live streaming text (classic-parity). */}
+          {isSummary && (line.detail || line.running) && (
+            <div
+              className={`mt-0.5 pl-4 pr-1 py-1.5 rounded-md border ${
+                line.summaryDone
+                  ? 'border-emerald-500/25 bg-emerald-500/[0.04]'
+                  : 'border-indigo-500/25 bg-indigo-500/[0.04]'
+              }`}
+            >
+              {line.summaryPending && !line.detail ? (
+                <div
+                  className="text-[12px] animate-pulse"
+                  style={{ color: 'color-mix(in srgb, rgb(var(--color-text-muted)) 55%, transparent)' }}
+                >
+                  Waiting for context compression…
+                </div>
+              ) : (
+                <FollowScrollBox
+                  as="pre"
+                  contentKey={(line.detail || '').length}
+                  follow={!!line.running}
+                  className="text-[12px] leading-relaxed whitespace-pre-wrap break-words font-sans m-0 bg-transparent border-0 p-0 max-h-[360px] overflow-y-auto"
+                  style={{ color: 'color-mix(in srgb, rgb(var(--color-text-muted)) 70%, transparent)' }}
+                >
+                  {line.detail || 'Summarizing…'}
+                  {line.running && !line.summaryPending ? (
+                    <span className="inline-block w-1.5 h-3.5 bg-indigo-400/50 animate-pulse ml-0.5 align-middle" />
+                  ) : null}
+                </FollowScrollBox>
+              )}
+            </div>
+          )}
 
-      {open && line.kind === 'tool' && !isFileEdit && !isFileRead && (
-        <div className="pl-4">
-          <SoloToolExpandPanel
-            toolName={friendlyToolName(line.toolName || line.primary, t)}
-            args={line.toolArgs}
-            result={line.toolResult || ''}
-            running={line.running}
-            hideHtmlArg={hideVizHtml}
-          />
-        </div>
-      )}
+          {isFileEdit && line.fileEdit && (
+            <div className="mt-1 mb-1.5 pl-4">
+              <FileDiffBlock
+                info={line.fileEdit}
+                status={line.toolStatus || 'success'}
+                note={
+                  line.toolResult
+                    ? line.toolResult.split('\n').map((l) => l.trim()).find((l) => l.length > 0)?.slice(0, 120)
+                    : undefined
+                }
+                embedded
+              />
+            </div>
+          )}
 
-      {open && line.kind === 'info' && line.detail && (
-        <div className="mt-1 mb-1.5 pl-4 rounded-md border border-border/40 bg-bgLight px-2.5 py-2">
-          <pre
-            className="text-[12px] whitespace-pre-wrap break-words font-sans m-0"
-            style={{ color: 'color-mix(in srgb, rgb(var(--color-text-muted)) 42%, transparent)' }}
-          >
-            {line.detail}
-          </pre>
-        </div>
-      )}
+          {isFileRead && line.fileEdit && (
+            <div className="mt-1 mb-1.5 pl-4">
+              <FileDiffBlock
+                info={line.fileEdit}
+                status={line.toolStatus || 'success'}
+                resultContent={line.toolResult}
+                embedded
+              />
+            </div>
+          )}
+
+          {line.kind === 'tool' && !isFileEdit && !isFileRead && (
+            <div className="pl-4">
+              <SoloToolExpandPanel
+                toolName={friendlyToolName(line.toolName || line.primary, t)}
+                args={line.toolArgs}
+                result={line.toolResult || ''}
+                running={line.running}
+                hideHtmlArg={hideVizHtml}
+              />
+            </div>
+          )}
+
+          {line.kind === 'info' && line.detail && (
+            <div className="mt-1 mb-1.5 pl-4 rounded-md border border-border/40 bg-bgLight px-2.5 py-2">
+              <pre
+                className="text-[12px] whitespace-pre-wrap break-words font-sans m-0"
+                style={{ color: 'color-mix(in srgb, rgb(var(--color-text-muted)) 42%, transparent)' }}
+              >
+                {line.detail}
+              </pre>
+            </div>
+          )}
+        </Collapse>
+      ) : null}
     </div>
   );
 }, (prev, next) => {
@@ -1117,21 +1307,27 @@ export function mergeWorkflowBlocks(blocks: WorkflowBlock[]): WorkflowBlock {
   const events = blocks.flatMap((b) => b.events);
   const completed = blocks.every((b) => b.completed);
   const elapsed = blocks.reduce((sum, b) => sum + (typeof b.elapsed_ms === 'number' ? b.elapsed_ms : 0), 0);
-  const started = blocks.find((b) => typeof b.started_ms === 'number')?.started_ms;
+  const startedNums = blocks
+    .map((b) => b.started_ms)
+    .filter((n): n is number => typeof n === 'number');
+  const started = startedNums.length ? Math.min(...startedNums) : undefined;
   const status = completed
     ? null
-    : (blocks.find((b) => !b.completed)?.status ?? null);
+    : (blocks.find((b) => !b.completed)?.status ?? 'working');
   return {
     events,
     status,
     completed,
-    elapsed_ms: elapsed > 0 ? elapsed : undefined,
+    // Live merged groups must not inherit a frozen elapsed from earlier chunks
+    // or the fold stops being a scroll box / clock and tools leak into the page.
+    elapsed_ms: completed && elapsed > 0 ? elapsed : undefined,
     started_ms: started,
   };
 }
 
 export const SoloActivityRow = React.memo(function SoloActivityRow({
   block,
+  turnDelivered = false,
   expandLevel = 'thoughts',
   turnStartedMs,
   shellStreams = {},
@@ -1142,16 +1338,19 @@ export const SoloActivityRow = React.memo(function SoloActivityRow({
   const { t } = useTranslation();
   const expand = workflowExpandFlags(expandLevel);
   const [tick, setTick] = useState(0);
-  const hasOpenTools = block.events.some(
+  // 任务已交付 → 视为已收尾：所有"执行中"判定（脉冲/流光/计时）一律停。
+  const effBlock = turnDelivered && !block.completed ? { ...block, completed: true } : block;
+  const hasOpenTools = effBlock.events.some(
     (e) => e.type === 'tool_call' && !e.result,
   );
   // Async delegate_task_submit keeps the sub-agent window live after the parent
   // turn seals — treat it as still running so the outer fold / panel stay mounted.
-  const hasAsyncDelegate = hasOpenAsyncDelegate(block.events);
-  const hasLiveShell = Object.values(shellStreams).some((s) => s.state === 'running');
+  const hasAsyncDelegate = !turnDelivered && hasOpenAsyncDelegate(effBlock.events);
+  const hasLiveShell = !turnDelivered
+    && Object.values(shellStreams).some((s) => s.state === 'running');
   const hasRunning = hasOpenTools || hasAsyncDelegate || hasLiveShell;
-  const hasLiveCompression = block.events.some((e) => {
-    if (block.completed && !hasAsyncDelegate) return false;
+  const hasLiveCompression = effBlock.events.some((e) => {
+    if (effBlock.completed && !hasAsyncDelegate) return false;
     if (e.type === 'summary_stream') {
       const data = typeof e.content === 'object' && e.content ? e.content : {};
       return !data.done;
@@ -1165,48 +1364,54 @@ export const SoloActivityRow = React.memo(function SoloActivityRow({
   // Parent only passes turnStartedMs for the active incomplete group.
   // Treat any incomplete block as live so gaps between tool rounds do not
   // flip the header to "Worked" and auto-collapse while the agent is still going.
-  const isLiveTurn = !block.completed || hasLiveCompression || hasRunning;
-  const hasToolSteps = block.events.some(
+  // After Stop, the fold is completed even if some tool_call never got a
+  // result — do not keep "Working" / spinner from those open tools.
+  const isLiveTurn =
+    !effBlock.completed || hasLiveCompression || hasAsyncDelegate || hasLiveShell;
+  const hasToolSteps = effBlock.events.some(
     (e) => e.type === 'tool_call' || e.type === 'tool_result',
   );
 
-  const [outerOpen, setOuterOpen] = useState(isLiveTurn || hasToolSteps);
-  const [stepVirt, setStepVirt] = useState({ start: 0, end: STEP_VIRT_AFTER });
-  const wasLiveRef = useRef(isLiveTurn);
+  // Outer fold state goes through useFold so the body mounts lazily and the
+  // open/close animates via <Collapse> (same motion as the sidebar groups).
+  const {
+    open: outerOpen,
+    mounted: outerMounted,
+    toggle: toggleOuterFold,
+    setOpen: setOuterOpen,
+  } = useFold(isLiveTurn);
+  const [stepVirt, setStepVirt] = useState({ start: 0, end: 24 });
   /** User pin: 'open' | 'closed' | null (follow auto open/collapse). */
   const userOverrideRef = useRef<'open' | 'closed' | null>(null);
   const stepsScrollRef = useRef<HTMLDivElement>(null);
   const stepsAtBottomRef = useRef(true);
   const rootRef = useRef<HTMLDivElement>(null);
 
-  const toggleOuter = () => {
-    setOuterOpen((v) => {
-      const next = !v;
-      userOverrideRef.current = next ? 'open' : 'closed';
-      return next;
-    });
-  };
+  const toggleOuter = useCallback(() => {
+    const next = toggleOuterFold();
+    userOverrideRef.current = next ? 'open' : 'closed';
+  }, [toggleOuterFold]);
 
   useEffect(() => {
-    if (isLiveTurn && !wasLiveRef.current) {
-      // Rising edge of a live turn: auto-open only when the user has not
-      // pinned open/closed. Do NOT clear the pin — soft-poll history rebuilds
-      // can flicker completed↔live and would otherwise wipe a deliberate
-      // collapse and snap the fold shut/open against the user.
-      if (userOverrideRef.current == null) setOuterOpen(true);
-    } else if (isLiveTurn) {
+    if (isLiveTurn) {
+      // Keep the process visible while the agent is working, unless the user
+      // hid it. Do not clear the pin — history rebuilds can flicker
+      // completed↔live and would otherwise snap against a deliberate toggle.
       if (userOverrideRef.current !== 'closed') setOuterOpen(true);
-    } else if (userOverrideRef.current !== 'open') {
-      // Thought-only folds collapse when the turn seals. Tool rows must stay
-      // visible: committing the stream mid-turn marks this block completed and
-      // used to hide every tool header behind a closed chevron.
-      if (!hasToolSteps) setOuterOpen(false);
+      return;
     }
-    wasLiveRef.current = isLiveTurn;
-  }, [isLiveTurn, hasToolSteps]);
+    if (userOverrideRef.current === 'open') return;
+    // Delay so a brief completed↔live flicker does not hide the steps, and so
+    // the fold tucks away right after the final reply lands.
+    const t = window.setTimeout(() => {
+      if (userOverrideRef.current === 'open') return;
+      setOuterOpen(false);
+    }, 480);
+    return () => window.clearTimeout(t);
+  }, [isLiveTurn]);
 
   useEffect(() => {
-    if (!isLiveTurn && !hasRunning && !hasLiveCompression) return;
+    if (!isLiveTurn) return;
     const t = setInterval(() => {
       // Elapsed-time header only — never rebuild line bodies on this tick.
       // Skip entirely while the user has a text selection (any pane).
@@ -1215,13 +1420,22 @@ export const SoloActivityRow = React.memo(function SoloActivityRow({
       setTick((n) => n + 1);
     }, 1000);
     return () => clearInterval(t);
-  }, [isLiveTurn, hasRunning, hasLiveCompression]);
+  }, [isLiveTurn]);
 
   // Do NOT put `tick` in buildLines deps — that remounted thought/tool text every
   // 400ms and cleared mouse selections in scheduled-task / live panes.
   const prevLinesRef = useRef<ActivityLine[]>([]);
+  const lineCacheRef = useRef<{
+    completed: boolean;
+    map: WeakMap<WorkflowEvent, ActivityLine[]>;
+  }>({ completed: !!effBlock.completed, map: new WeakMap() });
   const lines = useMemo(() => {
-    const built = buildLines(block, shellStreams, t);
+    const cache = lineCacheRef.current;
+    if (cache.completed !== !!effBlock.completed) {
+      cache.completed = !!effBlock.completed;
+      cache.map = new WeakMap();
+    }
+    const built = buildLines(effBlock, shellStreams, t, cache.map);
     const prevByKey = new Map(prevLinesRef.current.map((l) => [l.key, l]));
     const next = built.map((line) => {
       const old = prevByKey.get(line.key);
@@ -1229,10 +1443,10 @@ export const SoloActivityRow = React.memo(function SoloActivityRow({
     });
     prevLinesRef.current = next;
     return next;
-  }, [block, shellStreams, t]);
+  }, [effBlock, shellStreams, t]);
   const summary = useMemo(
-    () => outerSummary(block, lines, turnStartedMs, uiMode, t),
-    [block, lines, turnStartedMs, tick, uiMode, t],
+    () => outerSummary(effBlock, lines, turnStartedMs, uiMode, t),
+    [effBlock, lines, turnStartedMs, tick, uiMode, t],
   );
 
   // Active phase detection: while the latest step is still thought / plan /
@@ -1250,10 +1464,10 @@ export const SoloActivityRow = React.memo(function SoloActivityRow({
   }, [lines]);
 
   const thinkingActive =
-    isLiveTurn && !block.completed && lastActivity?.kind === 'thought';
+    isLiveTurn && !effBlock.completed && lastActivity?.kind === 'thought';
   const planningActive =
     isLiveTurn &&
-    !block.completed &&
+    !effBlock.completed &&
     (lastActivity?.kind === 'plan' || lines.some((l) => l.kind === 'plan' && !!l.running));
 
   const displayLines = useMemo(() => {
@@ -1272,44 +1486,59 @@ export const SoloActivityRow = React.memo(function SoloActivityRow({
   const useStepsScrollBox = displayLines.length > SOLO_STEPS_SCROLL_THRESHOLD;
   const virtSteps = useStepsScrollBox && displayLines.length > STEP_VIRT_AFTER;
 
+  const shellStreamsRef = useRef(shellStreams);
+  shellStreamsRef.current = shellStreams;
   const shellStreamFor = useCallback(
-    (id: string) => shellStreams[id],
-    [shellStreams],
+    (id: string) => shellStreamsRef.current[id],
+    [],
   );
+
+  const virtRafRef = useRef<number | null>(null);
+  const userScrollingRef = useRef(false);
+  const userScrollIdleRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const markStepsUserScrolling = useCallback(() => {
+    userScrollingRef.current = true;
+    if (userScrollIdleRef.current) clearTimeout(userScrollIdleRef.current);
+    userScrollIdleRef.current = setTimeout(() => {
+      userScrollingRef.current = false;
+    }, 180);
+  }, []);
+  const syncStepVirt = useCallback((el: HTMLDivElement) => {
+    const n = displayLines.length;
+    setStepVirt((p) => {
+      const next = expandVirtWindow(n, el.scrollTop, el.clientHeight, p);
+      return p.start === next.start && p.end === next.end ? p : next;
+    });
+  }, [displayLines.length]);
+
+  useEffect(() => () => {
+    if (virtRafRef.current != null) cancelAnimationFrame(virtRafRef.current);
+    if (userScrollIdleRef.current) clearTimeout(userScrollIdleRef.current);
+  }, []);
 
   // Keep the steps box pinned to the latest tools (thoughts sit above them).
   // Do this after the turn seals too — otherwise the 280px box stays on the
   // first thought lines and the tool headers never enter the viewport.
+  // Window jumps to the tail only here (new rows while stuck to bottom), never
+  // from the scroll handler — that fight with the thumb is the jitter source.
   useLayoutEffect(() => {
     if (!outerOpen || !useStepsScrollBox) return;
     const sel = window.getSelection();
     if (sel && !sel.isCollapsed) return;
     const el = stepsScrollRef.current;
-    if (!el || !stepsAtBottomRef.current) return;
-    el.scrollTop = el.scrollHeight;
-  }, [displayLines.length, outerOpen, useStepsScrollBox]);
-
-  useLayoutEffect(() => {
-    if (!virtSteps || !outerOpen) return;
-    const el = stepsScrollRef.current;
     if (!el) return;
-    const update = () => {
-      const h = el.clientHeight || 280;
-      const n = displayLines.length;
-      let start: number;
-      let end: number;
-      if (stepsAtBottomRef.current) {
-        ({ start, end } = stepVirtRange(n, true, { start: 0, end: 0 }, h));
-      } else {
-        start = Math.max(0, Math.floor(el.scrollTop / STEP_EST_PX) - STEP_OVERSCAN);
-        end = Math.min(n, Math.ceil((el.scrollTop + h) / STEP_EST_PX) + STEP_OVERSCAN);
-      }
-      setStepVirt((p) => (p.start === start && p.end === end ? p : { start, end }));
-    };
-    update();
-    el.addEventListener('scroll', update, { passive: true });
-    return () => el.removeEventListener('scroll', update);
-  }, [virtSteps, outerOpen, displayLines.length]);
+    const n = displayLines.length;
+    if (userScrollingRef.current) {
+      if (virtSteps) syncStepVirt(el);
+      return;
+    }
+    if (!stepsAtBottomRef.current) {
+      if (virtSteps) syncStepVirt(el);
+      return;
+    }
+    if (virtSteps) setStepVirt(virtTailWindow(n, el.clientHeight));
+    el.scrollTop = el.scrollHeight;
+  }, [displayLines.length, outerOpen, useStepsScrollBox, virtSteps, syncStepVirt]);
 
   const hasSettledActivity = displayLines.some(
     (l) =>
@@ -1404,19 +1633,21 @@ export const SoloActivityRow = React.memo(function SoloActivityRow({
     return (
       <div ref={rootRef} className="my-1.5 w-full select-text">
         {renderOuterToggle({ running: isLiveTurn, shimmer: thinkingActive })}
-        {outerOpen && thoughtBodies.length > 0 && (
-          <div className="mt-0.5 pl-4 pr-1 rounded-sm bg-bgLight py-1">
-            {thoughtBodies.map((text, i) => (
-              <MarkdownScrollBody
-                key={i}
-                text={text}
-                follow={thinkingActive && i === thoughtBodies.length - 1}
-                muted
-                maxHeightClass="max-h-[320px]"
-              />
-            ))}
-          </div>
-        )}
+        {outerMounted && thoughtBodies.length > 0 ? (
+          <Collapse open={outerOpen}>
+            <div className="mt-0.5 pl-4 pr-1 rounded-sm bg-bgLight py-1">
+              {thoughtBodies.map((text, i) => (
+                <MarkdownScrollBody
+                  key={i}
+                  text={text}
+                  follow={thinkingActive && i === thoughtBodies.length - 1}
+                  muted
+                  maxHeightClass="max-h-[320px]"
+                />
+              ))}
+            </div>
+          </Collapse>
+        ) : null}
         {showNextPlanning ? (
           <div className={outerOpen ? 'pl-4' : undefined}>
             <NextPlanningPlaceholder
@@ -1439,37 +1670,39 @@ export const SoloActivityRow = React.memo(function SoloActivityRow({
     return (
       <div ref={rootRef} className="my-1.5 w-full select-text">
         {renderOuterToggle({ running: live, shimmer: live })}
-        {outerOpen && summaryLine && (summaryLine.detail || summaryLine.running) && (
-          <div
-            className={`mt-0.5 pl-4 pr-1 py-1.5 rounded-md border ${
-              summaryLine.summaryDone
-                ? 'border-emerald-500/25 bg-emerald-500/[0.04]'
-                : 'border-indigo-500/25 bg-indigo-500/[0.04]'
-            }`}
-          >
-            {summaryLine.summaryPending && !summaryLine.detail ? (
-              <div
-                className="text-[12px] animate-pulse"
-                style={{ color: 'color-mix(in srgb, rgb(var(--color-text-muted)) 55%, transparent)' }}
-              >
-                Waiting for context compression…
-              </div>
-            ) : (
-              <FollowScrollBox
-                as="pre"
-                contentKey={(summaryLine.detail || '').length}
-                follow={!!summaryLine.running}
-                className="text-[12px] leading-relaxed whitespace-pre-wrap break-words font-sans m-0 bg-transparent border-0 p-0 max-h-[360px] overflow-y-auto"
-                style={{ color: 'color-mix(in srgb, rgb(var(--color-text-muted)) 70%, transparent)' }}
-              >
-                {summaryLine.detail || 'Summarizing…'}
-                {summaryLine.running && !summaryLine.summaryPending ? (
-                  <span className="inline-block w-1.5 h-3.5 bg-indigo-400/50 animate-pulse ml-0.5 align-middle" />
-                ) : null}
-              </FollowScrollBox>
-            )}
-          </div>
-        )}
+        {outerMounted && summaryLine && (summaryLine.detail || summaryLine.running) ? (
+          <Collapse open={outerOpen}>
+            <div
+              className={`mt-0.5 pl-4 pr-1 py-1.5 rounded-md border ${
+                summaryLine.summaryDone
+                  ? 'border-emerald-500/25 bg-emerald-500/[0.04]'
+                  : 'border-indigo-500/25 bg-indigo-500/[0.04]'
+              }`}
+            >
+              {summaryLine.summaryPending && !summaryLine.detail ? (
+                <div
+                  className="text-[12px] animate-pulse"
+                  style={{ color: 'color-mix(in srgb, rgb(var(--color-text-muted)) 55%, transparent)' }}
+                >
+                  Waiting for context compression…
+                </div>
+              ) : (
+                <FollowScrollBox
+                  as="pre"
+                  contentKey={(summaryLine.detail || '').length}
+                  follow={!!summaryLine.running}
+                  className="text-[12px] leading-relaxed whitespace-pre-wrap break-words font-sans m-0 bg-transparent border-0 p-0 max-h-[360px] overflow-y-auto"
+                  style={{ color: 'color-mix(in srgb, rgb(var(--color-text-muted)) 70%, transparent)' }}
+                >
+                  {summaryLine.detail || 'Summarizing…'}
+                  {summaryLine.running && !summaryLine.summaryPending ? (
+                    <span className="inline-block w-1.5 h-3.5 bg-indigo-400/50 animate-pulse ml-0.5 align-middle" />
+                  ) : null}
+                </FollowScrollBox>
+              )}
+            </div>
+          </Collapse>
+        ) : null}
         {showNextPlanning ? (
           <div className={outerOpen ? 'pl-4' : undefined}>
             <NextPlanningPlaceholder
@@ -1491,19 +1724,21 @@ export const SoloActivityRow = React.memo(function SoloActivityRow({
         {thoughtBodies.length > 0 && (
           <div className="mb-1">
             {renderOuterToggle({ running: thinkingActive, shimmer: thinkingActive })}
-            {outerOpen && (
-              <div className="mt-0.5 pl-4 pr-1 rounded-sm bg-bgLight py-1">
-                {thoughtBodies.map((text, i) => (
-                  <MarkdownScrollBody
-                    key={i}
-                    text={text}
-                    follow={thinkingActive && i === thoughtBodies.length - 1}
-                    muted
-                    maxHeightClass="max-h-[320px]"
-                  />
-                ))}
-              </div>
-            )}
+            {outerMounted ? (
+              <Collapse open={outerOpen}>
+                <div className="mt-0.5 pl-4 pr-1 rounded-sm bg-bgLight py-1">
+                  {thoughtBodies.map((text, i) => (
+                    <MarkdownScrollBody
+                      key={i}
+                      text={text}
+                      follow={thinkingActive && i === thoughtBodies.length - 1}
+                      muted
+                      maxHeightClass="max-h-[320px]"
+                    />
+                  ))}
+                </div>
+              </Collapse>
+            ) : null}
           </div>
         )}
         {planLines.map((line) => (
@@ -1524,44 +1759,54 @@ export const SoloActivityRow = React.memo(function SoloActivityRow({
   return (
     <div ref={rootRef} className="my-1.5 w-full select-text">
       {renderOuterToggle({
-        running: isLiveTurn || hasRunning || hasLiveCompression,
-        shimmer: thinkingActive || hasRunning || hasLiveCompression,
+        running: isLiveTurn,
+        shimmer: thinkingActive || isLiveTurn,
       })}
       {/* Depth 1: event lines indented under the outer fold.
           >10 steps → fixed-height scroll box so the page doesn't grow forever.
           Delegate folds stay mounted (hidden when collapsed) so an open
-          SubAgentPanel keeps receiving live job_id updates after the turn seals. */}
+          SubAgentPanel keeps receiving live job_id updates after the turn seals.
+          The whole body mounts lazily via useFold().mounted and animates
+          through <Collapse> instead of display:none snapping. */}
+      {outerMounted ? (
+      <Collapse open={outerOpen}>
       <div
         ref={stepsScrollRef}
+        onPointerDown={markStepsUserScrolling}
         onScroll={(e) => {
           const el = e.currentTarget;
+          markStepsUserScrolling();
           stepsAtBottomRef.current =
-            el.scrollHeight - el.scrollTop - el.clientHeight < 28;
+            el.scrollHeight - el.scrollTop - el.clientHeight < 48;
+          if (!virtSteps) return;
+          if (virtRafRef.current != null) return;
+          virtRafRef.current = requestAnimationFrame(() => {
+            virtRafRef.current = null;
+            syncStepVirt(el);
+          });
         }}
         className={
-          !outerOpen
-            ? 'hidden'
-            : useStepsScrollBox
-              ? `mt-0.5 space-y-0.5 pl-3 pr-1 py-1 ${SOLO_STEPS_SCROLL_MAX_CLASS} overflow-y-auto overscroll-contain rounded-md border border-border/45 bg-bgLight`
-              : 'mt-0.5 space-y-0.5 pl-4'
+          useStepsScrollBox
+            ? `mt-0.5 pl-3 pr-1 py-1 ${SOLO_STEPS_SCROLL_MAX_CLASS} overflow-y-auto overscroll-contain rounded-md border border-border/45 bg-bgLight ${
+                virtSteps ? 'flex flex-col' : 'space-y-0.5'
+              }`
+            : 'mt-0.5 space-y-0.5 pl-4'
         }
-        aria-hidden={!outerOpen}
+        style={
+          useStepsScrollBox
+            ? { overflowAnchor: 'none', scrollBehavior: 'auto' }
+            : undefined
+        }
       >
         {(() => {
-          const range = virtSteps
-            ? stepVirtRange(
-                displayLines.length,
-                stepsAtBottomRef.current,
-                stepVirt,
-                stepsScrollRef.current?.clientHeight || 280,
-              )
-            : { start: 0, end: displayLines.length };
-          const { start, end } = range;
+          const n = displayLines.length;
+          const start = virtSteps ? Math.max(0, Math.min(stepVirt.start, n)) : 0;
+          const end = virtSteps ? Math.max(start, Math.min(stepVirt.end, n)) : n;
           const slice = displayLines.slice(start, end);
           return (
             <>
               {virtSteps && start > 0 ? (
-                <div style={{ height: start * STEP_EST_PX }} aria-hidden />
+                <div style={{ height: start * STEP_EST_PX, flexShrink: 0 }} aria-hidden />
               ) : null}
               {slice.map((line) => (
                 <SoloEventLine
@@ -1571,17 +1816,19 @@ export const SoloActivityRow = React.memo(function SoloActivityRow({
                   onOpenFile={onOpenFile}
                   embedVisualizations={embedVisualizations}
                   defaultOpen={
+                    // Never auto-open tool panels just because they are running:
+                    // each open panel pretty-prints args/results and used to stay
+                    // open after the call finished, so fast bursts got slower
+                    // with every extra tool. Expand-all remains an explicit pref.
                     (line.kind === 'thought' && expand.thoughts && !hasToolSteps) ||
                     (line.kind === 'plan' && expand.plan) ||
-                    (line.kind === 'tool' && (
-                      expand.tools || (!!line.running && !line.fileEdit)
-                    )) ||
+                    (line.kind === 'tool' && expand.tools) ||
                     !!(line.kind === 'summary' && line.running)
                   }
                 />
               ))}
-              {virtSteps && end < displayLines.length ? (
-                <div style={{ height: (displayLines.length - end) * STEP_EST_PX }} aria-hidden />
+              {virtSteps && end < n ? (
+                <div style={{ height: (n - end) * STEP_EST_PX, flexShrink: 0 }} aria-hidden />
               ) : null}
             </>
           );
@@ -1590,6 +1837,8 @@ export const SoloActivityRow = React.memo(function SoloActivityRow({
           <NextPlanningPlaceholder classic={embedVisualizations} startedMs={liveStartedMs} />
         ) : null}
       </div>
+      </Collapse>
+      ) : null}
     </div>
   );
 });

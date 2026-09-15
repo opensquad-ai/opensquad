@@ -8,6 +8,13 @@ describe('parseTimestampMs', () => {
     expect(parseTimestampMs('2026-07-11T11:30:00Z', { now })).toBe(Date.parse('2026-07-11T11:30:00Z'));
   });
 
+  it('afternoon China time stored as naive UTC is not shown as morning', () => {
+    // 13:03 CST = 05:03 UTC. Naive ISO must parse as UTC, not as local 05:03.
+    expect(parseTimestampMs('2026-09-12T05:03:00', { now: Date.parse('2026-09-12T08:00:00Z') })).toBe(
+      Date.parse('2026-09-12T05:03:00Z'),
+    );
+  });
+
   it('treats naive ISO as UTC when that is not in the future', () => {
     // utcnow()-style naive: 11:30 UTC → 30m ago
     expect(parseTimestampMs('2026-07-11T11:30:00.123456', { now })).toBe(

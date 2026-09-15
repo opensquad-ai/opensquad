@@ -7,6 +7,7 @@ import {
   FolderOpen, Menu, Shield,
 } from 'lucide-react';
 import { marked } from 'marked';
+import { sanitizeHtml, escapeHtml } from '../utils/safeHtml';
 import { adminAPI, AdminAgent, TokenStats, ChatProfile, userAPI, pluginAPI, PluginInfo, modelCardAPI, ModelCardInfo, ModelCardDetail } from '../services/api';
 import { resolveChatAvatar, resolveChatName } from '../utils/image';
 import { useTranslation, Trans } from 'react-i18next';
@@ -318,10 +319,12 @@ export const AgentManagerPage: React.FC<AgentManagerPageProps> = ({ onBack, onCh
   }, [detailAgent, detailTab, detailLoading, configObj]);
 
   // 渲染 Role Prompt markdown
+  // Role Prompt is user-editable and can arrive inside an installed market
+  // package → treat it as untrusted and sanitize before innerHTML.
   const renderedRole = useMemo(() => {
     if (!roleText) return `<p class="text-textMuted text-sm">${t('agentManager.empty')}</p>`;
-    try { return marked.parse(roleText) as string; }
-    catch { return `<pre>${roleText}</pre>`; }
+    try { return sanitizeHtml(marked.parse(roleText) as string); }
+    catch { return `<pre>${escapeHtml(roleText)}</pre>`; }
   }, [roleText]);
 
   // ---- 数据加载 ----

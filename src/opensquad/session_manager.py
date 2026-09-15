@@ -1830,8 +1830,37 @@ class SessionManager:
             return messages[-limit:]
         return messages
 
+    @staticmethod
+    def _align_history_window(messages: list[dict], limit: int | None) -> list[dict]:
+        """Take the last *limit* messages without splitting a tool_call pair.
+
+        A naive ``messages[-limit:]`` can start on ``role=tool``, which drops
+        the declaring assistant (and often the original user request). The
+        API then sees a tool result without a matching ``tool_calls`` id —
+        or a synthetic assistant with a *new* id — and returns 400.
+
+        If the cut still drops the first user message, prepend it so "continue"
+        turns still see the original task.
+        """
+        if not messages:
+            return []
+        n = len(messages)
+        if not limit or limit <= 0 or n <= limit:
+            start = 0
+        else:
+            start = n - limit
+            while start > 0 and messages[start].get("role") == "tool":
+                start -= 1
+        window = list(messages[start:])
+        if start > 0:
+            first_user = next((m for m in messages[:start] if m.get("role") == "user"), None)
+            if first_user is not None and (not window or window[0] is not first_user):
+                window = [first_user, *window]
+        return window
+
     def get_messages_for_chat_api(self, limit: int = 50, *, sid: str | None = None) -> list[dict]:
-        messages = self.get_messages(limit, sid=sid)
+        data = self._resolve_session_data(sid)
+        messages = self._align_history_window(data.get("messages") or [], limit)
         result = []
         _ui_only_keys = frozenset(
             {

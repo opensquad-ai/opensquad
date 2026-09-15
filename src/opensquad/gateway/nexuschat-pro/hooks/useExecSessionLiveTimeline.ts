@@ -9,7 +9,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { agentSessionAPI } from '../services/api';
 import { getAiWsService, type AIWSMessage } from '../services/aiWebSocket';
 import {
-  appendWorkflowEvent,
+  appendWorkflowEvents,
   buildTimelineFromSession,
   foldTaskProcessSinceLastUser,
   genTimelineUID,
@@ -252,25 +252,12 @@ export function useExecSessionLiveTimeline(
   }, []);
 
   const sealOnStop = useCallback(() => {
-    const nowMs = Date.now();
-    setTimeline((prev) => {
-      const sealed = sealIncompleteWorkflows(prev, { nowMs });
-      // Also cancel open tool cards so the fold is not stuck "running".
-      return sealed.map((entry) => {
-        if (entry.kind !== 'workflow') return entry;
-        const events = entry.data.events.map((evt) => {
-          if (evt.type === 'tool_call' && !evt.result) {
-            return {
-              ...evt,
-              result: 'Cancelled: stopped by user',
-              resultStatus: 'error' as const,
-            };
-          }
-          return evt;
-        });
-        return { ...entry, data: { ...entry.data, events, status: null, completed: true } };
-      });
-    });
+    setTimeline((prev) =>
+      sealIncompleteWorkflows(prev, {
+        nowMs: Date.now(),
+        cancelOpenTools: 'Cancelled: still running when the turn stopped',
+      }),
+    );
     setBusy(false);
   }, []);
 
@@ -322,6 +309,42 @@ export function useExecSessionLiveTimeline(
 
     const unsubs: Array<() => void> = [];
 
+    type LiveWorkflowItem = { event: WorkflowEvent; status: string | null };
+    const pendingLiveWorkflowEvents: LiveWorkflowItem[] = [];
+    let workflowTimelineRaf: number | null = null;
+    let lastWsEventAt = 0;
+    const DISK_CATCHUP_SKIP_MS = 8000;
+
+    const flushLiveWorkflowEvents = () => {
+      if (workflowTimelineRaf != null) {
+        cancelAnimationFrame(workflowTimelineRaf);
+        workflowTimelineRaf = null;
+      }
+      if (!pendingLiveWorkflowEvents.length) return;
+      const batch = pendingLiveWorkflowEvents.splice(0);
+      setTimeline((prev) => appendWorkflowEvents(prev, batch));
+    };
+
+    const enqueueLiveWorkflowEvent = (
+      event: WorkflowEvent,
+      status: string | null,
+      immediate = false,
+    ) => {
+      lastWsEventAt = Date.now();
+      setBusy(true);
+      pendingLiveWorkflowEvents.push({ event, status });
+      if (immediate) {
+        flushLiveWorkflowEvents();
+        return;
+      }
+      if (workflowTimelineRaf == null) {
+        workflowTimelineRaf = requestAnimationFrame(() => {
+          workflowTimelineRaf = null;
+          flushLiveWorkflowEvents();
+        });
+      }
+    };
+
     unsubs.push(
       onWs('thought', (msg) => {
         const text = extractContent(msg);
@@ -343,8 +366,7 @@ export function useExecSessionLiveTimeline(
               ? String((raw as any).job_id)
               : undefined,
         };
-        setBusy(true);
-        setTimeline((prev) => appendWorkflowEvent(prev, event, 'Thinking...'));
+        enqueueLiveWorkflowEvent(event, 'Thinking...');
       }),
     );
 
@@ -360,8 +382,7 @@ export function useExecSessionLiveTimeline(
           subTaskLabel: typeof data === 'object' ? (data.sub_task_label || '') : '',
           jobId: typeof data === 'object' && data?.job_id ? String(data.job_id) : undefined,
         };
-        setBusy(true);
-        setTimeline((prev) => appendWorkflowEvent(prev, event, `Calling ${toolName}...`));
+        enqueueLiveWorkflowEvent(event, `Calling ${toolName}...`);
       }),
     );
 
@@ -384,8 +405,7 @@ export function useExecSessionLiveTimeline(
           subAgent: !!data.sub_agent,
           subTaskLabel: data.sub_task_label || '',
         };
-        setBusy(true);
-        setTimeline((prev) => appendWorkflowEvent(prev, event, `Writing ${toolName}...`));
+        enqueueLiveWorkflowEvent(event, `Writing ${toolName}...`);
       }),
     );
 
@@ -401,11 +421,12 @@ export function useExecSessionLiveTimeline(
           subTaskLabel: typeof data === 'object' ? (data.sub_task_label || '') : '',
           jobId: typeof data === 'object' && data?.job_id ? String(data.job_id) : undefined,
         };
-        setTimeline((prev) => appendWorkflowEvent(prev, event, `${toolName} completed`));
+        enqueueLiveWorkflowEvent(event, `${toolName} completed`);
       }),
     );
 
     const handleFinal = (msg: AIWSMessage) => {
+      flushLiveWorkflowEvents();
       if (finalizingRef.current) return;
       finalizingRef.current = true;
       const text = extractContent(msg);
@@ -468,6 +489,7 @@ export function useExecSessionLiveTimeline(
 
     unsubs.push(
       onWs('to_user_end_task', (msg) => {
+        flushLiveWorkflowEvents();
         if (finalizingRef.current) return;
         finalizingRef.current = true;
         const text = extractContent(msg);
@@ -524,18 +546,21 @@ export function useExecSessionLiveTimeline(
 
     unsubs.push(
       onWs('stream', () => {
+        lastWsEventAt = Date.now();
         setBusy(true);
       }),
     );
 
     unsubs.push(
       onWs('turn_start', () => {
+        lastWsEventAt = Date.now();
         setBusy(true);
       }),
     );
 
     unsubs.push(
       onWs('turn_elapsed', (msg) => {
+        flushLiveWorkflowEvents();
         const data = (msg.content || msg.data || {}) as Record<string, unknown>;
         // Backend sends {started_ms, ended_ms}; some paths may send elapsed_ms.
         let elapsed = Number(data.elapsed_ms ?? data.elapsed ?? NaN);
@@ -584,8 +609,9 @@ export function useExecSessionLiveTimeline(
           lower === 'idle'
           || lower === 'ready'
           || lower.includes('task stopped')
-          || lower.includes('stopped')
+          ||           lower.includes('stopped')
         ) {
+          flushLiveWorkflowEvents();
           setTimeline((prev) => sealIncompleteWorkflows(prev, { nowMs: Date.now() }));
           setBusy(false);
         }
@@ -602,7 +628,7 @@ export function useExecSessionLiveTimeline(
           content: planContent,
           timestamp: Date.now(),
         };
-        setTimeline((prev) => appendWorkflowEvent(prev, event, 'Planning...'));
+        enqueueLiveWorkflowEvent(event, 'Planning...');
       }),
     );
 
@@ -631,6 +657,10 @@ export function useExecSessionLiveTimeline(
             /* ignore */
           }
         });
+        if (workflowTimelineRaf != null) {
+          cancelAnimationFrame(workflowTimelineRaf);
+          workflowTimelineRaf = null;
+        }
         window.clearTimeout(askAgain);
         window.clearInterval(askInterval);
       };
@@ -641,6 +671,8 @@ export function useExecSessionLiveTimeline(
         // Don't rewrite DOM while the user is selecting text in the page.
         const sel = window.getSelection();
         if (sel && !sel.isCollapsed) return;
+        // Live WS already owns the fold — a full rebuild here remounts rows.
+        if (lastWsEventAt && Date.now() - lastWsEventAt < DISK_CATCHUP_SKIP_MS) return;
         const resp = await agentSessionAPI.getSessionHistoryPaged(
           agentId,
           sessionId,
@@ -689,6 +721,10 @@ export function useExecSessionLiveTimeline(
           /* ignore */
         }
       });
+      if (workflowTimelineRaf != null) {
+        cancelAnimationFrame(workflowTimelineRaf);
+        workflowTimelineRaf = null;
+      }
       window.clearInterval(pollId);
       window.clearTimeout(askAgain);
       window.clearInterval(askInterval);

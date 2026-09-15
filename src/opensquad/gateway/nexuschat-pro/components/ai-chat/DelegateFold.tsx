@@ -3,6 +3,7 @@
  * Stays "running" until the parent tool returns; click opens SubAgentPanel.
  */
 import React, { useState, useCallback } from 'react';
+import { useTranslation } from 'react-i18next';
 import { CheckCircle, XCircle, GitBranch } from 'lucide-react';
 import type { DelegateBundle } from '../../utils/delegateGrouping';
 import { SubAgentPanel } from './SubAgentPanel';
@@ -18,6 +19,7 @@ export const DelegateFold: React.FC<DelegateFoldProps> = ({
   bundle,
   variant = 'classic',
 }) => {
+  const { t } = useTranslation();
   const [panelOpen, setPanelOpen] = useState(false);
   const openPanel = useCallback(() => setPanelOpen(true), []);
   const closePanel = useCallback(() => setPanelOpen(false), []);
@@ -30,9 +32,9 @@ export const DelegateFold: React.FC<DelegateFoldProps> = ({
 
   const toolHint =
     bundle.toolCount > 0
-      ? `${bundle.toolCount} nested tool${bundle.toolCount === 1 ? '' : 's'}`
+      ? t('aiChat.toolFlow.delegate.nestedTools', { count: bundle.toolCount })
       : bundle.running
-        ? 'sub-agent'
+        ? t('aiChat.toolFlow.delegate.subAgent')
         : '';
 
   const panel = (
@@ -59,7 +61,7 @@ export const DelegateFold: React.FC<DelegateFoldProps> = ({
           title="Open delegate window"
         >
           <span className="text-[13px] leading-relaxed min-w-0" style={{ color: faint }}>
-            <span className="font-normal">{bundle.running ? 'Exploring' : 'Explored'}</span>
+            <span className="font-normal">{bundle.running ? t('aiChat.toolFlow.line.exploring') : t('aiChat.toolFlow.line.explored')}</span>
             {toolHint ? <span>{' '}{toolHint}</span> : null}
             {bundle.running ? <span style={{ opacity: 0.85 }}> …</span> : null}
           </span>

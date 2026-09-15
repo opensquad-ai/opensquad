@@ -24,6 +24,13 @@ from __future__ import annotations
 import logging
 from unittest.mock import MagicMock, patch
 
+import pytest
+
+# plugins.telegram.adapter imports python-telegram-bot at module scope. Skip
+# rather than error when the optional extra is not installed (`--extra telegram`);
+# CI installs it, so these tests do run on the gate.
+pytest.importorskip("telegram")
+
 # ── helpers ──────────────────────────────────────────────────────────────
 
 

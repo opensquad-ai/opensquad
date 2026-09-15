@@ -382,6 +382,17 @@ class InputHandler:
         )
         runner._current_input_source = "chatpro"
         runner._current_channel = "chatpro_group"
+        runner._current_group_targets = [
+            {
+                "id": str(msg.source_id),
+                "type": "group" if msg.type == "group" else "dm",
+            }
+            for msg in pending
+            if getattr(msg, "source_id", None)
+        ]
+        last_gid = next((str(msg.source_id) for msg in reversed(pending) if getattr(msg, "source_id", None)), "")
+        if last_gid:
+            runner._current_group_id = last_gid
 
         # Merge pending web messages
         if extra_web:

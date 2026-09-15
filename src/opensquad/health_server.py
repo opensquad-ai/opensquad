@@ -96,6 +96,14 @@ def stop_health_server(timeout: float = 2.0):
         _health_server.shutdown()
     except Exception as e:
         logger.warning(f"[HealthServer] Shutdown error: {e}")
+    # shutdown() only stops the serve_forever() loop -- it does NOT release the
+    # listening socket. Without server_close() the port stays bound, so callers
+    # that probe the old port block until their timeout instead of getting a
+    # fast connection-refused. Always close the socket.
+    try:
+        _health_server.server_close()
+    except Exception as e:
+        logger.warning(f"[HealthServer] Close error: {e}")
     if _health_thread and _health_thread.is_alive():
         _health_thread.join(timeout=timeout)
     _health_server = None

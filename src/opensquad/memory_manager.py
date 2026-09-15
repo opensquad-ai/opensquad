@@ -419,7 +419,10 @@ class MemoryManager:
         """Generate a cache key from a keyword list (sorted then hashed)."""
         sorted_kw = sorted(set(keywords))
         raw = "|".join(sorted_kw)
-        return hashlib.md5(raw.encode("utf-8")).hexdigest()
+        # MD5 is used here only as a short, collision-resistant *cache key* —
+        # never for authentication or integrity. `usedforsecurity=False` states
+        # that intent explicitly (and silences bandit B324).
+        return hashlib.md5(raw.encode("utf-8"), usedforsecurity=False).hexdigest()
 
     def _is_active(self, cache_key: str) -> bool:
         """Check whether a cache_key is already in the active window."""

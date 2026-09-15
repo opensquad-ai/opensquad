@@ -141,6 +141,8 @@ def is_delegate_tool(name: str) -> bool:
 
 def is_shell_tool(name: str) -> bool:
     n = (name or "").lower()
+    if n in ("shell", "terminal", "cmd", "bash", "powershell", "执行命令"):
+        return True
     needles = (
         "run_session_job",
         "create_shell",

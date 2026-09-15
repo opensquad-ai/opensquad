@@ -11,9 +11,12 @@ playwright
 playwright-stealth
 trafilatura
 beautifulsoup4
+lxml
 
 # PDF Processing
-PyPDF2
+# NOTE: pdf_processor.py does `import fitz`, which is PyMuPDF. This file
+# previously listed PyPDF2, which nothing in this service imports.
+PyMuPDF
 
 # Reranker (Qwen3-Reranker-0.6B sidecar)
 torch

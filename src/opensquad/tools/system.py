@@ -9,6 +9,7 @@ import contextvars
 import os
 import platform
 import queue
+import re
 import subprocess
 import threading
 import time
@@ -34,6 +35,77 @@ from opensquad.utils.path_utils import is_path_safe as _is_path_safe
 
 # Project root (workspace-aware)
 _PROJECT_ROOT = _get_workspace_root()
+
+# Models often append `| more` / `| less`, which hangs a persistent shell
+# waiting for interactive pager input until the user hits Stop.
+_INTERACTIVE_PAGER_RE = re.compile(
+    r"[ \t]*\|[ \t]*(?:more|less|most|pg)(?:\.com)?(?:[ \t]+[^\n|&]*)?[ \t]*$",
+    re.IGNORECASE,
+)
+# `git diff` / `git log` use a pager when they think stdout is a console
+# (Windows hidden cmd still counts). The pager never sees a keypress, so
+# the command hangs until timeout and every later run_session_job is stuck.
+_GIT_INVOKE_RE = re.compile(
+    r"(^|[;&|\n]\s*)(git)(\.exe)?(\s+)(?!--no-pager\b)",
+    re.IGNORECASE,
+)
+
+
+def _strip_interactive_pager(command: str) -> str:
+    cmd = (command or "").rstrip()
+    new, n = _INTERACTIVE_PAGER_RE.subn("", cmd)
+    stripped = new.strip()
+    if n and stripped:
+        logger.warning("[system] stripped interactive pager: %r -> %r", command, stripped)
+        return stripped
+    return cmd
+
+
+def _inject_git_no_pager(command: str) -> str:
+    cmd = command or ""
+    new, n = _GIT_INVOKE_RE.subn(r"\1\2\3\4--no-pager ", cmd)
+    if n:
+        logger.debug("[system] injected git --no-pager: %r -> %r", command, new)
+    return new
+
+
+def _prepare_shell_command(command: str) -> str:
+    return _inject_git_no_pager(_strip_interactive_pager(command))
+
+
+def _sandbox_check(command: str) -> str | None:
+    """Weak-sandbox gate for agent-driven shell commands (M0).
+
+    Returns a rejection message when the command is blocked by policy, else
+    None. Import is lazy so the tools layer never hard-depends on the
+    security package at import time.
+    """
+    try:
+        from opensquad.security.sandbox import check_shell_command
+
+        return check_shell_command(command)
+    except Exception:
+        logger.debug("[system] sandbox check unavailable", exc_info=True)
+        return None
+
+
+def _noninteractive_shell_env(base: dict[str, str] | None = None) -> dict[str, str]:
+    """Env for agent-driven shells: no git/less pagers, no interactive git prompts."""
+    env = dict(base) if base is not None else os.environ.copy()
+    env["PYTHONUNBUFFERED"] = "1"
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    env["GIT_ASKPASS"] = env.get("GIT_ASKPASS") or ""
+    # Empty GIT_PAGER is not enough on every Git build; `cat` is ignored when
+    # missing from PATH, but --no-pager on the command line still wins.
+    env["GIT_PAGER"] = "cat"
+    env["PAGER"] = "cat"
+    env["LESS"] = "FRX"
+    if not env.get("TERM"):
+        env["TERM"] = "dumb"
+    if os.name == "nt":
+        env.setdefault("PYTHONUTF8", "1")
+        env.setdefault("PYTHONIOENCODING", "utf-8")
+    return env
 
 
 def _resolve_working_directory(working_directory: str | None) -> str:
@@ -168,12 +240,7 @@ class Job:
         self.start_time = datetime.now()
         try:
             # Subprocess environment: force Python subprocesses to output UTF-8
-            env = os.environ.copy()
-            # Critical for live CMD panel: avoid block-buffering when stdout is a pipe
-            env["PYTHONUNBUFFERED"] = "1"
-            if platform.system() == "Windows":
-                env.setdefault("PYTHONUTF8", "1")
-                env.setdefault("PYTHONIOENCODING", "utf-8")
+            env = _noninteractive_shell_env()
 
             # Start process with redirected output
             # Windows: create a new process group so Ctrl+C / console shutdown
@@ -198,7 +265,8 @@ class Job:
                 # the model can request.  If stricter isolation is needed,
                 # set shell=False and implement an allow-list of safe commands
                 # in the agent's role card / tool definitions.
-                shell=self.shell,
+                # B602 suppressed below: rationale is the comment block above.
+                shell=self.shell,  # nosec B602
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,  # Merge stderr into stdout
                 stdin=subprocess.DEVNULL,
@@ -442,9 +510,7 @@ class ShellSession:
         self._start_process()
 
     def _start_process(self):
-        env = os.environ.copy()
-        if os.name == "nt":
-            env.setdefault("PYTHONIOENCODING", "utf-8")
+        env = _noninteractive_shell_env()
         popen_kw: dict = {
             "stdin": subprocess.PIPE,
             "stdout": subprocess.PIPE,
@@ -468,17 +534,39 @@ class ShellSession:
         if os.name == "nt":
             if "powershell" in self.shell_type.lower():
                 self._send_raw(
-                    "$OutputEncoding = [System.Text.Encoding]::UTF8; [Console]::OutputEncoding = [System.Text.Encoding]::UTF8\n"
+                    "$OutputEncoding = [System.Text.Encoding]::UTF8; [Console]::OutputEncoding = [System.Text.Encoding]::UTF8; "
+                    "$env:GIT_PAGER='cat'; $env:PAGER='cat'; $env:GIT_TERMINAL_PROMPT='0'\n"
                 )
             else:
                 self._send_raw("@echo off\n")
                 self._send_raw("chcp 65001 >nul 2>nul\n")
+                self._send_raw("set GIT_PAGER=cat\n")
+                self._send_raw("set PAGER=cat\n")
+                self._send_raw("set GIT_TERMINAL_PROMPT=0\n")
         else:
-            self._send_raw("export PYTHONUNBUFFERED=1\n")
+            self._send_raw("export PYTHONUNBUFFERED=1 GIT_PAGER=cat PAGER=cat GIT_TERMINAL_PROMPT=0\n")
 
         self._stop_event.clear()
         self._reader_thread = threading.Thread(target=self._read_loop, daemon=True)
         self._reader_thread.start()
+
+    def _recycle(self, reason: str) -> None:
+        """Kill a stuck shell (pager / hung foreground) and start a fresh one."""
+        logger.warning("[system] recycling shell session %s (%s)", self.session_id, reason)
+        try:
+            self.close()
+        except Exception:
+            logger.debug("[system] recycle close failed sid=%s", self.session_id, exc_info=True)
+        try:
+            self._start_process()
+        except Exception:
+            logger.debug("[system] recycle start failed sid=%s", self.session_id, exc_info=True)
+
+    def _ensure_alive(self) -> bool:
+        if self.process is not None and self.process.poll() is None:
+            return True
+        self._recycle("shell-exited")
+        return bool(self.process is not None and self.process.poll() is None)
 
     def _send_raw(self, cmd: str):
         if not self.process or not self.process.stdin:
@@ -487,18 +575,25 @@ class ShellSession:
         self.process.stdin.flush()
 
     def _read_loop(self):
-        while not self._stop_event.is_set() and self.process and self.process.poll() is None:
-            line = self.process.stdout.readline() if self.process.stdout else ""
-            if not line:
-                break
-            with self._lock:
-                self.output_buffer.append(line)
-                if len(self.output_buffer) > self._max_buffer_size:
-                    self.output_buffer.pop(0)
+        try:
+            while not self._stop_event.is_set() and self.process and self.process.poll() is None:
+                line = self.process.stdout.readline() if self.process.stdout else ""
+                if not line:
+                    break
+                with self._lock:
+                    self.output_buffer.append(line)
+                    if len(self.output_buffer) > self._max_buffer_size:
+                        self.output_buffer.pop(0)
+        except Exception:
+            logger.debug("[system] session %s stdout reader stopped", self.session_id, exc_info=True)
 
     def execute(self, command: str, timeout: float = 120.0) -> dict[str, Any]:
-        if not self.process or self.process.poll() is not None:
+        if not self._ensure_alive():
             return {"status": "error", "message": "Session shell is not running."}
+        command = _prepare_shell_command(command)
+        denied = _sandbox_check(command)
+        if denied:
+            return {"status": "error", "message": denied}
 
         ctx = get_tool_call_context()
         ui_call_id = ctx.get("call_id", "")
@@ -554,7 +649,7 @@ class ShellSession:
                     },
                 )
 
-        def _finish_status(state: str, return_code: int | None = None) -> None:
+        def _finish_status(state: str, return_code: int | None = None, reason: str | None = None) -> None:
             if not ui_call_id:
                 return
             payload: dict[str, Any] = {
@@ -567,6 +662,8 @@ class ShellSession:
             }
             if return_code is not None:
                 payload["return_code"] = return_code
+            if reason:
+                payload["reason"] = reason
             emit_job_event("job_status", payload)
 
         while time.time() - start_time < timeout:
@@ -574,7 +671,9 @@ class ShellSession:
                 with self._lock:
                     partial = "".join(self.output_buffer[start_index:])
                 _emit_new_chunks(partial)
-                _finish_status("aborted")
+                _finish_status("aborted", reason="shell_exited")
+                if not (self.process and self.process.poll() is None):
+                    self._recycle("shell-exited-mid-command")
                 return {
                     "status": "error",
                     "session_id": self.session_id,
@@ -587,7 +686,8 @@ class ShellSession:
                 with self._lock:
                     partial = "".join(self.output_buffer[start_index:])
                 _emit_new_chunks(partial)
-                _finish_status("aborted")
+                _finish_status("aborted", reason="user_stop")
+                self._recycle("user-stop")
                 return {
                     "status": "error",
                     "session_id": self.session_id,
@@ -614,34 +714,43 @@ class ShellSession:
         with self._lock:
             partial = "".join(self.output_buffer[start_index:])
         _emit_new_chunks(partial)
-        _finish_status("error")
+        _finish_status("error", reason="timeout")
+        # Hung pager / foreground process would otherwise block every later command.
+        self._recycle("timeout")
         return {
             "status": "error",
             "session_id": self.session_id,
             "message": f"Command timed out after {timeout}s",
             "partial_data": partial,
             "working_directory": self.working_directory,
+            "timed_out": True,
         }
 
     def close(self):
         self._stop_event.set()
-        if self.process:
+        proc = self.process
+        self.process = None
+        if proc:
             try:
                 if os.name == "nt":
                     subprocess.run(
-                        ["taskkill", "/F", "/T", "/PID", str(self.process.pid)],
+                        ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
                         capture_output=True,
                         timeout=10,
                     )
                 else:
-                    self.process.terminate()
+                    proc.terminate()
                     try:
-                        self.process.wait(timeout=5)
+                        proc.wait(timeout=5)
                     except subprocess.TimeoutExpired:
-                        self.process.kill()
+                        proc.kill()
             except Exception:
                 with contextlib.suppress(Exception):
-                    self.process.kill()
+                    proc.kill()
+        t = self._reader_thread
+        self._reader_thread = None
+        if t is not None and t.is_alive() and t is not threading.current_thread():
+            t.join(timeout=2)
 
 
 _SESSIONS: dict[str, ShellSession] = {}
@@ -694,12 +803,26 @@ def create_shell_session(
         return {"status": "error", "message": str(e)}
 
 
-def run_session_job(command: str, timeout: float = 120.0, session_id: str = _DEFAULT_SESSION_ID) -> dict[str, Any]:
+def run_session_job(
+    command: str,
+    timeout: float = 120.0,
+    session_id: str = _DEFAULT_SESSION_ID,
+    description: str | None = None,
+) -> dict[str, Any]:
     """Run command in persistent shell session. Uses the same shell per session_id.
 
     WARNING: If a previous command in this session started a foreground process
     (e.g. npm run dev, python server.py), this call will BLOCK until that process
     exits, then time out. For long-running services, use start_job instead.
+
+    Args:
+        command:    Command-line string to execute.
+        timeout:    Seconds to wait for completion (default 120).
+        session_id: Persistent shell session id (one shell per session).
+        description: MANDATORY in practice — one short line explaining WHY this
+            command is run (its purpose/goal, e.g. "查看目录结构以定位配置文件").
+            Always include it; it is shown to the user in the tool-flow UI instead
+            of the raw command.
     """
     watch_root = _shell_watch_begin()
     try:
@@ -922,6 +1045,7 @@ def start_job(
     working_directory: str | None = None,
     blocking: bool = False,
     max_wait_seconds: float | None = None,
+    description: str | None = None,
 ) -> dict[str, Any]:
     """
     Start a background command job.
@@ -947,8 +1071,16 @@ def start_job(
         working_directory: Optional working directory for this job.
         blocking:          Whether to block until completion.
         max_wait_seconds:  Optional safety timeout when blocking=True. If exceeded, returns completed=False and keep job running.
+        description:       MANDATORY in practice — one short line explaining WHY this
+                           command is run (its purpose/goal, e.g. "启动开发服务器以便预览页面").
+                           Always include it; it is shown to the user in the tool-flow UI instead
+                           of the raw command.
     """
     _cleanup_old_jobs()
+    command = _prepare_shell_command(command)
+    denied = _sandbox_check(command)
+    if denied:
+        return {"status": "error", "message": denied}
 
     resolved_cwd = _resolve_working_directory(working_directory)
     if not _is_path_safe(resolved_cwd):

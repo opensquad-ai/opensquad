@@ -304,7 +304,12 @@ async def run_parallel_dispatcher(runner: AgentRunner, initial_query: str | None
 
         # Same session already running → leave in queue (re-push) wait_any already popped
         if scheduler.is_session_busy(sid):
-            # Re-queue at front of session inbox
+            # Re-queue at front of session inbox, then WAIT for the turn to
+            # finish instead of busy-polling. The old `sleep(0.05)` + continue
+            # loop re-popped and re-pushed the same message every ~50ms for the
+            # whole duration of the turn, emitting busy_sessions+status WS
+            # frames each cycle (frame storm + the queued message visibly
+            # cycling in the logs while the model never saw it).
             hub.push(
                 item.get("content", ""),
                 source=item.get("source", "gateway"),
@@ -317,9 +322,9 @@ async def run_parallel_dispatcher(runner: AgentRunner, initial_query: str | None
                 user_id=item.get("user_id", ""),
                 client_id=item.get("client_id", ""),
                 session_id=sid,
+                model_card=item.get("model_card", ""),
             )
-            # Wait briefly for current turn to finish before retrying
-            await asyncio.sleep(0.05)
+            await scheduler.wait_session_free(str(sid), timeout=5.0)
             continue
 
         # Acquire parallel slot (returns False if sid busy or capacity timeout)

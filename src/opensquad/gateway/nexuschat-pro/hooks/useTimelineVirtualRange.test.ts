@@ -3,8 +3,10 @@ import {
   ALWAYS_RENDER_TAIL,
   DEFAULT_ESTIMATE,
   WINDOW_AFTER,
+  expandTimelineRange,
   isTimelineIndexVirtualizedAway,
   layoutTimelineWindow,
+  tailTimelineRange,
 } from './useTimelineVirtualRange';
 
 describe('layoutTimelineWindow', () => {
@@ -39,6 +41,20 @@ describe('layoutTimelineWindow', () => {
     expect(layout.padTopPx).toBe((count - ALWAYS_RENDER_TAIL) * DEFAULT_ESTIMATE);
     expect(layout.padMidPx).toBe(0);
     expect(layout.tailStart).toBe(count - ALWAYS_RENDER_TAIL);
+  });
+});
+
+describe('expandTimelineRange', () => {
+  it('only grows the window so estimated spacers cannot jump the thumb', () => {
+    const prev = { start: 80, end: 120 };
+    const grown = expandTimelineRange(prev, 40, 150, 400);
+    expect(grown).toEqual({ start: 40, end: 150 });
+    const same = expandTimelineRange(grown, 90, 110, 400);
+    expect(same).toBe(grown);
+  });
+
+  it('builds a tail window for stick-to-bottom follow', () => {
+    expect(tailTimelineRange(200, 48)).toEqual({ start: 152, end: 199 });
   });
 });
 

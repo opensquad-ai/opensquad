@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { AI_MARKDOWN_CLASS, renderFencedMarkdown } from '../../utils/fencedMarkdown';
+import { escapeHtml } from '../../utils/safeHtml';
 import { useMermaidHydration } from '../../hooks/useMermaidHydration';
 import { FollowScrollBox } from './FollowScrollBox';
 
@@ -13,12 +14,13 @@ interface StreamingMessageProps {
   senderName?: string;
 }
 
-/** Render fenced markdown with a safe fallback to raw text. */
+/** Render fenced markdown with a safe fallback to escaped raw text. */
 function renderMarkdownSafe(raw: string): string {
   try {
     return renderFencedMarkdown(raw);
   } catch {
-    return raw;
+    // Escape, never return `raw`: this string goes straight into innerHTML.
+    return escapeHtml(raw);
   }
 }
 
@@ -76,8 +78,9 @@ export const StreamingMessage: React.FC<StreamingMessageProps> = ({
     [],
   );
 
-  // Prefer hydrating when the stream is complete (stable fences); still try mid-stream.
-  const mermaidRef = useMermaidHydration(renderedHtml, !!visibleContent);
+  // Hydrate mermaid only after the stream is complete — incomplete fences
+  // fail mermaid.render on every 100ms flush and spike CPU.
+  const mermaidRef = useMermaidHydration(renderedHtml, !!isComplete && !!visibleContent);
 
   if (!visibleContent) return null;
 

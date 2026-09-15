@@ -8,8 +8,6 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next';
 import {
   Check,
-  ChevronDown,
-  ChevronRight,
   Copy,
   Eye,
   EyeOff,
@@ -31,11 +29,13 @@ import {
 } from 'lucide-react';
 import { adminAPI } from '../../services/api';
 import { getLangForFile, highlightLine, HLJS_THEME_CSS } from '../../utils/codeHighlight';
-import { AI_MARKDOWN_CLASS, renderFencedMarkdown } from '../../utils/fencedMarkdown';
+import { FILE_MARKDOWN_CLASS, renderFencedMarkdown } from '../../utils/fencedMarkdown';
+import { FileIndentGuides } from './FileIndentGuides';
 import { UnifiedDiffView, type DiffLine } from './UnifiedDiffView';
 import { fillDiffCollapseHidden, flattenDiffCollapses } from './fillDiffCollapseHidden';
 import { SOFT_PRESENCE_MS, useSoftPresence } from '../../utils/useSoftPresence';
 import { OpenSquadLoader } from '../OpenSquadLoader';
+import { ControlledFold, FoldChevron } from '../Collapse';
 import {
   getWorkspaceFileCache,
   putWorkspaceFileCache,
@@ -457,16 +457,17 @@ const CodePreview: React.FC<{ fileName: string; content: string }> = ({ fileName
   const lang = useMemo(() => getLangForFile(fileName), [fileName]);
   const lines = useMemo(() => content.split('\n'), [content]);
   return (
-    <div className="flex-1 min-h-0 overflow-auto bg-[#0d1117] font-mono text-[11px] leading-5">
+    <div className="flex-1 min-h-0 overflow-auto file-code-surface font-mono text-[11px] leading-5">
       <style>{HLJS_THEME_CSS}</style>
-      <div className="min-w-full inline-block">
+      <div className="min-w-full inline-block relative">
+        <FileIndentGuides padLeft="calc(2.5rem + 0.5rem)" text={content} />
         {lines.map((line, i) => (
-          <div key={i} className="flex items-start hover:bg-primary/10">
-            <span className="select-none w-10 shrink-0 text-right pr-2 text-gray-600 tabular-nums text-[10px] border-r border-gray-800">
+          <div key={i} className="relative z-[1] flex items-start hover:bg-primary/10">
+            <span className="select-none w-10 shrink-0 text-right pr-2 text-textMuted tabular-nums text-[10px] border-r border-border/70">
               {i + 1}
             </span>
             <span
-              className="flex-1 min-w-0 whitespace-pre-wrap break-words pl-2 text-gray-200"
+              className="flex-1 min-w-0 whitespace-pre-wrap break-words pl-2 text-textMain"
               dangerouslySetInnerHTML={{ __html: highlightLine(line, lang) }}
             />
           </div>
@@ -479,10 +480,10 @@ const CodePreview: React.FC<{ fileName: string; content: string }> = ({ fileName
 const MarkdownPreview: React.FC<{ content: string }> = ({ content }) => {
   const html = useMemo(() => renderFencedMarkdown(content || ''), [content]);
   return (
-    <div className="flex-1 min-h-0 overflow-auto bg-[#0d1117]">
+    <div className="flex-1 min-h-0 overflow-auto bg-bgLight">
       <style>{HLJS_THEME_CSS}</style>
       <div
-        className={`${AI_MARKDOWN_CLASS} prose prose-sm prose-invert max-w-none break-words px-3.5 py-3 text-[12.5px] leading-relaxed`}
+        className={`${FILE_MARKDOWN_CLASS} px-3.5 py-3 text-[12.5px] leading-relaxed text-textMain`}
         dangerouslySetInnerHTML={{ __html: html }}
       />
     </div>
@@ -490,7 +491,7 @@ const MarkdownPreview: React.FC<{ content: string }> = ({ content }) => {
 };
 
 const ImagePreview: React.FC<{ src: string; fileName: string; size?: number }> = ({ src, fileName, size }) => (
-  <div className="flex-1 min-h-0 overflow-auto bg-[#0d1117] flex flex-col items-center justify-center p-3 gap-2">
+  <div className="flex-1 min-h-0 overflow-auto bg-bgLight flex flex-col items-center justify-center p-3 gap-2">
     <img
       src={src}
       alt={fileName}
@@ -498,7 +499,7 @@ const ImagePreview: React.FC<{ src: string; fileName: string; size?: number }> =
       draggable={false}
     />
     {typeof size === 'number' ? (
-      <div className="text-[10px] text-gray-500 font-mono">{formatBytes(size)}</div>
+      <div className="text-[10px] text-textMuted font-mono">{formatBytes(size)}</div>
     ) : null}
   </div>
 );
@@ -2251,7 +2252,7 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
                         title={isOpenRow ? t('aiChat.collapseDiff') : t('aiChat.expandDiff')}
                         onClick={() => void toggleChangedExpand(e.path)}
                       >
-                        {isOpenRow ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+                        <FoldChevron open={isOpenRow} />
                       </button>
                       <FileTypeIcon name={e.name} type={e.type === 'dir' ? 'dir' : 'file'} />
                       <button
@@ -2328,7 +2329,7 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
                         <Copy size={12} className="text-textMuted" />
                       </button>
                     </div>
-                    {isOpenRow ? (
+                    <ControlledFold open={isOpenRow}>
                       <div className="max-h-[280px] overflow-auto border-t border-border/30 bg-bgLight/80">
                         {inline ? (
                           <UnifiedDiffView
@@ -2349,7 +2350,7 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
                           <div className="px-3 py-2 text-[11px] text-textMuted">{t('aiChat.noDiff')}</div>
                         )}
                       </div>
-                    ) : null}
+                    </ControlledFold>
                   </div>
                 );
               })}
@@ -2463,10 +2464,8 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
                       >
                         {e.skipped || !hasKids ? (
                           <span className="w-3" />
-                        ) : isOpenDir ? (
-                          <ChevronDown size={12} />
                         ) : (
-                          <ChevronRight size={12} />
+                          <FoldChevron open={isOpenDir} />
                         )}
                       </button>
                     ) : (

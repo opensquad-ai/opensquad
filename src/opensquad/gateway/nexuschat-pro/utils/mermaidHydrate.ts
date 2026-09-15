@@ -3,6 +3,8 @@
  * Fenced ```mermaid blocks are emitted as .ai-mermaid[data-src] placeholders;
  * this module turns them into SVG after the HTML is in the DOM.
  */
+import DOMPurify from 'dompurify';
+
 let _initTheme: string | null = null;
 let _seq = 0;
 
@@ -42,12 +44,74 @@ function detectMermaidTheme(): 'dark' | 'default' {
   return 'default';
 }
 
+/**
+ * Soft brand-tinted palettes (violet #8257CC anchor) for the `base` theme.
+ * Mindmap / pie section colors come from the cScale cycle: pastel fill +
+ * dark readable label (light) / deep fill + light label (dark).
+ */
+const MMD_LIGHT_VARS = {
+  background: 'transparent',
+  primaryColor: '#EDE9FE',
+  primaryTextColor: '#4C1D95',
+  primaryBorderColor: '#A78BFA',
+  secondaryColor: '#DBEAFE',
+  tertiaryColor: '#CCFBF1',
+  lineColor: '#A78BFA',
+  textColor: '#3F3F46',
+  mainBkg: '#EDE9FE',
+  nodeBorder: '#A78BFA',
+  clusterBkg: '#F8F7FF',
+  clusterBorder: '#DDD6FE',
+  edgeLabelBackground: '#ffffff',
+  cScale0: '#EDE9FE', cScaleLabel0: '#5B21B6',
+  cScale1: '#DBEAFE', cScaleLabel1: '#1E40AF',
+  cScale2: '#CCFBF1', cScaleLabel2: '#115E59',
+  cScale3: '#DCFCE7', cScaleLabel3: '#166534',
+  cScale4: '#FEF3C7', cScaleLabel4: '#92400E',
+  cScale5: '#FFEDD5', cScaleLabel5: '#9A3412',
+  cScale6: '#FCE7F3', cScaleLabel6: '#9D174D',
+  cScale7: '#E0E7FF', cScaleLabel7: '#3730A3',
+  cScale8: '#D1FAE5', cScaleLabel8: '#065F46',
+  cScale9: '#FFE4E6', cScaleLabel9: '#9F1239',
+  cScale10: '#E0F2FE', cScaleLabel10: '#075985',
+  cScale11: '#F3E8FF', cScaleLabel11: '#6B21A8',
+};
+
+const MMD_DARK_VARS = {
+  background: 'transparent',
+  primaryColor: '#3B2A66',
+  primaryTextColor: '#EDE9FE',
+  primaryBorderColor: '#7C5CC4',
+  secondaryColor: '#1E3A5F',
+  tertiaryColor: '#134E4A',
+  lineColor: '#7C5CC4',
+  textColor: '#E4E4E7',
+  mainBkg: '#3B2A66',
+  nodeBorder: '#7C5CC4',
+  clusterBkg: '#27223B',
+  clusterBorder: '#4C3D78',
+  edgeLabelBackground: '#27223B',
+  cScale0: '#4C3D78', cScaleLabel0: '#E9D5FF',
+  cScale1: '#1E3A5F', cScaleLabel1: '#BAE6FD',
+  cScale2: '#134E4A', cScaleLabel2: '#99F6E4',
+  cScale3: '#14532D', cScaleLabel3: '#BBF7D0',
+  cScale4: '#78350F', cScaleLabel4: '#FDE68A',
+  cScale5: '#7C2D12', cScaleLabel5: '#FED7AA',
+  cScale6: '#881337', cScaleLabel6: '#FECDD3',
+  cScale7: '#312E81', cScaleLabel7: '#C7D2FE',
+  cScale8: '#064E3B', cScaleLabel8: '#D1FAE5',
+  cScale9: '#881337', cScaleLabel9: '#FFE4E6',
+  cScale10: '#0C4A6E', cScaleLabel10: '#E0F2FE',
+  cScale11: '#581C87', cScaleLabel11: '#F3E8FF',
+};
+
 async function ensureMermaid(theme: 'dark' | 'default') {
   const mermaid = (await import('mermaid')).default;
   if (_initTheme !== theme) {
     mermaid.initialize({
       startOnLoad: false,
-      theme,
+      theme: 'base',
+      themeVariables: theme === 'dark' ? MMD_DARK_VARS : MMD_LIGHT_VARS,
       securityLevel: 'strict',
       fontFamily: 'ui-sans-serif, system-ui, sans-serif',
     });
@@ -66,15 +130,55 @@ function decodeSrc(el: HTMLElement): string {
   }
 }
 
+/** Sanitize an agent-authored SVG for innerHTML (SVG profile — no scripts). */
+function sanitizeSvg(code: string): string {
+  try {
+    const clean = DOMPurify.sanitize(code, {
+      USE_PROFILES: { svg: true, svgFilters: true },
+      ADD_ATTR: ['viewBox', 'xmlns', 'preserveAspectRatio', 'filter', 'id', 'class'],
+    }) as unknown as string;
+    return /<svg[\s>]/i.test(clean) ? clean : '';
+  } catch {
+    return '';
+  }
+}
+
 /**
- * Render all pending `.ai-mermaid` nodes under *root*.
- * Incomplete / invalid diagrams fall back to a code preview.
+ * Inject sanitized agent SVGs. Reuses the mermaid toolbar / fullscreen viewer:
+ * the host div carries `.ai-mermaid-svg`, which `attachMermaidInteractions`
+ * and all `.ai-mermaid-*` CSS already target.
+ */
+function hydrateSvgNodes(nodes: HTMLElement[]): void {
+  for (const el of nodes) {
+    const code = decodeSrc(el).trim();
+    el.setAttribute('data-rendered', '1');
+    const clean = /<\/svg>\s*$/i.test(code) ? sanitizeSvg(code) : '';
+    if (!clean) {
+      el.innerHTML =
+        `<pre class="ai-svg-fallback"><code>${escapeHtml(code)}</code></pre>`;
+      el.setAttribute('data-rendered', 'preview');
+      continue;
+    }
+    el.innerHTML = `<div class="ai-mermaid-svg">${clean}</div>${buildToolbar()}`;
+    attachMermaidInteractions(el);
+    el.removeAttribute('data-src');
+  }
+}
+
+/**
+ * Render all pending `.ai-mermaid` nodes and inject all `.ai-svg` nodes under
+ * *root*. Incomplete / invalid diagrams fall back to a code preview.
  */
 export async function hydrateMermaidIn(root: HTMLElement | null): Promise<void> {
   if (!root || typeof document === 'undefined') return;
   const nodes = Array.from(
     root.querySelectorAll<HTMLElement>('.ai-mermaid:not([data-rendered])'),
   );
+  // SVG fences need no async renderer — sanitize + inject right away.
+  const svgNodes = Array.from(
+    root.querySelectorAll<HTMLElement>('.ai-svg:not([data-rendered])'),
+  );
+  if (svgNodes.length) hydrateSvgNodes(svgNodes);
   if (!nodes.length) return;
 
   const theme = detectMermaidTheme();
@@ -92,11 +196,12 @@ export async function hydrateMermaidIn(root: HTMLElement | null): Promise<void> 
       el.setAttribute('data-rendered', '1');
       continue;
     }
-    // Skip obviously incomplete streaming diagrams
+    // Skip obviously incomplete streaming diagrams — never mermaid.render
+    // until the fence is stable (caller should wait for isComplete).
     if (/^```|```$/m.test(code) || code.split('\n').length < 2) {
       el.innerHTML =
         `<pre class="ai-mermaid-fallback"><code>${escapeHtml(code)}</code></pre>`;
-      // Do not mark rendered — allow retry when stream completes with fuller source
+      el.setAttribute('data-rendered', 'preview');
       continue;
     }
 

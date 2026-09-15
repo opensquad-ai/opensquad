@@ -1,8 +1,17 @@
-import React, { useLayoutEffect, type CSSProperties, type ReactNode, type RefObject, type UIEventHandler } from 'react';
+import React, {
+  useCallback,
+  useEffect,
+  useRef,
+  type CSSProperties,
+  type ReactNode,
+  type RefObject,
+  type UIEventHandler,
+} from 'react';
 import {
   layoutTimelineWindow,
   useTimelineVirtualRange,
 } from '../../hooks/useTimelineVirtualRange';
+import { isFoldAnimating } from '../Collapse';
 
 export type TimelineKeyed = { _uid?: string };
 
@@ -37,7 +46,13 @@ export function ChatTimeline<T extends TimelineKeyed>({
   /** When true, skip stick-to-bottom (text selection freeze). */
   freezeRef?: RefObject<boolean>;
 }) {
-  const virt = useTimelineVirtualRange(scrollRef, entries.length);
+  const columnRef = useRef<HTMLDivElement>(null);
+  const userScrollingRef = useRef(false);
+  const userScrollIdleRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const virt = useTimelineVirtualRange(scrollRef, entries.length, {
+    unpinRef,
+    scrollingRef: userScrollingRef,
+  });
   const layout = layoutTimelineWindow(entries.length, virt);
   const nodes: ReactNode[] = [];
 
@@ -65,23 +80,85 @@ export function ChatTimeline<T extends TimelineKeyed>({
     nodes.push(renderEntry(entry, i, entryKey));
   }
 
-  useLayoutEffect(() => {
+  const markUserScrolling = useCallback(() => {
+    userScrollingRef.current = true;
+    if (userScrollIdleRef.current) clearTimeout(userScrollIdleRef.current);
+    userScrollIdleRef.current = setTimeout(() => {
+      userScrollingRef.current = false;
+    }, 180);
+  }, []);
+
+  const syncUnpin = useCallback(
+    (el: HTMLElement) => {
+      if (!unpinRef) return;
+      const dist = el.scrollHeight - el.scrollTop - el.clientHeight;
+      unpinRef.current = dist > 80;
+    },
+    [unpinRef],
+  );
+
+  const handleScroll = useCallback<UIEventHandler<HTMLDivElement>>(
+    (e) => {
+      syncUnpin(e.currentTarget);
+      markUserScrolling();
+      onScroll?.(e);
+    },
+    [markUserScrolling, onScroll, syncUnpin],
+  );
+
+  useEffect(() => {
+    const onUp = () => {
+      if (userScrollIdleRef.current) clearTimeout(userScrollIdleRef.current);
+      userScrollIdleRef.current = setTimeout(() => {
+        userScrollingRef.current = false;
+      }, 80);
+    };
+    window.addEventListener('pointerup', onUp);
+    window.addEventListener('pointercancel', onUp);
+    return () => {
+      window.removeEventListener('pointerup', onUp);
+      window.removeEventListener('pointercancel', onUp);
+    };
+  }, []);
+
+  // Pin to bottom when the column actually grows (new tools / stream), not on
+  // every parent re-render — that forced layout on each tool_call and janked
+  // fast tool bursts. Never fight the thumb while the user is dragging.
+  // A user-initiated fold expand also grows the column — but there the fold
+  // header must stay put (content grows downward), so bail while it animates.
+  useEffect(() => {
     const el = scrollRef.current;
-    if (!el) return;
-    if (freezeRef?.current) return;
-    if (unpinRef?.current) return;
-    if (el.querySelector('[data-tool-expanded]')) return;
-    el.scrollTop = el.scrollHeight;
-  });
+    const col = columnRef.current;
+    if (!el || !col) return;
+    const pin = () => {
+      if (freezeRef?.current || unpinRef?.current || userScrollingRef.current) return;
+      if (isFoldAnimating()) return;
+      const gap = el.scrollHeight - el.scrollTop - el.clientHeight;
+      if (gap < 4) return;
+      el.scrollTop = el.scrollHeight;
+    };
+    pin();
+    const ro = new ResizeObserver(pin);
+    ro.observe(col);
+    return () => {
+      ro.disconnect();
+      if (userScrollIdleRef.current) clearTimeout(userScrollIdleRef.current);
+    };
+  }, [scrollRef, freezeRef, unpinRef]);
 
   return (
     <div
       ref={scrollRef}
       className={['os-chat-scroll', className].filter(Boolean).join(' ')}
-      style={{ overflowAnchor: 'none', ...style }}
-      onScroll={onScroll}
+      style={{ overflowAnchor: 'none', scrollBehavior: 'auto', ...style }}
+      onPointerDown={(e) => {
+        userScrollingRef.current = true;
+        if (e.currentTarget instanceof HTMLElement) syncUnpin(e.currentTarget);
+        markUserScrolling();
+      }}
+      onScroll={handleScroll}
     >
-      <div className={columnClass}>
+      <div ref={columnRef} className={columnClass}>
         {header}
         {nodes}
         {footer}

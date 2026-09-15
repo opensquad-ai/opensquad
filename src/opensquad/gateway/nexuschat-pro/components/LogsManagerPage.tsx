@@ -151,10 +151,22 @@ export const LogsManagerPage: React.FC<LogsManagerPageProps> = ({ onBack }) => {
   const loadSources = useCallback(async () => {
     setSourcesLoading(true);
     try {
-      const [filesRes, agentsRes] = await Promise.all([
+      const [filesOutcome, agentsOutcome] = await Promise.allSettled([
         logsAPI.listLogFiles(),
         adminAPI.getAgents(),
       ]);
+      const filesRes = filesOutcome.status === 'fulfilled'
+        ? filesOutcome.value
+        : { files: [] as LogFileInfo[] };
+      const agentsRes = agentsOutcome.status === 'fulfilled'
+        ? agentsOutcome.value
+        : { agents: [] as AdminAgent[] };
+      if (filesOutcome.status === 'rejected') {
+        console.error('Failed to load log files:', filesOutcome.reason);
+      }
+      if (agentsOutcome.status === 'rejected') {
+        console.error('Failed to load agent log sources:', agentsOutcome.reason);
+      }
       setSystemFiles(filesRes.files);
       setAgents(agentsRes.agents || []);
 
