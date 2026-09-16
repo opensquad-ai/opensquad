@@ -193,8 +193,10 @@ from opensquad._syscfg._config import (
     ctx_conv_text_budget_chars,
     ctx_keep_recent_fraction,
     ctx_keep_recent_rounds,
+    ctx_overflow_guard_frac,
     ctx_recent_hard_cap_frac,
     ctx_summary_max_tokens,
+    ctx_system_prompt_budget_chars,
     ctx_trigger_threshold,
     ensure_external_api_key,
     ensure_gateway_token,
@@ -293,6 +295,8 @@ class _SysCfg:
     ctx_keep_recent_rounds = staticmethod(ctx_keep_recent_rounds)
     ctx_summary_max_tokens = staticmethod(ctx_summary_max_tokens)
     ctx_conv_text_budget_chars = staticmethod(ctx_conv_text_budget_chars)
+    ctx_system_prompt_budget_chars = staticmethod(ctx_system_prompt_budget_chars)
+    ctx_overflow_guard_frac = staticmethod(ctx_overflow_guard_frac)
 
     vcs_git_server = staticmethod(vcs_git_server)
     vcs_default_remote = staticmethod(vcs_default_remote)

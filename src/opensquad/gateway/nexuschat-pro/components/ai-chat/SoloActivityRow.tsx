@@ -30,7 +30,7 @@ import {
   Image,
 } from 'lucide-react';
 import type { WorkflowBlock, WorkflowEvent } from '../../utils/aiChatTimeline';
-import { isToolResultFailure } from '../../utils/aiChatTimeline';
+import { isFinalFlag, isToolResultFailure } from '../../utils/aiChatTimeline';
 import { hasOpenAsyncDelegate } from '../../utils/aiChatTimeline';
 import { FileDiffBlock, extractFileEditInfo, parsePartialFileToolArgs, applyEditDiffContext, type FileEditInfo } from './FileDiffBlock';
 import { formatElapsedAtLeastOneSecond } from '../../utils/formatElapsed';
@@ -285,7 +285,7 @@ function eventToLines(evt: WorkflowEvent, key: string, blockCompleted: boolean, 
         ? evt.content
         : String(data.text || data.message || '');
     if (!text.trim()) return lines;
-    const isFinal = !!data.is_final;
+    const isFinal = isFinalFlag(evt.content);
     lines.push({
       key,
       kind: 'progress',
@@ -1356,8 +1356,7 @@ export const SoloActivityRow = React.memo(function SoloActivityRow({
       return !data.done;
     }
     if (e.type === 'compression_progress') {
-      const data = typeof e.content === 'object' && e.content ? e.content : {};
-      return !data.is_final;
+      return !isFinalFlag(e.content);
     }
     return false;
   });

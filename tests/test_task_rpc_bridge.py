@@ -376,12 +376,15 @@ def _message_loop_node():
 
 
 def _membership_gate_types() -> set[str]:
-    """String literals of the ``elif msg_type in [...]`` gate in the loop.
+    """Types of the ``elif msg_type in ...`` gate in the loop.
 
-    Located structurally rather than by "first list literal mentioning X": the
-    module-level ``_AGENT_OUTPUT_BROADCAST_TYPES`` frozenset is defined *earlier
-    in the file*, so a text/regex match would silently attribute its contents to
-    the gate and hide a missing entry (a false negative that already bit us).
+    The right-hand side is a *constant* since the WS event contract was
+    centralised (``opensquad.protocol_version.AGENT_OUTPUT_DISPATCH_TYPES``), so
+    a ``Name`` comparator is resolved through the imported gateway module.
+    Resolving structurally still matters: the module-level
+    ``_AGENT_OUTPUT_BROADCAST_TYPES`` is defined *earlier in the file*, so a
+    text/regex match would silently attribute its contents to the gate and hide a
+    missing entry (a false negative that already bit us).
     """
     loop = _message_loop_node()
     for node in ast.walk(loop):
@@ -392,6 +395,12 @@ def _membership_gate_types() -> set[str]:
         if not any(isinstance(op, ast.In) for op in node.ops):
             continue
         for comp in node.comparators:
+            if isinstance(comp, ast.Name) and comp.id != "msg_type":
+                # Resolve the constant to its value (never to a literal here).
+                resolved = getattr(ws_mod, comp.id, None)
+                if resolved is not None:
+                    return set(resolved)
+                continue
             if not isinstance(comp, ast.List):
                 continue
             vals = {e.value for e in comp.elts if isinstance(e, ast.Constant)}

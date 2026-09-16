@@ -3,6 +3,7 @@
  */
 import type { ChatMessage, FileAttachment } from '../components/ai-chat/MessageBubble';
 import { parsePlanContent } from '../components/ai-chat/PlanBlock';
+import { WS_FIELD_IS_FINAL } from './wsFieldNames';
 
 export function genTimelineUID(): string {
   try {
@@ -789,14 +790,44 @@ export function isWorkflowSettled(events: WorkflowEvent[]): boolean {
       if (!data.done) return false;
     }
     if (e.type === 'compression_progress') {
-      const data = typeof e.content === 'object' && e.content ? e.content : {};
-      if (!data.is_final) return false;
+      if (!isFinalFlag(e.content)) return false;
     }
   }
   // Async delegate_task_submit returns an ack immediately but the sub-agent
   // keeps streaming — treat that as still in-flight for UI settlement.
   if (hasOpenAsyncDelegate(events)) return false;
   return true;
+}
+
+/**
+ * Read `content.is_final` from a wire payload.
+ *
+ * The field is snake_case because the Python side produces it and several
+ * browser consumers read it. A camelCase `isFinal` write silently broke
+ * `isWorkflowSettled()` (a compression block never settled), so both directions
+ * now go through `WS_FIELD_IS_FINAL` — the spelling exists in exactly one place.
+ */
+export function isFinalFlag(data: unknown): boolean {
+  return (
+    typeof data === 'object'
+    && data !== null
+    && (data as Record<string, unknown>)[WS_FIELD_IS_FINAL] === true
+  );
+}
+
+/**
+ * The single producer of a `compression_progress` timeline payload.
+ *
+ * Returns the exact shape consumers read (`is_final`, snake_case). Never build
+ * this object inline — a wrong key here is invisible to `tsc` and only shows up
+ * as a fold that never settles.
+ */
+export function compressionProgressContent(
+  text: string,
+  isFinal: boolean,
+  traceId: string,
+): { text: string; is_final: boolean; trace_id: string } {
+  return { text, [WS_FIELD_IS_FINAL]: isFinal, trace_id: traceId };
 }
 
 function messageHasVisibleChat(m: any): boolean {
@@ -1173,7 +1204,7 @@ export function sealPendingCompression(
     const c = typeof evt.content === 'object' && evt.content ? evt.content : {};
     return {
       ...evt,
-      content: { ...c, done: true, is_final: true, pending: false, text: message },
+      content: { ...c, done: true, [WS_FIELD_IS_FINAL]: true, pending: false, text: message },
     };
   });
 
@@ -1203,8 +1234,7 @@ export function shouldTreatWorkflowComplete(block: WorkflowBlock): boolean {
       const data = typeof e.content === 'object' && e.content ? e.content : {};
       if (data.done) hasDoneSummary = true;
     } else if (e.type === 'compression_progress') {
-      const data = typeof e.content === 'object' && e.content ? e.content : {};
-      if (data.is_final) hasFinalProgress = true;
+      if (isFinalFlag(e.content)) hasFinalProgress = true;
     } else if (e.type === 'tool_call') {
       toolCalls += 1;
       if (e.result) toolsWithResult += 1;

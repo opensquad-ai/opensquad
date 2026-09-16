@@ -33,6 +33,7 @@ if _IS_FROZEN:
         sys.path.insert(0, _PKG_GATEWAY_DIR)
 
 from opensquad.system_config import syscfg as _syscfg
+from opensquad.utils import blocking_io
 from opensquad.workspace_utils import load_last_workspace
 
 # ── Minimal console logger (before workspace-based file logging is set up) ──
@@ -884,8 +885,8 @@ if _VITE_AVAILABLE:
                     content_type = "application/javascript"
                 elif dist_file.endswith(".css"):
                     content_type = "text/css"
-                with open(dist_file, "rb") as f:
-                    return Response(content=f.read(), media_type=content_type)
+                # dist assets are MB-scale: read them off the event loop.
+                return Response(content=await blocking_io.read_bytes(dist_file), media_type=content_type)
             return Response(
                 content="<html><body><h2>Frontend dev server unavailable</h2>"
                 "<p>The Vite dev server is not running and no built dist/ "

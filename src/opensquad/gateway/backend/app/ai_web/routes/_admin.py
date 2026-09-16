@@ -19,6 +19,7 @@ from app.api import get_current_user_dep
 from app.http_clients import close_shared_http_clients, get_local_http_client
 from app.models import User
 from opensquad.system_config import syscfg
+from opensquad.utils import blocking_io
 
 from .. import model_preset_service
 from ..registry import registry
@@ -861,10 +862,13 @@ async def admin_get_system_logs(
         return {"file": file, "logs": [], "total": 0}
 
     try:
-        with open(path, encoding="utf-8", errors="replace") as f:
-            all_lines = f.readlines()
+        # Log files can be tens of MB: read them off the event loop.
+        text = await blocking_io.read_text(path)
+        all_lines = text.split("\n")
+        if all_lines and all_lines[-1] == "":
+            all_lines.pop()  # match readlines(): no phantom trailing line
         # Return last N lines, skip blank lines
-        result = [ln.rstrip("\n\r") for ln in all_lines[-lines:] if ln.strip()]
+        result = [ln.rstrip("\r") for ln in all_lines[-lines:] if ln.strip()]
         return {"file": file, "logs": result, "total": len(result)}
     except Exception as e:
         raise HTTPException(500, f"Failed to read log file: {e}")

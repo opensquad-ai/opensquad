@@ -36,6 +36,11 @@ from collections.abc import Callable
 from datetime import datetime
 from typing import Any
 
+from opensquad.protocol_version import (
+    FIELD_IS_FINAL,
+    FIELD_TEXT,
+    FIELD_TRACE_ID,
+)
 from opensquad.tool import logger
 
 from ._compression import (
@@ -96,9 +101,12 @@ async def compress_session_context(
     round_id_for_event = round_id
 
     async def _progress(text: str, *, final: bool = False) -> None:
+        # Field names come from the shared WS contract: this payload is read by
+        # the browser as `content.is_final` (snake_case) and a rename here is
+        # invisible to every Python-side check.
         await emit(
             "compression_progress",
-            {"text": text, "is_final": final, "trace_id": trace_id},
+            {FIELD_TEXT: text, FIELD_IS_FINAL: final, FIELD_TRACE_ID: trace_id},
             sid=target_sid,
         )
 

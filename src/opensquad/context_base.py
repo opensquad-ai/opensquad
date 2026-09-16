@@ -127,10 +127,29 @@ def init_standard_context(agent_md_path: str, memory_manager=None, bridge=None, 
 # agent.md via write_file while still avoiding a disk read per turn.
 _agent_md_cache: tuple[float, str] | None = None
 
+# Double-encoding signature. Reading a UTF-8 file with the ANSI code page (on
+# zh-CN Windows: PowerShell `Get-Content | Set-Content`, or
+# `open(path, encoding='gbk')`) maps Chinese into mojibake; writing it back as
+# UTF-8 bakes the damage in. The classic tells are the `锟斤拷` sequence
+# (U+FFFD re-encoded through GBK) and a pile of U+FFFD replacement characters.
+_MOJIBAKE_MARKERS = ("锟斤拷", "濠电姷", "闂傚倸")
+_ENCODING_DAMAGE_FFFD_THRESHOLD = 10
+_agent_md_damage_warned_mtime: float | None = None
+
+
+def _looks_encoding_damaged(text: str) -> bool:
+    """Heuristic: does ``text`` carry the double-encoding signature?
+
+    Deliberately cheap and conservative — this runs on every agent.md read.
+    """
+    if text.count("\ufffd") >= _ENCODING_DAMAGE_FFFD_THRESHOLD:
+        return True
+    return any(marker in text for marker in _MOJIBAKE_MARKERS)
+
 
 def _read_agent_md() -> str:
     """Read agent.md file content. Re-reads only when the file mtime changes."""
-    global _agent_md_cache
+    global _agent_md_cache, _agent_md_damage_warned_mtime
     if not _agent_md_path or not os.path.exists(_agent_md_path):
         _agent_md_cache = None
         return ""
@@ -140,11 +159,75 @@ def _read_agent_md() -> str:
             return _agent_md_cache[1]
         with open(_agent_md_path, encoding="utf-8") as f:
             content = f.read().strip()
+        if _looks_encoding_damaged(content) and _agent_md_damage_warned_mtime != mtime:
+            _agent_md_damage_warned_mtime = mtime
+            logger.error(
+                "[ContextBase] agent.md looks encoding-damaged: %d U+FFFD replacement chars in %d chars (%s). "
+                "An ANSI/GBK round-trip through the file destroys UTF-8 Chinese permanently - this is not "
+                "recoverable. Restore from a backup, and only ever rewrite agent.md through "
+                "filesystem.write_file(..., encoding='utf-8'); never Get-Content|Set-Content or open(..., 'gbk').",
+                content.count("\ufffd"),
+                len(content),
+                _agent_md_path,
+            )
         _agent_md_cache = (mtime, content)
         return content
     except Exception as e:
         logger.warning(f"[ContextBase] Failed to read agent.md: {e}")
         return ""
+
+
+# ── Stable-layer size guard ──────────────────────────────────────────────
+# Everything in system_vars is injected into the system prompt on EVERY turn
+# and is never a candidate for context compression (`_prepare_messages()`
+# always rebuilds the request as `[system_msg, ...]`). An unbounded source is
+# therefore a hard ceiling on every request the agent can ever send: on
+# 2026-09-15 a 1.76 MB agent.md put 1,336,859 system tokens against a
+# 262,144-token window and every turn — including brand-new sessions — came
+# back 400. Bound each variable and say so, loudly and in-prompt.
+_DEFAULT_SYSTEM_VAR_CHAR_LIMIT = 20000
+_cap_warned_at: dict[str, int] = {}
+
+
+def _system_var_char_limit() -> int:
+    """Per-variable char budget (env ``CTX_SYSTEM_PROMPT_BUDGET_CHARS`` / config)."""
+    try:
+        from opensquad import system_config
+
+        return int(system_config.syscfg.ctx_system_prompt_budget_chars())
+    except Exception:
+        return _DEFAULT_SYSTEM_VAR_CHAR_LIMIT
+
+
+def _cap_system_var(name: str, text: str) -> str:
+    """Bound one system-prompt variable, appending an explicit notice if cut.
+
+    The head is kept (a memory document opens with the user's preferences and
+    standing instructions — the part the model must see). Silent truncation
+    would leave the agent unable to explain why its own memory looks
+    incomplete, so the marker names the real size, the limit, and the fix.
+    """
+    limit = _system_var_char_limit()
+    if limit <= 0 or len(text) <= limit:
+        return text
+    if _cap_warned_at.get(name) != len(text):
+        _cap_warned_at[name] = len(text)
+        logger.error(
+            "[ContextBase] %s is %d chars, over the %d-char system-prompt budget -> truncating. "
+            "This variable is injected into the system prompt every turn and is never removed by "
+            "context compression, so leaving it unbounded eventually 400s every model call. "
+            "Shrink the source (for agent.md: filesystem.write_file(..., encoding='utf-8')).",
+            name,
+            len(text),
+            limit,
+        )
+    marker = (
+        f"\n\n[... TRUNCATED: {name} is {len(text):,} chars but only the first {limit:,} are "
+        f"injected (limit = context_compression.system_prompt_budget_chars). The remainder was NOT "
+        f"compressed away by context compression - this value is part of the system prompt and is "
+        f"never summarised. Rewrite the source document smaller. ...]"
+    )
+    return text[:limit] + marker
 
 
 def inject_standard(context: dict) -> tuple:
@@ -288,6 +371,13 @@ def inject_standard(context: dict) -> tuple:
 
     else:
         system_vars["TEAM_COLLAB_CARDS"] = ""
+
+    # Bound every stable-layer variable (see _cap_system_var): unbounded values
+    # here are a hard ceiling on every request the agent can ever send.
+    for _name in ("AGENT_PROFILE", "CONTEXT_SUMMARY", "AGENT_WORKSPACE", "TEAM_COLLAB_CARDS"):
+        _val = system_vars.get(_name)
+        if isinstance(_val, str) and _val:
+            system_vars[_name] = _cap_system_var(_name, _val)
 
     # ======== dynamic_vars (dynamic layer, injected into user message prefix) ========
 

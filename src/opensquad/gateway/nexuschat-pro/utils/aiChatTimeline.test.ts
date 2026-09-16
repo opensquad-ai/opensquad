@@ -7,13 +7,16 @@ import {
   buildTimelineFromSession,
   CANCELLED_OPEN_TOOL_RESULT,
   composeAssistantDisplayContent,
+  compressionProgressContent,
   detectCancelledTurn,
   extractLiveToolCallFromMarkup,
   foldTaskProcessSinceLastUser,
   formatUserSkillDisplayContent,
   genTimelineUID,
-  LIVE_XML_TOOL_ID,
+  isFinalFlag,
   isToolResultFailure,
+  isWorkflowSettled,
+  LIVE_XML_TOOL_ID,
   mergeOrphanedToolResultsAcrossWorkflows,
   rebaseTimelineUids,
   sealIncompleteWorkflows,
@@ -1864,5 +1867,68 @@ describe('rebaseTimelineUids', () => {
     if (rebased[0].kind === 'workflow') {
       expect(rebased[0].data.events[0]._uid).toBe('evt-a');
     }
+  });
+});
+
+/**
+ * Field-name contract for `compression_progress` payloads.
+ *
+ * The real bug this locks: the WS hook produced timeline payloads with a
+ * camelCase `isFinal` key while `isWorkflowSettled` read `data.is_final`. The
+ * block therefore never settled — the fold stayed "live" forever, and `tsc`
+ * could not see it because the timeline content type is a loose record. The
+ * round trip (producer -> consumer) is asserted behaviourally instead of by
+ * scanning for a string.
+ */
+describe('compression_progress field names (`is_final`, snake_case)', () => {
+  const progressEvent = (content: Record<string, unknown>): WorkflowEvent =>
+    ({ type: 'compression_progress', content, timestamp: 1_700_000_000_000 } as unknown as WorkflowEvent);
+
+  it('the producer writes the key the consumer reads', () => {
+    const produced = compressionProgressContent('Summarizing…', true, 'cmp_1');
+    expect(produced.is_final).toBe(true);
+    expect(produced.text).toBe('Summarizing…');
+    expect(produced.trace_id).toBe('cmp_1');
+    // The camelCase spelling must not survive anywhere on the payload.
+    expect((produced as unknown as Record<string, unknown>).isFinal).toBeUndefined();
+  });
+
+  it('a produced payload settles the workflow (producer -> consumer round trip)', () => {
+    expect(isWorkflowSettled([progressEvent(compressionProgressContent('done', true, 'cmp_1'))])).toBe(true);
+    expect(isWorkflowSettled([progressEvent(compressionProgressContent('working', false, 'cmp_1'))])).toBe(false);
+  });
+
+  it('a camelCase-only payload does NOT settle — the bug this fixes', () => {
+    // Exactly the shape the hook used to write. Before the fix this returned
+    // `false` for the *final* frame, so the block never settled.
+    expect(isWorkflowSettled([progressEvent({ text: 'done', isFinal: true, trace_id: 'cmp_1' })])).toBe(false);
+  });
+
+  it('isFinalFlag accepts only the snake_case wire field', () => {
+    expect(isFinalFlag({ is_final: true })).toBe(true);
+    expect(isFinalFlag({ is_final: false })).toBe(false);
+    expect(isFinalFlag({ isFinal: true })).toBe(false);
+    expect(isFinalFlag(null)).toBe(false);
+    expect(isFinalFlag(undefined)).toBe(false);
+    expect(isFinalFlag('is_final')).toBe(false);
+    expect(isFinalFlag({})).toBe(false);
+  });
+
+  it('sealPendingCompression seals with the same key the consumer reads', () => {
+    const prev: TimelineEntry[] = [
+      {
+        kind: 'workflow',
+        data: {
+          events: [progressEvent(compressionProgressContent('…', false, 'cmp_1'))],
+          status: 'working',
+          completed: false,
+        },
+        _uid: genTimelineUID(),
+      } as unknown as TimelineEntry,
+    ];
+    const sealed = sealPendingCompression(prev);
+    if (sealed[0].kind !== 'workflow') throw new Error('shape');
+    expect(sealed[0].data.completed).toBe(true);
+    expect(isWorkflowSettled(sealed[0].data.events)).toBe(true);
   });
 });

@@ -5,6 +5,17 @@ import re
 from playwright.async_api import Browser, async_playwright
 from playwright.async_api import Error as PlaywrightError
 
+
+def _write_text(path: str, text: str) -> None:
+    """Sync file write, dispatched through ``asyncio.to_thread`` by callers.
+
+    Kept at module level on purpose: ``tests/test_async_no_blocking_calls.py``
+    flags any ``open()`` inside an ``async def`` body.
+    """
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(text)
+
+
 try:
     from playwright_stealth import stealth_async
 except ImportError:
@@ -783,8 +794,8 @@ async def search_with_bing_playwright(
                 error_screenshot_path = os.path.join(debug_dir, f"error_screenshot_{safe_query}.png")
                 html_path = os.path.join(debug_dir, f"error_page_{safe_query}.html")
                 await active.screenshot(path=error_screenshot_path, full_page=True)
-                with open(html_path, "w", encoding="utf-8") as f:
-                    f.write(await active.content())
+                # A full SERP's HTML can be MB-scale: keep the write off the loop.
+                await asyncio.to_thread(_write_text, html_path, await active.content())
                 print(f"--- Screenshot saved to: {error_screenshot_path} ---")
                 print(f"--- HTML saved to: {html_path} ---")
                 print(f"--- Error details: {e} ---")

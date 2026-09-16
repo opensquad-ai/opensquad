@@ -112,6 +112,7 @@ from app.websocket import manager, notify_message_update, notify_new_message, no
 # (OPENSQUAD_USER_DATA env) is handled in one place. See issue #43.
 from opensquad.system_config import syscfg
 from opensquad.ui_prefs import load_ui_prefs, merge_and_save_ui_prefs
+from opensquad.utils import blocking_io
 
 UPLOAD_DIR = syscfg.workspace_uploads_dir()
 os.makedirs(UPLOAD_DIR, exist_ok=True)
@@ -2430,8 +2431,8 @@ async def upload_file(
         file_path, file_url = target_dir / new_filename, f"/uploads/{safe_folder}/{new_filename}"
     else:
         file_path, file_url = upload_dir / new_filename, f"/uploads/{new_filename}"
-    with open(file_path, "wb") as f:
-        f.write(content)
+    # User-sized payload: never write it inline on the event loop.
+    await blocking_io.write_bytes(file_path, content)
     size_bytes = len(content)
     size_str = (
         f"{size_bytes}B"

@@ -6,7 +6,6 @@ import threading
 import uuid
 from collections import OrderedDict
 
-from .system_config import syscfg
 from .xml_parser import StreamingTagParser, StreamingThoughtBlockDropper, strip_prompted_thought_blocks
 
 try:
@@ -17,10 +16,10 @@ import contextlib
 import os
 
 from . import session_manager as _session_module
-from .events import bus
+from ._provider_base import ProviderAPIBase
 from .input_hub import input_hub
 from .model_config import ModelConfig
-from .utils import CharPrinter
+from .utils import CharPrinter, blocking_io
 
 _openai_client = None
 _async_openai_client = None  # NEW
@@ -114,7 +113,7 @@ def apply_deepseek_prompt_cache(
 __all__ = ["ChatAPI", "apply_deepseek_prompt_cache", "wants_deepseek_prompt_cache"]
 
 
-class ChatAPI:
+class ChatAPI(ProviderAPIBase):
     """
     ChatAPI v2.1: Clean OpenAI-compatible interface with streaming tag push support.
     Added provider-level file uploads (Files API) for large files / video / audio direct upload.
@@ -241,34 +240,11 @@ class ChatAPI:
         self.token_max = config.token_max
         self.reduction_strategy = config.reduction_strategy
         self.reduction_batch_size = config.reduction_batch_size
-        self._sid_provider = None  # Injected by Runner; returns the session_id for the current turn
-        self._user_id_provider = None  # Injected by Runner; returns the user_id for the current turn
-        self._latest_summary = ""  # Context compression summary (for {{CONTEXT_SUMMARY}} injection)
-        self._auto_compressed = False  # Flag: did auto-compression run during the last chat() call?
-        self._auto_compress_stats = {}  # Stats from last auto-compression (tokens_before, tokens_after, etc.)
-        self._last_tools = None  # Cached tools from last chat() call, used for accurate token counting
-        self._prev_reasoning_content = (
-            ""  # CRITICAL: Must be passed back to DeepSeek V4 in next turn when tools are involved
-        )
-
-        # ── Incremental token counter (P0 perf optimization) ──
-        # Avoids re-encoding all messages on every _prepare_messages() call.
-        # Incremented in add_user_message/add_tool_result/add_assistant_message,
-        # invalidated on compression/pop/hot-reload.
-        self._cached_token_count: int | None = None  # None = needs full recount
-        self._cached_tools_token_count: int = 0  # tokens from _last_tools
-
-        # ── Per-message token cache (P1 perf optimization) ──
-        # Avoids re-encoding the same message content across repeated
-        # _prepare_messages() calls. Keyed by identity+shape (not json.dumps).
-        self._msg_token_cache: OrderedDict = OrderedDict()
-        self._msg_token_cache_max_size = 5000
-
-        # Cumulative token consumption statistics
-        self.total_input_tokens = 0
-        self.total_output_tokens = 0
-        self.total_requests = 0
-        self.total_cache_read_tokens = 0
+        # ── Shared provider state ──
+        # Counters, incremental token counter, per-message token LRU cache and
+        # the compression flags all live in ProviderAPIBase so the three
+        # providers cannot drift apart again.
+        self._init_provider_base()
 
         # ── Safety cap for message history (P2 defense) ──
         self._MAX_HISTORY_MESSAGES = 5000  # Prevent unbounded memory growth
@@ -462,25 +438,6 @@ class ChatAPI:
         """Update the raw template (only used at boot phase, e.g. injecting EXPERT_ROLE_CARD)"""
         self._prompt_template = template
 
-    def _emit_with_sid(self, etype, data):
-        """Send an event with session_id (obtained via sid_provider injected by Runner)"""
-        sid = self._sid_provider() if self._sid_provider else None
-        wrapper: dict = {"data": data}
-        if sid:
-            wrapper["sid"] = sid
-        try:
-            from opensquad.session_parallel import get_turn_local
-            from opensquad.turn_trace import make_trace_id
-
-            tl = get_turn_local()
-            if tl is not None:
-                wrapper["turn_id"] = int(tl.turn or 0)
-                wrapper["round_id"] = int(tl.round or 0)
-                wrapper["trace_id"] = make_trace_id("", sid or tl.sid, tl.round, tl.turn)
-        except Exception:
-            pass
-        bus.emit(etype, wrapper)
-
     # -- Provider-level Files API --
 
     def _upload_file_openai(self, path: str, purpose: str = "user_data") -> str | None:
@@ -549,6 +506,81 @@ class ChatAPI:
         if ext in [".mkv"]:
             return "video/x-matroska"
         return "video/mp4"
+
+    # -- Summariser transport (prompt assembly lives in ProviderAPIBase) --
+
+    def _summarizer_request(self, system_prompt: str, user_prompt: str, max_tokens: int) -> str:
+        """Reach the summariser through an OpenAI-compatible streaming client.
+
+        Uses a dedicated client so a long compression request cannot disturb
+        the main agent client, and streams to match the manual-compression
+        path (better compatibility across relay wrappers).
+        """
+        summary_model = self._summarizer_model()
+        summary_client = _get_openai()(
+            api_key=self.api_key,
+            base_url=self.base_url,
+            timeout=180,  # Generous timeout for large context compression
+        )
+        logger.info("[CompressTrace] Starting streaming summary generation...")
+        stream = summary_client.chat.completions.create(
+            model=summary_model,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            max_tokens=max_tokens,
+            temperature=0.2,
+            stream=True,
+        )
+
+        parts: list[str] = []
+        prompt_tokens = 0
+        completion_tokens = 0
+        finish_reason = None
+
+        for chunk in stream:
+            if not chunk.choices:
+                chunk_usage = getattr(chunk, "usage", None)
+                if chunk_usage:
+                    prompt_tokens = getattr(chunk_usage, "prompt_tokens", 0) or 0
+                    completion_tokens = getattr(chunk_usage, "completion_tokens", 0) or 0
+                continue
+
+            delta = chunk.choices[0].delta
+            if delta and delta.content:
+                parts.append(delta.content)
+
+            chunk_finish = getattr(chunk.choices[0], "finish_reason", None)
+            if chunk_finish:
+                finish_reason = chunk_finish
+            chunk_usage = getattr(chunk, "usage", None)
+            if chunk_usage:
+                prompt_tokens = getattr(chunk_usage, "prompt_tokens", 0) or 0
+                completion_tokens = getattr(chunk_usage, "completion_tokens", 0) or 0
+
+        content = "".join(parts).strip()
+        logger.info(
+            "[CompressTrace] streaming summary complete: content_len=%d, prompt_tokens=%d, "
+            "completion_tokens=%d, finish_reason=%s",
+            len(content),
+            prompt_tokens,
+            completion_tokens,
+            finish_reason,
+        )
+        if not content:
+            logger.warning(
+                "Summary generation returned empty content, model=%s, prompt_len=%d, "
+                "prompt_tokens=%d, completion_tokens=%d, finish_reason=%s, chunks_collected=%d",
+                summary_model,
+                len(user_prompt),
+                prompt_tokens,
+                completion_tokens,
+                finish_reason,
+                len(parts),
+            )
+            return "Summary generation returned empty response. Please rely on the First User Query."
+        return content
 
     def add_user_message(
         self,
@@ -945,777 +977,6 @@ class ChatAPI:
             return True
         return False
 
-    def _prepare_messages(self) -> list[dict]:
-        """
-        Prepare the message list to send to the API, applying smart context compression.
-
-        Strategy:
-        - Trigger: when total_tokens > token_max * trigger_threshold (default 0.75).
-        - Retention: newest ~10% of tokens are kept verbatim (by token count, not rounds).
-        - Summarize: everything between first_user_msg and the recent retained portion.
-
-        Both regular messages and tool_result messages are treated identically —
-        tool_result with large payloads will be summarized, not preserved.
-        """
-        import time as _time
-
-        _t0 = _time.monotonic()
-
-        # Reset auto-compression flag for this call
-        self._auto_compressed = False
-        self._auto_compress_stats = {}
-
-        # 1. Count current tokens (uses incremental cache when available)
-        current_tokens = self.get_current_token_count(self._last_tools)
-        threshold = syscfg.ctx_trigger_threshold()
-        # Use the model's declared context window. A 1M-token model must not
-        # be compacted at 128k just because that is the common card default.
-        threshold_tokens = int(self.token_max * threshold)
-
-        # PERF-3 (400-token hard guard): the local tiktoken/cl100k estimate
-        # systematically undercounts (~2.6-3x) versus the provider's real
-        # accounting (DeepSeek uses ~1.35 chars/token; relay wrappers inflate
-        # further).  If the *scaled* estimate would exceed a high watermark
-        # (85% of max), force compression so the request never hits a 400.
-        # This is a safety net on top of the normal threshold-based path.
-        _scaled_estimate = current_tokens * 3
-        _hard_watermark = int(self.token_max * 0.85)
-        if _scaled_estimate > _hard_watermark and current_tokens <= threshold_tokens:
-            logger.warning(
-                "[CompressTrace] HARD GUARD triggered: local estimate %d tokens, scaled x3 = %d > 85%% of max %d. "
-                "Forcing compression to avoid 400.",
-                current_tokens,
-                _scaled_estimate,
-                self.token_max,
-            )
-            self._emit_with_sid("status", "Context near limit, compacting (hard guard)...")
-
-        if current_tokens <= threshold_tokens and _scaled_estimate <= _hard_watermark:
-            logger.info("[CompressTrace] below threshold, no compression needed")
-            return self.req
-
-        logger.warning(
-            "[CompressTrace] context compression TRIGGERED (%.1f%% of max)",
-            current_tokens / self.token_max * 100,
-        )
-        self._emit_with_sid("status", "Context limit reached, compacting...")
-
-        if len(self.req) < 5:
-            # Too few messages to compress meaningfully — keep all
-            logger.info("[CompressTrace] too few messages (%d), skipping compression", len(self.req))
-            return self.req
-
-        # 3. Compression strategy
-        system_msg = self.req[0]
-
-        # Find the first user message (original intent)
-        first_user_msg = None
-        first_user_idx = 0
-        for i in range(1, len(self.req)):
-            if self.req[i]["role"] == "user":
-                first_user_msg = self.req[i]
-                first_user_idx = i
-                break
-
-        logger.info(
-            "[CompressTrace] scan: total_msgs=%d, first_user_idx=%d",
-            len(self.req),
-            first_user_idx,
-        )
-
-        # Compute per-message token counts
-        msg_tokens = []  # list of (index, token_count)
-        for i, msg in enumerate(self.req):
-            t = self._count_message_tokens(msg)
-            msg_tokens.append((i, t))
-
-        # Determine retention boundary: newest messages whose cumulative tokens
-        # are <= keep_recent_fraction (default 0.10 = 10%) of total.
-        keep_frac = syscfg.ctx_keep_recent_fraction()
-        keep_token_budget = int(current_tokens * keep_frac)
-
-        recent_start = len(self.req)  # default: no recent portion
-        recent_token_sum = 0
-        for idx, tok in reversed(msg_tokens):
-            if recent_token_sum + tok <= keep_token_budget:
-                recent_token_sum += tok
-                recent_start = idx
-            else:
-                break
-
-        # recent_start must be at least after first_user_msg
-        if first_user_msg is not None:
-            recent_start = max(recent_start, first_user_idx + 1)
-
-        # Ensure the recent section still covers recent user turns so the agent
-        # doesn't lose sight of the current task — BUT cap how far back we pull.
-        # In a long autonomous tool-calling run the 2nd-to-last user message can
-        # sit near the very start of the conversation (e.g. idx=2 with 370+
-        # messages of tool I/O after it). "Protecting" it by pulling recent_start
-        # all the way back swallows the entire context and leaves the summarize
-        # range empty, so compression becomes a no-op and tokens keep climbing.
-        # We refuse to extend if doing so would exceed a hard cap on the recent
-        # section; the user message then just gets summarized like everything
-        # else.
-        user_indices = [i for i in range(len(self.req)) if self.req[i].get("role") == "user"]
-        recent_hard_cap = int(current_tokens * syscfg.ctx_recent_hard_cap_frac())
-        for anchor in (
-            user_indices[-2] if len(user_indices) >= 2 else None,
-            user_indices[-1] if user_indices else None,
-        ):
-            if anchor is None or anchor >= recent_start:
-                continue
-            candidate_tokens = sum(t for _, t in msg_tokens[anchor:])
-            if candidate_tokens <= recent_hard_cap:
-                logger.warning(
-                    "[CompressTrace] extending recent_start to include user at "
-                    "idx=%d (was recent_start=%d, candidate_tokens=%d <= cap=%d)",
-                    anchor,
-                    recent_start,
-                    candidate_tokens,
-                    recent_hard_cap,
-                )
-                recent_start = min(recent_start, anchor)
-            else:
-                logger.warning(
-                    "[CompressTrace] NOT extending to user at idx=%d: would add "
-                    "%d tokens, exceeding recent hard cap %d (will be summarized)",
-                    anchor,
-                    candidate_tokens,
-                    recent_hard_cap,
-                )
-
-        # CRITICAL: Ensure recent_start doesn't split a tool_call/tool_result pair.
-        # If the first message in recent_msgs has role="tool", we must include its
-        # preceding assistant message with tool_calls, otherwise DeepSeek rejects
-        # the request with "Messages with role 'tool' must be a response to a
-        # preceding message with 'tool_calls'".
-        # FIX: recent_start may equal len(self.req) when the newest message is too
-        # large to fit the retention budget (kept at its initial value). Guard the
-        # index to avoid IndexError that kills the whole tool flow mid-turn.
-        while recent_start > 0 and recent_start < len(self.req) and self.req[recent_start].get("role") == "tool":
-            recent_start -= 1
-            logger.warning(
-                "[CompressTrace] tool message at recent_start, extending to include "
-                "preceding assistant (new recent_start=%d, role=%s)",
-                recent_start,
-                self.req[recent_start].get("role"),
-            )
-        # Also scan the first few messages in recent block for orphan tool messages
-        for offset in range(min(3, len(self.req) - recent_start)):
-            idx = recent_start + offset
-            if self.req[idx].get("role") == "tool":
-                needed = idx - 1
-                while needed >= 0 and self.req[needed].get("role") != "assistant":
-                    needed -= 1
-                if needed >= 0 and self.req[needed].get("tool_calls"):
-                    recent_start = min(recent_start, needed)
-                    logger.warning(
-                        "[CompressTrace] orphan tool at idx=%d, extending recent_start "
-                        "to %d (assistant with tool_calls)",
-                        idx,
-                        recent_start,
-                    )
-                    break
-
-        recent_msgs = self.req[recent_start:]
-        end_scan = recent_start
-
-        # Compression range: from after first_user_msg up to recent_start
-        start_scan = first_user_idx + 1 if first_user_msg else 1
-
-        logger.info(
-            "[CompressTrace] retention: keep_frac=%.2f, keep_budget=%d tokens, "
-            "recent_start=%d, recent_msgs=%d, recent_tokens=%d, "
-            "summarize_range=[%d, %d) msgs=%d",
-            keep_frac,
-            keep_token_budget,
-            recent_start,
-            len(recent_msgs),
-            recent_token_sum,
-            start_scan,
-            end_scan,
-            end_scan - start_scan,
-        )
-
-        if start_scan >= end_scan:
-            # Anchor pullback (or a degenerate conversation) swallowed the
-            # entire compression range. NEVER return uncompressed context here
-            # — that defeats the whole point of triggering compression and
-            # leaves tokens pinned above the limit. Force a token-budget-only
-            # split that drops user anchors and guarantees a non-empty summarize
-            # range so the summarizer actually runs.
-            logger.warning(
-                "[CompressTrace] compression range empty (start=%d end=%d), "
-                "forcing token-budget-only retention (dropping user anchors)",
-                start_scan,
-                end_scan,
-            )
-            recent_start = len(self.req)
-            acc = 0
-            for idx, tok in reversed(msg_tokens):
-                if acc + tok <= keep_token_budget:
-                    acc += tok
-                    recent_start = idx
-                else:
-                    break
-            # Leave at least one message for the summarizer.
-            min_scan = min((first_user_idx + 2) if first_user_msg else 2, len(self.req))
-            if recent_start < min_scan:
-                recent_start = min_scan
-            # Re-run tool-pair integrity fix on the forced boundary.
-            while recent_start > 0 and recent_start < len(self.req) and self.req[recent_start].get("role") == "tool":
-                recent_start -= 1
-            recent_msgs = self.req[recent_start:]
-            end_scan = recent_start
-            start_scan = (first_user_idx + 1) if first_user_msg else 1
-            logger.warning(
-                "[CompressTrace] forced recent_start=%d, summarize_range=[%d, %d) msgs=%d",
-                recent_start,
-                start_scan,
-                end_scan,
-                end_scan - start_scan,
-            )
-            if start_scan >= end_scan:
-                # Degenerate tiny conversation — nothing to summarize, keep all.
-                partial = [system_msg]
-                if first_user_msg:
-                    partial.append(first_user_msg)
-                partial.extend(recent_msgs)
-                logger.info(
-                    "[CompressTrace] skip summary: msgs=%d, tokens_before=%d, tokens_after=%d",
-                    len(partial),
-                    current_tokens,
-                    self._count_tokens(partial, self._last_tools),
-                )
-                return partial
-
-        # 4. Generate summary
-        dropped_count = end_scan - start_scan
-        msgs_to_summarize = self.req[start_scan:end_scan]
-        summarize_tokens = sum(t for _, t in msg_tokens[start_scan:end_scan])
-
-        _t1 = _time.monotonic()
-        logger.info(
-            "[CompressTrace] calling summarizer: %d messages, %d tokens, build_wait=%.2fs",
-            dropped_count,
-            summarize_tokens,
-            _t1 - _t0,
-        )
-
-        summary_content = self._generate_summary(msgs_to_summarize)
-
-        _t2 = _time.monotonic()
-        logger.info(
-            "[CompressTrace] summarizer returned: summary_len=%d chars, elapsed=%.2fs",
-            len(summary_content),
-            _t2 - _t1,
-        )
-
-        # Capture prior summary BEFORE overwriting — runner needs it for
-        # compress_current_session(previous_summary=...).
-        previous_summary_snapshot = (getattr(self, "_latest_summary", "") or "").strip()
-
-        self._latest_summary = f"[Context summary | Compressed {dropped_count} messages]\n{summary_content}"
-
-        compacted_req = [system_msg]
-        if first_user_msg:
-            compacted_req.append(first_user_msg)
-        compacted_req.extend(recent_msgs)
-
-        new_token_count = self._count_tokens(compacted_req, self._last_tools)
-
-        logger.info(
-            "[CompressTrace] compression result: msgs: %d -> %d, tokens: %d -> %d, saved=%d (%.1f%%)",
-            len(self.req),
-            len(compacted_req),
-            current_tokens,
-            new_token_count,
-            current_tokens - new_token_count,
-            (current_tokens - new_token_count) / max(current_tokens, 1) * 100,
-        )
-
-        # CRITICAL FIX: Preserve reasoning_content from the ORIGINAL pre-compression
-        # self.req before it gets overwritten by compacted_req.
-        # The holder message (with reasoning_content) may be outside recent_msgs and get dropped;
-        # we MUST keep a copy in self._prev_reasoning_content so the inject logic at lines
-        # 949-990 can re-attach it to every assistant message in the compacted context.
-        _last_reasoning = None
-        for m in reversed(self.req):  # scan original (not yet overwritten)
-            if m.get("role") == "assistant" and m.get("reasoning_content"):
-                _last_reasoning = m.get("reasoning_content")
-                break
-
-        self.req = compacted_req
-        self.invalidate_token_cache()  # Compression changed message list
-
-        if _last_reasoning:
-            self._prev_reasoning_content = _last_reasoning
-            logger.info(
-                f"[CompressTrace] Preserved _prev_reasoning_content after auto-compression, len={len(_last_reasoning)}"
-            )
-
-        # Fingerprint of the first kept recent message so runner can align the
-        # disk archive cut with this recent_start boundary.
-        first_kept_role = ""
-        first_kept_content = ""
-        for m in recent_msgs:
-            role = m.get("role") or ""
-            if role not in ("user", "assistant"):
-                continue
-            content = m.get("content", "")
-            if isinstance(content, list):
-                parts = []
-                for item in content:
-                    if isinstance(item, dict) and item.get("type") == "text":
-                        parts.append(str(item.get("text") or ""))
-                content = "\n".join(parts)
-            content = str(content or "").strip()
-            if not content:
-                continue
-            first_kept_role = role
-            first_kept_content = content[:240]
-            break
-
-        # Signal auto-compression to runner (which will emit summary_stream + history_sync)
-        self._auto_compressed = True
-        self._auto_compress_stats = {
-            "tokens_before": current_tokens,
-            "tokens_after": new_token_count,
-            "messages_before": len(self.req) + dropped_count,
-            "messages_after": len(self.req),
-            "dropped_count": dropped_count,
-            "summarize_range": [start_scan, end_scan],
-            "recent_start": recent_start,
-            "recent_tokens": recent_token_sum,
-            "keep_frac": keep_frac,
-            "previous_summary": previous_summary_snapshot,
-            "first_kept_role": first_kept_role,
-            "first_kept_content": first_kept_content,
-        }
-        logger.info(
-            "[CompressTrace] auto-compression COMPLETE (total_elapsed=%.2fs): %d -> %d tokens, %d messages retained",
-            _time.monotonic() - _t0,
-            current_tokens,
-            new_token_count,
-            len(self.req),
-        )
-
-        return self.req
-
-    def _tail_msgs_for_rounds(self, n_rounds: int) -> list[dict]:
-        """Return the tail messages covering the most recent n_rounds user turns.
-
-        IMPORTANT: tool_result messages are NOT preserved in the recent section.
-        They are included in the compression range so their large payloads get summarized.
-        This prevents tool_result from dominating the context even in recent rounds.
-        """
-        msgs = self.req[1:]  # Skip system msg
-        user_turn_count = 0
-        for i in range(len(msgs) - 1, -1, -1):
-            msg = msgs[i]
-            role = msg.get("role", "")
-            content = msg.get("content", "")
-            # Check if this is a tool_result (role=user but content is tool result)
-            is_tool_result = (
-                role == "user"
-                and isinstance(content, list)
-                and any(
-                    isinstance(item, dict) and item.get("type") in ("tool_result", "functionResponse")
-                    for item in content
-                )
-            )
-            # Also exclude role:"tool" messages — they are not user turns
-            is_tool_role = role == "tool"
-            # Only count actual user messages (not tool_result, not tool role)
-            if role == "user" and not is_tool_result and not is_tool_role:
-                user_turn_count += 1
-                if user_turn_count >= n_rounds:
-                    # Return recent messages but EXCLUDE tool_result from preservation.
-                    # tool_result will fall in the compression range and be summarized.
-                    tail = msgs[i:]
-                    return [m for m in tail if not self._is_tool_result_msg(m)]
-        return msgs  # fallback: return all non-system messages
-
-    @staticmethod
-    def _is_tool_result_msg(msg: dict) -> bool:
-        """Check if a message is a tool_result (large payload that should be compressed)."""
-        role = msg.get("role", "")
-        content = msg.get("content", "")
-        if role == "tool":
-            return True
-        if role == "user" and isinstance(content, list):
-            return any(
-                isinstance(item, dict) and item.get("type") in ("tool_result", "functionResponse") for item in content
-            )
-        return False
-
-    def _build_conv_text(self, messages: list[dict], budget_chars: int) -> str:
-        """
-        Convert a message list to text using an overall budget rather than per-message truncation.
-        Tool call results are prioritized; remaining space is allocated proportionally per message.
-        """
-        # First pass: extract full text of each message
-        items = []
-        for m in messages:
-            role = m.get("role", "unknown")
-            content = m.get("content", "")
-            if isinstance(content, list):
-                text_parts = []
-                for item in content:
-                    if not isinstance(item, dict):
-                        continue
-                    t = item.get("type", "")
-                    if t == "text":
-                        text_parts.append(item["text"])
-                    elif t == "tool_use":
-                        inp = json.dumps(item.get("input", {}), ensure_ascii=False)[:300]
-                        text_parts.append(f"[tool_use: {item.get('name', '?')}({inp})]")
-                    elif t == "tool_result":
-                        for c in item.get("content") or []:
-                            if isinstance(c, dict) and c.get("type") == "text":
-                                text_parts.append(c["text"])
-                content = "\n".join(text_parts)
-            else:
-                content = str(content)
-            items.append((role, content))
-
-        # Second pass: compute total length, truncate proportionally
-        total_chars = sum(len(c) for _, c in items)
-        if total_chars <= budget_chars:
-            return "\n".join(f"{role}: {content}" for role, content in items)
-
-        n = len(items)
-        min_per_msg = 200
-        base_alloc = max(min_per_msg, budget_chars // n)
-
-        parts = []
-        for role, content in items:
-            if len(content) <= base_alloc:
-                parts.append(f"{role}: {content}")
-            else:
-                parts.append(f"{role}: {content[:base_alloc]}...[truncated]")
-        return "\n".join(parts)
-
-    def _generate_summary(self, messages: list[dict]) -> str:
-        """Use LLM to generate a state-snapshot style summary of the message list.
-
-        Uses streaming to match manual compression behavior and improve compatibility
-        with various API providers that may handle streaming differently than non-streaming.
-        """
-        budget = syscfg.ctx_conv_text_budget_chars()
-        max_tokens = syscfg.ctx_summary_max_tokens()
-        conv_text = self._build_conv_text(messages, budget)
-
-        # Use dedicated summarizer model if configured (same logic as manual compression in runner.py)
-        summary_model = syscfg.get("summarizer", "model") or self.model
-
-        system_prompt = (
-            "You are a summarizer agent. Return ONLY the summary in the specified template. "
-            "Do not add commentary or extra sections."
-        )
-
-        user_prompt = (
-            "You are compressing conversation history for an AI Agent that is currently executing a task.\n"
-            "The compression result will replace this history; the Agent must be able to seamlessly continue working based on your summary.\n\n"
-            "[Hard rules - the following must be preserved verbatim, never rewritten or omitted]\n"
-            "- All file paths and directory names\n"
-            "- All IDs, ports, version numbers, and configuration values\n"
-            "- The original text of all error messages\n"
-            "- Requirements, constraints, or preferences explicitly specified by the user\n"
-            "- The most recent user request (what the agent is currently working on)\n\n"
-            "[Output format - be specific, include exact values, avoid vague summaries]\n\n"
-            "## Current Task\n"
-            "(What the agent is working on RIGHT NOW — the most recent user request in detail)\n\n"
-            "## Original Goal\n"
-            "(The very first user request in this session, in one sentence)\n\n"
-            "## Completed\n"
-            "(Operations successfully executed and confirmed, with key output values and file paths)\n\n"
-            "## Current State\n"
-            "(What state the system/files/code is in right now — this is the most important section. "
-            "Include open files, current working directory, last tool executed, etc.)\n\n"
-            "## Key Parameters\n"
-            "(Exact values that will definitely be needed going forward: paths, configs, API addresses, port numbers, etc.)\n\n"
-            "## Unresolved Issues\n"
-            "(Explicitly existing blockers, errors, or incomplete steps; omit this section if none)\n\n"
-            "---\n"
-            f"Conversation history to compress:\n{conv_text}"
-        )
-
-        # Pre-check: estimate prompt token count
-        try:
-            full_prompt_text = system_prompt + "\n" + user_prompt
-            estimated_prompt_tokens = len(_get_tiktoken().encode(full_prompt_text))
-            logger.info(
-                "[CompressTrace] summary prompt: model=%s, chars=%d, estimated_tokens=%d, max_tokens=%d",
-                summary_model,
-                len(full_prompt_text),
-                estimated_prompt_tokens,
-                max_tokens,
-            )
-        except (TypeError, AttributeError):
-            pass  # Tokenizer may fail, continue anyway
-
-        try:
-            # Use a dedicated client for summarization to avoid interfering with main agent client
-            summary_client = _get_openai()(
-                api_key=self.api_key,
-                base_url=self.base_url,
-                timeout=180,  # Generous timeout for large context compression via streaming
-            )
-
-            # Use streaming to match manual compression behavior and improve API compatibility
-            logger.info("[CompressTrace] Starting streaming summary generation...")
-            stream = summary_client.chat.completions.create(
-                model=summary_model,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt},
-                ],
-                max_tokens=max_tokens,
-                temperature=0.2,
-                stream=True,
-            )
-
-            # Collect streaming chunks
-            parts: list[str] = []
-            prompt_tokens = 0
-            completion_tokens = 0
-            finish_reason = None
-
-            for chunk in stream:
-                if not chunk.choices:
-                    # Extract usage from chunk with empty choices (some APIs do this)
-                    chunk_usage = getattr(chunk, "usage", None)
-                    if chunk_usage:
-                        prompt_tokens = getattr(chunk_usage, "prompt_tokens", 0) or 0
-                        completion_tokens = getattr(chunk_usage, "completion_tokens", 0) or 0
-                    continue
-
-                delta = chunk.choices[0].delta
-                if delta and delta.content:
-                    parts.append(delta.content)
-
-                # Capture finish_reason and usage from the last chunk
-                chunk_finish = getattr(chunk.choices[0], "finish_reason", None)
-                if chunk_finish:
-                    finish_reason = chunk_finish
-                chunk_usage = getattr(chunk, "usage", None)
-                if chunk_usage:
-                    prompt_tokens = getattr(chunk_usage, "prompt_tokens", 0) or 0
-                    completion_tokens = getattr(chunk_usage, "completion_tokens", 0) or 0
-
-            content = "".join(parts).strip()
-
-            logger.info(
-                "[CompressTrace] streaming summary complete: content_len=%d, prompt_tokens=%d, "
-                "completion_tokens=%d, finish_reason=%s",
-                len(content),
-                prompt_tokens,
-                completion_tokens,
-                finish_reason,
-            )
-
-            if not content:
-                logger.warning(
-                    "Summary generation returned empty content, model=%s, prompt_len=%d, "
-                    "prompt_tokens=%d, completion_tokens=%d, finish_reason=%s, chunks_collected=%d",
-                    summary_model,
-                    len(user_prompt),
-                    prompt_tokens,
-                    completion_tokens,
-                    finish_reason,
-                    len(parts),
-                )
-                return "Summary generation returned empty response. Please rely on the First User Query."
-            return content
-        except Exception as e:
-            logger.error(f"Summary generation failed: {e}")
-            return "Summary generation failed. Please rely on the First User Query."
-
-    def _count_tokens(self, messages: list[dict], tools: list[dict] | None = None) -> int:
-        num_tokens = 0
-        try:
-            for message in messages:
-                num_tokens += 4
-                role = message.get("role", "")
-                if role:
-                    num_tokens += len(self.encoding.encode(role))
-                if message.get("name"):
-                    num_tokens += len(self.encoding.encode(message["name"])) + 1
-                if message.get("tool_call_id"):
-                    num_tokens += len(self.encoding.encode(message["tool_call_id"])) + 1
-                if role == "tool":
-                    num_tokens += 2
-                for key, value in message.items():
-                    if key == "content":
-                        if isinstance(value, str):
-                            num_tokens += len(self.encoding.encode(value))
-                        elif value is None:
-                            num_tokens += 1
-                        elif isinstance(value, list):
-                            from opensquad.token_breakdown import count_multimodal_content_tokens
-
-                            for item in value:
-                                if not isinstance(item, dict):
-                                    continue
-                                if item.get("type") == "text":
-                                    num_tokens += len(self.encoding.encode(item["text"]))
-                                elif item.get("type") == "image_url":
-                                    detail = item.get("image_url", {}).get("detail", "auto")
-                                    num_tokens += 1105 if detail == "high" else 85
-                                elif item.get("type") in ("audio_url", "video_url"):
-                                    num_tokens += 120
-                            # Claude tool_result / Gemini functionResponse / tool_use
-                            num_tokens += count_multimodal_content_tokens(value, self.encoding)
-                    elif key == "reasoning_content" and isinstance(value, str):
-                        # Thinking text uploads with the message (DeepSeek V4
-                        # requires it on follow-up turns) and counts toward the
-                        # provider's input tokens; previously skipped (~2.5%
-                        # undercount on the 151735_a7s7 session).
-                        num_tokens += len(self.encoding.encode(value))
-                    elif key == "tool_calls" and isinstance(value, list):
-                        from opensquad.token_breakdown import tool_fn_text
-
-                        for tc in value:
-                            num_tokens += 8
-                            tc_id = tc.get("id", "") if isinstance(tc, dict) else ""
-                            if tc_id:
-                                num_tokens += len(self.encoding.encode(tc_id))
-                            fn = tc.get("function", {}) if isinstance(tc, dict) else {}
-                            text = tool_fn_text(fn if fn else tc)
-                            if text:
-                                num_tokens += len(self.encoding.encode(text))
-            if tools:
-                for tool in tools:
-                    num_tokens += 6
-                    fn = tool.get("function", {})
-                    if fn.get("name"):
-                        num_tokens += len(self.encoding.encode(fn["name"]))
-                    if fn.get("description"):
-                        num_tokens += len(self.encoding.encode(fn["description"]))
-                    if fn.get("parameters"):
-                        num_tokens += len(self.encoding.encode(json.dumps(fn["parameters"], ensure_ascii=False)))
-        except Exception as e:
-            logger.warning(f"Token count error: {e}")
-            return len(str(messages)) // 4
-
-        num_tokens += 3
-        return num_tokens
-
-    def _count_message_tokens(self, message: dict) -> int:
-        """Count tokens for a single message. Used by incremental counter."""
-        # Fast path: identity+shape cache (messages are immutable once added)
-        from opensquad.token_breakdown import message_token_cache_key
-
-        try:
-            msg_key = message_token_cache_key(message)
-            if msg_key in self._msg_token_cache:
-                # True LRU: move to end (most recently used)
-                self._msg_token_cache.move_to_end(msg_key)
-                return self._msg_token_cache[msg_key]
-        except (TypeError, AttributeError, ValueError):
-            msg_key = None
-
-        num_tokens = 4
-        role = message.get("role", "")
-        if role:
-            num_tokens += len(self.encoding.encode(role))
-        if message.get("name"):
-            num_tokens += len(self.encoding.encode(message["name"])) + 1
-        if message.get("tool_call_id"):
-            num_tokens += len(self.encoding.encode(message["tool_call_id"])) + 1
-        if role == "tool":
-            num_tokens += 2
-        for key, value in message.items():
-            if key == "content":
-                if isinstance(value, str):
-                    num_tokens += len(self.encoding.encode(value))
-                elif value is None:
-                    num_tokens += 1
-                elif isinstance(value, list):
-                    from opensquad.token_breakdown import count_multimodal_content_tokens
-
-                    for item in value:
-                        if not isinstance(item, dict):
-                            continue
-                        if item.get("type") == "text":
-                            num_tokens += len(self.encoding.encode(item["text"]))
-                        elif item.get("type") == "image_url":
-                            detail = item.get("image_url", {}).get("detail", "auto")
-                            num_tokens += 1105 if detail == "high" else 85
-                        elif item.get("type") in ("audio_url", "video_url"):
-                            num_tokens += 120
-                    num_tokens += count_multimodal_content_tokens(value, self.encoding)
-            elif key == "reasoning_content" and isinstance(value, str):
-                # Thinking text uploads with the message (DeepSeek V4 requires
-                # it on follow-up turns) and counts toward the provider's input
-                # tokens; previously skipped (~2.5% undercount).
-                num_tokens += len(self.encoding.encode(value))
-            elif key == "tool_calls" and isinstance(value, list):
-                from opensquad.token_breakdown import tool_fn_text
-
-                for tc in value:
-                    num_tokens += 8
-                    tc_id = tc.get("id", "") if isinstance(tc, dict) else ""
-                    if tc_id:
-                        num_tokens += len(self.encoding.encode(tc_id))
-                    fn = tc.get("function", {}) if isinstance(tc, dict) else {}
-                    text = tool_fn_text(fn if fn else tc)
-                    if text:
-                        num_tokens += len(self.encoding.encode(text))
-        if msg_key is not None:
-            self._msg_token_cache[msg_key] = num_tokens
-            # True LRU eviction: pop oldest (first) items when over capacity
-            while len(self._msg_token_cache) > self._msg_token_cache_max_size:
-                self._msg_token_cache.popitem(last=False)
-        return num_tokens
-
-    def _count_tools_tokens(self, tools: list[dict] | None) -> int:
-        """Count tokens for tool definitions."""
-        if not tools:
-            return 0
-        num_tokens = 0
-        for tool in tools:
-            num_tokens += 6
-            fn = tool.get("function", {})
-            if fn.get("name"):
-                num_tokens += len(self.encoding.encode(fn["name"]))
-            if fn.get("description"):
-                num_tokens += len(self.encoding.encode(fn["description"]))
-            if fn.get("parameters"):
-                num_tokens += len(self.encoding.encode(json.dumps(fn["parameters"], ensure_ascii=False)))
-        return num_tokens
-
-    def get_current_token_count(self, tools: list[dict] | None = None) -> int:
-        """Get the current token count, using incremental cache when possible.
-
-        This is the preferred API for token counting. It maintains an
-        incremental counter that is updated when messages are added,
-        and only does a full recount when the cache is invalidated.
-        """
-        # If tools changed, recalculate tools tokens
-        if tools is not None and tools is not self._last_tools:
-            self._cached_tools_token_count = self._count_tools_tokens(tools)
-            self._last_tools = tools
-
-        # If cache is valid, use it
-        if self._cached_token_count is not None:
-            return self._cached_token_count + self._cached_tools_token_count + 3
-
-        # Cache miss: full recount
-        total = self._count_tokens(self.req, tools)
-        self._cached_token_count = total - self._cached_tools_token_count - 3
-        return total
-
-    def invalidate_token_cache(self):
-        """Invalidate the incremental token count cache.
-
-        Call this after compression, pop_last_message, or any operation
-        that modifies self.req without going through add_* methods.
-        """
-        self._cached_token_count = None
-
     def _force_text_only_modalities(self) -> bool:
         """Models like stepaudio-2.5-chat accept audio input but only return text."""
         name = (self.model or "").lower()
@@ -1739,8 +1000,8 @@ class ChatAPI:
                 ext = "png"
             fname = f"agent_img_{uuid.uuid4().hex[:12]}.{ext}"
             fpath = os.path.join(self.output_media_dir, fname)
-            with open(fpath, "wb") as f:
-                f.write(raw)
+            # Generated media: write it off the event loop.
+            await blocking_io.write_bytes(fpath, raw)
             item = {"type": "image", "url": f"/uploads/{fname}", "mime": mime or "image/png"}
             logger.info(f"[ChatAPI] Saved image output: {fname}")
             return item
@@ -1833,15 +1094,18 @@ class ChatAPI:
             client = self._ensure_client()
             edit_paths = [p for p in (image_path or []) if p and os.path.isfile(p)]
             if edit_paths and self.is_img_model:
-                # Image editing path (StepFun / OpenAI images.edits)
-                with open(edit_paths[0], "rb") as img_f:
-                    result = await client.images.edit(
-                        model=self.model,
-                        image=img_f,
-                        prompt=prompt,
-                        response_format="b64_json",
-                        extra_body=extra_body,
-                    )
+                # Image editing path (StepFun / OpenAI images.edits).
+                # Read the source image off the event loop and hand the SDK a
+                # (filename, bytes) pair: reading it inline stalls every WS push
+                # while the multipart body is assembled.
+                edit_bytes = await blocking_io.read_bytes(edit_paths[0])
+                result = await client.images.edit(
+                    model=self.model,
+                    image=(os.path.basename(edit_paths[0]), edit_bytes),
+                    prompt=prompt,
+                    response_format="b64_json",
+                    extra_body=extra_body,
+                )
             else:
                 result = await client.images.generate(
                     model=self.model,
@@ -1919,13 +1183,14 @@ class ChatAPI:
                         img_content = []
                         for img in image_path:
                             try:
-                                with open(img, "rb") as f:
-                                    import base64 as _b64
+                                import base64 as _b64
 
-                                    encoded = _b64.b64encode(f.read()).decode("utf-8")
-                                    img_content.append(
-                                        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{encoded}"}}
-                                    )
+                                # User-sized image: read it off the event loop.
+                                data = await blocking_io.read_bytes(img)
+                                encoded = _b64.b64encode(data).decode("utf-8")
+                                img_content.append(
+                                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{encoded}"}}
+                                )
                             except Exception as e:
                                 logger.error(f"[ChatAPI] Failed to encode image {img}: {e}")
                         if img_content:
@@ -2530,8 +1795,8 @@ class ChatAPI:
                 fname = f"agent_audio_{_uuid.uuid4().hex[:12]}.wav"
                 fpath = os.path.join(self.output_media_dir, fname)
                 raw_bytes = b"".join(base64.b64decode(c) for c in audio_output_chunks)
-                with open(fpath, "wb") as f:
-                    f.write(raw_bytes)
+                # Generated media: write it off the event loop.
+                await blocking_io.write_bytes(fpath, raw_bytes)
                 output_media.append({"type": "audio", "url": f"/uploads/{fname}", "mime": "audio/wav"})
                 logger.info(f"[ChatAPI] Saved audio output: {fname}")
             except Exception as e:
@@ -2547,48 +1812,3 @@ class ChatAPI:
         }
         logger.info(f"[ChatAPI] Returning dict with tool_data={'present' if tool_data else 'None'}")
         return result
-
-    def _ensure_history_dir(self):
-        """Lazy resolve history_dir from workspace (workspace may not be set at __init__ time)."""
-        if self.history_dir is None:
-            self.history_dir = syscfg.workspace_data_dir("ai_his_talk")
-            os.makedirs(self.history_dir, exist_ok=True)
-
-    def _initialize_history(self, topic: str | None):
-        if not topic:
-            return
-        self._ensure_history_dir()
-        self.history_file = os.path.join(self.history_dir, f"{topic}.json")
-        if os.path.exists(self.history_file):
-            try:
-                with open(self.history_file, encoding="utf-8") as f:
-                    self.req = json.load(f)
-            except Exception as e:
-                logger.error(f"Failed to load history: {e}")
-
-    def save_history(self):
-        if self.history_file:
-            try:
-                with open(self.history_file, "w", encoding="utf-8") as f:
-                    json.dump(self.req, f, ensure_ascii=False, indent=2)
-            except Exception as e:
-                logger.error(f"Failed to save history: {e}")
-
-    def get_cumulative_stats(self) -> dict:
-        """Return cumulative token consumption statistics"""
-        return {
-            "total_input_tokens": self.total_input_tokens,
-            "total_output_tokens": self.total_output_tokens,
-            "total_tokens": self.total_input_tokens + self.total_output_tokens,
-            "total_requests": self.total_requests,
-            "cache_read_tokens": self.total_cache_read_tokens,
-            "cache_creation_tokens": 0,  # OpenAI does not distinguish creation; all merged into cache_read
-        }
-
-    def list_sessions(self) -> list[str]:
-        """List all historical session names"""
-        self._ensure_history_dir()
-        if not os.path.exists(self.history_dir):
-            return []
-        files = os.listdir(self.history_dir)
-        return [f.replace(".json", "") for f in files if f.endswith(".json")]

@@ -4,6 +4,7 @@ import logging
 
 from opensquad import bus
 from opensquad.input_hub import input_hub
+from opensquad.protocol_version import LAUNCHER_RELAY_TOPICS
 from opensquad.sdk import AgentConfig, BaseAgent
 from opensquad.system_config import syscfg
 
@@ -31,6 +32,24 @@ _TOP_LEVEL_CMD_FALLBACK_KEYS = (
     "session_id",
     "content",
 )
+
+# Relay topic -> dedicated GatewayAdapter handler method. Topics absent from this
+# map are plain relays: ``on_generic_event(topic)`` forwards the payload verbatim
+# under its own WS type. Keyed by the topic names in
+# ``opensquad.protocol_version.LAUNCHER_RELAY_TOPICS``; the guard asserts every
+# value names a real method and every key is a relayed topic, so a rename on
+# either side fails loudly instead of raising AttributeError at agent boot.
+_RELAY_HANDLER_METHODS: dict[str, str] = {
+    "to_user_final": "on_runner_output",
+    "to_user_reply": "on_runner_output",
+    "to_user_end_task": "on_runner_end_task",
+    "thought": "on_runner_thought",
+    "to_user_stream": "on_runner_stream",
+    "tool_call": "on_tool_call",
+    "tool_call_delta": "on_tool_call_delta",
+    "tool_result": "on_tool_result",
+    "state": "on_runner_state",
+}
 
 
 def coerce_command_data(message: dict) -> dict:
@@ -88,57 +107,28 @@ class GatewayAdapter(BaseAgent):
             bus.subscribe(event_type, callback)
             self._subscriptions.append((event_type, callback))
 
-        # Listen to Runner output events
-        _sub("to_user_final", self.on_runner_output)
-        _sub("to_user_reply", self.on_runner_output)
-        _sub("to_user_end_task", self.on_runner_end_task)
-        _sub("thought", self.on_runner_thought)
-        _sub("to_user_stream", self.on_runner_stream)
-        _sub("tool_call", self.on_tool_call)
-        _sub("tool_call_delta", self.on_tool_call_delta)
-        _sub("tool_result", self.on_tool_result)
-        # Subscribe to state and system notification events
-        _sub("state", self.on_runner_state)
-        _sub("wake", self.on_generic_event("wake"))
-        _sub("sleep", self.on_generic_event("sleep"))
-        _sub("info", self.on_generic_event("info"))
-        _sub("status", self.on_generic_event("status"))
-        _sub("turn_start", self.on_generic_event("turn_start"))
-        # Subscribe to Token stats events
-        _sub("token_stats", self.on_generic_event("token_stats"))
-        # Subscribe to session management events
-        _sub("current_session", self.on_generic_event("current_session"))
-        _sub("history_sync", self.on_generic_event("history_sync"))
-        # Ready-stage notifications (extensions/MCP finished loading)
-        _sub("agent_ready_stage", self.on_generic_event("agent_ready_stage"))
-        _sub("session_list", self.on_generic_event("session_list"))
-        # Subscribe to plan events
-        _sub("plan", self.on_generic_event("plan"))
-        # Subscribe to workflow elapsed-time events
-        _sub("turn_elapsed", self.on_generic_event("turn_elapsed"))
-        # Per-round billed token usage (final-assistant-message 消耗 badge)
-        _sub("turn_usage", self.on_generic_event("turn_usage"))
-        _sub("turn_cancelled", self.on_generic_event("turn_cancelled"))
-        # Subscribe to prompt_update events
-        _sub("prompt_update", self.on_generic_event("prompt_update"))
-        # Subscribe to model output media events (audio/image)
-        _sub("output_media", self.on_generic_event("output_media"))
-        # Realtime voice events
-        _sub("voice_audio_out", self.on_generic_event("voice_audio_out"))
-        _sub("voice_transcript", self.on_generic_event("voice_transcript"))
-        _sub("voice_realtime_status", self.on_generic_event("voice_realtime_status"))
-        # Subscribe to context compression summary stream events
-        _sub("summary_stream", self.on_generic_event("summary_stream"))
+        # The topic list is DERIVED from opensquad.protocol_version
+        # (LAUNCHER_RELAY_TOPICS). Subscribing to a topic outside that table would
+        # relay a frame the gateway does not recognise, which it logs as
+        # "Unknown message from agent" and throws away — see
+        # tests/test_ws_event_contract.py. Order is irrelevant: every topic has
+        # exactly one handler, so bus dispatch order cannot change.
+        for _topic in LAUNCHER_RELAY_TOPICS:
+            _sub(_topic, self._relay_handler(_topic))
+
         # M2: parallel task lifecycle — relay task_update / task_removed to the web UI
         self._wire_task_scheduler()
-        _sub("group_member_update", self.on_generic_event("group_member_update"))
-        _sub("user_status_update", self.on_generic_event("user_status_update"))
-        # Shell / background job live output for CMD-style web panel
-        _sub("job_stdout", self.on_generic_event("job_stdout"))
-        _sub("job_status", self.on_generic_event("job_status"))
-        _sub("busy_sessions", self.on_generic_event("busy_sessions"))
-        _sub("scheduled_task_turn_done", self.on_generic_event("scheduled_task_turn_done"))
-        _sub("compression_progress", self.on_generic_event("compression_progress"))
+
+    def _relay_handler(self, topic: str):
+        """The event-bus handler for a relay *topic*.
+
+        A dedicated handler when the topic needs one (stream debouncing, session
+        routing, load-percent bookkeeping), otherwise a generic verbatim relay.
+        """
+        method_name = _RELAY_HANDLER_METHODS.get(topic)
+        if method_name is not None:
+            return getattr(self, method_name)
+        return self.on_generic_event(topic)
 
     def dispose(self):
         """Unsubscribe all event bus handlers.

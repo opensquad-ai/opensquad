@@ -183,6 +183,36 @@ def ctx_conv_text_budget_chars() -> int:
     return int(get("context_compression", "conv_text_budget_chars", 24000))
 
 
+def ctx_system_prompt_budget_chars() -> int:
+    """Per-variable character budget for the stable system-prompt layer.
+
+    AGENT_PROFILE / CONTEXT_SUMMARY / AGENT_WORKSPACE / TEAM_COLLAB_CARDS are
+    injected into the system prompt on every turn and are never touched by
+    context compression, so a single unbounded source (agent.md) inflates the
+    prompt until the provider rejects every request with a 400. Bound it.
+    """
+    val = os.environ.get("CTX_SYSTEM_PROMPT_BUDGET_CHARS")
+    if val:
+        return int(val)
+    return int(get("context_compression", "system_prompt_budget_chars", 20000))
+
+
+def ctx_overflow_guard_frac() -> float:
+    """Fraction of ``token_max`` above which the *irreducible* prompt part
+    (system message + tool schemas) is declared unfixable by compression.
+
+    Compression rebuilds the request as ``[system_msg, first_user, *recent]``,
+    so the system message and the tool schemas are a hard floor on the request
+    size. When that floor alone exceeds this fraction of the window no amount
+    of compacting can help: the turn fails fast with a self-describing error
+    instead of shipping a request that is guaranteed to come back 400.
+    """
+    val = os.environ.get("CTX_OVERFLOW_GUARD_FRAC")
+    if val:
+        return float(val)
+    return float(get("context_compression", "overflow_guard_fraction", 0.95))
+
+
 # VCS / Git
 def vcs_git_server() -> str:
     val = os.environ.get("VCS_GIT_SERVER")

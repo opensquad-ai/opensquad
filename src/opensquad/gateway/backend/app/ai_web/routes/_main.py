@@ -23,6 +23,7 @@ from pydantic import BaseModel
 from app.api import get_current_user_dep
 from app.models import User
 from opensquad.system_config import syscfg
+from opensquad.utils import blocking_io
 
 from ..audit_routes import router as audit_router
 from ..registry import registry
@@ -956,8 +957,8 @@ async def agent_transcribe_audio(
         content = await file.read()
         if not content:
             raise HTTPException(400, "empty audio file")
-        with open(audio_path, "wb") as fw:
-            fw.write(content)
+        # User-sized payload: never write it inline on the event loop.
+        await blocking_io.write_bytes(audio_path, content)
         cleanup = True
     elif path:
         # Allow relative upload names or absolute paths under _UPLOAD_DIR
@@ -1031,8 +1032,8 @@ async def group_transcribe_audio(
         content = await file.read()
         if not content:
             raise HTTPException(400, "empty audio file")
-        with open(audio_path, "wb") as fw:
-            fw.write(content)
+        # User-sized payload: never write it inline on the event loop.
+        await blocking_io.write_bytes(audio_path, content)
         cleanup = True
     elif path:
         candidate = path.strip()
@@ -1097,8 +1098,8 @@ async def agent_upload_image(
     filepath = os.path.join(_UPLOAD_DIR, filename)
 
     content = await file.read()
-    with open(filepath, "wb") as fw:
-        fw.write(content)
+    # User-sized payload: never write it inline on the event loop.
+    await blocking_io.write_bytes(filepath, content)
 
     logger.info(f"Image uploaded for {agent_id}: {filepath} ({len(content)} bytes)")
 
@@ -1125,8 +1126,8 @@ async def agent_upload_file(
     filepath = os.path.join(_UPLOAD_DIR, filename)
 
     content = await file.read()
-    with open(filepath, "wb") as fw:
-        fw.write(content)
+    # User-sized payload: never write it inline on the event loop.
+    await blocking_io.write_bytes(filepath, content)
 
     file_size = len(content)
     content_type = file.content_type or "application/octet-stream"
@@ -1171,8 +1172,8 @@ async def agent_upload_files(
         filepath = os.path.join(_UPLOAD_DIR, filename)
 
         content = await file.read()
-        with open(filepath, "wb") as fw:
-            fw.write(content)
+        # User-sized payload: never write it inline on the event loop.
+        await blocking_io.write_bytes(filepath, content)
 
         file_size = len(content)
         content_type = file.content_type or "application/octet-stream"
@@ -1737,8 +1738,8 @@ async def agent_push_upload_and_chat(
         filepath = os.path.join(_UPLOAD_DIR, filename)
 
         content = await file.read()
-        with open(filepath, "wb") as fw:
-            fw.write(content)
+        # User-sized payload: never write it inline on the event loop.
+        await blocking_io.write_bytes(filepath, content)
 
         file_size = len(content)
         content_type = file.content_type or "application/octet-stream"

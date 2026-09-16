@@ -5,12 +5,10 @@ import logging
 import os
 import tempfile
 import time
-from collections import OrderedDict
 
-from .events import bus
+from ._provider_base import ProviderAPIBase
 from .input_hub import input_hub
 from .model_config import ModelConfig
-from .system_config import syscfg
 from .utils import CharPrinter
 from .xml_parser import StreamingTagParser
 
@@ -47,7 +45,7 @@ def _get_anthropic():
         return _AnthropicClient
 
 
-class ClaudeAPI:
+class ClaudeAPI(ProviderAPIBase):
     """
     ClaudeAPI v3.1: Enhanced Anthropic interface, feature-aligned with ChatAPI.
     Supports: context compression, token statistics, history persistence, stream interruption, event dispatch.
@@ -153,18 +151,10 @@ class ClaudeAPI:
         self.token_max = config.token_max
         self.reduction_strategy = config.reduction_strategy
         self.reduction_batch_size = config.reduction_batch_size
-        self._sid_provider = None
-        self._user_id_provider = None  # Injected by Runner; returns the user_id for the current turn
-        self._latest_summary = ""
-
-        self.total_input_tokens = 0
-        self.total_output_tokens = 0
-        self.total_requests = 0
-        self.total_cache_read_tokens = 0
-        self.total_cache_creation_tokens = 0
-        # ── Per-message token cache (P3 perf optimization) ──
-        self._msg_token_cache: OrderedDict = OrderedDict()  # PERF-10: LRU eviction
-        self._msg_token_cache_max_size = 5000
+        # ── Shared provider state ──
+        # Counters, incremental token counter, per-message token LRU cache and
+        # the compression flags all live in ProviderAPIBase.
+        self._init_provider_base()
 
         try:
             self.encoding = _get_tiktoken().get_encoding("cl100k_base")
@@ -237,13 +227,6 @@ class ClaudeAPI:
 
     def set_template(self, template: str):
         self._prompt_template = template
-
-    def _emit_with_sid(self, etype, data):
-        sid = self._sid_provider() if self._sid_provider else None
-        if sid:
-            bus.emit(etype, {"sid": sid, "data": data})
-        else:
-            bus.emit(etype, data)
 
     # -- Provider-level Files API (Anthropic beta) --
 
@@ -583,297 +566,23 @@ class ClaudeAPI:
             return True
         return False
 
-    def _count_tokens(self, messages: list[dict], tools: list[dict] | None = None) -> int:
-        """Estimate token consumption (based on tiktoken).
+    # -- Summariser transport (prompt assembly lives in ProviderAPIBase) --
 
-        Mirrors ``ChatAPI._count_tokens``: counts message tokens plus, when
-        ``tools`` is provided, the per-tool definition overhead
-        (name/description/parameters). The runner passes ``_last_tools`` here so
-        the token-stat breakdown stays consistent across providers; without this
-        parameter the call ``_count_tokens(req, tools)`` raises a TypeError.
-        """
-        if not self.encoding:
-            return len(str(messages)) // 3
-        try:
-            num_tokens = sum(self._count_message_tokens(m) for m in messages)
-            if tools:
-                for tool in tools:
-                    fn = tool.get("function", {}) if isinstance(tool, dict) else getattr(tool, "function", {})
-                    num_tokens += 6
-                    if fn.get("name"):
-                        num_tokens += len(self.encoding.encode(fn["name"]))
-                    if fn.get("description"):
-                        num_tokens += len(self.encoding.encode(fn["description"]))
-                    if fn.get("parameters"):
-                        num_tokens += len(self.encoding.encode(json.dumps(fn["parameters"], ensure_ascii=False)))
-            return num_tokens
-        except (TypeError, AttributeError) as e:
-            logger.warning(f"Token count error: {e}")
-            return len(str(messages)) // 3
-
-    def _count_message_tokens(self, message: dict) -> int:
-        """Count tokens for a single message with identity+shape cache."""
-        from opensquad.token_breakdown import message_token_cache_key
-
-        try:
-            msg_key = message_token_cache_key(message)
-            if msg_key in self._msg_token_cache:
-                self._msg_token_cache.move_to_end(msg_key)  # PERF-10: LRU touch
-                return self._msg_token_cache[msg_key]
-        except (TypeError, AttributeError, ValueError):
-            msg_key = None
-
-        num_tokens = 4
-        if message.get("role") == "tool":
-            num_tokens += 3
-        content = message.get("content", "")
-        if isinstance(content, str):
-            num_tokens += len(self.encoding.encode(content))
-        elif isinstance(content, list):
-            for item in content:
-                if item.get("type") == "text":
-                    num_tokens += len(self.encoding.encode(item["text"]))
-                elif item.get("type") == "image":
-                    num_tokens += 300
-                elif item.get("type") in ("audio", "video"):
-                    num_tokens += 400
-                elif item.get("type") == "tool_result":
-                    tool_content = item.get("content", "")
-                    if isinstance(tool_content, list):
-                        for tc in tool_content:
-                            if isinstance(tc, dict) and tc.get("type") == "text":
-                                num_tokens += len(self.encoding.encode(tc["text"]))
-                    elif isinstance(tool_content, str):
-                        num_tokens += len(self.encoding.encode(tool_content))
-        if "tool_calls" in message:
-            num_tokens += 6
-            for tc in message["tool_calls"]:
-                func = tc.get("function", {})
-                num_tokens += len(self.encoding.encode(func.get("name", "")))
-                num_tokens += len(self.encoding.encode(func.get("arguments", "")))
-
-        if msg_key is not None:
-            self._msg_token_cache[msg_key] = num_tokens
-            if len(self._msg_token_cache) > self._msg_token_cache_max_size:
-                # PERF-10: true LRU — pop least-recently-used while over budget.
-                while len(self._msg_token_cache) > self._msg_token_cache_max_size:
-                    self._msg_token_cache.popitem(last=False)
-        return num_tokens
-
-    def _prepare_messages(self) -> list[dict]:
-        """Context compression strategy (trigger threshold and keep-rounds are read from system_config)."""
-        current_tokens = self._count_tokens(self.req)
-
-        threshold = syscfg.ctx_trigger_threshold()
-        if current_tokens <= self.token_max * threshold:
-            return self.req
-
-        logger.warning(
-            f"Claude Context limit reached ({current_tokens}/{self.token_max}, threshold={threshold}). Compacting."
+    def _summarizer_request(self, system_prompt: str, user_prompt: str, max_tokens: int) -> str:
+        """Ask Claude itself to produce the compression summary."""
+        response = self.client.messages.create(
+            model=self.model,
+            max_tokens=max_tokens,
+            system=system_prompt,
+            messages=[{"role": "user", "content": user_prompt}],
+            temperature=0.3,
         )
-        self._emit_with_sid("status", "Context limit reached, compacting...")
-        self._emit_with_sid("info", f"Memory overload ({current_tokens} tokens), compacting context for Claude...")
-
-        system_msg = self.req[0]
-
-        if len(self.req) < 10:
-            return [system_msg] + self.req[-3:]
-
-        # Preserve the first User message (original intent)
-        first_user_idx = -1
-        for i in range(1, len(self.req)):
-            if self.req[i]["role"] == "user":
-                # In Claude, tool_result also has role=user; exclude those
-                content = self.req[i].get("content", "")
-                is_tool_result = isinstance(content, list) and any(
-                    isinstance(item, dict) and item.get("type") == "tool_result" for item in content
-                )
-                if not is_tool_result:
-                    first_user_idx = i
-                    break
-
-        # Keep recent tail by number of rounds
-        recent_msgs = self._tail_msgs_for_rounds(syscfg.ctx_keep_recent_rounds())
-        recent_start_idx = len(self.req) - len(recent_msgs)
-        start_scan = (first_user_idx + 1) if first_user_idx != -1 else 1
-        end_scan = recent_start_idx
-
-        # Cap how far back rounds-based retention can pull. In a long autonomous
-        # tool-calling run the 2nd-to-last real user turn sits near the start of
-        # the conversation, so _tail_msgs_for_rounds swallows nearly everything
-        # and leaves the summarize range empty — compression becomes a no-op and
-        # tokens keep climbing. Fall back to token-budget retention when the
-        # recent section exceeds the hard cap.
-        msg_tokens = [(i, self._count_message_tokens(m)) for i, m in enumerate(self.req)]
-        recent_tokens = sum(t for _, t in msg_tokens[recent_start_idx:])
-        recent_hard_cap = int(current_tokens * syscfg.ctx_recent_hard_cap_frac())
-        if recent_tokens > recent_hard_cap:
-            keep_budget = int(current_tokens * syscfg.ctx_keep_recent_fraction())
-            new_start = len(self.req)
-            acc = 0
-            for idx, tok in reversed(msg_tokens):
-                if acc + tok <= keep_budget:
-                    acc += tok
-                    new_start = idx
-                else:
-                    break
-            logger.warning(
-                f"[ClaudeAPI] rounds-based recent section too large "
-                f"({recent_tokens} > cap {recent_hard_cap}), falling back to "
-                f"token-budget retention (recent_start {recent_start_idx} -> {new_start})"
-            )
-            recent_start_idx = new_start
-            recent_msgs = self.req[recent_start_idx:]
-            end_scan = recent_start_idx
-
-        if start_scan >= end_scan:
-            # Range still empty — force a token-budget-only split (dropping
-            # round/anchor protection) so the summarizer actually runs. Never
-            # return uncompressed context here; that pins tokens above the limit.
-            logger.warning(
-                f"[ClaudeAPI] compression range empty (start={start_scan} end={end_scan}), "
-                f"forcing token-budget-only retention"
-            )
-            keep_budget = int(current_tokens * syscfg.ctx_keep_recent_fraction())
-            recent_start_idx = len(self.req)
-            acc = 0
-            for idx, tok in reversed(msg_tokens):
-                if acc + tok <= keep_budget:
-                    acc += tok
-                    recent_start_idx = idx
-                else:
-                    break
-            min_scan = min((first_user_idx + 2) if first_user_idx != -1 else 2, len(self.req))
-            if recent_start_idx < min_scan:
-                recent_start_idx = min_scan
-            recent_msgs = self.req[recent_start_idx:]
-            end_scan = recent_start_idx
-            start_scan = (first_user_idx + 1) if first_user_idx != -1 else 1
-            logger.warning(
-                f"[ClaudeAPI] forced recent_start={recent_start_idx}, "
-                f"summarize_range=[{start_scan}, {end_scan}) msgs={end_scan - start_scan}"
-            )
-
-        if start_scan < end_scan:
-            dropped_count = end_scan - start_scan
-            msgs_to_summarize = self.req[start_scan:end_scan]
-
-            self._emit_with_sid("info", f"Calling model to summarize {dropped_count} history messages intelligently...")
-            summary_content = self._generate_summary(msgs_to_summarize)
-
-            self._latest_summary = f"[Context Summary | Compressed {dropped_count} messages]\n{summary_content}"
-
-            new_req = [system_msg]
-            if first_user_idx != -1:
-                new_req.append(self.req[first_user_idx])
-            new_req.extend(recent_msgs)
-            self.req = new_req
-            logger.info(f"Compacted Claude context: {dropped_count} messages summarized.")
-
-            new_token_count = self._count_tokens(self.req)
-            self._emit_with_sid(
-                "info",
-                f"Context compaction done: {current_tokens} -> {new_token_count} tokens ({len(self.req)} messages)",
-            )
-
-        return self.req
-
-    def _tail_msgs_for_rounds(self, n_rounds: int) -> list[dict]:
-        """Return the tail messages covering the most recent n_rounds user turns."""
-        msgs = self.req[1:]  # skip system msg
-        user_turn_count = 0
-        for i in range(len(msgs) - 1, -1, -1):
-            msg = msgs[i]
-            role = msg.get("role", "")
-            content = msg.get("content", "")
-            is_tool_result = (
-                role == "user"
-                and isinstance(content, list)
-                and any(isinstance(item, dict) and item.get("type") == "tool_result" for item in content)
-            )
-            if role == "user" and not is_tool_result:
-                user_turn_count += 1
-                if user_turn_count >= n_rounds:
-                    return msgs[i:]
-        return msgs
-
-    def _build_conv_text(self, messages: list[dict], budget_chars: int) -> str:
-        """Build conversation text with overall budget control, avoiding per-message hard truncation."""
-        items = []
-        for m in messages:
-            role = m.get("role", "unknown")
-            content = m.get("content", "")
-            if isinstance(content, list):
-                text_parts = []
-                for item in content:
-                    if not isinstance(item, dict):
-                        continue
-                    t = item.get("type", "")
-                    if t == "text":
-                        text_parts.append(item["text"])
-                    elif t == "tool_use":
-                        inp = json.dumps(item.get("input", {}), ensure_ascii=False)[:300]
-                        text_parts.append(f"[tool_use: {item.get('name', '?')}({inp})]")
-                    elif t == "tool_result":
-                        for c in item.get("content") or []:
-                            if isinstance(c, dict) and c.get("type") == "text":
-                                text_parts.append(c["text"])
-                content = "\n".join(text_parts)
-            else:
-                content = str(content)
-            items.append((role, content))
-
-        total_chars = sum(len(c) for _, c in items)
-        if total_chars <= budget_chars:
-            return "\n".join(f"{role}: {content}" for role, content in items)
-
-        n = len(items)
-        base_alloc = max(200, budget_chars // n)
-        parts = []
-        for role, content in items:
-            if len(content) <= base_alloc:
-                parts.append(f"{role}: {content}")
-            else:
-                parts.append(f"{role}: {content[:base_alloc]}...[truncated]")
-        return "\n".join(parts)
-
-    def _generate_summary(self, messages: list[dict]) -> str:
-        """Call Claude itself to generate a state-snapshot-style summary."""
-        budget = syscfg.ctx_conv_text_budget_chars()
-        max_tokens = syscfg.ctx_summary_max_tokens()
-        conv_text = self._build_conv_text(messages, budget)
-
-        prompt = (
-            "You are compressing conversation history for an AI Agent that is actively executing a task.\n"
-            "The compressed result will replace this history; the Agent must be able to continue seamlessly based on your summary.\n\n"
-            "[Hard rules - the following content must be preserved verbatim; never rewrite or omit]\n"
-            "- All file paths and directory names\n"
-            "- All IDs, ports, version numbers, and configuration values\n"
-            "- Original text of all error messages\n"
-            "- Requirements, constraints, or preferences explicitly specified by the user\n\n"
-            "[Output format - use lists, no long prose, omit irrelevant details]\n\n"
-            "## Current Task\n"
-            "(The user's original goal, in one sentence)\n\n"
-            "## Completed\n"
-            "(Actions successfully executed and confirmed, with key output values)\n\n"
-            "## Current State\n"
-            "(What state the system/files/code is in right now - this is the most important section)\n\n"
-            "## Key Parameters\n"
-            "(Exact values that will definitely be needed later: paths, configs, API addresses, etc.)\n\n"
-            "## Unresolved Issues\n"
-            "(Confirmed blockers or errors; omit this section if none)\n\n"
-            "---\n"
-            f"Conversation history to compress:\n{conv_text}"
-        )
-
-        try:
-            response = self.client.messages.create(
-                model=self.model, max_tokens=max_tokens, messages=[{"role": "user", "content": prompt}], temperature=0.3
-            )
-            return response.content[0].text
-        except Exception as e:
-            logger.error(f"Claude summary failed: {e}")
-            return "Summary generation failed. Please rely on the First User Query."
+        text = ""
+        for block in response.content or []:
+            block_text = getattr(block, "text", None)
+            if block_text:
+                text += block_text
+        return text
 
     def _convert_tools_to_claude_format(self, openai_tools: list[dict]) -> list[dict]:
         """
@@ -1278,48 +987,3 @@ class ClaudeAPI:
                     "stream_error": True,
                     "timed_out": timed_out,
                 }
-
-    def _ensure_history_dir(self):
-        """Lazy resolve history_dir from workspace (workspace may not be set at __init__ time)."""
-        if self.history_dir is None:
-            self.history_dir = syscfg.workspace_data_dir("ai_his_talk")
-            os.makedirs(self.history_dir, exist_ok=True)
-
-    def _initialize_history(self, topic: str | None):
-        if not topic:
-            return
-        self._ensure_history_dir()
-        self.history_file = os.path.join(self.history_dir, f"{topic}.json")
-        if os.path.exists(self.history_file):
-            try:
-                with open(self.history_file, encoding="utf-8") as f:
-                    self.req = json.load(f)
-            except Exception as e:
-                logger.error(f"Failed to load history: {e}")
-
-    def save_history(self):
-        if self.history_file:
-            try:
-                with open(self.history_file, "w", encoding="utf-8") as f:
-                    json.dump(self.req, f, ensure_ascii=False, indent=2)
-            except Exception as e:
-                logger.error(f"Failed to save history: {e}")
-
-    def get_cumulative_stats(self) -> dict:
-        """Return cumulative token usage (aligned with ChatAPI)."""
-        return {
-            "total_input_tokens": self.total_input_tokens,
-            "total_output_tokens": self.total_output_tokens,
-            "total_tokens": self.total_input_tokens + self.total_output_tokens,
-            "total_requests": self.total_requests,
-            "cache_read_tokens": self.total_cache_read_tokens,
-            "cache_creation_tokens": self.total_cache_creation_tokens,
-        }
-
-    def list_sessions(self) -> list[str]:
-        """Return list of sessions (aligned with ChatAPI)."""
-        self._ensure_history_dir()
-        if not os.path.exists(self.history_dir):
-            return []
-        files = os.listdir(self.history_dir)
-        return [f.replace(".json", "") for f in files if f.endswith(".json")]

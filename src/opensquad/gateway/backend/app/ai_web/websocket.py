@@ -15,6 +15,9 @@ from datetime import datetime, timezone
 from fastapi import HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.security import HTTPBearer
 
+from opensquad.protocol_version import AGENT_OUTPUT_BROADCAST_TYPES as _AGENT_OUTPUT_BROADCAST_TYPES
+from opensquad.protocol_version import AGENT_OUTPUT_DISPATCH_TYPES as _AGENT_OUTPUT_DISPATCH_TYPES
+
 from .registry import AgentInfo, registry
 from .sessions import gateway_session_cache
 
@@ -28,53 +31,15 @@ security = HTTPBearer()
 # not a valid session file name and always 404s the history API.
 _agent_current_session_id: dict[str, str] = {}
 
-# Agent output / workflow event types that MUST reach every connected client
-# (TUI + Web, any account). An agent's disk session is a shared workspace: a
-# turn started from the TUI should stream live into the Web UI of the same
-# session, and vice versa. Forwarding these with a user-directed push would
-# hide the whole run from every other client (cross-account desync).
-_AGENT_OUTPUT_BROADCAST_TYPES = frozenset(
-    {
-        "message",
-        "response",
-        "thought",
-        "stream",
-        "tool_call",
-        "tool_call_delta",
-        "tool_result",
-        "state",
-        "wake",
-        "sleep",
-        "info",
-        "status",
-        "turn_start",
-        "turn_elapsed",
-        "turn_usage",
-        "turn_cancelled",
-        "token_stats",
-        "current_session",
-        "history_sync",
-        "session_list",
-        "busy_sessions",
-        "primary_session",
-        "file_push",
-        "plan",
-        "prompt_update",
-        "output_media",
-        "summary_stream",
-        "compression_progress",
-        "job_stdout",
-        "job_status",
-        "voice_realtime_status",
-        "voice_audio_out",
-        "voice_transcript",
-        "scheduled_task_turn_done",
-        # M2 parallel task lifecycle — the task panel is a per-agent shared
-        # view; every connected client should receive live status updates.
-        "task_update",
-        "task_removed",
-    }
-)
+# Both allow-lists are DERIVED — see opensquad/protocol_version.py for the single
+# enumeration and the bug class it removes. Do not inline a list here again:
+#
+#   _AGENT_OUTPUT_BROADCAST_TYPES — broadcast to every connected client
+#       (TUI + Web, any account) vs a directed push to one user.
+#   _AGENT_OUTPUT_DISPATCH_TYPES  — handled by the `_agent_message_loop` gate vs
+#       dropped into the `Unknown message from agent` warning.
+#
+# tests/test_ws_event_contract.py fails if either list is re-inlined.
 
 
 def _resolve_registered_agent_id(agent_id: str) -> str:
@@ -413,50 +378,13 @@ class AgentWebSocketHandler:
                             # stale marker keeps the agent stuck at "busy" forever.
                             registry.clear_busy(agent_id)
 
-                    elif msg_type in [
-                        "message",
-                        "response",
-                        "thought",
-                        "stream",
-                        "tool_call",
-                        "tool_call_delta",
-                        "tool_result",
-                        "state",
-                        "wake",
-                        "sleep",
-                        "info",
-                        "status",
-                        "turn_start",
-                        "turn_elapsed",
-                        "turn_usage",
-                        "token_stats",
-                        "current_session",
-                        "history_sync",
-                        "session_list",
-                        "busy_sessions",
-                        "primary_session",
-                        "file_push",
-                        "plan",
-                        "prompt_update",
-                        "output_media",
-                        "summary_stream",
-                        "compression_progress",
-                        "job_stdout",
-                        "job_status",
-                        # StepAudio realtime voice (browser <-> agent bridge)
-                        "voice_realtime_status",
-                        "voice_audio_out",
-                        "voice_transcript",
-                        "scheduled_task_turn_done",
-                        # M2 parallel task lifecycle. These MUST also appear in
-                        # _AGENT_OUTPUT_BROADCAST_TYPES *and* here: the frozenset
-                        # only decides broadcast-vs-directed, while this list is
-                        # what keeps the frame from falling through to the
-                        # "Unknown message from agent" branch and being dropped
-                        # silently (the UI then never updates).
-                        "task_update",
-                        "task_removed",
-                    ]:
+                    elif msg_type in _AGENT_OUTPUT_DISPATCH_TYPES:
+                        # DERIVED from opensquad.protocol_version. A type missing
+                        # from that set (or from the broadcast set above) falls
+                        # through to the "Unknown message from agent" warning and
+                        # is dropped silently — the UI then never updates even
+                        # though the event reached disk. See protocol_version.py
+                        # and tests/test_ws_event_contract.py.
                         # Agent's response message, forward to user
                         user_id = message.get("user_id")
                         # Capture the disk session_id for a scheduled-task execution

@@ -81,6 +81,10 @@ const BOOT = py('agents_boot.py');
 const BOOTSTRAP = py('runner_bootstrap.py');
 const AGENT_MODE = py('agent_mode.py');
 const WS = py('gateway/backend/app/ai_web/websocket.py');
+// The WS event-type allow-lists moved to the single source of truth. `info` being
+// broadcast is still asserted, but it now lives in protocol_version.py — see
+// tests/test_ws_event_contract.py for the Python-side lock.
+const PROTOCOL = py('protocol_version.py');
 
 describe('R1 — chips follow the theme (no hardcoded colours)', () => {
   it('uses primary theme tokens for surface + border', () => {
@@ -115,9 +119,19 @@ describe('R2 — the info event is consumed, not also rendered as an Activity bl
   });
 
   it('`info` is whitelisted for broadcast (otherwise web never sees it)', () => {
-    const setStart = WS.indexOf('_AGENT_OUTPUT_BROADCAST_TYPES = frozenset(');
-    const setBody = WS.slice(setStart, WS.indexOf(')', WS.indexOf('"scheduled_task_turn_done"')));
+    // The allow-list lives in opensquad/protocol_version.py now (single source,
+    // mirrored by AGENT_OUTPUT_BROADCAST_TYPES in websocket.py). Anchor on the
+    // frozenset literal and assert `info` is inside it.
+    const setStart = PROTOCOL.indexOf('AGENT_OUTPUT_BROADCAST_TYPES');
+    expect(setStart).toBeGreaterThan(-1);
+    const setBody = PROTOCOL.slice(
+      setStart,
+      PROTOCOL.indexOf(')', PROTOCOL.indexOf('"scheduled_task_turn_done"')),
+    );
     expect(setBody).toContain('"info"');
+    // ...and the gateway must not carry its own copy that could drift.
+    expect(WS).toContain('from opensquad.protocol_version import AGENT_OUTPUT_BROADCAST_TYPES');
+    expect(WS).not.toMatch(/_AGENT_OUTPUT_BROADCAST_TYPES = frozenset\(/);
   });
 });
 

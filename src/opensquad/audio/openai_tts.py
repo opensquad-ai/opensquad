@@ -16,6 +16,7 @@ import httpx
 
 from opensquad.audio import http_base_url
 from opensquad.system_config import syscfg
+from opensquad.utils import blocking_io
 
 logger = logging.getLogger(__name__)
 
@@ -83,8 +84,8 @@ async def synthesize_speech(
         raw = resp.content
         if not raw:
             return {"success": False, "error": "TTS returned empty body"}
-        with open(fpath, "wb") as f:
-            f.write(raw)
+        # Generated audio: write it off the event loop.
+        await blocking_io.write_bytes(fpath, raw)
     except Exception as e:
         logger.error("[openai_tts] request failed: %s", e)
         return {"success": False, "error": str(e)}

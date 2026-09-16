@@ -16,6 +16,7 @@ import websockets
 from opensquad import bus
 from opensquad.message_queue import message_queue
 from opensquad.system_config import syscfg
+from opensquad.utils import blocking_io
 
 logger = logging.getLogger(__name__)
 
@@ -779,8 +780,8 @@ class ChatProBridge:
                     # Save locally
                     filename = os.path.basename(att_url)
                     local_path = os.path.abspath(os.path.join(upload_dir, filename))
-                    with open(local_path, "wb") as f:
-                        f.write(r.content)
+                    # Attachment payload: write it off the event loop.
+                    await blocking_io.write_bytes(local_path, r.content)
 
                     # Update original data with local path field
                     att["local_path"] = local_path.replace("\\", "/")

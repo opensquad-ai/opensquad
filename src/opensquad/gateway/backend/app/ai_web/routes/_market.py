@@ -25,6 +25,7 @@ from app.api import get_current_user_dep
 from app.http_clients import get_tls_http_client
 from app.models import User
 from opensquad.system_config import syscfg
+from opensquad.utils import blocking_io
 
 from ..routes._admin import _proxy_get
 
@@ -418,8 +419,8 @@ async def market_get_plugin_build_log(plugin_id: str):
 
     content = ""
     if os.path.exists(log_path):
-        with open(log_path, encoding="utf-8") as f:
-            content = f.read()
+        # Build logs grow unbounded: read them off the event loop.
+        content = await blocking_io.read_text(log_path)
 
     return {"status": status, "log": content}
 
@@ -543,22 +544,19 @@ async def market_install_plugin(
     # 5a. Restore the real plugin.py if we had one before.
     if existing_plugin_py is not None:
         try:
-            with open(existing_plugin_py_path, "wb") as f:
-                f.write(existing_plugin_py)
+            await blocking_io.write_bytes(existing_plugin_py_path, existing_plugin_py)
         except Exception as e:
             logger.warning(f"Failed to restore plugin.py for '{plugin_id}': {e}")
 
     # 5b. Restore preserved 'enabled' state and 'category' into the extracted plugin.json
     if os.path.isfile(existing_manifest):
         try:
-            with open(existing_manifest, encoding="utf-8") as f:
-                new_manifest_data = json.load(f)
+            new_manifest_data = await blocking_io.read_json(existing_manifest)
             new_manifest_data["enabled"] = existing_enabled
             # Restore category only if the new zip doesn't carry one
             if existing_category and not new_manifest_data.get("category"):
                 new_manifest_data["category"] = existing_category
-            with open(existing_manifest, "w", encoding="utf-8") as f:
-                json.dump(new_manifest_data, f, indent=2, ensure_ascii=False)
+            await blocking_io.write_json(existing_manifest, new_manifest_data, indent=2)
         except Exception as e:
             logger.warning(f"Failed to restore enabled state for '{plugin_id}': {e}")
 
@@ -1111,8 +1109,7 @@ async def market_install_role(
             md_resp.raise_for_status()
             dest_path = os.path.join(_ROLE_CARDS_DIR, fname)
             text = md_resp.text
-            with open(dest_path, "w", encoding="utf-8") as f:
-                f.write(text)
+            await blocking_io.write_text(dest_path, text)
             installed_files.append(fname)
             total_size += len(text.encode("utf-8"))
 
@@ -1124,8 +1121,7 @@ async def market_install_role(
                 icon_resp = await client.get(icon_url, follow_redirects=True)
                 if icon_resp.status_code == 200:
                     icon_path = os.path.join(_ROLE_CARDS_DIR, f"{item_id}_icon.svg")
-                    with open(icon_path, "wb") as f:
-                        f.write(icon_resp.content)
+                    await blocking_io.write_bytes(icon_path, icon_resp.content)
                     icon_downloaded = True
             except Exception as icon_err:
                 logger.warning(f"Role icon download failed for '{item_id}': {icon_err}")
@@ -1255,8 +1251,7 @@ async def market_install_collab(
         text = md_resp.text
         text_size_kb = len(text.encode("utf-8")) / 1024
         dest_path = os.path.join(_COLLAB_CARDS_DIR, f"{item_id}.md")
-        with open(dest_path, "w", encoding="utf-8") as f:
-            f.write(text)
+        await blocking_io.write_text(dest_path, text)
 
         # Also download icon if index.json has icon_url
         icon_url = meta.get("icon_url")
@@ -1266,8 +1261,7 @@ async def market_install_collab(
                 icon_resp = await client.get(icon_url, follow_redirects=True)
                 if icon_resp.status_code == 200:
                     icon_path = os.path.join(_COLLAB_CARDS_DIR, f"{item_id}_icon.svg")
-                    with open(icon_path, "wb") as f:
-                        f.write(icon_resp.content)
+                    await blocking_io.write_bytes(icon_path, icon_resp.content)
                     icon_downloaded = True
             except Exception as icon_err:
                 logger.warning(f"Collab icon download failed for '{item_id}': {icon_err}")

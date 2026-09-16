@@ -12,6 +12,26 @@ Migration phases:
   Phase 1c — AgentRunner and sub-modules accept AgentContext in constructor
   Phase 2  — All inline imports replaced by context lookups
   Phase 3  — Global singletons removed
+
+Leaf invariant (enforced by ``tests/test_context_is_leaf.py``):
+  This module must never import another ``opensquad`` module **at runtime** —
+  neither at module level nor inside a function body. It is the one module
+  every subsystem is allowed to depend on, so a single runtime edge back out
+  re-creates the 40-module coupling cycle: ~14 modules import ``_context``
+  lazily (``from opensquad._context import get_current_context``) from inside
+  function bodies, and any runtime import here closes that loop.
+
+  Type-only imports are allowed, but only inside the single
+  ``if TYPE_CHECKING:`` block below. They are erased before execution, cannot
+  affect import order, and are the only reason ``ctx.chat_api`` & friends still
+  carry real types — measured: replacing them with ``Any`` makes mypy stop
+  reporting ``attr-defined`` errors on every ``ctx.<service>`` access.
+
+  Consequence: boot-time wiring of the concrete singletons (``bus`` /
+  ``input_hub`` / ``session_manager`` / …) lives in the boot layer
+  (``agents_boot``, ``agent_boot_phases``), never here. A ``from_boot()``
+  factory used to live on this class; it was dead code (0 callers) and the
+  only source of runtime out-edges — it is gone and must not come back.
 """
 
 from __future__ import annotations
@@ -37,8 +57,6 @@ if TYPE_CHECKING:
 
     # Python 3.11+ union syntax used below (safe with from __future__ import annotations)
     ChatAPIType = ChatAPI | ClaudeAPI | GoogleAPI
-    MemoryManager = Any
-    PluginManager = Any
 
 logger = logging.getLogger(__name__)
 
@@ -156,42 +174,6 @@ class AgentContext:
                 self.tool_registry is not None,
             ]
         )
-
-    @classmethod
-    def from_boot(cls, **overrides: Any) -> AgentContext:
-        """Factory that creates an AgentContext pre-populated with global
-        module-level singletons as defaults.
-
-        Callers only need to supply overrides for fields that should differ
-        from the global singletons (e.g. ``chat_api``, ``tool_registry``,
-        ``agent_id``)::
-
-            ctx = AgentContext.from_boot(agent_id="my-agent", chat_api=my_api)
-
-        Returns:
-            AgentContext with module-level defaults merged with overrides.
-        """
-        from opensquad.event_pipeline import event_pipeline
-        from opensquad.events import bus
-        from opensquad.input_hub import input_hub
-        from opensquad.message_queue import message_queue
-        from opensquad.message_router import message_router
-        from opensquad.session_manager import session_manager
-        from opensquad.sleep_controller import sleep_controller
-        from opensquad.state_manager import state_manager
-
-        defaults = {
-            "event_bus": bus,
-            "input_hub": input_hub,
-            "message_queue": message_queue,
-            "sleep_controller": sleep_controller,
-            "state_manager": state_manager,
-            "event_pipeline": event_pipeline,
-            "message_router": message_router,
-            "session_manager": session_manager,
-        }
-        defaults.update(overrides)
-        return cls(**defaults)
 
 
 # ------------------------------------------------------------------

@@ -262,7 +262,43 @@ def test_finalize_persists_and_broadcasts_turn_usage():
 
 
 def test_gateway_adapter_forwards_turn_usage():
-    assert '_sub("turn_usage", self.on_generic_event("turn_usage"))' in ADAPTER_SRC
+    """The adapter must relay ``turn_usage`` — asserted on the contract, not a literal.
+
+    This used to grep for ``_sub("turn_usage", self.on_generic_event("turn_usage"))``.
+    Subscriptions are now derived by iterating ``LAUNCHER_RELAY_TOPICS`` (the single
+    source of truth; ``tests/test_ws_event_contract.py`` locks the derivation), so a
+    literal check would pin the *old* wiring forever and block exactly the refactor
+    that removed the three-place registration bug.
+    """
+    import ast
+    import re
+
+    from opensquad.protocol_version import LAUNCHER_RELAY_TOPICS
+
+    def _relay_handler_topics() -> set[str]:
+        for node in ast.walk(ast.parse(ADAPTER_SRC)):
+            if (
+                isinstance(node, ast.AnnAssign)
+                and isinstance(node.target, ast.Name)
+                and node.target.id == "_RELAY_HANDLER_METHODS"
+                and isinstance(node.value, ast.Dict)
+            ):
+                return {k.value for k in node.value.keys if isinstance(k, ast.Constant)}
+        pytest.fail("_RELAY_HANDLER_METHODS not found in gateway_adapter.py")
+        raise AssertionError  # unreachable
+
+    assert "turn_usage" in LAUNCHER_RELAY_TOPICS, (
+        "turn_usage dropped out of the relay contract — the frame would be dropped "
+        "before it could reach the browser (the original bug this test was written for)"
+    )
+    assert "turn_usage" not in _relay_handler_topics(), (
+        "turn_usage gained a dedicated relay handler; update this test together with the gateway-side dispatch contract"
+    )
+    # Derived, never re-inlined: a literal `_sub("...")` is the bug that came back twice.
+    assert "for _topic in LAUNCHER_RELAY_TOPICS:" in ADAPTER_SRC
+    assert not re.search(r"_sub\(\s*[\"']", ADAPTER_SRC), (
+        "gateway_adapter.py re-inlined a topic literal into `_sub(...)`"
+    )
 
 
 def test_payload_never_includes_negative_deltas():

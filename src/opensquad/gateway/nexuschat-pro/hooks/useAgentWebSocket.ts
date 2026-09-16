@@ -9,9 +9,11 @@ import {
   appendWorkflowEvent,
   composeAssistantDisplayContent,
   buildTimelineFromSession,
+  compressionProgressContent,
   extractLiveToolCallFromMarkup,
   foldTaskProcessSinceLastUser,
   genTimelineUID,
+  isFinalFlag,
   sealIncompleteWorkflows,
   toWebMediaUrl,
   type TimelineEntry,
@@ -921,7 +923,7 @@ export function useAgentWebSocket(agentId: string, ctx: AgentWebWsCtx) {
     const unsubCompressionProgress = onWs('compression_progress', (msg: AIWSMessage) => {
       const data = msg.content || msg.data || {};
       const text = typeof data === 'object' ? (data.text || '') : '';
-      const isFinal = typeof data === 'object' ? !!data.is_final : false;
+      const isFinal = isFinalFlag(data);
       const traceId = typeof data === 'object' ? (data.trace_id || '') : '';
 
       console.debug('[AIChatPage] compression_progress recv', { text, isFinal, traceId });
@@ -948,7 +950,7 @@ export function useAgentWebSocket(agentId: string, ctx: AgentWebWsCtx) {
           if (targetWfIdx < 0) {
             return appendWorkflowEvent(prev, {
               type: 'compression_progress',
-              content: { text, isFinal, trace_id: traceId },
+              content: compressionProgressContent(text, isFinal, traceId),
               timestamp: Date.now(),
             }, text);
           }
@@ -964,7 +966,7 @@ export function useAgentWebSocket(agentId: string, ctx: AgentWebWsCtx) {
             if (evt.type === 'compression_progress') {
               events[i] = {
                 ...evt,
-                content: { text, isFinal, trace_id: traceId },
+                content: compressionProgressContent(text, isFinal, traceId),
                 timestamp: Date.now(),
               };
               merged = true;
@@ -974,7 +976,7 @@ export function useAgentWebSocket(agentId: string, ctx: AgentWebWsCtx) {
           if (!merged) {
             events.push({
               type: 'compression_progress',
-              content: { text, isFinal, trace_id: traceId },
+              content: compressionProgressContent(text, isFinal, traceId),
               timestamp: Date.now(),
               _uid: genUID(),
             });
