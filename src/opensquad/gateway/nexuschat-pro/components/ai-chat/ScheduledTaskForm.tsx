@@ -375,7 +375,7 @@ export const ScheduledTaskForm: React.FC<Props> = ({ agentName, rootPath, value,
                     className="flex-1 bg-transparent outline-none text-[11px]"
                   />
                   <button type="button" onClick={() => set('skills', skills.map(skillId).filter(Boolean))}
-                    className="text-[10px] text-sky-500 hover:underline">{t('scheduledTasks.selectAll')}</button>
+                    className="text-[10px] text-primary hover:underline">{t('scheduledTasks.selectAll')}</button>
                   <button type="button" onClick={() => set('skills', [])}
                     className="text-[10px] text-rose-500 hover:underline">{t('scheduledTasks.clear')}</button>
                 </div>
@@ -390,9 +390,9 @@ export const ScheduledTaskForm: React.FC<Props> = ({ agentName, rootPath, value,
                         key={id || s.name}
                         type="button"
                         onClick={() => toggleSkill(s)}
-                        className={`w-full text-left px-3 py-1.5 flex items-start gap-2 hover:bg-black/[0.03] dark:hover:bg-white/[0.05] ${on ? 'bg-sky-500/5' : ''}`}
+                        className={`w-full text-left px-3 py-1.5 flex items-start gap-2 hover:bg-black/[0.03] dark:hover:bg-white/[0.05] ${on ? 'bg-primary/5' : ''}`}
                       >
-                        <span className={`mt-0.5 shrink-0 w-3.5 h-3.5 rounded border flex items-center justify-center ${on ? 'bg-sky-500 border-sky-500' : 'border-border'}`}>
+                        <span className={`mt-0.5 shrink-0 w-3.5 h-3.5 rounded border flex items-center justify-center ${on ? 'bg-primary border-primary' : 'border-border'}`}>
                           {on ? <Check size={10} className="text-white" /> : null}
                         </span>
                         <span className="min-w-0">
@@ -414,7 +414,7 @@ export const ScheduledTaskForm: React.FC<Props> = ({ agentName, rootPath, value,
           <button
             type="button"
             onClick={() => set('enabled', !v.enabled)}
-            className={`relative w-9 h-5 rounded-full transition-colors ${v.enabled ? 'bg-sky-500' : 'bg-black/15 dark:bg-white/20'}`}
+            className={`relative w-9 h-5 rounded-full transition-colors ${v.enabled ? 'bg-primary' : 'bg-black/15 dark:bg-white/20'}`}
           >
             <span className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform ${v.enabled ? 'translate-x-4' : ''}`} />
           </button>
@@ -426,11 +426,11 @@ export const ScheduledTaskForm: React.FC<Props> = ({ agentName, rootPath, value,
       {/* Footer */}
       <div className="flex items-center justify-end gap-2 px-4 py-3 border-t border-border shrink-0">
         <button type="button" onClick={onCancel}
-          className="px-3 py-1.5 rounded-lg text-[12px] font-medium text-sky-600 hover:bg-sky-500/10">
+          className="px-3 py-1.5 rounded-lg text-[12px] font-medium text-primary hover:bg-primary/10">
           {t('scheduledTasks.cancel')}
         </button>
         <button type="button" onClick={handleSave} disabled={!canSave || saving}
-          className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[12px] font-medium text-white bg-sky-600 hover:bg-sky-700 disabled:opacity-40">
+          className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[12px] font-medium text-white bg-primary hover:bg-primary/90 disabled:opacity-40">
           <Save size={12} /> {t('scheduledTasks.save')}
         </button>
       </div>
@@ -441,7 +441,7 @@ export const ScheduledTaskForm: React.FC<Props> = ({ agentName, rootPath, value,
 const Field: React.FC<{ label: string; required?: boolean; children: React.ReactNode }> = ({ label, required, children }) => (
   <label className="block space-y-1">
     <span className="text-[11px] font-medium text-textMuted">
-      {label}{required ? <span className="text-sky-500"> *</span> : null}
+      {label}{required ? <span className="text-primary"> *</span> : null}
     </span>
     {children}
   </label>

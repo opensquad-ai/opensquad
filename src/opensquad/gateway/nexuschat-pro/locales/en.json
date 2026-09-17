@@ -269,6 +269,12 @@
     "accountPasswordPlaceholder": "Login password for this email account",
     "accountPasswordHint": "Agent will log in to the bound group chat account with this password."
   },
+  "errorBoundary": {
+    "title": "This section failed to render",
+    "hint": "The panel threw while rendering and was stopped on its own, so the rest of the app keeps working.",
+    "retry": "Retry",
+    "reload": "Reload page"
+  },
   "pluginManager": {
     "title": "Plugins",
     "typePlatform": "Platform",
@@ -1676,6 +1682,8 @@
     "loading": "Loading…",
     "empty": "No parallel tasks yet — click \"New task\" to create one",
     "selectTask": "Select a task to view details",
+    "viewFlow": "View execution",
+    "viewFlowHint": "Open the session to read this task's full tool flow",
     "backToList": "Back to list",
     "submit": "Submit task",
     "submitFailed": "Failed to submit task",

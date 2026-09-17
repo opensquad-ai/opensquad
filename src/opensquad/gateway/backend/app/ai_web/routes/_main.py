@@ -766,14 +766,21 @@ async def agent_session_list(
     if not reader:
         raise HTTPException(404, f"Agent not found: {agent_id}")
 
-    sessions = await reader.async_get_session_list(limit=limit, offset=offset)
+    # Over-fetch by one row so `has_more` reflects whether another page really
+    # exists. `len(sessions) >= limit` answered "yes" whenever the page was
+    # merely full, so a client polling this list had to burn one extra request
+    # per refresh to discover the end — and the sidebar's hasMore flapped
+    # true/false there, which kept re-arming its load-more.
+    page = await reader.async_get_session_list(limit=limit + 1, offset=offset)
+    has_more = len(page) > limit
+    sessions = page[:limit]
     current_id = await reader.async_get_current_session_id()
 
     return {
         "agent_id": agent_id,
         "current_session_id": current_id,
         "sessions": sessions,
-        "has_more": len(sessions) >= limit,
+        "has_more": has_more,
     }
 
 

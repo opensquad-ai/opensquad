@@ -879,6 +879,33 @@ describe('buildTimelineFromSession', () => {
     expect(tl[1].kind === 'workflow' && tl[1].data.completed).toBe(true);
     expect(tl[1].kind === 'workflow' && tl[1].data.status).toBeNull();
   });
+
+  it('dedups multiple summary_stream frames into one per block (stream + final)', () => {
+    // 历史重建可能既有"流式帧"又有"完成帧"（或 context_summary 系统消息），
+    // 过去会各转成一个 summary_stream，渲染出重复的"上下文摘要"折叠。
+    const messages = [
+      { role: 'user', content: 'compress now', timestamp: '2026-07-11T01:00:00.000Z' },
+    ];
+    const events = [
+      {
+        type: 'summary_stream',
+        data: { id: 'summary_history', text: '# partial', done: false },
+        timestamp: '2026-07-11T01:00:01.000Z',
+      },
+      {
+        type: 'summary_stream',
+        data: { id: 'summary_history', text: '# Context Summary complete', done: true },
+        timestamp: '2026-07-11T01:00:05.000Z',
+      },
+    ];
+    const tl = buildTimelineFromSession(messages, events);
+    const wf = tl.find((e) => e.kind === 'workflow');
+    if (!wf || wf.kind !== 'workflow') throw new Error('no workflow');
+    const summaries = wf.data.events.filter((e) => e.type === 'summary_stream');
+    expect(summaries.length).toBe(1);
+    expect((summaries[0].content as { done?: boolean }).done).toBe(true);
+    expect(String((summaries[0].content as { text?: string }).text)).toContain('complete');
+  });
 });
 
 describe('shouldTreatWorkflowComplete', () => {

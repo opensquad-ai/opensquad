@@ -239,7 +239,7 @@ export const ScheduledTasksPage: React.FC<Props> = ({ agentName, rootPath, sessi
           <button
             type="button"
             onClick={startNew}
-            className="mt-2 w-full inline-flex items-center justify-center gap-1.5 px-2 py-1.5 rounded-lg text-[12px] font-medium text-sky-600 border border-sky-500/40 hover:bg-sky-500/10"
+            className="mt-2 w-full inline-flex items-center justify-center gap-1.5 px-2 py-1.5 rounded-lg text-[12px] font-medium text-primary border border-primary/40 hover:bg-primary/10"
           >
             <Plus size={13} /> {t('scheduledTasks.newTask')}
           </button>
@@ -358,7 +358,7 @@ const EmptyHint: React.FC<{ text: string }> = ({ text }) => (
 
 const StatusBadge: React.FC<{ status: string }> = ({ status }) => {
   const map: Record<string, { c: string; Icon: React.FC<any> }> = {
-    running: { c: 'bg-sky-500/15 text-sky-600', Icon: OpenSquadLoader },
+    running: { c: 'bg-primary/15 text-primary', Icon: OpenSquadLoader },
     success: { c: 'bg-emerald-500/15 text-emerald-600', Icon: CheckCircle2 },
     stopped: { c: 'bg-emerald-500/10 text-emerald-700', Icon: CheckCircle2 },
     failed: { c: 'bg-rose-500/15 text-rose-600', Icon: XCircle },
@@ -417,7 +417,7 @@ const ExecRow: React.FC<{
       tabIndex={0}
       onClick={() => { if (confirming) return; onClick(); }}
       onKeyDown={(ev) => { if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); if (!confirming) onClick(); } }}
-      className={`group w-full text-left px-2 py-1.5 rounded-lg transition-colors cursor-pointer ${active ? 'bg-sky-500/10' : 'hover:bg-black/[0.04] dark:hover:bg-white/[0.05]'}`}
+      className={`group w-full text-left px-2 py-1.5 rounded-lg transition-colors cursor-pointer ${active ? 'bg-primary/10' : 'hover:bg-black/[0.04] dark:hover:bg-white/[0.05]'}`}
     >
       <div className="flex items-center justify-between gap-1">
         <span className="text-[11px] font-medium truncate">{exec.task_name}</span>
@@ -465,14 +465,14 @@ const ExecRow: React.FC<{
 const TaskRow: React.FC<{ task: ScheduledTask; active: boolean; onClick: () => void; onToggle: (en: boolean) => void }> = ({ task, active, onClick, onToggle }) => (
   <div
     onClick={onClick}
-    className={`group px-2 py-1.5 rounded-lg cursor-pointer transition-colors ${active ? 'bg-sky-500/10' : 'hover:bg-black/[0.04] dark:hover:bg-white/[0.05]'}`}
+    className={`group px-2 py-1.5 rounded-lg cursor-pointer transition-colors ${active ? 'bg-primary/10' : 'hover:bg-black/[0.04] dark:hover:bg-white/[0.05]'}`}
   >
     <div className="flex items-center justify-between gap-1">
       <span className="text-[11px] font-medium truncate">{task.name}</span>
       <button
         type="button"
         onClick={(e) => { e.stopPropagation(); onToggle(!task.enabled); }}
-        className={`relative w-7 h-4 rounded-full transition-colors shrink-0 ${task.enabled ? 'bg-sky-500' : 'bg-black/15 dark:bg-white/20'}`}
+        className={`relative w-7 h-4 rounded-full transition-colors shrink-0 ${task.enabled ? 'bg-primary' : 'bg-black/15 dark:bg-white/20'}`}
         title={task.enabled ? 'enabled' : 'disabled'}
       >
         <span className={`absolute top-0.5 left-0.5 w-3 h-3 rounded-full bg-white shadow transition-transform ${task.enabled ? 'translate-x-3' : ''}`} />
@@ -515,7 +515,7 @@ const TaskDetail: React.FC<{ task: ScheduledTask; onEdit: () => void; onRun: () 
           <Trash2 size={11} />
         </button>
         <button type="button" onClick={() => onToggle(!task.enabled)}
-          className={`relative w-9 h-5 rounded-full transition-colors ${task.enabled ? 'bg-sky-500' : 'bg-black/15 dark:bg-white/20'}`}>
+          className={`relative w-9 h-5 rounded-full transition-colors ${task.enabled ? 'bg-primary' : 'bg-black/15 dark:bg-white/20'}`}>
           <span className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform ${task.enabled ? 'translate-x-4' : ''}`} />
         </button>
       </div>

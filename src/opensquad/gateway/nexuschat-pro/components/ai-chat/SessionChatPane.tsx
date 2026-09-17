@@ -355,6 +355,7 @@ export const SessionChatPane: React.FC<SessionChatPaneProps> = ({
         <ChatTimeline
           scrollRef={listRef}
           entries={timeline}
+          revealKey={sessionId}
           className="h-full min-h-0 overflow-y-auto px-2 sm:px-4 py-3 sm:py-4"
           columnClass={columnClass}
           unpinRef={userScrolledRef}
@@ -373,7 +374,7 @@ export const SessionChatPane: React.FC<SessionChatPaneProps> = ({
             ) : null
           }
           footer={<div ref={endRef} />}
-          renderEntry={(entry, i, entryKey) => {
+          renderEntry={(entry, i, entryKey, revealStyle) => {
                 const lockLayout =
                   i >= timeline.length - 8
                   || (entry.kind === 'workflow' && !entry.data.completed);
@@ -394,7 +395,7 @@ export const SessionChatPane: React.FC<SessionChatPaneProps> = ({
                     anchorId: entryKey,
                   };
                   return (
-                    <TimelineRow key={entryKey} lockLayout={lockLayout}>
+                    <TimelineRow key={entryKey} lockLayout={lockLayout} style={revealStyle}>
                       {isSolo ? (
                         <SoloMessage {...msgProps} />
                       ) : (
@@ -424,7 +425,7 @@ export const SessionChatPane: React.FC<SessionChatPaneProps> = ({
                     && typeof (nextAfterGroup.data as ChatMessage).content === 'string'
                     && !!(nextAfterGroup.data as ChatMessage).content.trim();
                   return (
-                    <TimelineRow key={entryKey} lockLayout={lockLayout}>
+                    <TimelineRow key={entryKey} lockLayout={lockLayout} style={revealStyle}>
                       <SoloActivityRow
                         block={merged}
                         turnDelivered={turnDelivered}
@@ -443,11 +444,13 @@ export const SessionChatPane: React.FC<SessionChatPaneProps> = ({
                     ? t('aiChat.modelSwitched', { model: sw.model })
                     : sw.text;
                   return (
-                    <div key={entryKey} className="flex items-center gap-1.5 py-0.5 my-0.5 mx-0">
-                      <div className="flex-1 h-px bg-border/25" />
-                      <span className="text-[10px] text-textMuted/45 font-mono shrink-0">{label}</span>
-                      <div className="flex-1 h-px bg-border/25" />
-                    </div>
+                    <TimelineRow key={entryKey} style={revealStyle}>
+                      <div className="flex items-center gap-1.5 py-0.5 my-0.5 mx-0">
+                        <div className="flex-1 h-px bg-border/25" />
+                        <span className="text-[10px] text-textMuted/45 font-mono shrink-0">{label}</span>
+                        <div className="flex-1 h-px bg-border/25" />
+                      </div>
+                    </TimelineRow>
                   );
                 }
                 return null;

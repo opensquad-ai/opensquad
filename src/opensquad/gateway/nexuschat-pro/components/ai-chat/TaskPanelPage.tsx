@@ -15,7 +15,7 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import {
   ArrowLeft, Check, CheckCircle2, ChevronRight, CircleDashed, GitMerge,
-  ListTodo, Loader2, PauseCircle, Plus, RotateCcw, Target, Trash2, X, XCircle,
+  ListTodo, ListTree, Loader2, PauseCircle, Plus, RotateCcw, Target, Trash2, X, XCircle,
 } from 'lucide-react';
 import {
   taskAPI,
@@ -26,6 +26,8 @@ import {
 import { OpenSquadLoader } from '../OpenSquadLoader';
 import { getAiWsService, type AIWSMessage } from '../../services/aiWebSocket';
 import { useIsMobileViewport } from '../../hooks/useMatchMedia';
+import { normalizeTaskPlan } from '../../utils/taskPlan';
+import { openSessionTab } from '../../utils/uiEvents';
 
 interface Props {
   agentName: string;
@@ -278,14 +280,14 @@ export const TaskPanelPage: React.FC<Props> = ({ agentName, rootPath }) => {
       >
         <div className="px-3 py-3 border-b border-border/60 shrink-0">
           <div className="flex items-center gap-1.5 text-sm font-semibold">
-            <ListTodo size={14} className="text-sky-500" />
+            <ListTodo size={14} className="text-primary" />
             {t('taskPanel.title')}
           </div>
           <div className="mt-0.5 text-[10px] text-textMuted truncate" title={rootPath}>{rootPath}</div>
           <button
             type="button"
             onClick={startNew}
-            className="mt-2 w-full inline-flex items-center justify-center gap-1.5 px-2 py-1.5 rounded-lg text-[12px] font-medium text-sky-600 border border-sky-500/40 hover:bg-sky-500/10"
+            className="mt-2 w-full inline-flex items-center justify-center gap-1.5 px-2 py-1.5 rounded-lg text-[12px] font-medium text-primary border border-primary/40 hover:bg-primary/10"
           >
             <Plus size={13} /> {t('taskPanel.newTask')}
           </button>
@@ -358,7 +360,7 @@ const EmptyHint: React.FC<{ text: string }> = ({ text }) => (
 
 const STATUS_META: Record<string, { c: string; Icon: React.FC<any> }> = {
   queued: { c: 'bg-black/10 text-textMuted', Icon: CircleDashed },
-  running: { c: 'bg-sky-500/15 text-sky-600', Icon: Loader2 },
+  running: { c: 'bg-primary/15 text-primary', Icon: Loader2 },
   waiting_approval: { c: 'bg-amber-500/15 text-amber-600', Icon: CircleDashed },
   // Parked on budget / an unverified milestone — resumable, unlike 'failed'.
   blocked: { c: 'bg-violet-500/15 text-violet-600', Icon: PauseCircle },
@@ -370,7 +372,7 @@ const STATUS_META: Record<string, { c: string; Icon: React.FC<any> }> = {
 
 const MILESTONE_META: Record<string, { c: string }> = {
   pending: { c: 'text-textMuted border-border' },
-  running: { c: 'text-sky-600 border-sky-500/40' },
+  running: { c: 'text-primary border-primary/40' },
   done: { c: 'text-emerald-600 border-emerald-500/40' },
   blocked: { c: 'text-rose-600 border-rose-500/40' },
 };
@@ -413,7 +415,7 @@ const TaskRow: React.FC<{
     onClick={onClick}
     onKeyDown={(ev) => { if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); onClick(); } }}
     className={`w-full text-left px-2 py-1.5 rounded-lg transition-colors cursor-pointer ${
-      active ? 'bg-sky-500/10' : 'hover:bg-black/[0.04] dark:hover:bg-white/[0.05]'
+      active ? 'bg-primary/10' : 'hover:bg-black/[0.04] dark:hover:bg-white/[0.05]'
     }`}
   >
     <div className="flex items-center justify-between gap-1">
@@ -430,7 +432,7 @@ const TaskRow: React.FC<{
     {task.plan_total > 0 && (
       <div className="mt-1 h-1 rounded-full bg-black/[0.06] dark:bg-white/[0.08] overflow-hidden">
         <div
-          className="h-full rounded-full bg-sky-500 transition-all"
+          className="h-full rounded-full bg-primary transition-all"
           style={{ width: `${Math.min(100, Math.round((task.plan_done / task.plan_total) * 100))}%` }}
         />
       </div>
@@ -438,10 +440,31 @@ const TaskRow: React.FC<{
   </div>
 );
 
-const InfoCell: React.FC<{ label: string; value: React.ReactNode }> = ({ label, value }) => (
+/**
+ * One read-only field. Pass `onClick` when the value is actionable (the task's
+ * session id is the way into that task's tool flow) — a plain `<button>` in the
+ * value slot keeps it keyboard-reachable without changing the grid.
+ */
+const InfoCell: React.FC<{
+  label: string;
+  value: React.ReactNode;
+  onClick?: () => void;
+  title?: string;
+}> = ({ label, value, onClick, title }) => (
   <div className="space-y-0.5">
     <div className="text-[10px] text-textMuted">{label}</div>
-    <div className="text-[11px] font-medium break-all">{value}</div>
+    {onClick ? (
+      <button
+        type="button"
+        onClick={onClick}
+        title={title}
+        className="block w-full text-left text-[11px] font-medium break-all text-primary hover:underline"
+      >
+        {value}
+      </button>
+    ) : (
+      <div className="text-[11px] font-medium break-all">{value}</div>
+    )}
   </div>
 );
 
@@ -587,7 +610,7 @@ const TaskSubmitForm: React.FC<{
             role="switch"
             aria-checked={form.use_worktree}
             onClick={() => onChange({ ...form, use_worktree: !form.use_worktree })}
-            className={`relative w-9 h-5 rounded-full transition-colors ${form.use_worktree ? 'bg-sky-500' : 'bg-black/15 dark:bg-white/20'}`}
+            className={`relative w-9 h-5 rounded-full transition-colors ${form.use_worktree ? 'bg-primary' : 'bg-black/15 dark:bg-white/20'}`}
           >
             <span className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform ${form.use_worktree ? 'translate-x-4' : ''}`} />
           </button>
@@ -606,7 +629,7 @@ const TaskSubmitForm: React.FC<{
           type="button"
           disabled={submitting || !form.title.trim() || !form.prompt.trim()}
           onClick={onSubmit}
-          className="inline-flex items-center gap-1 px-3 py-1.5 rounded-lg text-[11px] font-medium bg-sky-500 text-white hover:bg-sky-600 disabled:opacity-40"
+          className="inline-flex items-center gap-1 px-3 py-1.5 rounded-lg text-[11px] font-medium bg-primary text-white hover:bg-primary/90 disabled:opacity-40"
         >
           {submitting ? <OpenSquadLoader size={12} /> : <Check size={12} />}
           {t('taskPanel.submit')}
@@ -616,7 +639,13 @@ const TaskSubmitForm: React.FC<{
   );
 };
 
-const TaskDetail: React.FC<{
+/**
+ * Exported for the jsdom regression lock: a plain task ships `plan: {}`, and
+ * reading a field off that placeholder is what used to blank the app. The test
+ * mounts this component directly because no pure helper can catch a missing
+ * null-check on a wire field.
+ */
+export const TaskDetail: React.FC<{
   task: ParallelTask;
   repo: string;
   onAbort: () => void;
@@ -633,7 +662,10 @@ const TaskDetail: React.FC<{
 
   const isTerminal = TERMINAL.has(task.status);
   const hasWorktree = !!task.worktree_path;
-  const plan = task.plan || null;
+  // Never dereference `task.plan` directly: a plain task sends the empty object,
+  // and this is the read that produced
+  // "Cannot read properties of undefined (reading 'max_tokens')".
+  const plan = normalizeTaskPlan(task.plan);
   const resumable = isResumableGoal(task);
 
   // Load the M1 change report when the user expands the section.
@@ -698,6 +730,17 @@ const TaskDetail: React.FC<{
           </div>
         </div>
         <div className="flex items-center gap-1.5 shrink-0 flex-wrap">
+          {/* Read-only action, and the only one a finished task offers: without
+              it a completed task had no way at all into what it actually did. */}
+          {task.session_id && (
+            <button
+              type="button"
+              onClick={() => openSessionTab(task.session_id)}
+              className="inline-flex items-center gap-1 px-2 py-1 rounded-lg text-[11px] font-medium border border-primary/40 text-primary hover:bg-primary/10"
+            >
+              <ListTree size={11} /> {t('taskPanel.viewFlow')}
+            </button>
+          )}
           {task.status === 'waiting_approval' && (
             <>
               <button type="button" onClick={() => onApprove(true)}
@@ -753,7 +796,14 @@ const TaskDetail: React.FC<{
           {task.plan_total > 0 && (
             <InfoCell label={t('taskPanel.progress')} value={`${task.plan_done} / ${task.plan_total}`} />
           )}
-          <InfoCell label={t('taskPanel.session')} value={task.session_id || '--'} />
+          <InfoCell
+            label={t('taskPanel.session')}
+            value={task.session_id || '--'}
+            // A task with no session yet has no flow to show — leave the cell
+            // inert rather than opening an empty tab.
+            onClick={task.session_id ? () => openSessionTab(task.session_id) : undefined}
+            title={task.session_id ? t('taskPanel.viewFlowHint') : undefined}
+          />
         </div>
 
         {task.plan_total > 0 && (
@@ -761,7 +811,7 @@ const TaskDetail: React.FC<{
             <div className="text-[10px] text-textMuted mb-1">{t('taskPanel.progress')}</div>
             <div className="h-1.5 rounded-full bg-black/[0.06] dark:bg-white/[0.08] overflow-hidden">
               <div
-                className="h-full rounded-full bg-sky-500 transition-all"
+                className="h-full rounded-full bg-primary transition-all"
                 style={{ width: `${Math.min(100, Math.round((task.plan_done / task.plan_total) * 100))}%` }}
               />
             </div>
@@ -858,7 +908,7 @@ const TaskDetail: React.FC<{
                       <div className="max-h-40 overflow-y-auto rounded bg-black/[0.02] dark:bg-white/[0.03] p-2 space-y-0.5">
                         {report.files.map((f) => (
                           <div key={`${f.status}-${f.path}`} className="text-[10px] font-mono truncate">
-                            <span className={f.status.startsWith('A') ? 'text-emerald-600' : f.status.startsWith('D') ? 'text-rose-600' : 'text-sky-600'}>
+                            <span className={f.status.startsWith('A') ? 'text-emerald-600' : f.status.startsWith('D') ? 'text-rose-600' : 'text-primary'}>
                               {f.status}
                             </span>{' '}
                             <span className="text-textMain">{f.path}</span>

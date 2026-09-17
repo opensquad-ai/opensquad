@@ -58,7 +58,16 @@ class SessionsMixin:
         if reader is None:
             return self._send_json({"error": f"Agent not found: {agent_id}"}, 404)
         try:
-            sessions = reader.get_session_list(limit=limit, offset=offset)
+            # Over-fetch one row so `has_more` is truthful: `len >= limit` said
+            # "more pages" whenever the page happened to be exactly full, which
+            # cost every paging client one wasted request to learn the end.
+            if limit is None:
+                sessions = reader.get_session_list(limit=None, offset=offset)
+                has_more = None
+            else:
+                page = reader.get_session_list(limit=limit + 1, offset=offset)
+                has_more = len(page) > limit
+                sessions = page[:limit]
             current_id = reader.get_current_session_id()
         except Exception as e:
             import httpx
@@ -78,7 +87,7 @@ class SessionsMixin:
             {
                 "sessions": sessions,
                 "current_session_id": current_id,
-                "has_more": bool(limit and len(sessions) >= limit),
+                "has_more": bool(has_more),
             }
         )
 

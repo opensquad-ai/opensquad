@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { type CSSProperties } from 'react';
 
 /**
  * Timeline row wrapper.
@@ -11,8 +11,12 @@ export const TimelineRow: React.FC<{
   className?: string;
   /** Kept for callers; layout is always native so the scrollbar stays stable. */
   lockLayout?: boolean;
-}> = ({ children, className }) => (
-  <div className={['timeline-row', className].filter(Boolean).join(' ')}>
+  /** Only set while the pane is revealing its content — carries the entrance
+   *  animation delay (see `.os-revealing` in index.css). Leave undefined
+   *  otherwise so virtual remounts during scroll do not animate. */
+  style?: CSSProperties;
+}> = ({ children, className, style }) => (
+  <div className={['timeline-row', className].filter(Boolean).join(' ')} style={style}>
     {children}
   </div>
 );

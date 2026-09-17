@@ -15,6 +15,12 @@ type FollowScrollBoxProps = {
   /** When true, re-arm stick-to-bottom (e.g. while thought is still streaming). */
   follow?: boolean;
   as?: 'div' | 'pre';
+  /**
+   * Reports every *transition* of "am I pinned to the bottom" — never called
+   * repeatedly for the same value. Consumers use it to drop a scroll-edge
+   * treatment while the reader is up in the text (see `os-thought-tail`).
+   */
+  onStickChange?: (stuck: boolean) => void;
 };
 
 export const FollowScrollBox: React.FC<FollowScrollBoxProps> = ({
@@ -24,12 +30,25 @@ export const FollowScrollBox: React.FC<FollowScrollBoxProps> = ({
   contentKey,
   follow = true,
   as = 'div',
+  onStickChange,
 }) => {
   const ref = useRef<HTMLDivElement | HTMLPreElement | null>(null);
   const stickRef = useRef(true);
+  // Latest-ref: keeps `publish` stable so the effects below do not re-run when
+  // a parent re-renders (it does, on every streamed chunk).
+  const notifyRef = useRef(onStickChange);
+  notifyRef.current = onStickChange;
+
+  /** Single writer for stick state — edges only, so callers can setState. */
+  const publish = (next: boolean) => {
+    if (stickRef.current === next) return;
+    stickRef.current = next;
+    notifyRef.current?.(next);
+  };
 
   useEffect(() => {
-    if (follow) stickRef.current = true;
+    if (follow) publish(true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [follow]);
 
   useLayoutEffect(() => {
@@ -51,7 +70,7 @@ export const FollowScrollBox: React.FC<FollowScrollBoxProps> = ({
   const onScroll = () => {
     const el = ref.current;
     if (!el) return;
-    stickRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < NEAR_BOTTOM_PX;
+    publish(el.scrollHeight - el.scrollTop - el.clientHeight < NEAR_BOTTOM_PX);
   };
 
   if (as === 'pre') {

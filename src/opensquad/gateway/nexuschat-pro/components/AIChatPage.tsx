@@ -118,6 +118,8 @@ import {
   type SplitNode,
   type SplitDirection,
 } from '../utils/workspaceStore';
+// Cross-surface event names — shared with the panels that ask for a tab.
+import { OPEN_SESSION_TAB_EVENT } from '../utils/uiEvents';
 
 // AI Chat sub-components
 import { MessageBubble, ChatMessage, FileAttachment } from './ai-chat/MessageBubble';
@@ -2563,19 +2565,26 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     eventSidRef.current = '';
   };
 
-  const handleCompressContext = () => {
+  const handleCompressContext = (paneSessionId?: string) => {
     if (isCompressingContext || isLoadingSession) return;
     setIsCompressingContext(true);
-    // Local optimistic feedback: show immediate workflow info even before backend emits.
-    setTimeline(prev => appendWorkflowEvent(prev, {
-      type: 'summary_stream',
-      content: { id: 'compress_pending', text: 'Generating context summary...', done: false, pending: true },
-      timestamp: Date.now(),
-    }, 'Summarizing...'));
-    // Compress the pane the user is looking at. The agent runs several parallel
-    // panes; without an explicit sid it can only guess the focused session,
-    // which is often a different pane than the one whose button was clicked.
-    const compressSid = (currentSessionIdRef.current || '').trim();
+    // Compress the pane the user is looking at — same rule as onViewReport:
+    // tab 模式下 composer 所属会话往往不是焦点会话，切 tab 不回写焦点。
+    const compressSid = (paneSessionId || currentSessionIdRef.current || '').trim();
+    // Optimistic feedback must land in the clicked pane's timeline. setTimeline
+    // routes by eventSidRef — empty means "focused pane", which would silently
+    // dump the compress indicator into a different session (看起来毫无反应).
+    const prevSid = eventSidRef.current;
+    eventSidRef.current = compressSid;
+    try {
+      setTimeline(prev => appendWorkflowEvent(prev, {
+        type: 'summary_stream',
+        content: { id: 'compress_pending', text: 'Generating context summary...', done: false, pending: true },
+        timestamp: Date.now(),
+      }, 'Summarizing...'));
+    } finally {
+      eventSidRef.current = prevSid;
+    }
     wsServiceRef.current?.compressContext(compressSid || undefined);
     // Hard fallback: the backend always emits a terminal frame (done / skipped),
     // so this only fires when the request never reached the agent (agent died,
@@ -2583,7 +2592,13 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     // makes the button look stuck on "进度中" forever.
     window.setTimeout(() => {
       setIsCompressingContext(false);
-      setTimeline(prev => sealPendingCompression(prev, t('aiChat.compressNoResponse', { defaultValue: '压缩没有响应，请重试' })));
+      const prevSidTo = eventSidRef.current;
+      eventSidRef.current = compressSid;
+      try {
+        setTimeline(prev => sealPendingCompression(prev, t('aiChat.compressNoResponse', { defaultValue: '压缩没有响应，请重试' })));
+      } finally {
+        eventSidRef.current = prevSidTo;
+      }
     }, 120000);
   };
 
@@ -4273,7 +4288,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
             requestSessionTokenStats(sessionId);
           }
         }}
-        onCompressContext={handleCompressContext}
+        onCompressContext={() => handleCompressContext(sessionId)}
         compressing={isCompressingContext}
         compressDisabled={isLoadingSession || isCompressingContext}
         sessionChanges={
@@ -4466,7 +4481,9 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     setFilesPanelOpen(false);
   }, []);
 
-  // Open a session content tab (e.g. from the Scheduled Tasks "task flow" button).
+  // Open a session content tab (e.g. from the parallel-task / scheduled-task
+  // "执行过程" button). The panels cannot open tabs themselves, so they ask
+  // through `utils/uiEvents.openSessionTab`.
   useEffect(() => {
     const handler = (e: any) => {
       const sessionId: string | undefined = e?.detail?.sessionId;
@@ -4477,8 +4494,8 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
       if (pane) setFocusedPane(agentId, pane);
       refreshWsSnap();
     };
-    window.addEventListener('opensquad-open-session-tab', handler as EventListener);
-    return () => window.removeEventListener('opensquad-open-session-tab', handler as EventListener);
+    window.addEventListener(OPEN_SESSION_TAB_EVENT, handler as EventListener);
+    return () => window.removeEventListener(OPEN_SESSION_TAB_EVENT, handler as EventListener);
   }, [activeWorkspace, focusedPaneId, agentId, refreshWsSnap]);
 
   // Open in-chat Skill 库 / 插件 / 角色 from nested views.
@@ -4976,6 +4993,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
         <ChatTimeline
           scrollRef={messagesContainerRef}
           entries={displayTimeline}
+          revealKey={currentSessionId}
           className="h-full overflow-y-auto px-2 sm:px-4 py-3 sm:py-4 relative"
           style={{ minHeight: 0 }}
           columnClass={soloColumnClass}
@@ -5001,7 +5019,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
           <div ref={chatEndRef} />
             </>
           )}
-          renderEntry={(entry, i, entryKey) => {
+          renderEntry={(entry, i, entryKey, revealStyle) => {
             const lockLayout =
               i >= displayTimeline.length - 8
               || (entry.kind === 'workflow' && !entry.data.completed);
@@ -5057,7 +5075,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
                 ) : null;
               if (replyEmbeds.length === 0 && !turnFilesCard) {
                 return (
-                  <TimelineRow key={entryKey} lockLayout={lockLayout}>
+                  <TimelineRow key={entryKey} lockLayout={lockLayout} style={revealStyle}>
                     {isSolo
                       ? <SoloMessage {...msgProps} anchorId={entryKey} />
                       : <MessageBubble {...msgProps} anchorId={entryKey} />}
@@ -5065,7 +5083,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
                 );
               }
               return (
-                <TimelineRow key={entryKey} lockLayout={lockLayout}>
+                <TimelineRow key={entryKey} lockLayout={lockLayout} style={revealStyle}>
                   {isSolo
                     ? <SoloMessage {...msgProps} anchorId={entryKey} />
                     : <MessageBubble {...msgProps} anchorId={entryKey} />}
@@ -5118,7 +5136,11 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
                 ? turnStartedMs
                 : (!isSolo && i === lastIncompleteIdx ? turnStartedMs : undefined);
               return (
-                <TimelineRow key={entryKey} lockLayout={lockLayout || (groupHasIncomplete && !turnDelivered)}>
+                <TimelineRow
+                  key={entryKey}
+                  lockLayout={lockLayout || (groupHasIncomplete && !turnDelivered)}
+                  style={revealStyle}
+                >
                   <SoloActivityRow
                     block={merged}
                     turnDelivered={turnDelivered}
@@ -5162,19 +5184,21 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
                 ? t('aiChat.modelSwitched', { model: sw.model })
                 : sw.text;
               return (
-                <div key={entryKey} className="flex items-center gap-1.5 py-0.5 my-0.5 mx-0">
-                  <div className="flex-1 h-px bg-border/25" />
-                  <RefreshCw size={11} className="text-textMuted/50 shrink-0" />
-                  <span className="text-[10px] text-textMuted/45 font-mono shrink-0">{label}</span>
-                  <div className="flex-1 h-px bg-border/25" />
-                </div>
+                <TimelineRow key={entryKey} style={revealStyle}>
+                  <div className="flex items-center gap-1.5 py-0.5 my-0.5 mx-0">
+                    <div className="flex-1 h-px bg-border/25" />
+                    <RefreshCw size={11} className="text-textMuted/50 shrink-0" />
+                    <span className="text-[10px] text-textMuted/45 font-mono shrink-0">{label}</span>
+                    <div className="flex-1 h-px bg-border/25" />
+                  </div>
+                </TimelineRow>
               );
             }
             if (entry.kind === 'task_fold') {
               const fold = entry.data;
               const foldEmbedIndex = !isSolo ? indexHtmlEmbedsByAssistantMessage(fold.entries) : null;
               return (
-                <TimelineRow key={entryKey} lockLayout={lockLayout}>
+                <TimelineRow key={entryKey} lockLayout={lockLayout} style={revealStyle}>
                 <TaskFoldBlock
                   title={fold.title}
                   messageCount={fold.messageCount}

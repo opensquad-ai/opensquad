@@ -63,10 +63,11 @@ const GroupRow = React.memo(function GroupRow({
       // dedupes per session — each group is fetched at most once.
       onPointerEnter={() => onPrefetchGroup?.(group.id)}
       onContextMenu={(e) => onContextMenu(e, group.id)}
-      className={`flex items-center gap-3 px-5 py-4 cursor-pointer transition-colors border-l-4 ${
-        isActive
-          ? 'bg-primary/10 border-primary'
-          : 'hover:bg-bgLight border-transparent'
+      // Selection is signalled by the row tint alone — no left accent bar.
+      // `pl-6` keeps the avatar / text column where the old `px-5` + 4 px
+      // border put it, so dropping the bar does not shift the row content.
+      className={`flex items-center gap-3 pl-6 pr-5 py-4 cursor-pointer transition-colors ${
+        isActive ? 'bg-primary/10' : 'hover:bg-bgLight'
       }`}
     >
       <div className="relative flex-shrink-0">

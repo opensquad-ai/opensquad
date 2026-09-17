@@ -9,6 +9,7 @@ import { WorkspaceFileEditor } from './WorkspaceFileEditor';
 import { ComposerLandingDock } from './ComposerLandingDock';
 import { ScheduledTasksPage } from './ScheduledTasksPage';
 import { TaskPanelPage } from './TaskPanelPage';
+import { ErrorBoundary } from '../ErrorBoundary';
 import type { ComposerSendPayload } from './AgentWebComposer';
 import type { SoloTokenStats } from './SoloContextFooter';
 import type { TimelineEntry } from '../../utils/aiChatTimeline';
@@ -231,24 +232,30 @@ export const WorkspacePaneShell: React.FC<WorkspacePaneShellProps> = ({
           );
         })}
 
+        {/* An L2 panel is an independent surface: a render throw inside one must
+            cost the user that pane, not the whole workspace. */}
         {showScheduled ? (
-          <ScheduledTasksPage
-            agentName={agentId}
-            rootPath={rootPath}
-            sessionBridge={{
-              getSessionLiveTimeline: handlers.getSessionLiveTimeline,
-              getSessionTokenStats: handlers.getSessionTokenStats,
-              isSessionBusy: handlers.isSessionBusy,
-              sendToSessionStay: handlers.sendToSessionStay,
-              stopSession: handlers.stopSession,
-              renderSessionPendingPanel: handlers.renderSessionPendingPanel,
-              ensureSessionWatched: handlers.ensureSessionWatched,
-            }}
-          />
+          <ErrorBoundary label="scheduled-tasks" resetKey={`${agentId}:scheduled`}>
+            <ScheduledTasksPage
+              agentName={agentId}
+              rootPath={rootPath}
+              sessionBridge={{
+                getSessionLiveTimeline: handlers.getSessionLiveTimeline,
+                getSessionTokenStats: handlers.getSessionTokenStats,
+                isSessionBusy: handlers.isSessionBusy,
+                sendToSessionStay: handlers.sendToSessionStay,
+                stopSession: handlers.stopSession,
+                renderSessionPendingPanel: handlers.renderSessionPendingPanel,
+                ensureSessionWatched: handlers.ensureSessionWatched,
+              }}
+            />
+          </ErrorBoundary>
         ) : null}
 
         {showTasks ? (
-          <TaskPanelPage agentName={agentId} rootPath={rootPath} />
+          <ErrorBoundary label="tasks" resetKey={`${agentId}:tasks`}>
+            <TaskPanelPage agentName={agentId} rootPath={rootPath} />
+          </ErrorBoundary>
         ) : null}
 
         {/* Session shell stays mounted while any session tab is open, so

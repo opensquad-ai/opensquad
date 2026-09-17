@@ -2,7 +2,7 @@
  * Scrollable Markdown body for thought / dialogue text.
  * Renders ```lang fences as highlighted code blocks.
  */
-import React, { useMemo } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { FollowScrollBox } from './FollowScrollBox';
 import { AI_MARKDOWN_CLASS, renderFencedMarkdown } from '../../utils/fencedMarkdown';
 
@@ -15,6 +15,12 @@ interface MarkdownScrollBodyProps {
   /** Softer text for thought panels */
   muted?: boolean;
   maxHeightClass?: string;
+  /**
+   * Live thought only: give the body a "tail" — the newest lines are still
+   * settling and solidify as the follow-scroll pushes them up. Off by default,
+   * so a finished body is always rendered at full weight for reading.
+   */
+  softEdge?: boolean;
 }
 
 export const MarkdownScrollBody: React.FC<MarkdownScrollBodyProps> = ({
@@ -24,14 +30,28 @@ export const MarkdownScrollBody: React.FC<MarkdownScrollBodyProps> = ({
   style,
   muted = false,
   maxHeightClass = 'max-h-[320px]',
+  softEdge = false,
 }) => {
   const html = useMemo(() => renderFencedMarkdown(text), [text]);
+
+  // Reading mode: while the reader is up in the text the tail is dropped, so
+  // nothing is ever dimmed under their eyes mid-sentence. Re-armed every time a
+  // live body appears (a new streaming thought starts pinned to the bottom).
+  const [stuck, setStuck] = useState(true);
+  useEffect(() => {
+    if (softEdge) setStuck(true);
+  }, [softEdge]);
+
+  const tail = softEdge && stuck;
 
   return (
     <FollowScrollBox
       contentKey={text.length}
       follow={follow}
-      className={`${maxHeightClass} overflow-y-auto ${className}`}
+      onStickChange={softEdge ? setStuck : undefined}
+      className={`${maxHeightClass} overflow-y-auto ${tail ? 'os-thought-tail' : ''} ${
+        softEdge ? 'os-thought-settle' : ''
+      } ${className}`}
       style={style}
     >
       <div

@@ -39,7 +39,7 @@ interface Props {
 
 const StatusBadge: React.FC<{ status: string }> = ({ status }) => {
   const map: Record<string, { c: string; label: string }> = {
-    running: { c: 'bg-sky-500/15 text-sky-600', label: 'running' },
+    running: { c: 'bg-primary/15 text-primary', label: 'running' },
     success: { c: 'bg-emerald-500/15 text-emerald-600', label: 'success' },
     failed: { c: 'bg-rose-500/15 text-rose-600', label: 'failed' },
     missed: { c: 'bg-amber-500/15 text-amber-600', label: 'missed' },

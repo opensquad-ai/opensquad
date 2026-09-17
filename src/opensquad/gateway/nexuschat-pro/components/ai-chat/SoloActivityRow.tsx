@@ -459,7 +459,32 @@ export function buildLines(
   lineCache?: WeakMap<WorkflowEvent, ActivityLine[]>,
 ): ActivityLine[] {
   const lines: ActivityLine[] = [];
-  const baseItems = buildDisplayWorkflowItems(block.events);
+  // 上下文摘要块内去重：只保留最后一条 summary_stream（与实时 WS 行为一致）。
+  // 历史重建 / 相邻块合并后可能出现"流式帧 + 完成帧"两条，渲染成重复的
+  // "上下文摘要"折叠；合并块里也只会有一条。
+  let blockEvents = block.events;
+  let lastSummaryIdx = -1;
+  for (let i = blockEvents.length - 1; i >= 0; i--) {
+    if (blockEvents[i].type === 'summary_stream') {
+      lastSummaryIdx = i;
+      break;
+    }
+  }
+  if (lastSummaryIdx >= 0) {
+    let hasEarlier = false;
+    for (let i = 0; i < lastSummaryIdx; i++) {
+      if (blockEvents[i].type === 'summary_stream') {
+        hasEarlier = true;
+        break;
+      }
+    }
+    if (hasEarlier) {
+      blockEvents = blockEvents.filter(
+        (e, i) => e.type !== 'summary_stream' || i === lastSummaryIdx,
+      );
+    }
+  }
+  const baseItems = buildDisplayWorkflowItems(blockEvents);
   const items = attachShellJobsToDisplayItems(baseItems, shellStreams);
 
   for (let i = 0; i < items.length; i++) {
@@ -1193,6 +1218,7 @@ const SoloEventLine = React.memo(function SoloEventLine({
               <MarkdownScrollBody
                 text={line.detail}
                 follow={!!line.running}
+                softEdge={!!line.running}
                 muted
                 maxHeightClass="max-h-[320px]"
               />
@@ -1731,6 +1757,7 @@ export const SoloActivityRow = React.memo(function SoloActivityRow({
                       key={i}
                       text={text}
                       follow={thinkingActive && i === thoughtBodies.length - 1}
+                      softEdge={thinkingActive && i === thoughtBodies.length - 1}
                       muted
                       maxHeightClass="max-h-[320px]"
                     />

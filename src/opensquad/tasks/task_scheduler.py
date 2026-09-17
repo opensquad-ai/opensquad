@@ -95,7 +95,9 @@ class Task:
         "error",
         "result_summary",
         # M3 — "task" (one turn) or "goal" (budgeted milestone run). ``plan``
-        # carries the GoalPlan checkpoint for goals and stays {} for plain tasks.
+        # carries the GoalPlan checkpoint for goals and stays {} for plain
+        # tasks; ``to_dict`` emits None for that placeholder so consumers can
+        # tell "no checkpoint" from "checkpoint with nothing filled in".
         "kind",
         "plan",
         "on_event",
@@ -145,7 +147,12 @@ class Task:
             "error": self.error,
             "result_summary": self.result_summary,
             "kind": self.kind,
-            "plan": self.plan,
+            # ``None``, not ``{}``, when there is no checkpoint: an empty object
+            # is truthy, so every consumer that guards with `if task.plan` (the
+            # web panel among them) went on to dereference fields that a plain
+            # task never has. ``__init__`` maps anything non-dict back to ``{}``,
+            # so persisting and reloading through this dict stays lossless.
+            "plan": self.plan or None,
         }
 
     @classmethod

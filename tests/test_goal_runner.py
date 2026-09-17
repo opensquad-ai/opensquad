@@ -476,7 +476,46 @@ class TestSchedulerGoal:
     def test_plain_task_keeps_kind_and_has_no_plan(self, scheduler):
         task = scheduler.submit(title="t", prompt="p", agent_id="test-agent")
         assert task["kind"] == KIND_TASK
-        assert task["plan"] == {}
+        # ``None``, not ``{}``: an empty dict is truthy, so a consumer guarding
+        # with `if task.plan` would treat a plain task as a goal and read
+        # checkpoint fields that are not there. The web panel did exactly that
+        # and white-screened on `plan.budget.max_tokens`.
+        assert task["plan"] is None
+
+    def test_goal_wire_carries_a_complete_budget(self, scheduler):
+        """The keys the panel dereferences must exist on every goal payload.
+
+        `TaskDetail` reads `plan.budget.max_tokens` / `max_seconds` /
+        `max_attempts` and `plan.milestones.length` unconditionally once a
+        checkpoint is present. A goal that serialises without one of them is
+        the same blank screen from the other direction.
+        """
+        task = scheduler.submit(
+            title="g",
+            prompt="g",
+            agent_id="test-agent",
+            kind=KIND_GOAL,
+            plan=build_plan("g", ["a", "b"]).to_dict(),
+        )
+        plan = task["plan"]
+        assert isinstance(plan, dict)
+        assert set(plan["budget"]) == {"max_tokens", "max_seconds", "max_attempts"}
+        assert isinstance(plan["milestones"], list)
+        # The discriminator the frontend presence check relies on.
+        assert plan["status"]
+
+    def test_a_plain_task_reloads_without_a_checkpoint(self, scheduler):
+        """``None`` must survive the persistence round trip.
+
+        ``to_dict`` writes ``plan: None``; ``__init__`` maps anything non-dict
+        back to ``{}``. If that guard went away, reloading a plain task would
+        leave ``plan = None`` and every ``task.plan[...]`` write would explode.
+        """
+        submitted = scheduler.submit(title="t", prompt="p", agent_id="test-agent")
+        assert submitted["plan"] is None
+        reloaded = ts.Task(**submitted)
+        assert reloaded.plan == {}
+        assert reloaded.to_dict()["plan"] is None
 
     def test_task_blocked_error_parks_instead_of_failing(self, scheduler):
         async def blocker(task):

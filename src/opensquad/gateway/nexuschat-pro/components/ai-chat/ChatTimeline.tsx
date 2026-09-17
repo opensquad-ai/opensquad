@@ -1,7 +1,9 @@
 import React, {
   useCallback,
   useEffect,
+  useMemo,
   useRef,
+  useState,
   type CSSProperties,
   type ReactNode,
   type RefObject,
@@ -14,6 +16,14 @@ import {
 import { isFoldAnimating } from '../Collapse';
 
 export type TimelineKeyed = { _uid?: string };
+
+/** Reveal window: kept in sync with --duration-reveal / --reveal-stagger. */
+const REVEAL_DURATION_MS = 260;
+const REVEAL_STAGGER_MS = 26;
+/** Cap the stagger so a long page does not finish revealing half a second
+ *  after the last row — beyond this many rows they all start together. */
+const REVEAL_MAX_STAGGERED_ROWS = 12;
+const REVEAL_TOTAL_MS = REVEAL_DURATION_MS + REVEAL_STAGGER_MS * REVEAL_MAX_STAGGERED_ROWS;
 
 /**
  * Scroll container that mounts only near-viewport + trailing timeline rows.
@@ -31,10 +41,11 @@ export function ChatTimeline<T extends TimelineKeyed>({
   footer,
   unpinRef,
   freezeRef,
+  revealKey,
 }: {
   scrollRef: RefObject<HTMLDivElement | null>;
   entries: T[];
-  renderEntry: (entry: T, index: number, key: string) => ReactNode;
+  renderEntry: (entry: T, index: number, key: string, revealStyle?: CSSProperties) => ReactNode;
   className?: string;
   style?: CSSProperties;
   onScroll?: UIEventHandler<HTMLDivElement>;
@@ -45,6 +56,12 @@ export function ChatTimeline<T extends TimelineKeyed>({
   unpinRef?: RefObject<boolean>;
   /** When true, skip stick-to-bottom (text selection freeze). */
   freezeRef?: RefObject<boolean>;
+  /**
+   * Identity of the content being shown (the session id). Changing it replays
+   * the entrance reveal once — so opening a session fills in instead of
+   * appearing all at once. Leave undefined to disable the reveal entirely.
+   */
+  revealKey?: string | null;
 }) {
   const columnRef = useRef<HTMLDivElement>(null);
   const userScrollingRef = useRef(false);
@@ -54,7 +71,43 @@ export function ChatTimeline<T extends TimelineKeyed>({
     scrollingRef: userScrollingRef,
   });
   const layout = layoutTimelineWindow(entries.length, virt);
+
+  // Reveal gate. Deliberately null-gated on content: while the pane is empty
+  // there is nothing to reveal, and firing on `revealKey` alone would burn the
+  // one-shot window before the rows arrive (both cache-miss and cache-hit
+  // paths can hand us the session id first and the entries a tick later).
+  // Growing `entries` afterwards keeps the same signature, so streaming and
+  // paging never replay it.
+  const revealSignature = revealKey && entries.length > 0 ? revealKey : null;
+  const [revealing, setRevealing] = useState(false);
+  useEffect(() => {
+    if (!revealSignature) return;
+    setRevealing(true);
+    const id = window.setTimeout(() => setRevealing(false), REVEAL_TOTAL_MS);
+    return () => window.clearTimeout(id);
+  }, [revealSignature]);
+
+  /** Per-row delay for the currently mounted window, or undefined when idle. */
+  const revealStyleAt = useMemo(() => {
+    if (!revealing) return null;
+    return (ordinal: number): CSSProperties => ({
+      '--reveal-delay': `${Math.min(ordinal, REVEAL_MAX_STAGGERED_ROWS) * REVEAL_STAGGER_MS}ms`,
+    } as CSSProperties);
+  }, [revealing]);
+
   const nodes: ReactNode[] = [];
+  // Ordinal among *rendered* rows, not the global index: the visible window of
+  // a long history sits at the end of `entries`, so a global index would push
+  // every delay past the cap and the stagger would be invisible.
+  let revealOrdinal = 0;
+  const pushRow = (i: number) => {
+    const entry = entries[i];
+    if (!entry) return;
+    const entryKey = entry._uid || `entry-${i}`;
+    const delay = revealStyleAt?.(revealOrdinal);
+    revealOrdinal += 1;
+    nodes.push(renderEntry(entry, i, entryKey, delay));
+  };
 
   if (layout.padTopPx > 0) {
     nodes.push(
@@ -62,10 +115,7 @@ export function ChatTimeline<T extends TimelineKeyed>({
     );
   }
   for (let i = layout.midStart; i <= layout.midEnd; i++) {
-    const entry = entries[i];
-    if (!entry) continue;
-    const entryKey = entry._uid || `entry-${i}`;
-    nodes.push(renderEntry(entry, i, entryKey));
+    pushRow(i);
   }
   if (layout.padMidPx > 0) {
     nodes.push(
@@ -74,10 +124,7 @@ export function ChatTimeline<T extends TimelineKeyed>({
   }
   for (let i = layout.tailStart; i < entries.length; i++) {
     if (i <= layout.midEnd) continue;
-    const entry = entries[i];
-    if (!entry) continue;
-    const entryKey = entry._uid || `entry-${i}`;
-    nodes.push(renderEntry(entry, i, entryKey));
+    pushRow(i);
   }
 
   const markUserScrolling = useCallback(() => {
@@ -158,7 +205,10 @@ export function ChatTimeline<T extends TimelineKeyed>({
       }}
       onScroll={handleScroll}
     >
-      <div ref={columnRef} className={columnClass}>
+      <div
+        ref={columnRef}
+        className={[columnClass, revealing ? 'os-revealing' : ''].filter(Boolean).join(' ')}
+      >
         {header}
         {nodes}
         {footer}

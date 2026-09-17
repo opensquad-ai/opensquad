@@ -3399,6 +3399,14 @@ export function convertSessionEventsToWorkflow(rawEvents: any[]): WorkflowEvent[
       }
     } else if (type === 'summary_stream') {
       const streamData = typeof data === 'object' && data !== null ? data : {};
+      // 每块最多一条 summary_stream（与实时 WS 行为一致）：后到的覆盖先到的。
+      // 否则历史重建会把"流式帧 + 完成帧"（以及 context_summary 系统消息）
+      // 各转成一个事件，渲染出重复的"上下文摘要"折叠。
+      for (let k = result.length - 1; k >= 0; k--) {
+        if (result[k].type === 'summary_stream') {
+          result.splice(k, 1);
+        }
+      }
       result.push({
         _uid: genTimelineUID(),
         type: 'summary_stream',

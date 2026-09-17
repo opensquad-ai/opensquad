@@ -3,13 +3,19 @@
 
 import argparse
 import json
+import logging
 import os
+from collections.abc import Iterable, Mapping
 from pathlib import Path
 
-import librosa
 import numpy as np
-import onnxruntime
-import soundfile as sf
+
+logger = logging.getLogger(__name__)
+
+# librosa / soundfile / onnxruntime / yaml are imported at their call sites:
+# none of them is needed until a model is actually loaded, and keeping them out
+# of module scope lets the pure feed-planning helpers below be unit-tested
+# without the ~240 MB graph or the inference stack installed.
 
 
 def load_cmvn(cmvn_path):
@@ -25,6 +31,8 @@ def load_cmvn(cmvn_path):
 
 
 def compute_fbank(wav, sr=16000, n_mels=80, frame_length=25, frame_shift=10):
+    import librosa
+
     if sr != 16000:
         wav = librosa.resample(wav, orig_sr=sr, target_sr=16000)
         sr = 16000
@@ -79,6 +87,77 @@ LANG_MAP = {
     "pt": 16,
 }
 
+# ── Graph I/O names ──────────────────────────────────────────────────────────
+# The same logical tensor is spelled differently across SenseVoice ONNX exports:
+# the ModelScope quantised graph declares x / x_length / language / text_norm,
+# FunASR's export declares speech / speech_lengths / language / textnorm. A
+# hardcoded spelling made every transcription fail with
+#   Required inputs (['x', 'x_length', 'text_norm']) are missing from input feed
+#   (['speech', 'speech_lengths', 'language', 'textnorm'])
+# so names are resolved from the loaded graph instead. First alias present wins.
+_INPUT_ALIASES: dict[str, tuple[str, ...]] = {
+    "x": ("x", "speech", "speech_feats", "feats", "input", "audio"),
+    "x_length": ("x_length", "speech_lengths", "lengths", "input_lengths", "feat_lengths"),
+    "language": ("language", "lang", "lid"),
+    "text_norm": ("text_norm", "textnorm", "text_norm_ids"),
+}
+# Without these two nothing can be inferred. `language` / `text_norm` stay
+# optional: some exports bake the prompt in and drop the inputs entirely.
+_ESSENTIAL_INPUTS = ("x", "x_length")
+
+
+def resolve_feed_plan(declared_inputs: Iterable[str]) -> dict[str, str]:
+    """Map each logical tensor onto the name *this* graph declares.
+
+    Returns ``{logical_name: graph_input_name}``, covering only the inputs the
+    graph actually has. Raises when an essential input is absent, so a
+    mismatched model fails once at load time (surfaced by ``/health`` and the
+    plugin panel) instead of on every single transcription request.
+    """
+    declared = [str(n) for n in declared_inputs]
+    plan: dict[str, str] = {}
+    for logical, aliases in _INPUT_ALIASES.items():
+        match = next((a for a in aliases if a in declared), None)
+        if match is None:
+            logger.info("[SenseVoice] graph declares no %r input; not feeding it", logical)
+            continue
+        plan[logical] = match
+
+    missing = [k for k in _ESSENTIAL_INPUTS if k not in plan]
+    if missing:
+        raise RuntimeError(
+            f"SenseVoice graph is missing required input(s) {missing}; declared inputs: {sorted(declared)}"
+        )
+
+    unfed = sorted(set(declared) - set(plan.values()))
+    if unfed:
+        logger.warning(
+            "[SenseVoice] graph declares input(s) %s that this engine does not fill; "
+            "inference needs them to be optional",
+            unfed,
+        )
+    return plan
+
+
+def build_input_feed(
+    feed_plan: Mapping[str, str],
+    feat: np.ndarray,
+    language: str = "auto",
+    textnorm: int = 1,
+) -> dict[str, np.ndarray]:
+    """Assemble the ORT input feed, keyed by the graph's own tensor names.
+
+    ``feat`` arrives as ``(N, T, D)``; its length tensor is the frame count.
+    """
+    frames = int(feat.shape[1] if feat.ndim == 3 else feat.shape[0])
+    values: dict[str, np.ndarray] = {
+        "x": feat,
+        "x_length": np.array([frames], dtype=np.int32),
+        "language": np.array([LANG_MAP.get(language, 0)], dtype=np.int32),
+        "text_norm": np.array([textnorm], dtype=np.int32),
+    }
+    return {graph_name: values[logical] for logical, graph_name in feed_plan.items()}
+
 
 class SenseVoiceONNX:
     def __init__(self, model_dir):
@@ -93,6 +172,8 @@ class SenseVoiceONNX:
 
         self.means, self.vars = load_cmvn(self.cmvn_path)
 
+        import onnxruntime
+
         so = onnxruntime.SessionOptions()
         so.graph_optimization_level = onnxruntime.GraphOptimizationLevel.ORT_ENABLE_ALL
         so.intra_op_num_threads = 4
@@ -103,6 +184,9 @@ class SenseVoiceONNX:
         # 解析模型输入输出
         self.inputs = {i.name: i for i in self.session.get_inputs()}
         self.outputs = [o.name for o in self.session.get_outputs()]
+        # The graph's own spelling wins — never assume this export's tensor names.
+        self.feed_plan = resolve_feed_plan(self.inputs)
+        logger.info("[SenseVoice] feeding graph inputs %s", self.feed_plan)
 
         import yaml
 
@@ -116,6 +200,8 @@ class SenseVoiceONNX:
         self.lfr_n = fc.get("lfr_n", 6)
 
     def preprocess(self, audio_path):
+        import soundfile as sf
+
         wav, sr = sf.read(audio_path)
         feat = compute_fbank(wav, sr, self.n_mels, self.frame_length, self.frame_shift)
         feat = apply_lfr(feat, self.lfr_m, self.lfr_n)
@@ -127,17 +213,7 @@ class SenseVoiceONNX:
 
     def infer(self, audio_path, language="auto"):
         feat = self.preprocess(audio_path)
-        feat_len = np.array([feat.shape[1]], dtype=np.int32)
-        lang = np.array([LANG_MAP.get(language, 0)], dtype=np.int32)
-        textnorm = np.array([1], dtype=np.int32)  # 1=带标点归一化
-
-        feed = {
-            "speech": feat,
-            "speech_lengths": feat_len,
-            "language": lang,
-            "textnorm": textnorm,
-        }
-        return self.session.run(self.outputs, feed)
+        return self.session.run(self.outputs, build_input_feed(self.feed_plan, feat, language))
 
     def decode_ctc(self, outputs) -> tuple[str, str]:
         """Decode CTC logits to (text, detected_language).

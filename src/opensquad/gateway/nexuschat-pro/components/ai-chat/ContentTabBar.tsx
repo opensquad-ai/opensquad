@@ -48,8 +48,8 @@ interface ContentTabBarProps {
 
 function TabIcon({ kind }: { kind: ContentTab['kind'] }) {
   if (kind === 'session') return <MessageSquare size={12} className="text-sky-500 shrink-0" />;
-  if (kind === 'scheduled-tasks') return <Clock size={12} className="text-violet-500 shrink-0" />;
-  if (kind === 'tasks') return <ListTodo size={12} className="text-sky-500 shrink-0" />;
+  if (kind === 'scheduled-tasks') return <Clock size={12} className="text-primary shrink-0" />;
+  if (kind === 'tasks') return <ListTodo size={12} className="text-primary shrink-0" />;
   return <FileCode2 size={12} className="text-amber-500 shrink-0" />;
 }
 

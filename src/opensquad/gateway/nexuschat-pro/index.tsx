@@ -3,6 +3,7 @@ import ReactDOM from 'react-dom/client';
 import './index.css';
 import './i18n';
 import App from './App';
+import { ErrorBoundary } from './components/ErrorBoundary';
 import { initTheme } from './utils/themeStore';
 import { hydrateHostUiPrefs } from './utils/hostUiPrefs';
 
@@ -28,7 +29,11 @@ async function boot() {
   }
   root.render(
     <React.StrictMode>
-      <App />
+      {/* Outermost guard: without it any render throw unmounts the entire root
+          and the user gets a blank page with no way forward. */}
+      <ErrorBoundary label="app" full>
+        <App />
+      </ErrorBoundary>
     </React.StrictMode>
   );
 }

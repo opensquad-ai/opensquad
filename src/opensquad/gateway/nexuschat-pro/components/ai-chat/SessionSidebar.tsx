@@ -48,6 +48,14 @@ import {
   resolveCommsSessionId,
   withCommsSession,
 } from '../../utils/sessionSidebarGroups';
+import {
+  advanceLoadedRows,
+  appendSessionPage,
+  isNearListEnd,
+  mergeRefreshedPrefix,
+  refreshLimit,
+  SESSION_LIST_PAGE_SIZE,
+} from '../../utils/sessionListWindow';
 import { SOFT_PRESENCE_MS, useSoftPresence } from '../../utils/useSoftPresence';
 import { formatRelativeAge } from '../../utils/time';
 import { PulseDotsOrbit } from './PulseDotsStatus';
@@ -104,7 +112,6 @@ const SIDEBAR_WIDTH_KEY = 'opensquad.sessionSidebar.width';
 const SIDEBAR_WIDTH_DEFAULT = 256;
 const SIDEBAR_WIDTH_MIN = 200;
 const SIDEBAR_WIDTH_MAX = 480;
-const SESSION_LIST_PAGE_SIZE = 100;
 
 function loadSidebarWidth(): number {
   try {
@@ -219,7 +226,6 @@ const SessionSidebarInner: React.FC<SessionSidebarProps> = ({
   const { t, i18n } = useTranslation();
   const ageLocale: 'zh' | 'en' = i18n.language?.startsWith('zh') ? 'zh' : 'en';
   const [sessions, setSessions] = useState<AgentSession[]>([]);
-  const [offset, setOffset] = useState(0);
   const [hasMore, setHasMore] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
   const [metaMap, setMetaMap] = useState<Record<string, SessionProjectMeta>>({});
@@ -245,8 +251,23 @@ const SessionSidebarInner: React.FC<SessionSidebarProps> = ({
   const listRef = useRef<HTMLDivElement>(null);
   const sessionsRef = React.useRef(sessions);
   sessionsRef.current = sessions;
+  /** Current agent for in-flight callbacks, which otherwise only see the
+   *  agentId captured when their closure was created. */
+  const agentIdRef = useRef(agentId);
+  agentIdRef.current = agentId;
   const dragRef = useRef<{ startX: number; startWidth: number } | null>(null);
   const prefetchInflightRef = useRef(new Set<string>());
+  /** Server rows consumed so far — the offset for the next page. A ref, not
+   *  state: `offset` in loadMoreSessions' dep array changed its identity on
+   *  every page load, which recreated the scroll handler mid-scroll. */
+  const loadedRowsRef = useRef(0);
+  /** Page fetch in flight — stops a refresh and a load-more from interleaving
+   *  and advancing the offset twice for the same rows. */
+  const fetchingRef = useRef(false);
+  /** Latest refresh wins: several triggers (interval / focus / visibility / WS
+   *  events / post-switch timers) overlap easily, and a slow older response
+   *  landing last would rewrite the list and the cursor out of order. */
+  const refreshSeqRef = useRef(0);
 
   /** Warm timeline cache on hover so opening a session paints without「加载中」. */
   const prefetchSessionTimeline = useCallback(
@@ -321,14 +342,25 @@ const SessionSidebarInner: React.FC<SessionSidebarProps> = ({
       setLoading(true);
       setError(null);
     }
+    const seq = (refreshSeqRef.current += 1);
     try {
-      const resp = await agentSessionAPI.getSessionList(agentId, 0, SESSION_LIST_PAGE_SIZE);
-      const list = (resp.sessions || []).filter((s) => s.origin !== 'scheduled_task');
-      // Avoid no-op setState — parent/chat ticks + 6s poll would remount hover UI.
-      setSessions((prev) => (sessionsListEqual(prev, list) ? prev : list));
-      setOffset(list.length);
+      // Re-read the window the user has already scrolled into, not just page 1.
+      // Overwriting a long list with page 1 shortens the scroll area, puts the
+      // bottom sentinel back in view and starts a load/refresh loop — the list
+      // reads as stuck. A window-sized read is idempotent for the visible rows.
+      const resp = await agentSessionAPI.getSessionList(agentId, 0, refreshLimit(loadedRowsRef.current));
+      if (seq !== refreshSeqRef.current) return sessionsRef.current;
+      const raw = resp.sessions || [];
+      const list = raw.filter((s) => s.origin !== 'scheduled_task');
+      // Never let a refresh shorten the rendered list (see mergeRefreshedPrefix).
+      setSessions((prev) => {
+        const next = mergeRefreshedPrefix(prev, list);
+        return sessionsListEqual(prev, next) ? prev : next;
+      });
+      // Advance only: a load-more may have completed during the await, and
+      // rewinding the cursor to raw.length would re-request those rows.
+      loadedRowsRef.current = Math.max(loadedRowsRef.current, raw.length);
       setHasMore(!!resp.has_more);
-      setLoadingMore(false);
       reloadMeta();
       return list;
     } catch (err: any) {
@@ -342,37 +374,66 @@ const SessionSidebarInner: React.FC<SessionSidebarProps> = ({
   }, [agentId, reloadMeta, t]);
 
   const loadMoreSessions = useCallback(async () => {
-    if (!agentId || loadingMore || !hasMore) return;
+    if (!agentId || fetchingRef.current || !hasMore) return;
+    const forAgent = agentId;
+    fetchingRef.current = true;
     setLoadingMore(true);
     try {
-      const resp = await agentSessionAPI.getSessionList(agentId, offset, SESSION_LIST_PAGE_SIZE);
-      const more = (resp.sessions || []).filter((s) => s.origin !== 'scheduled_task');
-      setSessions((prev) => {
-        const seen = new Set(prev.map((s) => s.id));
-        const merged = [...prev];
-        for (const s of more) {
-          if (seen.has(s.id)) continue;
-          merged.push(s);
-          seen.add(s.id);
-        }
-        return merged;
-      });
-      setOffset((prev) => prev + more.length);
+      // `loadedRowsRef` counts server rows, not rendered rows: hidden origins
+      // are dropped below, so a filtered length would under-count the offset.
+      const resp = await agentSessionAPI.getSessionList(
+        agentId,
+        loadedRowsRef.current,
+        SESSION_LIST_PAGE_SIZE,
+      );
+      // Switched agents mid-flight — the cursor and list were reset for the new
+      // agent, so this page must not be appended nor the cursor advanced.
+      if (agentIdRef.current !== forAgent) return;
+      const raw = resp.sessions || [];
+      const more = raw.filter((s) => s.origin !== 'scheduled_task');
+      // Functional update: a refresh landing mid-flight must not be clobbered,
+      // and appending is order-independent.
+      setSessions((prev) => appendSessionPage(prev, more));
+      loadedRowsRef.current = advanceLoadedRows(loadedRowsRef.current, raw.length);
       setHasMore(!!resp.has_more);
     } catch {
-      setHasMore(false);
+      if (agentIdRef.current === forAgent) setHasMore(false);
     } finally {
-      setLoadingMore(false);
+      if (agentIdRef.current === forAgent) {
+        fetchingRef.current = false;
+        setLoadingMore(false);
+      }
     }
-  }, [agentId, offset, hasMore, loadingMore]);
+  }, [agentId, hasMore]);
 
   const handleListScroll = useCallback(() => {
     const el = listRef.current;
-    if (!el || loadingMore || !hasMore) return;
-    if (el.scrollHeight - el.scrollTop - el.clientHeight < 160) {
+    if (!el || fetchingRef.current || !hasMore) return;
+    if (
+      isNearListEnd({
+        scrollTop: el.scrollTop,
+        scrollHeight: el.scrollHeight,
+        clientHeight: el.clientHeight,
+      })
+    ) {
       void loadMoreSessions();
     }
-  }, [loadMoreSessions, loadingMore, hasMore]);
+  }, [loadMoreSessions, hasMore]);
+
+  // A different agent is a different list: drop the rendered window and the
+  // paging cursor together. Leaving them would (a) resume mid-list and (b) let
+  // mergeRefreshedPrefix carry the previous agent's rows over as an unmatched
+  // tail. Declared before the load effect below so the cursor is already 0 when
+  // it reads refreshLimit(). Bumping the refresh sequence also orphans any
+  // response still in flight for the previous agent, so it cannot write back.
+  useEffect(() => {
+    refreshSeqRef.current += 1;
+    loadedRowsRef.current = 0;
+    fetchingRef.current = false;
+    setSessions((prev) => (prev.length ? [] : prev));
+    setHasMore(false);
+  }, [agentId]);
+
 
   useEffect(() => {
     if (isOpen) void loadSessions({ silent: false });

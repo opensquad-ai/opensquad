@@ -269,6 +269,12 @@
     "accountPasswordPlaceholder": "该邮箱账号的登录密码",
     "accountPasswordHint": "Agent 将以此密码登录绑定的群聊账号。"
   },
+  "errorBoundary": {
+    "title": "此区域渲染失败",
+    "hint": "该面板渲染时出错，已单独停止渲染，应用其它部分仍可正常使用。",
+    "retry": "重试",
+    "reload": "重新加载页面"
+  },
   "pluginManager": {
     "title": "插件",
     "typePlatform": "平台",
@@ -1674,6 +1680,8 @@
     "loading": "加载中…",
     "empty": "暂无并行任务，点击「新建任务」创建",
     "selectTask": "选择一个任务查看详情",
+    "viewFlow": "查看执行过程",
+    "viewFlowHint": "在会话里查看该任务执行的完整工具流",
     "backToList": "返回列表",
     "submit": "提交任务",
     "submitFailed": "提交任务失败",

@@ -1932,7 +1932,7 @@ export interface TaskBudget {
   max_attempts: number;
 }
 
-/** M3 checkpoint. Present (and populated) only for `kind === 'goal'`. */
+/** M3 checkpoint, fully populated. Only a `kind === 'goal'` ever produces one. */
 export interface TaskPlan {
   goal: string;
   status: string;
@@ -1945,6 +1945,18 @@ export interface TaskPlan {
   budget: TaskBudget;
   milestones: TaskMilestone[];
 }
+
+/**
+ * `plan` as it actually arrives on the wire — every field optional.
+ *
+ * `Task.to_dict()` serialises a `plan` for *every* task, and a plain task ships
+ * the empty object as its placeholder, not `null`. Declaring the field as a
+ * complete `TaskPlan` let `task.plan || null` hand that `{}` straight to the
+ * detail panel, where one absent key blanked the app. The gateway and the agent
+ * are separate processes that may run different builds, so no field may be
+ * assumed present. Decode with `utils/taskPlan.normalizeTaskPlan` before use.
+ */
+export type TaskPlanWire = Partial<TaskPlan> | null;
 
 export interface ParallelTask {
   task_id: string;
@@ -1967,7 +1979,8 @@ export interface ParallelTask {
   error: string;
   result_summary: string;
   kind?: 'task' | 'goal';
-  plan?: TaskPlan | null;
+  /** Decode with `normalizeTaskPlan` — a plain task ships `{}`, not `null`. */
+  plan?: TaskPlanWire;
 }
 
 export interface WorktreeReportFile {

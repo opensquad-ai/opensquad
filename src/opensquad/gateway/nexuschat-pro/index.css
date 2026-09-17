@@ -863,3 +863,111 @@ html.dark .file-indent-guides {
   flex-shrink: 0;
   pointer-events: none;
 }
+
+/* ── Timeline content reveal ───────────────────────────────────────────
+   A session's history used to land in one frame — every message, tool block
+   and fold appearing simultaneously. The rows now rise and fade in on a short
+   stagger so the pane reads as filling in rather than snapping into place.
+
+   The animation is opt-in and one-shot by construction:
+     · `ChatTimeline` puts `.os-revealing` on the column only while its reveal
+       gate is open, and passes the per-row delay as an inline
+       `--reveal-delay` custom property;
+     · the gate opens once per `revealKey` (the session id) and closes after
+       the stagger window, then the class is dropped.
+   That second point is what keeps this compatible with virtualization: rows
+   remount constantly as they scroll in and out of the window, and an
+   animation attached unconditionally to `.timeline-row` would replay on every
+   remount — a list that flickers while you scroll it. */
+:root {
+  --duration-reveal: 260ms;
+  --reveal-stagger: 26ms;
+}
+
+@keyframes os-row-reveal {
+  from {
+    opacity: 0;
+    transform: translate3d(0, 6px, 0);
+  }
+  to {
+    opacity: 1;
+    transform: translate3d(0, 0, 0);
+  }
+}
+
+.os-revealing > .timeline-row {
+  animation: os-row-reveal var(--duration-reveal) var(--ease-soft) both;
+  animation-delay: var(--reveal-delay, 0ms);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .os-revealing > .timeline-row {
+    animation: none;
+  }
+}
+
+/* ── Thought tail (深度思考的尾迹) ─────────────────────────────────────
+   The live thought body used to be a flat wall of `textMuted`: every token
+   landed at its final weight in the frame it arrived, so there was no live
+   edge — the newest line looked exactly like the oldest one. Measured on the
+   reported screenshot: every plain-text glyph core sat at the same luminance
+   (123 on a 246 background), i.e. one uniform tone top to bottom.
+
+   A mask in *viewport* space turns the scroll box into a comet. The newest
+   lines at the bottom are still settling (translucent) and text solidifies as
+   the auto-follow scroll carries it upward. The gradient is spatial on
+   purpose: `FollowScrollBox` rewrites `innerHTML` on every streamed chunk, so
+   each chunk creates brand-new nodes and any per-node animation would restart
+   for the entire body on every token.
+
+   Two deliberate limits:
+     · the fade covers only the **newest few lines** (solid down to 58 % of the
+       box) and stops at 60 %, never 0 %, so text scrolled back to read is
+       dimmed rather than erased;
+     · `FollowScrollBox` reports when the reader leaves the bottom and
+       `MarkdownScrollBody` drops `.os-thought-tail` — reading mode is crisp.
+   `mask-image` rather than a background-coloured overlay, so it fades to
+   whatever surface the panel sits on, in either appearance. */
+:root {
+  --thought-tail-settle: 240ms;
+}
+
+@keyframes os-thought-settle {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+.os-thought-settle {
+  animation: os-thought-settle var(--thought-tail-settle) var(--ease-soft) both;
+}
+
+.os-thought-tail {
+  -webkit-mask-image: linear-gradient(
+    to bottom,
+    rgba(0, 0, 0, 1) 0%,
+    rgba(0, 0, 0, 1) 58%,
+    rgba(0, 0, 0, 0.92) 72%,
+    rgba(0, 0, 0, 0.8) 83%,
+    rgba(0, 0, 0, 0.69) 93%,
+    rgba(0, 0, 0, 0.6) 100%
+  );
+  mask-image: linear-gradient(
+    to bottom,
+    rgba(0, 0, 0, 1) 0%,
+    rgba(0, 0, 0, 1) 58%,
+    rgba(0, 0, 0, 0.92) 72%,
+    rgba(0, 0, 0, 0.8) 83%,
+    rgba(0, 0, 0, 0.69) 93%,
+    rgba(0, 0, 0, 0.6) 100%
+  );
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .os-thought-settle {
+    animation: none;
+  }
+}
