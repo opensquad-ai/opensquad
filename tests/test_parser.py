@@ -422,3 +422,55 @@ class TestParseDotsFunctionCalls:
         name, args = result[0]
         assert name == "mcp__filesystem__directory_tree"
         assert "tmp" in str(args.get("path", ""))
+
+
+class TestHyphenatedToolNames:
+    """MCP tool names embed the *server* name verbatim: ``mcp__{server}__{tool}``.
+
+    Servers are user-named and routinely hyphenated (``windows-cli``,
+    ``chrome-devtools``, ``zai-mcp-server``, ``sequential-thinking`` — all of
+    them are keys in ``data/mcp_global.json``). Dropping the hyphen made the
+    whole ``<tool_call>`` block unparsable, so the call never ran and the model
+    was never told why — it just repeated the identical call (2026-09-17: one
+    session burned all 200 turns that way).
+    """
+
+    @staticmethod
+    def _parse(text: str):
+        from opensquad.parser import ResponseParser
+
+        return ResponseParser.parse_tool_calls(text)
+
+    def test_bare_name_on_first_line_keeps_hyphen(self):
+        """The production shape: name on line 1, args as <arguments> JSON."""
+        text = '<tool_call>mcp__windows-cli__execute_command\n  <arguments>{"command": "dir"}</arguments>\n</tool_call>'
+        result = self._parse(text)
+        assert len(result) == 1, "hyphenated bare name must not be dropped"
+        assert result[0][0] == "mcp__windows-cli__execute_command"
+
+    def test_hyphen_survives_func_element(self):
+        """``_normalize_tool_name`` used to fold '-' to '_' inside the namespace."""
+        text = '<tool_call><func>mcp__windows-cli__execute_command</func><arguments>{"command": "dir"}</arguments></tool_call>'
+        result = self._parse(text)
+        assert result and result[0][0] == "mcp__windows-cli__execute_command"
+
+    def test_hyphen_survives_name_attribute(self):
+        text = '<tool_call name="mcp__chrome-devtools__take_snapshot"><arguments>{}</arguments></tool_call>'
+        result = self._parse(text)
+        assert result and result[0][0] == "mcp__chrome-devtools__take_snapshot"
+
+    def test_underscored_names_still_parse(self):
+        """Guard against a fix that only helps the hyphen case."""
+        text = '<tool_call>mcp__filesystem__list_directory<arguments>{"path": "."}</arguments></tool_call>'
+        assert self._parse(text)[0][0] == "mcp__filesystem__list_directory"
+
+    def test_normalizer_preserves_hyphen_only_for_namespaced_names(self):
+        """Legacy alias tolerance must not regress: bare ``read-file`` -> ``read_file``."""
+        from opensquad.parser import _normalize_tool_name
+
+        assert _normalize_tool_name("mcp__windows-cli__execute_command") == "mcp__windows-cli__execute_command"
+        assert _normalize_tool_name("mcp__Playwright__Browser_Navigate") == "mcp__playwright__browser_navigate"
+        assert _normalize_tool_name("Filesystem.Read_File") == "filesystem.read_file"
+        # bare (un-namespaced) names keep the old folding — models write read-file/read_file freely
+        assert _normalize_tool_name("read-file") == "read_file"
+        assert _normalize_tool_name("  FooBar  ") == "foobar"

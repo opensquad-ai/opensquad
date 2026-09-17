@@ -12,7 +12,13 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 import opensquad.runner as runner_module
-from opensquad._runner._turn_loop import FORMAT_ERROR_MAX_STREAK, FORMAT_ERROR_STOP_HINT, TurnLoop
+from opensquad._runner._turn_loop import (
+    FORMAT_ERROR_MAX_STREAK,
+    FORMAT_ERROR_STOP_HINT,
+    NO_OUTPUT_RETRY_MAX,
+    NO_OUTPUT_STOP_HINT,
+    TurnLoop,
+)
 
 DOTS_DIRECTORY_TREE = (
     "<dots_function_call>\n"
@@ -51,6 +57,7 @@ def _make_fake_runner():
     runner._awaiting_user_reply = False
     runner._last_user_msg_from_to_user = False
     runner._auto_continue_retries = 0
+    runner._no_output_retries = 0
     # Real tag helpers stay bound to the real implementations
     runner._extract_tag = runner_module.AgentRunner._extract_tag.__get__(runner, runner_module.AgentRunner)
     runner._filter_native_tokens = runner_module.AgentRunner._filter_native_tokens
@@ -206,3 +213,77 @@ async def test_format_error_stops_after_max_streak(turn_loop):
     finals = [c.args[1] for c in fake._emit.await_args_list if c.args and c.args[0] == "to_user_final"]
     assert any(FORMAT_ERROR_STOP_HINT in str(text) for text in finals)
     fake.tool_registry.call.assert_not_awaited()
+
+
+# ── "no usable output" loop ────────────────────────────────────────────────
+# A turn that yields neither visible text nor a runnable tool call used to
+# return the bare string "Error: No output produced" as next_input. The caller
+# feeds that to chat(..., skip_add_user=True) for every turn after the first, so
+# the model never saw it: measured 2026-09-17, a session re-sent a byte-identical
+# 5-message history 198 times and only stopped because max_turns (200) ran out.
+
+
+async def test_no_output_correction_reaches_the_model(turn_loop):
+    """The retry prompt must be appended to the conversation, not just returned."""
+    loop, fake, fake_sm = turn_loop
+
+    stop, next_input, went_to_sleep = await loop.handle_turn_result("")
+
+    assert stop is False
+    assert went_to_sleep is False
+    assert fake._no_output_retries == 1
+    assert fake.chat_api.add_user_message.call_count == 1, "correction was not delivered to the model"
+    delivered = fake.chat_api.add_user_message.call_args[0][0]
+    assert "[System Prompt]" in delivered
+    assert next_input  # non-empty keeps the caller looping
+
+
+async def test_no_output_names_the_tool_it_could_not_resolve(turn_loop):
+    """A generic 'no output' is unactionable; the raw name is what lets the model fix it."""
+    loop, fake, fake_sm = turn_loop
+
+    stop, next_input, _ = await loop._handle_no_output(
+        '<tool_call>mcp__windows-cli__execute_command\n  <arguments>{"command": "dir"}</arguments>\n</tool_call>'
+    )
+
+    assert stop is False
+    delivered = fake.chat_api.add_user_message.call_args[0][0]
+    assert "mcp__windows-cli__execute_command" in delivered
+
+
+async def test_no_output_stops_after_the_retry_budget(turn_loop):
+    """The cap is the whole point: without it the loop runs to max_turns."""
+    loop, fake, fake_sm = turn_loop
+
+    for i in range(NO_OUTPUT_RETRY_MAX):
+        stop, _, _ = await loop.handle_turn_result("")
+        assert stop is False, f"attempt {i + 1} should still retry"
+        assert fake._no_output_retries == i + 1
+
+    stop, next_input, went_to_sleep = await loop.handle_turn_result("")
+    assert stop is True
+    assert next_input == ""
+    assert went_to_sleep is False
+    finals = [c.args[1] for c in fake._emit.await_args_list if c.args and c.args[0] == "to_user_final"]
+    assert any(NO_OUTPUT_STOP_HINT in str(text) for text in finals)
+    fake.tool_registry.call.assert_not_awaited()
+
+
+async def test_real_output_resets_the_no_output_budget(turn_loop):
+    loop, fake, fake_sm = turn_loop
+    fake._no_output_retries = NO_OUTPUT_RETRY_MAX
+
+    await loop.handle_turn_result("<thought>ok</thought><to_user>done</to_user>")
+
+    assert fake._no_output_retries == 0
+
+
+async def test_a_runnable_tool_call_resets_the_no_output_budget(turn_loop):
+    """Progress is progress: a tool that actually runs must clear the counter."""
+    loop, fake, fake_sm = turn_loop
+    fake._no_output_retries = NO_OUTPUT_RETRY_MAX
+
+    await loop.handle_turn_result(DOTS_DIRECTORY_TREE)
+
+    assert fake._no_output_retries == 0
+    fake.tool_registry.call.assert_awaited()

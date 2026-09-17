@@ -7,6 +7,7 @@ import asyncio
 import json
 import logging
 import uuid
+from collections import deque
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -66,6 +67,13 @@ class ChatProBridge:
         self._subscriptions = set()  # Subscribed groups
         self._group_cache = {}  # {group_id: {"name": ..., "members": {user_id: name}}}
         self._group_cache_ts = 0.0  # Timestamp of last cache refresh (time.monotonic)
+        # Single-owner WS loop: reconnect() must cancel the previous connect_ws()
+        # task instead of stacking a second one, otherwise the gateway delivers
+        # every group message once per connection and the agent replies twice.
+        self._ws_task: asyncio.Task | None = None
+        # Dedup of inbound group messages (gateway broadcasts to every WS
+        # connection of the user; stale extra connections must not double-fire).
+        self._seen_msg_ids: deque[str] = deque(maxlen=200)
 
     def _internal_headers(self) -> dict:
         """Headers for trusted internal gateway calls (agent @ai registration, etc.)."""
@@ -188,7 +196,22 @@ class ChatProBridge:
             return False
         for gid in getattr(self, "_config_groups", []):
             self.join_group_api(gid)
-        asyncio.create_task(self.connect_ws())
+        # Tear down any previous WS loop first: connect_ws() reconnects forever,
+        # so spawning a second task would duplicate every inbound group message.
+        old_task = self._ws_task
+        if old_task is not None and not old_task.done():
+            old_task.cancel()
+            try:
+                await old_task
+            except (asyncio.CancelledError, Exception):
+                pass
+        if self.ws is not None:
+            try:
+                await self.ws.close()
+            except Exception:
+                pass
+            self.ws = None
+        self._ws_task = asyncio.create_task(self.connect_ws())
         logger.info("[Bridge] reconnect(): login OK, WebSocket task created")
         return True
 
@@ -439,6 +462,21 @@ class ChatProBridge:
 
     async def connect_ws(self):
         """WebSocket connection - responsible only for receiving messages into the pipeline."""
+        # Single-owner guard: only one connect_ws() loop may run per bridge.
+        # A second live connection makes the gateway deliver each group message
+        # once per connection, which duplicated agent replies in the group.
+        # Boot retries can spawn a second task while the first is still running
+        # (or mid-cancellation), so wait for the previous loop to exit instead of
+        # stacking on top of it.
+        current = asyncio.current_task()
+        prev = self._ws_task
+        if prev is not None and prev is not current and not prev.done():
+            logger.warning("[Bridge] connect_ws(): previous WS loop still active, waiting for it to exit...")
+            try:
+                await prev
+            except (asyncio.CancelledError, Exception):
+                pass
+        self._ws_task = current
         if not self.token:
             logger.warning("[Bridge] No token, trying to login before WS connect...")
             if not self.login():
@@ -541,6 +579,17 @@ class ChatProBridge:
         if msg_type in ["new_message", "message"]:
             # Extract message data
             msg_data = data.get("data", {})
+
+            # Dedup by message id: the gateway delivers to every WS connection of
+            # the user, so a stale extra connection (or a subscribe replay) must
+            # not push the same group message into the pipeline twice — that made
+            # the agent reply to one message multiple times.
+            msg_id = str(msg_data.get("id") or "")
+            if msg_id:
+                if msg_id in self._seen_msg_ids:
+                    logger.info(f"[Bridge] Duplicate group message ignored: {msg_id}")
+                    return
+                self._seen_msg_ids.append(msg_id)
 
             # Filter out our own messages
             sender_id = msg_data.get("sender_id")

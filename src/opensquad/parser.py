@@ -85,7 +85,14 @@ def _normalize_tool_name(name: str) -> str:
         parts = [_normalize_key(p) for p in parts if p]
         return ".".join(parts)
     if "__" in n:
-        parts = [_normalize_key(p) for p in n.split("__") if p]
+        # MCP / Native-FC names are built as ``mcp__{server}__{tool}`` and the
+        # server segment is whatever the user called the server in
+        # ``mcp_config.json`` — ``windows-cli``, ``chrome-devtools``,
+        # ``zai-mcp-server``. That hyphen is part of the real registry key, so
+        # folding it to ``_`` (what ``_normalize_key`` does for parameter keys)
+        # renamed the call into a tool that does not exist and the registry
+        # lookup missed. Only whitespace is folded here, as before.
+        parts = [re.sub(r"\s+", "_", p.strip().lower()) for p in n.split("__") if p]
         return "__".join(parts)
     return _normalize_key(n)
 
@@ -135,7 +142,12 @@ def _resolve_parsed_tool_name(name: str, body: str, args: dict[str, Any] | None 
     return norm or None
 
 
-_BARE_TOOL_NAME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_.]{0,80}$")
+# A hyphen is a legal character in a tool name: MCP tools are registered as
+# ``mcp__{server}__{tool}`` and the server segment is a free-form user choice
+# (``windows-cli``, ``chrome-devtools``, ``zai-mcp-server``, ``sequential-thinking``).
+# Excluding it here meant ``<tool_call>mcp__windows-cli__execute_command`` was
+# silently not parsed at all — see ``_normalize_tool_name`` for the other half.
+_BARE_TOOL_NAME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_.\-]{0,80}$")
 _BARE_TOOL_NAME_DENY = frozenset(
     {
         "arg_key",

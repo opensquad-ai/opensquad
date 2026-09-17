@@ -345,6 +345,13 @@ class AgentRunner:
         self._last_user_msg_from_to_user = False
         self._auto_continue_retries = 0
         self._max_auto_continue_retries = None
+        # Consecutive turns that produced neither visible text nor an executable
+        # tool call within one user turn. Returning a synthetic prompt as
+        # `next_input` does NOT deliver it to the model (the caller passes
+        # skip_add_user=True on every turn after the first), so without a cap
+        # here the turn loop re-sends byte-identical history until max_turns
+        # (default 200) is exhausted. See TurnLoop._handle_no_output.
+        self._no_output_retries = 0
 
         # Streaming metadata (tracks tag that produced the streamed user text)
         self._streamed_user_tag = None

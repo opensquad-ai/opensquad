@@ -31,6 +31,44 @@ FORMAT_ERROR_STOP_HINT = (
     "已停止自动重试。请更换支持 tools 的模型，或检查 tool_call_mode。"
 )
 
+# Turns that produced neither visible text nor an executable tool call, per user
+# turn. The retry prompt is appended to the conversation before we ask again, so
+# a small budget is enough to let the model correct itself — and the cap is what
+# keeps a stuck model from re-sending identical history until max_turns.
+NO_OUTPUT_RETRY_MAX = 2
+NO_OUTPUT_STOP_HINT = "模型连续多轮未产出可执行内容（既无正文也无可用工具调用），已停止本轮自动重试。"
+
+# A response that is nothing but tool-call markup which we failed to parse into a
+# call. Used to give the model an actionable reason instead of a generic "no
+# output", which it cannot act on.
+_TOOL_MARKUP_RE = re.compile(
+    r"<(?:tool_call|tool_calls|invoke|function_call|dots_function_call)\b[^>]*>(.*?)(?:</(?:tool_call|tool_calls|invoke|function_call|dots_function_call)\s*>|$)",
+    re.DOTALL | re.IGNORECASE,
+)
+
+
+def _unparsed_tool_name(raw: str) -> str:
+    """Best-effort name of the tool inside tool-call markup we could not parse."""
+    body = ""
+    m = _TOOL_MARKUP_RE.search(raw or "")
+    if m:
+        body = m.group(1)
+    if not body:
+        body = raw or ""
+    nm = re.search(r'name\s*=\s*"([^"]{1,120})"', body, re.IGNORECASE)
+    if nm:
+        return nm.group(1).strip()
+    nm = re.search(r"<func\s*>([^<]{1,120}?)(?:</func\s*>|$)", body, re.IGNORECASE | re.DOTALL)
+    if nm:
+        return nm.group(1).strip()
+    for line in body.strip().splitlines():
+        cand = line.strip()
+        if not cand or cand.startswith("<") or any(ch.isspace() for ch in cand):
+            continue
+        return cand[:120]
+    return ""
+
+
 # Helpers that still live on runner.py; imported lazily at call time so the
 # module can be imported independently of runner state.
 from opensquad.runner import _get_session_manager, _get_state_manager
@@ -39,7 +77,7 @@ from opensquad.task_logger import task_logger
 from opensquad.task_supervisor import task_supervisor
 from opensquad.tool import logger
 
-__all__ = ["FORMAT_ERROR_MAX_STREAK", "TurnLoop"]
+__all__ = ["FORMAT_ERROR_MAX_STREAK", "NO_OUTPUT_RETRY_MAX", "TurnLoop"]
 
 
 def _is_tool_markup_only(text: str) -> bool:
@@ -115,6 +153,83 @@ class TurnLoop:
             )
             return True, "", False
         return False, self.runner._summarize_result(fe_name, f"Error: {fe_detail}"), False
+
+    def _deliver_correction(self, prompt: str) -> bool:
+        """Put a synthetic correction INTO the conversation.
+
+        Returning one as ``next_input`` does not deliver it: the parallel turn
+        loop calls ``chat(current_input, skip_add_user=not is_first_turn)``, so
+        from turn 2 onward the string is dropped and the model is asked the exact
+        same question again. Measured on 2026-09-17: 198 requests carrying a
+        byte-identical 5-message history. Appending to the request history is what
+        makes a retry a retry rather than a re-roll of the same dice.
+        """
+        api = getattr(self.runner, "chat_api", None)
+        add = getattr(api, "add_user_message", None)
+        if not callable(add):
+            return False
+        try:
+            add(prompt)
+            return True
+        except Exception as e:  # bookkeeping must never break the turn
+            logger.warning("[Runner] Could not deliver synthetic correction to the model: %s", e)
+            return False
+
+    async def _handle_no_output(self, full_response: str) -> tuple[bool, str, bool]:
+        """The turn produced neither visible text nor an executable tool call.
+
+        This used to return the bare string ``"Error: No output produced"`` as
+        ``next_input`` — unbounded, and (see ``_deliver_correction``) never
+        actually shown to the model. A model that answers every request with the
+        same unparsable tool call then re-sends identical history until
+        ``max_turns`` (default 200) runs out. Send an actionable reason, deliver
+        it, and stop once the retry budget is spent.
+        """
+        runner = self.runner
+        tries = int(getattr(runner, "_no_output_retries", 0) or 0)
+        raw_name = _unparsed_tool_name(full_response)
+
+        if tries >= NO_OUTPUT_RETRY_MAX:
+            logger.error(
+                "[Runner] No usable output for %d consecutive turns (last tool name=%r) — stopping",
+                tries,
+                raw_name,
+            )
+            await runner._emit("error", {"message": NO_OUTPUT_STOP_HINT})
+            await runner._emit("to_user_final", NO_OUTPUT_STOP_HINT)
+            _get_session_manager().add_event(
+                "info",
+                {"text": NO_OUTPUT_STOP_HINT},
+                turn_id=runner._current_turn,
+                round_id=runner._current_round,
+            )
+            return True, "", False
+
+        runner._no_output_retries = tries + 1
+        if raw_name:
+            prompt = (
+                "[System Prompt] Nothing happened: your last reply carried a tool call that could not "
+                f"be resolved to a runnable tool ({raw_name!r}), so it was never executed.\n"
+                "Pick a tool that actually exists in the list you were given — an MCP server that is "
+                "disabled or not connected contributes no tools — or answer in plain text if no tool "
+                "is needed. Do not repeat the same call."
+            )
+        else:
+            prompt = (
+                "[System Prompt] Your last reply produced neither visible text nor a tool call, so "
+                "nothing happened. Either call a tool using the exact XML format, or reply to the "
+                "user in plain text."
+            )
+        logger.warning(
+            "[Runner] No usable output (attempt %d/%d, tool=%r) — sending correction back to model",
+            runner._no_output_retries,
+            NO_OUTPUT_RETRY_MAX,
+            raw_name,
+        )
+        self._deliver_correction(prompt)
+        # Non-empty so the caller keeps looping; it is dropped by skip_add_user,
+        # which is exactly why the correction was appended above instead.
+        return False, prompt, False
 
     async def handle_turn_result(
         self,
@@ -299,6 +414,8 @@ class TurnLoop:
         _parsed_tool_calls = parse_tool_calls(full_response, tool_data_from_api)
         if _parsed_tool_calls:
             self.runner._format_error_streak = 0
+            # A runnable call is progress — reset the no-output budget.
+            self.runner._no_output_retries = 0
             if _is_tool_markup_only(user_msg) and user_msg_from_tag in (None, "to_user"):
                 user_msg = ""
                 user_msg_from_tag = None
@@ -391,6 +508,8 @@ class TurnLoop:
                     await self.runner._emit("output_media", output_media)
                 _saved_msg = _send_msg
                 _saved_output_media = output_media
+                # A visible reply IS output — the no-output budget starts over.
+                self.runner._no_output_retries = 0
                 if user_msg_from_tag == "to_user_end_task":
                     _get_session_manager().mark_last_assistant_end_task(
                         sid=getattr(self.runner, "_turn_sid", "") or None
@@ -1014,6 +1133,10 @@ class TurnLoop:
                         self.runner._auto_continue_retries,
                         self.runner._max_auto_continue_retries,
                     )
+                    # Same delivery rule as _handle_no_output: a prompt that only
+                    # travels as `next_input` is dropped by skip_add_user and the
+                    # model never sees the hint it is supposed to act on.
+                    self._deliver_correction(auto_continue_prompt)
                     return False, auto_continue_prompt, False
                 logger.warning("[Runner] Max auto-continue retries reached")
             elif stream_error:
@@ -1079,4 +1202,6 @@ class TurnLoop:
                 await self.runner._emit("state", "idle")
                 return True, "", False
 
-        return False, "Error: No output produced", False
+        # Neither visible text nor a runnable tool call. Bounded + delivered —
+        # see _handle_no_output for why the old bare-string return looped.
+        return await self._handle_no_output(full_response)

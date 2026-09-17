@@ -136,7 +136,25 @@ class MessageRouter:
             images=msg_data.get("_image_paths", []),
         )
 
-        await message_queue.put(queue_msg)
+        # ``put`` returns False when this id is already inside the queue's dedup
+        # window. A duplicate has to stop HERE: the queue silently dropped it, but
+        # falling through would still run the state machine below and fire
+        # ``trigger_process_queue``, waking the agent a second time for a message
+        # it has already been given. Measured 2026-09-17 (agent305): one group
+        # message produced repeated identical replies, because the gateway
+        # delivers to every live WS connection and each delivery re-triggered.
+        if not await message_queue.put(queue_msg):
+            result.update(
+                {
+                    "action": "duplicate_dropped",
+                    "queued": False,
+                    "pushed": False,
+                    "reason": f"message id already in the pipeline: {queue_msg.id}",
+                }
+            )
+            logger.info(f"[Router] Duplicate group message dropped before wake: {queue_msg.id}")
+            return result
+
         result["queued"] = True
 
         # Receiving a group message means someone replied; clear the awaiting flag
