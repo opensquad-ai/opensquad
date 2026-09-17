@@ -167,10 +167,14 @@ jobs:
       steps:
         - uses: actions/checkout@v4
 
-        - name: Set up Node.js 20
+        # jsdom 30 declares `engines: ^22.22.2 || ^24.15.0 || >=26.0.0`, and its
+        # nested undici 8 reads `markAsUncloneable` off `node:worker_threads` --
+        # an export Node 20 does not have. On Node 20 the first `new CacheStorage()`
+        # throws and vitest aborts before running anything.
+        - name: Set up Node.js 22
           uses: actions/setup-node@v4
           with:
-            node-version: "20"
+            node-version: "22.22.2"
             cache: "npm"
             cache-dependency-path: src/opensquad/gateway/nexuschat-pro/package.json
 

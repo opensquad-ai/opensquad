@@ -105,10 +105,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Node.js 20
+      # jsdom 30 declares `engines: ^22.22.2 || ^24.15.0 || >=26.0.0`, and its
+      # nested undici 8 reads `markAsUncloneable` off `node:worker_threads` --
+      # an export Node 20 does not have. On Node 20 the first `new CacheStorage()`
+      # throws "webidl.util.markAsUncloneable is not a function" and vitest aborts
+      # before running anything. Twelve test files set `@vitest-environment jsdom`,
+      # so this is not avoidable by dropping a test. 22.22.2 is the version the
+      # suite is green on locally (49 files / 624 tests).
+      - name: Set up Node.js 22
         uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: "22.22.2"
           cache: "npm"
           cache-dependency-path: src/opensquad/gateway/nexuschat-pro/package.json
 
@@ -154,7 +161,11 @@ jobs:
         run: pip install pip-audit
 
       - name: Run pip-audit
-        run: pip-audit
+        # CI base Python ships setuptools 79.0.1 (PYSEC-2026-3447); upgrade
+        # before auditing so the scan is not poisoned by the runner image.
+        # Same invocation as the `sca` job in ci.yml, so one scanner does not
+        # carry two different sensitivity settings.
+        run: pip install -U setuptools && pip-audit --strict --progress-spinner=off --desc on
 
   version-sync:
     name: version sync check
