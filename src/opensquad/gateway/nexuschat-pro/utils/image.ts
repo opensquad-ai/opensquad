@@ -104,6 +104,32 @@ export function resolveChatName(
 }
 
 /**
+ * True when the profile carries an avatar the user uploaded.
+ *
+ * Custom avatars are stored as an `/uploads/...` path (the gateway writes the
+ * file and records that URL); everything else — the generated robot SVG
+ * data-URI, a legacy Dicebear link, an empty value — is a default. The Agent
+ * Workstation uses this to decide whether "reset" is meaningful, so it must not
+ * treat a default as custom. Absolute legacy URLs pointing at `/uploads/` count
+ * too; `getAvatarUrl` already normalises those to a relative path.
+ */
+export function isUploadedAvatar(
+  profile?: { chat_user_avatar?: string | null; avatar?: string | null } | null,
+): boolean {
+  const raw = resolveChatAvatar(profile);
+  if (!raw) return false;
+  if (raw.startsWith('data:') || raw.startsWith('blob:')) return false;
+  try {
+    if (raw.startsWith('http://') || raw.startsWith('https://')) {
+      return new URL(raw).pathname.startsWith('/uploads/');
+    }
+  } catch {
+    return false;
+  }
+  return raw.replace(/^\/+/, '').startsWith('uploads/');
+}
+
+/**
  * 将头像字段解析为可加载的 URL。
  * - 空值 → 本地 SVG 占位（不再依赖 Dicebear CDN）
  * - `data:` / `blob:` → 原样返回（切勿再拼 SERVER_BASE_URL，否则 Vite decodeURI 会炸）

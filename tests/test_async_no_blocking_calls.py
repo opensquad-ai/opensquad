@@ -85,7 +85,7 @@ FILE_IO_CALLS = frozenset({"open"})
 FILE_IO_ALLOWLIST: dict[tuple[str, str, str], int] = {
     # ── agent kernel: per-turn stats / config hot-reload / vision scratch ────
     ("opensquad/_runner/_output_handler.py", "broadcast_token_stats", "w"): 1,
-    ("opensquad/_runner/_state_machine.py", "idle_wait", "r"): 1,
+    ("opensquad/_runner/_state_machine.py", "_poll_hot_reload", "r"): 1,  # config.json（idle_wait 抽出共享）
     ("opensquad/_runner/_turn_loop.py", "handle_turn_result", "w"): 1,
     ("opensquad/agents_boot.py", "main", "r"): 1,
     ("opensquad/agents_boot.py", "main", "w"): 1,

@@ -68,6 +68,14 @@ export interface MessageBubbleProps {
   isStreaming?: boolean;
   /** Display name shown above the message */
   senderName?: string;
+  /**
+   * Suppress the name line entirely (do not fall back to the generic "Agent").
+   *
+   * 紧跟工作流组的助手回复就是这种情形：名字已经显示在工作流组上方，回复上面
+   * 再来一行只是重复。传 `senderName={undefined}` 是**不够的** —— 组件会退化成
+   * 兜底文案 "Agent"，于是统计行和正文之间多出一行幽灵签名。
+   */
+  hideSenderLabel?: boolean;
   /** Kept for API compatibility (classic no longer shows avatars). */
   senderAvatar?: string | null;
   /** classic = user right-bubble + agent document; solo = document-stream */
@@ -127,6 +135,7 @@ const MessageBubbleInner: React.FC<MessageBubbleProps> = ({
   message,
   isStreaming,
   senderName,
+  hideSenderLabel,
   senderAvatar: _senderAvatar,
   variant = 'classic',
   anchorId,
@@ -806,7 +815,7 @@ const MessageBubbleInner: React.FC<MessageBubbleProps> = ({
 
   return (
     <div className={`mb-6 w-full group ${isStreaming ? 'ai-streaming' : ''}`}>
-      {(senderName || label) && (
+      {!hideSenderLabel && (
         <div className="text-[11px] font-medium text-textMuted/70 mb-2">
           {senderName || label}
         </div>
@@ -851,6 +860,7 @@ export function areMessageBubblePropsEqual(prev: MessageBubbleProps, next: Messa
   return (
     prev.isStreaming === next.isStreaming
     && prev.senderName === next.senderName
+    && prev.hideSenderLabel === next.hideSenderLabel
     && prev.variant === next.variant
     && prev.anchorId === next.anchorId
     && prev.agentId === next.agentId

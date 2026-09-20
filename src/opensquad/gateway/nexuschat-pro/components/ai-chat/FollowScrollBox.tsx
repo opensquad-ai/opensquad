@@ -21,6 +21,12 @@ type FollowScrollBoxProps = {
    * treatment while the reader is up in the text (see `os-thought-tail`).
    */
   onStickChange?: (stuck: boolean) => void;
+  /**
+   * Reports every *transition* of "content overflows the box" (scrollbar
+   * present). Consumers use it to upgrade edge treatments that only make
+   * sense once the body actually scrolls (see `os-thought-drift`).
+   */
+  onOverflowChange?: (overflowing: boolean) => void;
 };
 
 export const FollowScrollBox: React.FC<FollowScrollBoxProps> = ({
@@ -31,13 +37,31 @@ export const FollowScrollBox: React.FC<FollowScrollBoxProps> = ({
   follow = true,
   as = 'div',
   onStickChange,
+  onOverflowChange,
 }) => {
   const ref = useRef<HTMLDivElement | HTMLPreElement | null>(null);
   const stickRef = useRef(true);
+  // Last observed scrollHeight — lets onScroll tell "content streamed in"
+  // apart from "the reader scrolled", so a temporarily large bottom gap
+  // during fast streaming never flips the stick state (the tail class would
+  // flap on every chunk — the visible "jitter" while a thought streams).
+  const lastScrollHeightRef = useRef(0);
   // Latest-ref: keeps `publish` stable so the effects below do not re-run when
   // a parent re-renders (it does, on every streamed chunk).
   const notifyRef = useRef(onStickChange);
   notifyRef.current = onStickChange;
+  // Overflow reporter: latest-ref + edge-only, same contract as stick state.
+  const overflowNotifyRef = useRef(onOverflowChange);
+  overflowNotifyRef.current = onOverflowChange;
+  const overflowRef = useRef(false);
+  const checkOverflow = () => {
+    const el = ref.current;
+    if (!el) return;
+    const next = el.scrollHeight > el.clientHeight + 1;
+    if (overflowRef.current === next) return;
+    overflowRef.current = next;
+    overflowNotifyRef.current?.(next);
+  };
 
   /** Single writer for stick state — edges only, so callers can setState. */
   const publish = (next: boolean) => {
@@ -56,10 +80,14 @@ export const FollowScrollBox: React.FC<FollowScrollBoxProps> = ({
     if (!el) return;
     if (!stickRef.current) return;
     el.scrollTop = el.scrollHeight;
+    lastScrollHeightRef.current = el.scrollHeight;
+    checkOverflow();
     // Second pass after paint — streaming fonts/wrap can grow height one frame late.
     const id = requestAnimationFrame(() => {
       if (!stickRef.current || !ref.current) return;
       ref.current.scrollTop = ref.current.scrollHeight;
+      lastScrollHeightRef.current = ref.current.scrollHeight;
+      checkOverflow();
     });
     return () => cancelAnimationFrame(id);
     // Intentionally omit `children`: parent re-renders (elapsed tick, live
@@ -70,6 +98,14 @@ export const FollowScrollBox: React.FC<FollowScrollBoxProps> = ({
   const onScroll = () => {
     const el = ref.current;
     if (!el) return;
+    // scrollHeight changed since the last event → content streamed in, and
+    // the pin effect re-arms right after. A large bottom gap at that moment
+    // is a race, not a user scroll — keep the stick state instead of flapping.
+    // The very first observation is a baseline, not a growth signal.
+    const prev = lastScrollHeightRef.current;
+    lastScrollHeightRef.current = el.scrollHeight;
+    checkOverflow();
+    if (prev > 0 && prev !== el.scrollHeight && stickRef.current) return;
     publish(el.scrollHeight - el.scrollTop - el.clientHeight < NEAR_BOTTOM_PX);
   };
 

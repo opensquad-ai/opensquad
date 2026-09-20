@@ -46,6 +46,10 @@ class PluginServicesMixin:
         """GET /api/services/manage — Enriched service list for the Service Manager UI.
         Returns ALL discovered services (from plugin.json) merged with runtime status.
         This endpoint is used by the new standalone Service Management page."""
+        # Function-local import to keep this mixin's module graph shallow, same as
+        # the gateway does before calling into the uninstall helpers.
+        from opensquad.resource_uninstall import is_protected_plugin
+
         # 1. Discover all plugin services from plugin.json
         discovered = discover_all_plugin_services()
 
@@ -76,6 +80,13 @@ class PluginServicesMixin:
                     "health_ok": None,
                     "service_cfg": info["service_cfg"],
                 }
+            # A service is owned by the plugin that declares it, so "uninstall
+            # this service" is really "uninstall that plugin". Resolve the same
+            # protection flag the plugin page reads from ``/api/plugins`` here,
+            # otherwise the Service Manager offers a button whose only possible
+            # outcome is the HTTP 400 ``prepare_plugin_uninstall`` raises for
+            # ``builtin_plugins.json`` entries.
+            status["builtin"] = is_protected_plugin(pid)
             services.append(status)
 
         return self._send_json({"services": services})

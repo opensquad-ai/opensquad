@@ -79,7 +79,9 @@ EXPECTED_MIXIN_CLASSES = [
 # loudly instead of quietly shrinking the route surface.
 EXPECTED_METHODS_PER_MODULE = {
     "_base": 18,
-    "_agents": 16,
+    # 17 = 16 + ``_handle_put_agent_profile`` (PUT /api/agents/{name}/profile),
+    # which backs the custom-agent-avatar upload.
+    "_agents": 17,
     "_filesystem": 19,
     "_plugins": 15,
     "_plugin_services": 10,
@@ -89,13 +91,14 @@ EXPECTED_METHODS_PER_MODULE = {
     "_cards": 17,
     "_workspace": 6,
 }
-EXPECTED_TOTAL_MIXIN_METHODS = 119
+EXPECTED_TOTAL_MIXIN_METHODS = 120
 
 # ``_do_*_impl`` if/elif chain lengths -- the URL surface of each verb.
 EXPECTED_DISPATCH_BRANCHES = {
     "_do_get_impl": 43,
     "_do_post_impl": 31,
-    "_do_put_impl": 17,
+    # 18 = 17 + the ``/api/agents/{name}/profile`` PUT branch.
+    "_do_put_impl": 18,
     "_do_delete_impl": 7,
 }
 

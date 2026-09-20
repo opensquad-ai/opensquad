@@ -8,19 +8,21 @@ import { POPOVER_SURFACE_CLASS } from './popoverSurface';
 
 export type ReasoningEffort = 'low' | 'medium' | 'high';
 
-const STANDARD_LEVELS: { id: ReasoningEffort; label: string }[] = [
+/** Exported so the narrow-viewport overflow menu (MobileComposerMenu) renders
+ *  the same options — a second copy would drift the moment one is edited. */
+export const STANDARD_LEVELS: { id: ReasoningEffort; label: string }[] = [
   { id: 'low', label: 'Low' },
   { id: 'medium', label: 'Medium' },
   { id: 'high', label: 'High' },
 ];
 
 /** DeepSeek maps UI High→API high (medium), UI Max→API max (high). */
-const DEEPSEEK_LEVELS: { id: ReasoningEffort; label: string }[] = [
+export const DEEPSEEK_LEVELS: { id: ReasoningEffort; label: string }[] = [
   { id: 'medium', label: 'High' },
   { id: 'high', label: 'Max' },
 ];
 
-function normalizeDeepseekEffort(effort: ReasoningEffort): ReasoningEffort {
+export function normalizeDeepseekEffort(effort: ReasoningEffort): ReasoningEffort {
   return effort === 'high' ? 'high' : 'medium';
 }
 

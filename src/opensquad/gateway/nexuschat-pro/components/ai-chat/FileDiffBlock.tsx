@@ -18,7 +18,7 @@
  */
 import React, { useState, useMemo, useEffect } from 'react';
 import { useTranslation } from 'react-i18next';
-import { CheckCircle, XCircle, FilePen, FilePlus, FileText, MessageSquare, ChevronsUpDown } from 'lucide-react';
+import { CheckCircle, XCircle, FilePen, FilePlus, FileText, ChevronsUpDown } from 'lucide-react';
 import { marked } from 'marked';
 import { OpenSquadLoader } from '../OpenSquadLoader';
 import { Collapse, FoldChevron, useFold } from '../Collapse';
@@ -639,8 +639,6 @@ const ReadContentPane: React.FC<{ content: string; lang: string }> = ({ content,
 interface FileDiffBlockProps {
   info: FileEditInfo;
   status: 'running' | 'success' | 'error';
-  /** Short one-liner note from tool result (edit/write) */
-  note?: string;
   /** Full read_file result — only inner `content` is shown (status/meta discarded) */
   resultContent?: string;
   /**
@@ -652,7 +650,7 @@ interface FileDiffBlockProps {
   onFileClick?: (path: string) => void;
 }
 
-export const FileDiffBlock: React.FC<FileDiffBlockProps> = ({ info, status, note, resultContent, embedded = false, onFileClick }) => {
+export const FileDiffBlock: React.FC<FileDiffBlockProps> = ({ info, status, resultContent, embedded = false, onFileClick }) => {
   const { t } = useTranslation();
   // Shared fold primitive. The diff body must stay lazily mounted: the Myers/LCS
   // pass below is deliberately skipped while collapsed ("skip ... until the fold
@@ -801,15 +799,6 @@ export const FileDiffBlock: React.FC<FileDiffBlockProps> = ({ info, status, note
     );
   }
 
-  // Build hunk header label (e.g. @@ -10,4 +10,6 @@)
-  function hunkHeader(lines: RawDiffLine[]): string {
-    const oldStart = lines.find(l => l.oldNo !== null)?.oldNo ?? 1;
-    const newStart = lines.find(l => l.newNo !== null)?.newNo ?? 1;
-    const oldCount = lines.filter(l => l.kind !== 'added').length;
-    const newCount = lines.filter(l => l.kind !== 'removed').length;
-    return `@@ -${oldStart},${oldCount} +${newStart},${newCount} @@`;
-  }
-
   return (
     <div className="rounded-md border border-amber-500/20 bg-amber-500/5 overflow-hidden">
       {/* ── Header ── */}
@@ -853,15 +842,9 @@ export const FileDiffBlock: React.FC<FileDiffBlockProps> = ({ info, status, note
       {fold(
         showDiffBody ? (
           <div className={embedded ? '' : 'border-t border-amber-500/10'}>
-          {/* File path + note */}
-          <div className="px-2 py-1.5 bg-black/20 border-b border-amber-500/10 space-y-0.5">
+          {/* File path */}
+          <div className="px-2 py-1.5 bg-black/20 border-b border-amber-500/10">
             <span className="block text-[10px] text-textMuted font-mono">{info.filePath}</span>
-            {note && (
-              <div className="flex items-start gap-1 pt-0.5">
-                <MessageSquare size={10} className="text-gray-500 flex-shrink-0 mt-0.5" />
-                <span className="text-[10px] text-gray-400 font-mono break-all">{note}</span>
-              </div>
-            )}
           </div>
 
           {/* Diff content */}
@@ -908,10 +891,6 @@ export const FileDiffBlock: React.FC<FileDiffBlockProps> = ({ info, status, note
                 const { lines } = entry.hunk;
                 return (
                   <div key={entryIdx}>
-                    {/* Hunk header */}
-                    <div className="px-2 py-0.5 text-[10px] text-blue-400/60 font-mono bg-blue-900/10 border-b border-blue-500/10 select-none">
-                      {hunkHeader(lines)}
-                    </div>
                     {lines.map((line, li) => (
                       <DiffLineRow key={`${entryIdx}-${li}`} line={line} lang={lang} />
                     ))}

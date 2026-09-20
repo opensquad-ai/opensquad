@@ -894,7 +894,11 @@ def _spawn_bot_subprocess(cfg: FeishuBotConfig) -> subprocess.Popen | None:
             [sys.executable, adapter_path, "--single", "-1"],
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
+            # Child is pinned to UTF-8 by env above; decode the same way so a
+            # non-ASCII log line can never kill the reader thread.
             text=True,
+            encoding="utf-8",
+            errors="replace",
             bufsize=1,
             cwd=os.path.dirname(ROOT_DIR),  # project root, not src/
             env=env,

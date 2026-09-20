@@ -1379,6 +1379,26 @@ class ChatAPI(ProviderAPIBase):
                 or ("high demand" in msg)
             )
 
+        def _is_connection_error(exc: Exception) -> bool:
+            """Detect network/connection errors (APIConnectionError, ConnectError, etc.)."""
+            cls = type(exc).__name__.lower()
+            msg = str(exc).lower()
+            return (
+                ("apiconnectionerror" in cls)
+                or ("connectionerror" in cls)
+                or ("connecterror" in cls)
+                or ("connection error" in msg)
+                or ("connection reset" in msg)
+                or ("connection refused" in msg)
+                or ("connection closed" in msg)
+                or ("failed to establish" in msg)
+                or ("network is unreachable" in msg)
+                or ("temporarily unavailable" in msg)
+                or ("econnaborted" in msg)
+                or ("econnreset" in msg)
+                or ("econnrefused" in msg)
+            )
+
         def _is_image_not_supported_error(exc: Exception) -> bool:
             """Detect errors indicating the model/provider does not support image input."""
             msg = str(exc).lower()
@@ -1422,7 +1442,16 @@ class ChatAPI(ProviderAPIBase):
                 cleaned.append(m_copy)
             return cleaned
 
-        max_stream_retries = 6  # Increased for rate limit handling
+        max_stream_retries = 6  # Per-type budget for stream timeout / rate limit handling
+        max_connection_retries = 10  # Network errors: up to 10 retries, exponential backoff capped at 60s
+        timeout_retries = 0
+        conn_retries = 0
+        rate_retries = 0
+        # Last exception that triggered a retry. If the retry loop is exhausted
+        # right after a retry (continue on the final iteration), the loop ends
+        # without break and stream_error stays False -- surface this exception
+        # instead of the misleading "unknown streaming failure".
+        last_retry_exc: Exception | None = None
         stream_ok = False
         stream_stopped = False
         _images_stripped = False  # Track if images were stripped due to unsupported error
@@ -1440,7 +1469,9 @@ class ChatAPI(ProviderAPIBase):
             tool_call_strategy.set_delta_callback(_on_tool_call_delta)
 
         client = self._ensure_client()
-        for attempt in range(max_stream_retries + 1):
+        # Loop bound covers the worst case where every per-type budget is used
+        # (timeout 6 + rate limit 6 + connection 10) plus one final error pass.
+        for attempt in range(max_stream_retries * 2 + max_connection_retries + 1):
             got_any_chunk = False
             try:
                 stream = await client.chat.completions.create(**request_params)
@@ -1583,10 +1614,12 @@ class ChatAPI(ProviderAPIBase):
             except Exception as e:
                 is_timeout = _is_timeout_error(e)
                 is_rate_limit = _is_rate_limit_error(e)
+                is_connection = _is_connection_error(e)
                 is_image_error = _is_image_not_supported_error(e)
                 is_auth_error = _is_auth_error(e)
-                can_retry_timeout = is_timeout and (attempt < max_stream_retries) and (not got_any_chunk)
-                can_retry_rate_limit = is_rate_limit and (attempt < max_stream_retries)
+                can_retry_timeout = is_timeout and (timeout_retries < max_stream_retries) and (not got_any_chunk)
+                can_retry_rate_limit = is_rate_limit and (rate_retries < max_stream_retries)
+                can_retry_connection = is_connection and (conn_retries < max_connection_retries) and (not got_any_chunk)
                 can_retry_image = is_image_error and (not _images_stripped)
 
                 if is_auth_error:
@@ -1626,18 +1659,34 @@ class ChatAPI(ProviderAPIBase):
                     continue
 
                 if can_retry_timeout:
-                    wait_s = 0.8 * (attempt + 1)
+                    timeout_retries += 1
+                    wait_s = 0.8 * timeout_retries
+                    last_retry_exc = e
                     logger.warning(
-                        f"[ChatAPI] Stream timeout before first chunk, retrying ({attempt + 1}/{max_stream_retries}) after {wait_s:.1f}s: {e}"
+                        f"[ChatAPI] Stream timeout before first chunk, retrying ({timeout_retries}/{max_stream_retries}) after {wait_s:.1f}s: {e}"
                     )
                     await asyncio.sleep(wait_s)
                     continue
 
                 if can_retry_rate_limit:
                     # Exponential backoff: 5s, 10s, 20s, 40s, 80s... capped at 600s (10 min)
-                    wait_s = min(5 * (2**attempt), 600)
+                    rate_retries += 1
+                    wait_s = min(5 * (2 ** (rate_retries - 1)), 600)
+                    last_retry_exc = e
                     logger.warning(
-                        f"[ChatAPI] Rate limit / quota exceeded, retrying ({attempt + 1}/{max_stream_retries}) after {wait_s:.0f}s: {e}"
+                        f"[ChatAPI] Rate limit / quota exceeded, retrying ({rate_retries}/{max_stream_retries}) after {wait_s:.0f}s: {e}"
+                    )
+                    await asyncio.sleep(wait_s)
+                    continue
+
+                if can_retry_connection:
+                    # Network / connection error: exponential backoff 2s, 4s, 8s, 16s, 32s
+                    # then capped at 60s; give up after max_connection_retries (10).
+                    conn_retries += 1
+                    wait_s = min(2**conn_retries, 60)
+                    last_retry_exc = e
+                    logger.warning(
+                        f"[ChatAPI] Connection error, retrying ({conn_retries}/{max_connection_retries}) after {wait_s:.0f}s: {e}"
                     )
                     await asyncio.sleep(wait_s)
                     continue
@@ -1656,7 +1705,12 @@ class ChatAPI(ProviderAPIBase):
 
         if not stream_ok and not stream_error and not stream_stopped:
             stream_error = True
-            full_response.append("\n[Error: Stream interrupted - unknown streaming failure]")
+            if last_retry_exc is not None:
+                # The retry loop was exhausted right after a retry -- report the
+                # real error instead of "unknown streaming failure".
+                full_response.append(f"\n[Error: {type(last_retry_exc).__name__} - {last_retry_exc}]")
+            else:
+                full_response.append("\n[Error: Stream interrupted - unknown streaming failure]")
 
         res_text = "".join(full_response)
         if tool_call_strategy and hasattr(tool_call_strategy, "set_delta_callback"):

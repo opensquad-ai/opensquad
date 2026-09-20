@@ -149,7 +149,15 @@ def push(remote: str = "origin", branch: str = "main", path: str | None = None) 
     """Push local commits to remote.
     path: local repo directory (uses current working directory if omitted)."""
     try:
-        result = subprocess.run(["git", "push", remote, branch], cwd=path, capture_output=True, text=True)
+        result = subprocess.run(
+            ["git", "push", remote, branch],
+            cwd=path,
+            capture_output=True,
+            text=True,
+            # git emits UTF-8; never let a decode mismatch swallow the result.
+            encoding="utf-8",
+            errors="replace",
+        )
         if result.returncode != 0:
             return f"Error: {result.stderr.strip()}"
         return result.stdout.strip() or "Success"

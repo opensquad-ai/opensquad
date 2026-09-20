@@ -37,6 +37,7 @@ import subprocess
 import time
 import uuid
 
+from opensquad.proc_text import utf8_text_kwargs
 from opensquad.system_config import syscfg
 
 logger = logging.getLogger(__name__)
@@ -57,7 +58,7 @@ def _run_git(repo: str, args: list[str], timeout: int = 60) -> tuple[bool, str]:
             ["git", *args],
             cwd=repo,
             capture_output=True,
-            text=True,
+            **utf8_text_kwargs(),
             timeout=timeout,
             env={
                 **os.environ,

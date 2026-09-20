@@ -1330,6 +1330,32 @@ export const adminAPI = {
       method: 'DELETE',
     });
   },
+
+  /**
+   * Upload a custom avatar for an Agent.
+   *
+   * Base64 in a JSON body rather than multipart: apiRequest() always sets
+   * Content-Type: application/json, and a browser cannot add the multipart
+   * boundary under that header. The server derives the stored extension from
+   * the image magic bytes, so `filename` is informational only.
+   */
+  uploadAgentAvatar: async (name: string, filename: string, base64: string) => {
+    return apiRequest<{ ok: boolean; avatar: string; profile?: ChatProfile; chat_user_id: string | null; groups_notified: number }>(
+      `/ai-web/admin/agents/${name}/avatar`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ filename, content: base64 }),
+      }
+    );
+  },
+
+  /** Drop the custom avatar and fall back to the generated default. */
+  resetAgentAvatar: async (name: string) => {
+    return apiRequest<{ ok: boolean; avatar: string; profile?: ChatProfile; chat_user_id: string | null; groups_notified: number }>(
+      `/ai-web/admin/agents/${name}/avatar`,
+      { method: 'DELETE' }
+    );
+  },
 };
 
 // ============================================================
@@ -1624,6 +1650,10 @@ export interface ServiceStatus {
   health_ok: boolean | null;
   service_cfg: PluginServiceConfig;
   plugin_status?: Record<string, any>;
+  /** True for ``builtin_plugins.json`` entries (websearch, vision, ...). They
+   *  ship with OpenSquad and the uninstall endpoint rejects them, so the
+   *  Service Manager hides/disables its uninstall action for these. */
+  builtin?: boolean;
 }
 
 export const servicesAPI = {

@@ -1157,7 +1157,10 @@ const PluginCard: React.FC<PluginCardProps> = ({
 
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2 mb-1">
-            <h3 className="text-sm font-bold text-textMain truncate">
+            <h3
+              className="text-sm font-bold text-textMain truncate cursor-default"
+              title={plugin.display_name || plugin.name}
+            >
               {plugin.display_name || plugin.name}
             </h3>
             <span className="text-xs text-textMuted shrink-0">v{plugin.version}</span>

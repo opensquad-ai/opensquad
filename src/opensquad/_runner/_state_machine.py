@@ -97,48 +97,8 @@ class StateMachine:
         initial_query: str | None = None
 
         while initial_query is None:
-            # -- 1. Hot-reload: plugins ------------------------------------
-            if runner._plugin_manager and runner._plugin_manager.check_reload_needed():
-                reload_result = runner._plugin_manager.reload_plugins(
-                    registry=runner.tool_registry,
-                    agent_id=runner._agent_id,
-                    agent_tool_names=runner._agent_tool_names,
-                )
-                if reload_result["loaded"] or reload_result["unloaded"]:
-                    logger.info(
-                        "[StateMachine] Plugin hot-reload: loaded=%s, unloaded=%s",
-                        reload_result["loaded"],
-                        reload_result["unloaded"],
-                    )
-
-            # -- 2. Hot-reload: config.json --------------------------------
-            config_path = runner._config_path
-            if config_path:
-                import os
-
-                if os.path.isfile(config_path):
-                    try:
-                        import json as _json
-
-                        mtime = os.path.getmtime(config_path)
-                        if mtime > runner._config_mtime:
-                            runner._config_mtime = mtime
-                            with open(config_path, encoding="utf-8") as _f:
-                                _new_cfg = _json.load(_f)
-                            new_tools = _new_cfg.get("tools", [])
-                            new_levels = _new_cfg.get("tool_levels", {})
-                            tools_changed = new_tools != runner._agent_tool_names
-                            levels_changed = new_levels != runner._agent_tool_levels
-                            if tools_changed or levels_changed:
-                                runner._agent_tool_names = new_tools
-                                runner._agent_tool_levels = new_levels
-                                self._apply_config_tools_reload(runner, _new_cfg)
-                            # Model hot-reload
-                            new_model = _new_cfg.get("model", {})
-                            if new_model != runner._model_config:
-                                await self._apply_model_reload(runner, new_model)
-                    except Exception as _e:
-                        logger.warning("[StateMachine] Config reload error: %s", _e)
+            # -- 1+2. Hot-reload: plugins / config.json (shared poll) ------
+            await self._poll_hot_reload(runner)
 
             # -- 3. Drain message queue if messages accumulated ---------------
             if message_queue.size > 0:
@@ -214,6 +174,58 @@ class StateMachine:
 
         return initial_query, pending_group_messages
 
+    async def _poll_hot_reload(self, runner: Any) -> None:
+        """Hot-reload plugins + config.json (tools & model) if changed on disk.
+
+        Shared by the pre-first-input idle loop and the between-turns
+        wait_for_events loop. Without the latter, model-card edits made after
+        the session started never reach the running runner — e.g. enabling
+        ``model.is_image`` for vision tool results keeps reading the boot-time
+        ``False`` snapshot, so read_image paths are dropped every turn.
+        """
+        # -- 1. Hot-reload: plugins ------------------------------------
+        if runner._plugin_manager and runner._plugin_manager.check_reload_needed():
+            reload_result = runner._plugin_manager.reload_plugins(
+                registry=runner.tool_registry,
+                agent_id=runner._agent_id,
+                agent_tool_names=runner._agent_tool_names,
+            )
+            if reload_result["loaded"] or reload_result["unloaded"]:
+                logger.info(
+                    "[StateMachine] Plugin hot-reload: loaded=%s, unloaded=%s",
+                    reload_result["loaded"],
+                    reload_result["unloaded"],
+                )
+
+        # -- 2. Hot-reload: config.json --------------------------------
+        config_path = runner._config_path
+        if config_path:
+            import os
+
+            if os.path.isfile(config_path):
+                try:
+                    import json as _json
+
+                    mtime = os.path.getmtime(config_path)
+                    if mtime > runner._config_mtime:
+                        runner._config_mtime = mtime
+                        with open(config_path, encoding="utf-8") as _f:
+                            _new_cfg = _json.load(_f)
+                        new_tools = _new_cfg.get("tools", [])
+                        new_levels = _new_cfg.get("tool_levels", {})
+                        tools_changed = new_tools != runner._agent_tool_names
+                        levels_changed = new_levels != runner._agent_tool_levels
+                        if tools_changed or levels_changed:
+                            runner._agent_tool_names = new_tools
+                            runner._agent_tool_levels = new_levels
+                            self._apply_config_tools_reload(runner, _new_cfg)
+                        # Model hot-reload
+                        new_model = _new_cfg.get("model", {})
+                        if new_model != runner._model_config:
+                            await self._apply_model_reload(runner, new_model)
+                except Exception as _e:
+                    logger.warning("[StateMachine] Config reload error: %s", _e)
+
     def _apply_config_tools_reload(self, runner: Any, new_cfg: dict) -> None:
         """Apply tool-level changes from a reloaded config.json."""
         if not runner._agent_dir:
@@ -286,6 +298,11 @@ class StateMachine:
             # Clear events before checking (avoid missed signals)
             input_event.clear()
             msg_event.clear()
+
+            # Hot-reload: plugins / config.json (shared with the idle loop).
+            # Runs between turns so model-card edits made after the session
+            # started (e.g. enabling model.is_image) reach the running runner.
+            await self._poll_hot_reload(runner)
 
             # Check immediately first (fast path)
             if input_hub.is_stop_requested():

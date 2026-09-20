@@ -125,7 +125,7 @@ const WorkflowContainerInner: React.FC<WorkflowContainerProps> = ({
         <div
           ref={scrollRef}
           onScroll={handleInnerScroll}
-          className="border-t border-border px-3 py-2 max-h-[600px] overflow-y-auto text-xs"
+          className="border-t border-border px-3 py-2 max-h-[600px] overflow-y-auto overflow-x-hidden [scrollbar-gutter:stable] text-xs"
         >
           <div ref={columnRef} className="space-y-2">
             {children}

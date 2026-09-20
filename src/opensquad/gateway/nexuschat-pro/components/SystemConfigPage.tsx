@@ -94,8 +94,8 @@ const Toggle: React.FC<{ value: boolean; onChange: (v: boolean) => void }> = ({ 
 };
 
 const FieldRow: React.FC<{ label: string; children: React.ReactNode }> = ({ label, children }) => (
-  <div className="flex items-center gap-3 py-2 border-b border-border last:border-0">
-    <span className="text-xs text-textMuted w-40 shrink-0">{label}</span>
+  <div className="flex flex-col gap-1 py-2 border-b border-border last:border-0 md:flex-row md:items-center md:gap-3">
+    <span className="text-xs text-textMuted md:w-40 md:shrink-0">{label}</span>
     <div className="flex-1">{children}</div>
   </div>
 );
@@ -271,7 +271,7 @@ const PortsTab: React.FC<{
       {allKeys.map(key => (
         <div key={key} className="px-4 py-3 rounded-xl bg-bgLight border border-border">
           <p className="text-sm font-semibold text-textMain mb-2 capitalize">{key}</p>
-          <div className="grid grid-cols-2 gap-3">
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
             {ports[key] !== undefined && (
               <div>
                 <label className="text-xs text-textMuted mb-1 block">{t('systemConfig.port')}</label>
@@ -803,26 +803,71 @@ export const SystemConfigPage: React.FC<SystemConfigPageProps> = ({
 
   // One shell size for all settings sections (General / About / Apps, …).
   // Match the former "应用" (embedded app panel) footprint so switching tabs
-  // does not resize the modal.
+  // does not resize the modal. Mobile (<md): true full-screen sheet.
   const settingsShellClass =
-    'w-[min(76.8rem,calc((100vw-0.75rem)*0.8))] h-[calc((100vh-0.75rem)*0.8)] max-h-[calc((100vh-0.75rem)*0.8)] shrink-0';
+    'h-full max-h-full w-full shrink-0 md:h-[calc((100vh-0.75rem)*0.8)] md:max-h-[calc((100vh-0.75rem)*0.8)] md:w-[min(76.8rem,calc((100vw-0.75rem)*0.8))]';
+
+  // Shared nav models — vertical sidebar on desktop, horizontal scrolling
+  // tab strip on mobile.
+  const configNavItems = NAV_ITEMS.map((item) => ({
+    key: item.key,
+    label: t(item.i18nKey),
+    icon: item.icon,
+    active: !showingApp && activeTab === item.key,
+    onSelect: () => selectConfigTab(item.key),
+  }));
+  const appNavItems = [
+    ...SETTINGS_APP_NAV_ITEMS.map((item) => {
+      const Icon = item.icon;
+      return {
+        key: item.view,
+        label: t(item.i18nKey),
+        icon: <Icon size={16} strokeWidth={1.75} />,
+        active: activeAppView === item.view,
+        onSelect: () => selectAppView(item.view),
+      };
+    }),
+    ...pluginNavItems.map((item) => ({
+      key: `plugin-nav-${item.name}-${item.view}`,
+      label: item.label,
+      icon: (
+        <span className="flex h-4 w-4 shrink-0 items-center justify-center rounded bg-primary/15 text-[9px] font-bold text-primary">
+          {(item.label || item.name).charAt(0).toUpperCase()}
+        </span>
+      ),
+      active: activeAppView === item.view,
+      onSelect: () => selectAppView(item.view),
+    })),
+  ];
+  const sidebarBtnClass = (active: boolean) =>
+    `flex items-center gap-2.5 rounded-xl px-3 py-2.5 text-left text-sm transition-all duration-soft ease-soft ${
+      active
+        ? 'bg-panel text-textMain shadow-soft'
+        : 'text-textMuted hover:bg-panel/70 hover:text-textMain'
+    }`;
+  const tabBtnClass = (active: boolean) =>
+    `flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-full px-3 py-1.5 text-xs font-medium transition-all duration-soft ease-soft ${
+      active
+        ? 'bg-panel text-textMain shadow-soft'
+        : 'text-textMuted hover:bg-panel/70 hover:text-textMain'
+    }`;
 
   return (
     <SoftOverlay
       open={isOpen}
       onBackdrop={onClose}
       zClass="z-[100]"
-      className="backdrop-blur-[2px] !p-2 sm:!p-3"
+      className="backdrop-blur-[2px] !p-0 md:!p-2 lg:!p-3"
       panelClassName={settingsShellClass}
     >
       <div
-        className="os-modal-shell flex h-full w-full flex-col overflow-hidden"
+        className="os-modal-shell flex h-full w-full flex-col overflow-hidden !rounded-none !border-0 md:!rounded-[1rem] md:!border"
         role="dialog"
         aria-modal="true"
         aria-labelledby="settings-title"
       >
         {/* Title row */}
-        <div className="os-modal-header shrink-0 rounded-t-[1rem]">
+        <div className="os-modal-header shrink-0 rounded-t-none md:rounded-t-[1rem]">
           <h3 id="settings-title" className="text-base font-semibold tracking-tight text-textMain">
             {t('systemConfig.title')}
           </h3>
@@ -831,27 +876,32 @@ export const SystemConfigPage: React.FC<SystemConfigPageProps> = ({
           </button>
         </div>
 
-        {/* Body: left nav + right content */}
+        {/* Mobile: horizontal scrolling tab strip (replaces the sidebar) */}
+        <div className="flex shrink-0 items-center gap-1 overflow-x-auto border-b border-border bg-bgLight/70 px-2 py-2 md:hidden [&::-webkit-scrollbar]:hidden">
+          {configNavItems.map((item) => (
+            <button key={item.key} type="button" onClick={item.onSelect} className={tabBtnClass(item.active)}>
+              <span className={item.active ? 'text-primary' : ''}>{item.icon}</span>
+              <span>{item.label}</span>
+            </button>
+          ))}
+          <span className="mx-1 h-4 w-px shrink-0 bg-border/70" />
+          {appNavItems.map((item) => (
+            <button key={item.key} type="button" onClick={item.onSelect} className={tabBtnClass(item.active)}>
+              <span className={item.active ? 'text-primary' : ''}>{item.icon}</span>
+              <span>{item.label}</span>
+            </button>
+          ))}
+        </div>
+
+        {/* Body: left nav (desktop only) + right content */}
         <div className="flex min-h-0 flex-1">
-          <nav className="flex w-[148px] shrink-0 flex-col gap-0.5 overflow-y-auto border-r border-border bg-bgLight/70 p-2 sm:w-[168px]">
-            {NAV_ITEMS.map((item) => {
-              const active = !showingApp && activeTab === item.key;
-              return (
-                <button
-                  key={item.key}
-                  type="button"
-                  onClick={() => selectConfigTab(item.key)}
-                  className={`flex items-center gap-2.5 rounded-xl px-3 py-2.5 text-left text-sm transition-all duration-soft ease-soft ${
-                    active
-                      ? 'bg-panel text-textMain shadow-soft'
-                      : 'text-textMuted hover:bg-panel/70 hover:text-textMain'
-                  }`}
-                >
-                  <span className={active ? 'text-primary' : ''}>{item.icon}</span>
-                  <span className="truncate font-medium">{t(item.i18nKey)}</span>
-                </button>
-              );
-            })}
+          <nav className="hidden w-[168px] shrink-0 flex-col gap-0.5 overflow-y-auto border-r border-border bg-bgLight/70 p-2 md:flex">
+            {configNavItems.map((item) => (
+              <button key={item.key} type="button" onClick={item.onSelect} className={sidebarBtnClass(item.active)}>
+                <span className={item.active ? 'text-primary' : ''}>{item.icon}</span>
+                <span className="truncate font-medium">{item.label}</span>
+              </button>
+            ))}
 
             <div className="my-1.5 px-2">
               <div className="h-px bg-border/70" />
@@ -860,47 +910,12 @@ export const SystemConfigPage: React.FC<SystemConfigPageProps> = ({
               </p>
             </div>
 
-            {SETTINGS_APP_NAV_ITEMS.map((item) => {
-              const Icon = item.icon;
-              const active = activeAppView === item.view;
-              return (
-                <button
-                  key={item.view}
-                  type="button"
-                  onClick={() => selectAppView(item.view)}
-                  className={`flex items-center gap-2.5 rounded-xl px-3 py-2.5 text-left text-sm transition-all duration-soft ease-soft ${
-                    active
-                      ? 'bg-panel text-textMain shadow-soft'
-                      : 'text-textMuted hover:bg-panel/70 hover:text-textMain'
-                  }`}
-                >
-                  <Icon size={16} strokeWidth={1.75} className={`shrink-0 ${active ? 'text-primary' : ''}`} />
-                  <span className="truncate font-medium">{t(item.i18nKey)}</span>
-                </button>
-              );
-            })}
-
-            {pluginNavItems.map((item) => {
-              const active = activeAppView === item.view;
-              return (
-                <button
-                  key={`plugin-nav-${item.name}-${item.view}`}
-                  type="button"
-                  onClick={() => selectAppView(item.view)}
-                  className={`flex items-center gap-2.5 rounded-xl px-3 py-2.5 text-left text-sm transition-all duration-soft ease-soft ${
-                    active
-                      ? 'bg-panel text-textMain shadow-soft'
-                      : 'text-textMuted hover:bg-panel/70 hover:text-textMain'
-                  }`}
-                  title={item.label}
-                >
-                  <span className="flex h-4 w-4 shrink-0 items-center justify-center rounded bg-primary/15 text-[9px] font-bold text-primary">
-                    {(item.label || item.name).charAt(0).toUpperCase()}
-                  </span>
-                  <span className="truncate font-medium">{item.label}</span>
-                </button>
-              );
-            })}
+            {appNavItems.map((item) => (
+              <button key={item.key} type="button" onClick={item.onSelect} className={sidebarBtnClass(item.active)} title={item.label}>
+                <span className={`shrink-0 ${item.active ? 'text-primary' : ''}`}>{item.icon}</span>
+                <span className="truncate font-medium">{item.label}</span>
+              </button>
+            ))}
           </nav>
 
           <div className="flex min-h-0 min-w-0 flex-1 flex-col">
@@ -940,7 +955,7 @@ export const SystemConfigPage: React.FC<SystemConfigPageProps> = ({
               </div>
             ) : (
               <>
-                <div className="min-h-0 flex-1 overflow-y-auto p-5 [&::-webkit-scrollbar]:w-1.5 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-border">
+                <div className="min-h-0 flex-1 overflow-y-auto p-4 md:p-5 [&::-webkit-scrollbar]:w-1.5 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-border">
                   {error && (
                     <div className="mb-3 rounded-lg border border-red-200 bg-red-50 px-4 py-2 text-sm text-red-600">
                       {error}
@@ -979,16 +994,16 @@ export const SystemConfigPage: React.FC<SystemConfigPageProps> = ({
                 </div>
 
                 {/* Footer — config tabs only */}
-                <div className="flex shrink-0 items-center justify-between gap-3 border-t border-border bg-bgLight/50 px-5 py-3.5">
-                  <div className="min-w-0">
+                <div className="flex shrink-0 items-center justify-between gap-2 border-t border-border bg-bgLight/50 px-4 py-3 md:gap-3 md:px-5">
+                  <div className="min-w-0 flex-1">
                     {showSave ? (
                       saved ? (
-                        <span className="text-sm font-medium text-green-600">{t('systemConfig.saved')}</span>
+                        <span className="truncate text-sm font-medium text-green-600">{t('systemConfig.saved')}</span>
                       ) : (
-                        <span className="text-xs text-textMuted">{t('systemConfig.restartHint')}</span>
+                        <span className="block truncate text-xs text-textMuted">{t('systemConfig.restartHint')}</span>
                       )
                     ) : (
-                      <span className="text-xs text-textMuted">{t('systemConfig.liveHint')}</span>
+                      <span className="block truncate text-xs text-textMuted">{t('systemConfig.liveHint')}</span>
                     )}
                   </div>
                   <div className="flex shrink-0 items-center gap-2">
@@ -1008,7 +1023,7 @@ export const SystemConfigPage: React.FC<SystemConfigPageProps> = ({
                         <button
                           type="button"
                           onClick={onClose}
-                          className="rounded-full border border-border px-4 py-2 text-sm text-textMuted transition-colors hover:bg-panel hover:text-textMain"
+                          className="whitespace-nowrap rounded-full border border-border px-4 py-2 text-sm text-textMuted transition-colors hover:bg-panel hover:text-textMain"
                         >
                           {t('common.cancel')}
                         </button>
@@ -1016,7 +1031,7 @@ export const SystemConfigPage: React.FC<SystemConfigPageProps> = ({
                           type="button"
                           onClick={handleSave}
                           disabled={saving || !config}
-                          className="flex items-center gap-2 rounded-full bg-primary px-5 py-2 text-sm font-medium text-white transition-opacity hover:opacity-90 disabled:opacity-60"
+                          className="flex items-center gap-2 whitespace-nowrap rounded-full bg-primary px-4 py-2 text-sm font-medium text-white transition-opacity hover:opacity-90 disabled:opacity-60 md:px-5"
                         >
                           {saving ? <OpenSquadLoader size={14} /> : <Save size={14} />}
                           {t('common.save')}
@@ -1026,7 +1041,7 @@ export const SystemConfigPage: React.FC<SystemConfigPageProps> = ({
                       <button
                         type="button"
                         onClick={onClose}
-                        className="rounded-full bg-primary px-5 py-2 text-sm font-medium text-white transition-opacity hover:opacity-90"
+                        className="whitespace-nowrap rounded-full bg-primary px-4 py-2 text-sm font-medium text-white transition-opacity hover:opacity-90 md:px-5"
                       >
                         {t('themeSettings.done')}
                       </button>

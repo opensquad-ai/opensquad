@@ -107,8 +107,66 @@ async def auto_transcribe_audio_paths(
     return "\n".join(parts)
 
 
-def resolve_group_asr_card() -> dict[str, Any] | None:
-    """Load the workspace model card marked ``group_asr: true`` (ASR for group chat)."""
+# Built-in local ASR services, most-preferred first.  SenseVoice leads because
+# the installer ships it pre-enabled; Whisper is the fallback.
+_BUILTIN_ASR_SERVICES: tuple[str, ...] = ("sensevoice", "whisper")
+
+
+def builtin_asr_service_of(card: dict[str, Any] | None) -> str:
+    """Return the built-in ASR service a card backs (``sensevoice``/``whisper``), else ``""``."""
+    if not card:
+        return ""
+    svc = (card.get("builtin_service") or "").strip().lower()
+    return svc if svc in _BUILTIN_ASR_SERVICES else ""
+
+
+def _iter_card_names() -> list[str]:
+    """Model-card names visible to the app, workspace first (dedup, stable order)."""
+    seen: set[str] = set()
+    names: list[str] = []
+    for cards_dir in syscfg.resource_search_dirs("model_cards"):
+        if not os.path.isdir(cards_dir):
+            continue
+        try:
+            entries = sorted(os.listdir(cards_dir))
+        except OSError:
+            continue
+        for fname in entries:
+            if not fname.endswith(".json"):
+                continue
+            name = fname[:-5]
+            if name in seen:
+                continue
+            seen.add(name)
+            names.append(name)
+    return names
+
+
+def _resolve_builtin_asr_card() -> dict[str, Any] | None:
+    """Best built-in local ASR card (``builtin_service`` = sensevoice|whisper)."""
+    best: dict[str, Any] | None = None
+    best_key: tuple[int, int, str] | None = None
+    for name in _iter_card_names():
+        try:
+            card = load_model_card(name)
+        except Exception:
+            continue
+        svc = builtin_asr_service_of(card)
+        if not svc:
+            continue
+        try:
+            enabled = bool(syscfg.is_service_enabled(svc))
+        except Exception:
+            enabled = False
+        # enabled first, then fixed service preference, then name for determinism
+        key = (0 if enabled else 1, _BUILTIN_ASR_SERVICES.index(svc), name)
+        if best_key is None or key < best_key:
+            best, best_key = card, key
+    return best
+
+
+def _resolve_flagged_group_asr_card() -> dict[str, Any] | None:
+    """Legacy fallback: a workspace card explicitly marked ``group_asr: true``."""
     cards_dir = syscfg.workspace_model_cards_dir()
     if not os.path.isdir(cards_dir):
         return None
@@ -129,6 +187,44 @@ def resolve_group_asr_card() -> dict[str, Any] | None:
         if card.get("group_asr"):
             return card
     return None
+
+
+def resolve_group_asr_card() -> dict[str, Any] | None:
+    """Resolve the ASR used for group-chat voice input (speech-to-text).
+
+    Group chat has no per-agent voice config to fall back on, so its voice input
+    is a **built-in** capability: it must use the locally hosted built-in ASR
+    service (SenseVoice / Whisper) rather than a user's cloud model card.
+
+    A cloud card is the wrong default here — it can be unreachable, rate-limited
+    or, as happened with ``stepaudio-2.5-asr`` (StepFun returns
+    ``404 model_invalid``), simply not provisioned for the account, which
+    surfaces to every group member as a broken mic button.
+
+    Resolution order:
+      1. the best **built-in** ASR card (``builtin_service`` = sensevoice|whisper),
+         preferring a service enabled in ``system_config.json``;
+      2. only if no built-in ASR card exists at all, a card explicitly marked
+         ``group_asr: true`` (kept so installs without a local ASR still work).
+
+    Returns ``None`` when neither is available; the caller should then tell the
+    user to enable the built-in ASR service.
+    """
+    builtin = _resolve_builtin_asr_card()
+    if builtin is not None:
+        logger.debug(
+            "[audio] group ASR -> built-in card %s (service=%s)",
+            builtin.get("_card"),
+            builtin_asr_service_of(builtin),
+        )
+        return builtin
+    legacy = _resolve_flagged_group_asr_card()
+    if legacy is not None:
+        logger.warning(
+            "[audio] no built-in ASR card available; falling back to model card %s flagged group_asr=true",
+            legacy.get("_card"),
+        )
+    return legacy
 
 
 def http_base_url(card: dict[str, Any]) -> str:

@@ -220,15 +220,10 @@ const ToolCallBlockInner: React.FC<ToolCallBlockProps> = ({
 
   // Delegate to FileDiffBlock for file edit/write/read ops
   if (fileEditInfo) {
-    // Extract a short note from result (first non-empty line, max 120 chars)
-    const noteText = resultStr
-      ? resultStr.split('\n').map(l => l.trim()).find(l => l.length > 0)?.slice(0, 120)
-      : undefined;
     return (
       <FileDiffBlock
         info={fileEditInfo}
         status={status}
-        note={fileEditInfo.kind === 'read' ? undefined : noteText}
         resultContent={fileEditInfo.kind === 'read' ? resultStr : undefined}
         onFileClick={onFileClick}
       />

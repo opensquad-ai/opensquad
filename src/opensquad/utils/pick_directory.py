@@ -14,6 +14,8 @@ import sys
 import threading
 from typing import Any
 
+from opensquad.proc_text import native_text_kwargs, utf8_text_kwargs
+
 logger = logging.getLogger(__name__)
 
 _pick_lock = threading.Lock()
@@ -116,7 +118,9 @@ if ($result -eq [System.Windows.Forms.DialogResult]::OK) {{
         proc = subprocess.run(
             ["powershell", "-NoProfile", "-STA", "-Command", script],
             capture_output=True,
-            text=True,
+            # Selected folder can be non-ASCII; PowerShell writes the console
+            # code page, not UTF-8 → decode natively or the path is mangled.
+            **native_text_kwargs(),
             timeout=600,
             check=False,
         )
@@ -142,7 +146,7 @@ def _pick_via_osascript(initial_dir: str | None) -> str | bool | None:
         proc = subprocess.run(
             ["osascript", "-e", script],
             capture_output=True,
-            text=True,
+            **utf8_text_kwargs(),
             timeout=600,
             check=False,
         )
@@ -167,7 +171,7 @@ def _pick_via_zenity(initial_dir: str | None) -> str | bool | None:
     if initial_dir:
         cmd.append(f"--filename={initial_dir}")
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=600, check=False)
+        proc = subprocess.run(cmd, capture_output=True, **utf8_text_kwargs(), timeout=600, check=False)
     except FileNotFoundError:
         return None
     except Exception as e:

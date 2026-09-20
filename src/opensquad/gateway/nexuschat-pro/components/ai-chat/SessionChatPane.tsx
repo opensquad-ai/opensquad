@@ -382,7 +382,16 @@ export const SessionChatPane: React.FC<SessionChatPaneProps> = ({
                   const msgProps = {
                     message: entry.data,
                     senderName:
-                      entry.data.role === 'user' ? userName : agentName,
+                      entry.data.role === 'user'
+                        ? userName
+                        : agentName,
+                    // 助手回复紧跟工作流组时，名字已在工作流上方显示 —— 整行隐藏。
+                    // 只传 undefined 不够：MessageBubble 会退化成兜底文案「Agent」，
+                    // 统计行和正文之间就多出一行幽灵签名。
+                    hideSenderLabel:
+                      entry.data.role === 'assistant'
+                      && i > 0
+                      && timeline[i - 1].kind === 'workflow',
                     agentId,
                     canWithdraw:
                       canWithdraw &&
@@ -426,14 +435,19 @@ export const SessionChatPane: React.FC<SessionChatPaneProps> = ({
                     && !!(nextAfterGroup.data as ChatMessage).content.trim();
                   return (
                     <TimelineRow key={entryKey} lockLayout={lockLayout} style={revealStyle}>
-                      <SoloActivityRow
-                        block={merged}
-                        turnDelivered={turnDelivered}
-                        expandLevel={expandLevel}
-                        embedVisualizations={false}
-                        uiMode={isSolo ? 'solo' : 'classic'}
-                        shellStreams={EMPTY_SHELL_STREAMS}
-                      />
+                      <div className="w-full min-w-0">
+                        {agentName && (
+                          <div className="text-[11px] font-medium text-textMuted/70 mb-2">{agentName}</div>
+                        )}
+                        <SoloActivityRow
+                          block={merged}
+                          turnDelivered={turnDelivered}
+                          expandLevel={expandLevel}
+                          embedVisualizations={false}
+                          uiMode={isSolo ? 'solo' : 'classic'}
+                          shellStreams={EMPTY_SHELL_STREAMS}
+                        />
+                      </div>
                     </TimelineRow>
                   );
                 }

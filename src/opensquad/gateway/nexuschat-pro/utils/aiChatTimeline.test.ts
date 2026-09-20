@@ -21,6 +21,7 @@ import {
   rebaseTimelineUids,
   sealIncompleteWorkflows,
   sealPendingCompression,
+  sealStaleWorkflowBlocks,
   shouldTreatWorkflowComplete,
   stripToolCallMarkup,
   timelineHasToolEvent,
@@ -789,11 +790,12 @@ describe('buildTimelineFromSession', () => {
     const wfBlocks = nested.filter((e) => e.kind === 'workflow') as Array<
       Extract<TimelineEntry, { kind: 'workflow' }>
     >;
-    expect(wfBlocks.length).toBeGreaterThanOrEqual(2);
-    const wf2 = wfBlocks[wfBlocks.length - 1];
+    // 降级后相邻/仅隔 prompt 的工作流块合并为一个折叠块（一轮一个折叠行）。
+    expect(wfBlocks.length).toBe(1);
+    const wf2 = wfBlocks[0];
     const wf2Process = wf2.data.events.filter((ev) => ev.type === 'process_output');
     expect(wf2Process.length).toBe(2);
-    // 两条过程输出按顺序挂在后一工作流块首（早盘 → 午盘）。
+    // 两条过程输出按顺序挂在块内（早盘 → 午盘）。
     expect(String(wf2Process[0].content)).toContain('已获取早盘');
     expect(String(wf2Process[1].content)).toContain('已获取午盘');
     expect(
@@ -1195,6 +1197,114 @@ describe('sealIncompleteWorkflows (mid-send)', () => {
     expect(sealed[0].data.status).toBeNull();
     expect(sealed[0].data.elapsed_ms).toBe(5500);
     expect(sealed[0].data.started_ms).toBe(started);
+  });
+
+  it('sealStaleWorkflowBlocks: 块尾思考在后续活动出现后封口冻结（不再按墙钟计时）', () => {
+    const uid = () => genTimelineUID();
+    const started = 1_700_000_000_000;
+    // 块1：工具已完成 + 块尾思考（bug 场景：永远"深度思考 17s↑"计时）
+    const stale: TimelineEntry[] = [
+      {
+        kind: 'workflow',
+        data: {
+          events: [
+            { type: 'tool_call', content: { id: 'c1', name: 'edit' }, result: 'ok', timestamp: started },
+            { type: 'thought', content: 'deep thought', timestamp: started + 1000 },
+          ],
+          status: 'working',
+          completed: false,
+          started_ms: started,
+        },
+        _uid: uid(),
+      },
+      // 透明分隔物不应阻断封口判定
+      {
+        kind: 'prompt',
+        data: { system_prompt: 'p', dynamic_prefix: '', changed: false, timestamp: new Date(started + 1500).toISOString() },
+        _uid: uid(),
+      },
+      // 块2：后续活动（仍在运行）
+      {
+        kind: 'workflow',
+        data: {
+          events: [{ type: 'tool_call', content: { id: 'c2', name: 'write_file' }, timestamp: started + 17_000 }],
+          status: 'working',
+          completed: false,
+          started_ms: started + 17_000,
+        },
+        _uid: uid(),
+      },
+    ];
+    const sealed = sealStaleWorkflowBlocks(stale);
+    const blocks = sealed.filter(
+      (e): e is Extract<TimelineEntry, { kind: 'workflow' }> => e.kind === 'workflow',
+    );
+    // 过期块封口，存活块（最后的活动）不受影响
+    expect(blocks[0].data.completed).toBe(true);
+    expect(blocks[0].data.status).toBeNull();
+    // elapsed = 后续活动起点 - 块起点 = 17s（思考耗时冻结在真实值）
+    expect(blocks[0].data.elapsed_ms).toBe(17_000);
+    expect(blocks[1].data.completed).toBe(false);
+
+    // 仅被透明分隔物跟随时不封口（仍是当前活动）
+    const live = sealStaleWorkflowBlocks([
+      {
+        kind: 'workflow',
+        data: {
+          events: [{ type: 'thought', content: 'streaming', timestamp: started }],
+          status: 'working',
+          completed: false,
+          started_ms: started,
+        },
+        _uid: uid(),
+      },
+      {
+        kind: 'prompt',
+        data: { system_prompt: 'p', dynamic_prefix: '', changed: false, timestamp: new Date(started + 100).toISOString() },
+        _uid: uid(),
+      },
+    ]);
+    const liveBlocks = live.filter(
+      (e): e is Extract<TimelineEntry, { kind: 'workflow' }> => e.kind === 'workflow',
+    );
+    expect(liveBlocks[0].data.completed).toBe(false);
+  });
+
+  it('appendWorkflowEvent: 新事件落给后方新块时，前方过期思考块被封口', () => {
+    const started = 1_700_000_000_000;
+    // 已有过期思考块 + 其后一条消息（appendWorkflowEvent 会跳过消息另起新块）
+    const prev: TimelineEntry[] = [
+      {
+        kind: 'workflow',
+        data: {
+          events: [{ type: 'thought', content: 'deep thought', timestamp: started }],
+          status: 'working',
+          completed: false,
+          started_ms: started,
+        },
+        _uid: genTimelineUID(),
+      },
+      {
+        kind: 'message',
+        data: { role: 'assistant', content: '阶段说明', timestamp: new Date(started + 5000).toISOString() },
+        _uid: genTimelineUID(),
+      },
+    ];
+    const next = appendWorkflowEvent(
+      prev,
+      { type: 'tool_call', content: { id: 'c9', name: 'write_file' }, timestamp: started + 9000 },
+      'working',
+    );
+    const blocks = next.filter(
+      (e): e is Extract<TimelineEntry, { kind: 'workflow' }> => e.kind === 'workflow',
+    );
+    expect(blocks.length).toBe(2);
+    // 旧思考块封口，耗时冻结在首个后续活动（阶段消息 ts=5s）
+    expect(blocks[0].data.completed).toBe(true);
+    expect(blocks[0].data.elapsed_ms).toBe(5000);
+    // 新工具进入存活的新块
+    expect(blocks[1].data.completed).toBe(false);
+    expect(blocks[1].data.events.some((e) => e.type === 'tool_call')).toBe(true);
   });
 
   it('cancels every open tool_call across all incomplete workflows', () => {

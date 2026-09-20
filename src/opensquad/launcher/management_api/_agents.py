@@ -606,6 +606,76 @@ class AgentsMixin:
             _processes[name].reload_config()
         return self._send_json({"message": f"Config saved for {name}"})
 
+    def _handle_put_agent_profile(self, name: str, body: dict):
+        """Write the agent's group-chat profile (``data/profile.json``).
+
+        The avatar is a free-form string: a ``/uploads/...`` path for a custom
+        upload, the generated default data-URI, or "" to clear it. The upload
+        itself belongs to the gateway — it owns both the ``/uploads`` mount and
+        the group-chat user row — so this endpoint only persists the value.
+        ``GET /api/agents`` then reports it, and every consumer that renders
+        ``chat_profile`` (Agent Workstation, sidebar, nav shortcuts) follows
+        without any extra plumbing.
+        """
+        global _agents_list_cache_at, _agents_list_cache_result
+
+        # Reject traversal before touching the filesystem. _resolve_agent_dir_name
+        # accepts any directory that exists under the agents root, and ".." is one.
+        raw_name = (name or "").strip()
+        if not raw_name or raw_name in (".", "..") or "/" in raw_name or "\\" in raw_name or "\x00" in raw_name:
+            return self._send_json({"error": "Invalid agent name"}, 400)
+        dir_name = self._resolve_agent_dir_name(raw_name) or raw_name
+        agent_dir = os.path.join(AGENTS_DIR, dir_name)
+        if not os.path.isdir(agent_dir) or os.path.commonpath(
+            [os.path.realpath(agent_dir), os.path.realpath(AGENTS_DIR)]
+        ) != os.path.realpath(AGENTS_DIR):
+            return self._send_json({"error": "Agent directory not found"}, 404)
+        if "avatar" not in body:
+            return self._send_json({"error": "Missing 'avatar' in body"}, 400)
+        raw_avatar = body.get("avatar")
+        if raw_avatar is not None and not isinstance(raw_avatar, str):
+            return self._send_json({"error": "'avatar' must be a string or null"}, 400)
+        avatar = (raw_avatar or "").strip()
+
+        from opensquad.avatar_utils import normalize_chat_profile
+        from opensquad.json_cache import invalidate_json_cache, load_json_cached
+
+        canonical = os.path.join(agent_dir, "data", "profile.json")
+        legacy = os.path.join(agent_dir, "data", "group_chat", "profile.json")
+        existing = load_json_cached(canonical, default=None)
+        if not isinstance(existing, dict):
+            existing = load_json_cached(legacy, default=None)
+        if not isinstance(existing, dict):
+            existing = {}
+
+        # Preserve the display name the group-chat account already reports: a
+        # rename happens in the chat UI, and overwriting it here from config
+        # would silently rename the account. Only a profile that does not exist
+        # yet falls back to config.agent_name — the same value the agent itself
+        # writes on boot.
+        display_name = existing.get("chat_user_name") or existing.get("name")
+        if not display_name:
+            cfg = _read_json(os.path.join(agent_dir, "config.json"))
+            display_name = cfg.get("agent_name") or dir_name
+        payload = {"name": display_name, "avatar": avatar}
+
+        try:
+            for profile_path in (canonical, legacy):
+                invalidate_json_cache(profile_path)
+                os.makedirs(os.path.dirname(profile_path), exist_ok=True)
+                with open(profile_path, "w", encoding="utf-8") as handle:
+                    json.dump(payload, handle, ensure_ascii=False, indent=2)
+        except OSError as exc:
+            return self._send_json({"error": f"Could not write profile.json: {exc}"}, 500)
+
+        # GET /api/agents carries a short TTL cache; without dropping it the new
+        # avatar would need up to _AGENTS_LIST_TTL_S to appear in the very UI
+        # that just uploaded it.
+        _agents_list_cache_result = None
+        _agents_list_cache_at = 0.0
+
+        return self._send_json({"ok": True, "profile": normalize_chat_profile(payload)})
+
     def _handle_get_role(self, name: str):
         """Read agent role prompt file (filename read from config.json prompt.role, default: role.md)"""
         agent_dir = os.path.join(AGENTS_DIR, name)

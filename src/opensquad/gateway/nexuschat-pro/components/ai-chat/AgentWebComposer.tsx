@@ -16,6 +16,7 @@ import { FileIcon, FileText, Mic, Send, Square, X } from 'lucide-react';
 import { agentSessionAPI, type ModelCardInfo, type SkillInfo } from '../../services/api';
 import { blobToWavFile } from '../../utils/mediaDevices';
 import { ModePicker, type AgentMode } from './ModePicker';
+import { MobileComposerMenu } from './MobileComposerMenu';
 import { SoloModelPicker } from './SoloModelPicker';
 import { EffortPicker, type ReasoningEffort } from './EffortPicker';
 import { SoloAttachMenu } from './SoloAttachMenu';
@@ -603,6 +604,45 @@ export const AgentWebComposer = forwardRef<AgentWebComposerHandle, AgentWebCompo
     !sending &&
     (!!inputText.trim() || images.length > 0 || attachments.length > 0 || !!pendingSkill);
 
+  // ── Settings shared by the desktop pickers and the narrow-viewport overflow
+  //    menu (MobileComposerMenu) so the two can never disagree. ──
+  const selectedCard =
+    (currentCardName && modelCards.find((c) => c.name === currentCardName)) ||
+    (modelName && modelCards.find((c) => c.model_name === modelName)) ||
+    null;
+  const effortDeepseekish = /deepseek/i.test(
+    `${selectedCard?.model_name || ''} ${selectedCard?.base_url || ''} ${selectedCard?.name || ''}`,
+  );
+  const showEffort = !!selectedCard?.is_think;
+
+  /**
+   * Send / Stop, rendered twice on purpose. Desktop keeps it as the last control
+   * of the toolbar; below `md` it moves into the input row beside the textarea
+   * (group-chat composer parity). Each copy is retired at the other's
+   * breakpoint, so exactly one is ever mounted.
+   */
+  const sendOrStop = busy ? (
+    <button
+      type="button"
+      onClick={onStop}
+      className="w-8 h-8 rounded-full bg-red-500 hover:bg-red-600 transition-colors flex items-center justify-center border-0 cursor-pointer shrink-0"
+      title="Stop"
+    >
+      <Square size={14} className="text-white" />
+    </button>
+  ) : (
+    <button
+      type="button"
+      onClick={() => void submit()}
+      disabled={!canSend}
+      className="w-8 h-8 rounded-full bg-primary hover:bg-primary/90 transition-colors flex items-center justify-center disabled:opacity-50 disabled:cursor-not-allowed border-0 cursor-pointer shrink-0"
+      title="Send"
+      aria-label="Send"
+    >
+      <Send size={14} className="text-white" />
+    </button>
+  );
+
   const showChanges =
     !!sessionChanges &&
     (sessionChanges.count > 0 || sessionChanges.additions > 0 || sessionChanges.deletions > 0);
@@ -793,7 +833,7 @@ export const AgentWebComposer = forwardRef<AgentWebComposerHandle, AgentWebCompo
               />
             ) : null}
             {pendingSkill ? (
-              <div className="px-3.5 pt-3 pb-0">
+              <div className="px-3.5 pt-3 pb-0 order-2 md:order-1 max-md:px-2.5 max-md:pt-2">
                 <button
                   type="button"
                   onClick={() => setPendingSkill(null)}
@@ -810,34 +850,51 @@ export const AgentWebComposer = forwardRef<AgentWebComposerHandle, AgentWebCompo
               </div>
             ) : null}
 
-            <textarea
-              ref={inputRef}
-              value={inputText}
-              onChange={(e) => setInputText(e.target.value)}
-              onKeyDown={onKeyDown}
-              onPaste={onPaste}
-              onFocus={onActivate}
-              placeholder={
-                pendingSkill
-                  ? 'Add details for this skill…'
-                  : landing
-                    ? '帮我把这个想法变成一个技术方案…（输入 / 召唤指令）'
-                    : '输入消息... (输入 / 召唤指令)'
-              }
-              disabled={disabled}
-              className={`w-full border-0 px-3.5 pt-3.5 pb-2 text-[15px] text-textMain placeholder-textMuted resize-none focus:outline-none min-h-[72px] max-h-[200px] bg-transparent leading-6 ${
-                disabled ? 'text-textMuted cursor-not-allowed' : ''
-              }`}
-              rows={2}
-              style={{ height: 'auto' }}
-              onInput={(e) => {
-                const target = e.target as HTMLTextAreaElement;
-                target.style.height = 'auto';
-                target.style.height = `${Math.min(target.scrollHeight, 200)}px`;
-              }}
-            />
+            {/* Input row — desktop: the textarea alone, full width.
+                Narrow viewport: textarea and a pinned Send share the row, the
+                way the group-chat composer does it (Send used to be the last
+                control of the toolbar and fell off the right edge of the
+                screen — see MobileComposerMenu for the measurements). */}
+            <div className="order-3 md:order-2 flex items-end gap-1.5 max-md:px-2 max-md:py-1.5">
+              <textarea
+                ref={inputRef}
+                value={inputText}
+                onChange={(e) => setInputText(e.target.value)}
+                onKeyDown={onKeyDown}
+                onPaste={onPaste}
+                onFocus={onActivate}
+                placeholder={
+                  pendingSkill
+                    ? 'Add details for this skill…'
+                    : landing
+                      ? '帮我把这个想法变成一个技术方案…（输入 / 召唤指令）'
+                      : '输入消息... (输入 / 召唤指令)'
+                }
+                disabled={disabled}
+                className={`flex-1 min-w-0 border-0 px-3.5 pt-3.5 pb-2 text-[15px] text-textMain placeholder-textMuted resize-none focus:outline-none min-h-[72px] max-h-[200px] bg-transparent leading-6 max-md:px-2.5 max-md:pt-1.5 max-md:pb-1.5 max-md:text-[14px] max-md:leading-5 max-md:min-h-[36px] max-md:max-h-[120px] ${
+                  disabled ? 'text-textMuted cursor-not-allowed' : ''
+                }`}
+                rows={1}
+                style={{ height: 'auto' }}
+                onInput={(e) => {
+                  const target = e.target as HTMLTextAreaElement;
+                  target.style.height = 'auto';
+                  target.style.height = `${Math.min(target.scrollHeight, 200)}px`;
+                }}
+              />
+              {/* Narrow-viewport copy of Send/Stop; the toolbar copy owns md+. */}
+              <div className="md:hidden shrink-0 pb-0.5">
+                {sendOrStop}
+              </div>
+            </div>
 
-            <div className="flex items-center gap-1.5 px-2.5 pb-2.5 pt-0.5">
+            {/* Toolbar. Desktop: under the textarea. Narrow viewport: promoted to
+                the first row and given the group-chat strip treatment
+                (bg-bgLight + bottom hairline + card top radius). Mode / model /
+                effort move into MobileComposerMenu there — the row cannot wrap
+                and both ends are shrink-0, so anything extra pushes Send off
+                the right edge of the screen. */}
+            <div className="flex items-center gap-1.5 px-2.5 pb-2.5 pt-0.5 order-1 md:order-3 max-md:rounded-t-[22px] max-md:border-b max-md:border-border max-md:bg-bgLight max-md:px-2 max-md:pt-1 max-md:pb-1.5 max-md:min-h-[38px]">
               <div className="flex items-center gap-0.5 shrink-0">
                 <SoloAttachMenu
                   disabled={disabled}
@@ -886,48 +943,66 @@ export const AgentWebComposer = forwardRef<AgentWebComposerHandle, AgentWebCompo
                     };
                     input.click();
                   }}
-                  className="w-7 h-7 rounded-full flex items-center justify-center text-textMuted hover:text-textMain hover:bg-primary/10 transition-colors border-0 bg-transparent cursor-pointer disabled:opacity-50"
+                  className="w-7 h-7 rounded-full flex items-center justify-center text-textMuted hover:text-textMain hover:bg-primary/10 transition-colors border-0 bg-transparent cursor-pointer disabled:opacity-50 max-md:hidden"
                   title="上传文件"
                 >
                   <FileText size={16} strokeWidth={1.75} />
                 </button>
-                <ModePicker mode={agentMode} disabled={disabled} onSelect={onModeChange} />
+                {/* Desktop-only from here down: on narrow viewports these three
+                    settings live in MobileComposerMenu. */}
+                <div className="max-md:hidden">
+                  <ModePicker mode={agentMode} disabled={disabled} onSelect={onModeChange} />
+                </div>
               </div>
 
               <div className="flex-1 min-w-0" />
 
               <div className="flex items-center gap-1.5 shrink-0">
-                <SoloModelPicker
-                  cards={modelCards}
+                <div className="max-md:hidden">
+                  <SoloModelPicker
+                    cards={modelCards}
+                    currentCardName={currentCardName}
+                    modelName={modelName}
+                    fallbackLabel={fallbackLabel}
+                    switching={switchingModel}
+                    disabled={disabled}
+                    onSelect={onSelectModel}
+                    onWillOpen={onRefreshModelCards}
+                    onAddModels={() => {
+                      window.dispatchEvent(new CustomEvent('switchView', { detail: 'models' }));
+                    }}
+                  />
+                </div>
+                {showEffort ? (
+                  <div className="max-md:hidden">
+                    <EffortPicker
+                      effort={reasoningEffort}
+                      deepseekStyle={effortDeepseekish}
+                      disabled={disabled || switchingModel}
+                      onSelect={onEffortChange}
+                    />
+                  </div>
+                ) : null}
+                {/* Narrow viewport only: Mode + Model + Effort, folded away. */}
+                <MobileComposerMenu
+                  className="md:hidden"
+                  disabled={disabled}
+                  mode={agentMode}
+                  onModeChange={onModeChange}
+                  modelCards={modelCards}
                   currentCardName={currentCardName}
                   modelName={modelName}
-                  fallbackLabel={fallbackLabel}
-                  switching={switchingModel}
-                  disabled={disabled}
-                  onSelect={onSelectModel}
+                  switchingModel={switchingModel}
+                  onSelectModel={onSelectModel}
                   onWillOpen={onRefreshModelCards}
                   onAddModels={() => {
                     window.dispatchEvent(new CustomEvent('switchView', { detail: 'models' }));
                   }}
+                  effort={reasoningEffort}
+                  onEffortChange={onEffortChange}
+                  showEffort={showEffort}
+                  deepseekStyle={effortDeepseekish}
                 />
-                {(() => {
-                  const selected =
-                    (currentCardName && modelCards.find((c) => c.name === currentCardName)) ||
-                    (modelName && modelCards.find((c) => c.model_name === modelName)) ||
-                    null;
-                  if (!selected?.is_think) return null;
-                  const deepseekish = /deepseek/i.test(
-                    `${selected.model_name || ''} ${selected.base_url || ''} ${selected.name || ''}`,
-                  );
-                  return (
-                    <EffortPicker
-                      effort={reasoningEffort}
-                      deepseekStyle={deepseekish}
-                      disabled={disabled || switchingModel}
-                      onSelect={onEffortChange}
-                    />
-                  );
-                })()}
                 {voiceEnabled && (voiceCapture.recording || sttDictating) ? (
                   <VoiceRecordPill
                     durationSec={voiceCapture.durationSec}
@@ -964,26 +1039,9 @@ export const AgentWebComposer = forwardRef<AgentWebComposerHandle, AgentWebCompo
                     ) : null}
                   </button>
                 ) : null}
-                {busy ? (
-                  <button
-                    type="button"
-                    onClick={onStop}
-                    className="w-8 h-8 rounded-full bg-red-500 hover:bg-red-600 transition-colors flex items-center justify-center border-0 cursor-pointer"
-                    title="Stop"
-                  >
-                    <Square size={14} className="text-white" />
-                  </button>
-                ) : (
-                  <button
-                    type="button"
-                    onClick={() => void submit()}
-                    disabled={!canSend}
-                    className="w-8 h-8 rounded-full bg-primary hover:bg-primary/90 transition-colors flex items-center justify-center disabled:opacity-50 disabled:cursor-not-allowed border-0 cursor-pointer"
-                    title="Send"
-                  >
-                    <Send size={14} className="text-white" />
-                  </button>
-                )}
+                {/* Desktop copy of Send/Stop; the narrow-viewport copy lives in
+                    the input row, so exactly one is ever visible. */}
+                <div className="max-md:hidden">{sendOrStop}</div>
               </div>
             </div>
           </div>

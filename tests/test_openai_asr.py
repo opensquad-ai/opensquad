@@ -176,3 +176,162 @@ def test_ensure_builtin_model_cards(tmp_path):
     copied2 = ensure_builtin_model_cards(workspace_path=str(ws), install_dir=str(install))
     assert copied2 == []
     assert '"user-edited"' in dst.read_text(encoding="utf-8")
+
+
+# ---------------------------------------------------------------------------
+# Group-chat ASR must resolve to the BUILT-IN local service, never a cloud card
+# ---------------------------------------------------------------------------
+
+_CLOUD_ASR_CARD = {
+    "base_url": "https://api.stepfun.com/step_plan/v1",
+    "model_name": "stepaudio-2.5-asr",
+    "group_asr": True,
+}
+_SENSEVOICE_CARD = {
+    "builtin_service": "sensevoice",
+    "asr_protocol": "openai_transcriptions",
+    "model_name": "sensevoice-small",
+}
+_WHISPER_CARD = {
+    "builtin_service": "whisper",
+    "asr_protocol": "openai_transcriptions",
+    "model_name": "base",
+}
+
+
+def _write_cards(cards_dir, cards: dict) -> str:
+    """Materialise {name: fields} as model-card JSON files; return the dir path."""
+    import json
+
+    for name, fields in cards.items():
+        (cards_dir / f"{name}.json").write_text(json.dumps({"name": name, **fields}), encoding="utf-8")
+    return str(cards_dir)
+
+
+def _resolve_with(cards_dir: str, *, enabled=lambda _svc: True):
+    """Run resolve_group_asr_card() against a single-card-dir workspace."""
+    from opensquad.audio import resolve_group_asr_card
+
+    with (
+        patch("opensquad.audio.syscfg.workspace_model_cards_dir", return_value=cards_dir),
+        patch("opensquad.audio.syscfg.resource_search_dirs", return_value=[cards_dir]),
+        patch("opensquad.audio.syscfg.is_service_enabled", side_effect=enabled),
+    ):
+        return resolve_group_asr_card()
+
+
+def test_group_asr_prefers_builtin_over_flagged_cloud_card(tmp_path):
+    """Regression: a cloud card flagged ``group_asr`` must not capture group voice input.
+
+    ``stepaudio-2.5-asr`` was flagged group_asr=true and pointed at StepFun, whose
+    API answers ``404 model_invalid`` — surfacing to every group member as
+    "Group transcribe failed: 502 ... ASR HTTP 404".  The built-in local ASR must win.
+    """
+    cards = tmp_path / "model_cards"
+    cards.mkdir()
+    dirpath = _write_cards(
+        cards,
+        {
+            "builtin-sensevoice-asr": _SENSEVOICE_CARD,
+            "stepaudio-2.5-asr": _CLOUD_ASR_CARD,
+        },
+    )
+
+    card = _resolve_with(dirpath)
+
+    assert card is not None
+    assert card["_card"] == "builtin-sensevoice-asr"
+    assert card.get("builtin_service") == "sensevoice"
+    assert asr_protocol_of(card) == "openai_transcriptions"
+
+
+def test_group_asr_prefers_builtin_even_when_cloud_card_sorts_first(tmp_path):
+    """Name order must not decide it — the built-in wins regardless of alphabetics."""
+    cards = tmp_path / "model_cards"
+    cards.mkdir()
+    dirpath = _write_cards(
+        cards,
+        {
+            "aaa-cloud-asr": _CLOUD_ASR_CARD,  # sorts before every builtin
+            "builtin-whisper-asr": _WHISPER_CARD,
+        },
+    )
+
+    card = _resolve_with(dirpath)
+
+    assert card is not None
+    assert card["_card"] == "builtin-whisper-asr"
+
+
+def test_group_asr_prefers_enabled_builtin_service(tmp_path):
+    """Between builtins, the service enabled in system_config wins over the fixed order."""
+    cards = tmp_path / "model_cards"
+    cards.mkdir()
+    dirpath = _write_cards(
+        cards,
+        {"builtin-sensevoice-asr": _SENSEVOICE_CARD, "builtin-whisper-asr": _WHISPER_CARD},
+    )
+
+    card = _resolve_with(dirpath, enabled=lambda svc: svc == "whisper")
+
+    assert card is not None
+    assert card["_card"] == "builtin-whisper-asr"
+
+
+def test_group_asr_defaults_to_sensevoice_when_both_enabled(tmp_path):
+    cards = tmp_path / "model_cards"
+    cards.mkdir()
+    dirpath = _write_cards(
+        cards,
+        {"builtin-sensevoice-asr": _SENSEVOICE_CARD, "builtin-whisper-asr": _WHISPER_CARD},
+    )
+
+    card = _resolve_with(dirpath)
+
+    assert card is not None
+    assert card["_card"] == "builtin-sensevoice-asr"
+
+
+def test_group_asr_falls_back_to_flagged_card_without_builtin(tmp_path):
+    """An install shipping no built-in ASR card still gets the legacy behaviour."""
+    cards = tmp_path / "model_cards"
+    cards.mkdir()
+    dirpath = _write_cards(cards, {"stepaudio-2.5-asr": _CLOUD_ASR_CARD})
+
+    card = _resolve_with(dirpath)
+
+    assert card is not None
+    assert card["_card"] == "stepaudio-2.5-asr"
+
+
+def test_group_asr_returns_none_when_unavailable(tmp_path):
+    """Nothing built in and nothing flagged ⇒ caller tells the user to enable the service."""
+    cards = tmp_path / "model_cards"
+    cards.mkdir()
+    dirpath = _write_cards(cards, {"gpt-5": {"is_image": False}})
+
+    assert _resolve_with(dirpath) is None
+
+
+def test_transcribe_file_disables_proxy_env_for_loopback(tmp_path):
+    """Built-in ASR is a loopback service: an ambient HTTP_PROXY must not hijack it."""
+    audio = tmp_path / "sample.wav"
+    audio.write_bytes(b"RIFF" + b"\x00" * 100)
+
+    mock_resp = MagicMock()
+    mock_resp.status_code = 200
+    mock_resp.json.return_value = {"text": "hi"}
+
+    mock_client = MagicMock()
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=None)
+    mock_client.post = AsyncMock(return_value=mock_resp)
+
+    async def _run(base_url):
+        with patch("opensquad.audio.openai_asr.httpx.AsyncClient", return_value=mock_client) as mock_cls:
+            await transcribe_file(api_key="sk-local", base_url=base_url, model="base", audio_path=str(audio))
+            return mock_cls.call_args.kwargs["trust_env"]
+
+    assert asyncio.run(_run("http://127.0.0.1:7101/v1")) is False
+    # A cloud endpoint must keep the ambient proxy: some deployments require it.
+    assert asyncio.run(_run("https://api.stepfun.com/step_plan/v1")) is True

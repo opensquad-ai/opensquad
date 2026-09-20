@@ -21,6 +21,9 @@
  *   T4  the next live body starts re-armed at the bottom;
  *   T5  `FollowScrollBox` reports stick state on *edges only* — one event per
  *       crossing, not one per scroll frame (the parent `setState`s).
+ *   T6  once the live body actually overflows (scrollbar present), the
+ *       bottom-only tail upgrades to the both-edge `os-thought-drift` mask;
+ *       a body that still fits keeps the bottom-only tail.
  *
  * Written with `React.createElement`: the vitest `include` glob is
  * `**\/*.test.ts`, so this file must not be `.tsx`.
@@ -76,6 +79,9 @@ const scroll = (el: HTMLElement) => {
 };
 
 const hasTail = (el: HTMLElement) => el.classList.contains('os-thought-tail');
+// A live body carries exactly ONE edge mask: bottom-only tail while it still
+// fits, both-edge drift once it overflows (scrollable). Reading mode drops both.
+const hasEdgeMask = (el: HTMLElement) => hasTail(el) || el.classList.contains('os-thought-drift');
 
 beforeEach(() => {
   globalThis.IS_REACT_ACT_ENVIRONMENT = true;
@@ -140,18 +146,18 @@ describe('T3 — reading mode drops the tail', () => {
     const el = renderBody({ softEdge: true, follow: true });
     setMetrics(el, 1000, 200, 0);
     scroll(el);
-    expect(hasTail(el)).toBe(false);
+    expect(hasEdgeMask(el)).toBe(false);
 
     setMetrics(el, 1000, 200, 800);
     scroll(el);
-    expect(hasTail(el)).toBe(true);
+    expect(hasEdgeMask(el)).toBe(true);
   });
 
   it('staying near the bottom keeps it (48px tolerance)', () => {
     const el = renderBody({ softEdge: true, follow: true });
     setMetrics(el, 1000, 200, 770);
     scroll(el);
-    expect(hasTail(el)).toBe(true);
+    expect(hasEdgeMask(el)).toBe(true);
   });
 });
 
@@ -166,7 +172,48 @@ describe('T4 — the next live body is re-armed', () => {
     renderBody({ softEdge: false, follow: false });
     const el2 = renderBody({ softEdge: true, follow: true });
 
-    expect(hasTail(el2)).toBe(true);
+    expect(hasEdgeMask(el2)).toBe(true);
+  });
+});
+
+describe('T6 — a long live body drifts past both edges', () => {
+  const hasDrift = (el: HTMLElement) => el.classList.contains('os-thought-drift');
+
+  it('overflowing body upgrades the tail to the both-edge drift mask', () => {
+    const el = renderBody({ softEdge: true, follow: true });
+    expect(hasTail(el)).toBe(true);
+    expect(hasDrift(el)).toBe(false);
+
+    // Content now overflows the capped box (scrollbar present)…
+    setMetrics(el, 1000, 200, 800);
+    scroll(el);
+
+    expect(hasDrift(el)).toBe(true);
+    // drift replaces the bottom-only tail — one mask per element
+    expect(hasTail(el)).toBe(false);
+  });
+
+  it('a body that still fits keeps the bottom-only tail', () => {
+    const el = renderBody({ softEdge: true, follow: true });
+    setMetrics(el, 200, 200, 0);
+    scroll(el);
+
+    expect(hasDrift(el)).toBe(false);
+    expect(hasTail(el)).toBe(true);
+  });
+
+  it('reading mode drops the drift mask too', () => {
+    const el = renderBody({ softEdge: true, follow: true });
+    setMetrics(el, 1000, 200, 800);
+    scroll(el);
+    expect(hasDrift(el)).toBe(true);
+
+    // Reader scrolls up — far from the bottom.
+    setMetrics(el, 1000, 200, 0);
+    scroll(el);
+
+    expect(hasDrift(el)).toBe(false);
+    expect(hasTail(el)).toBe(false);
   });
 });
 

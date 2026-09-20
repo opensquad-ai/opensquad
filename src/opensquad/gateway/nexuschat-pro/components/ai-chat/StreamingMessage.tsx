@@ -12,6 +12,8 @@ interface StreamingMessageProps {
   /** Kept for API compatibility; both modes render as document stream. */
   variant?: 'classic' | 'solo';
   senderName?: string;
+  /** Suppress the name line entirely (no "Agent" fallback). See MessageBubble. */
+  hideSenderLabel?: boolean;
 }
 
 /** Render fenced markdown with a safe fallback to escaped raw text. */
@@ -28,6 +30,7 @@ export const StreamingMessage: React.FC<StreamingMessageProps> = ({
   content,
   isComplete,
   senderName,
+  hideSenderLabel,
 }) => {
   const visibleContent = useMemo(() => {
     if (!content) return '';
@@ -99,9 +102,11 @@ export const StreamingMessage: React.FC<StreamingMessageProps> = ({
 
   return (
     <div className="mb-6 w-full">
-      <div className="text-[11px] font-medium text-textMuted/70 mb-2">
-        {senderName || 'Agent'}
-      </div>
+      {!hideSenderLabel && (
+        <div className="text-[11px] font-medium text-textMuted/70 mb-2">
+          {senderName || 'Agent'}
+        </div>
+      )}
       {/* Cap in-progress stream height so live tool rows above the footer stay on screen. */}
       {isComplete ? (
         body

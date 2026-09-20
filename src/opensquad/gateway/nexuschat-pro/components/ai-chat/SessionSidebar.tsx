@@ -765,16 +765,20 @@ const SessionSidebarInner: React.FC<SessionSidebarProps> = ({
             type="button"
             aria-label={t('aiChat.sessionSidebar.markSession')}
             title={t('aiChat.sessionSidebar.markSession')}
-            className={`w-3.5 h-3.5 rounded-full border shrink-0 transition-colors ${
-              marked
-                ? 'bg-textMuted border-textMuted'
-                : 'bg-transparent border-border hover:border-textMuted/70'
-            }`}
+            className="w-3 h-3 rounded-full shrink-0 flex items-center justify-center bg-black/[0.07] dark:bg-white/[0.09] shadow-[inset_1px_1px_2px_rgba(0,0,0,0.16),inset_-1px_-1px_1px_rgba(255,255,255,0.75)] dark:shadow-[inset_1px_1px_2px_rgba(0,0,0,0.6),inset_-1px_-1px_1px_rgba(255,255,255,0.07)] transition-shadow"
             onClick={(e) => {
               e.stopPropagation();
               toggleSelect(session.id);
             }}
-          />
+          >
+            <span
+              className={`w-1.5 h-1.5 rounded-full transition-all ${
+                marked
+                  ? 'bg-primary shadow-[0.5px_0.5px_1px_rgba(0,0,0,0.45)] dark:shadow-[0.5px_0.5px_1px_rgba(0,0,0,0.8)]'
+                  : 'bg-transparent group-hover:bg-primary/25'
+              }`}
+            />
+          </button>
         ) : (
           <span
             className={`w-1.5 h-1.5 rounded-full shrink-0 ${

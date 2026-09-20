@@ -186,6 +186,13 @@
   },
   "agentManager": {
     "title": "AI Agent Manager",
+    "avatarUpload": "Upload a custom avatar",
+    "avatarUploaded": "{{name}}'s avatar was updated ({{groups}} group chat(s) synced)",
+    "avatarUploadFailed": "Could not update the avatar",
+    "avatarTooLarge": "Image is too large ({{size}} KB; limit 2048 KB)",
+    "avatarBadType": "Pick a PNG / JPEG / WebP / GIF image",
+    "avatarResetHint": "Reset to the default avatar",
+    "avatarReset": "{{name}} is back to the default avatar",
     "layoutGrid": "Card layout",
     "layoutList": "List layout",
     "noDescription": "No description",
@@ -376,7 +383,12 @@
     "restartFailedMsg": "Restart failed: {{error}}",
     "saveAndRestart": "Save & Restart",
     "saveAndRestartFailedMsg": "Save and restart failed: {{error}}",
-    "portChangedRestartHint": "Port changed — restart the service to apply"
+    "portChangedRestartHint": "Port changed — restart the service to apply",
+    "uninstallServiceTitle": "Uninstall Service",
+    "uninstallServiceWarning": "Uninstalling removes the plugin directory that owns this service and clears its configuration. The service disappears from this list and can no longer be started.",
+    "uninstallServiceStopsHint": "This service is running and will be stopped before it is uninstalled.",
+    "uninstallShort": "Uninstall",
+    "noServices": "No services configured"
   },
   "pluginMarket": {
     "title": "Plugins",
@@ -1593,23 +1605,23 @@
         "desc": "Generate a soft palette on each click"
       },
       "inkGreen": {
-        "name": "Ink Green",
+        "name": "Pine Ink",
         "desc": "Classic deep green with warm beige surfaces"
       },
       "lakeBlue": {
-        "name": "Lake Blue",
+        "name": "Lake Light",
         "desc": "Restrained neutrals with a calm lake-blue accent"
       },
       "minimal": {
-        "name": "Minimal",
+        "name": "Still Blue",
         "desc": "Clean professional deep-blue style"
       },
       "violet": {
-        "name": "Violet",
+        "name": "Violet Haze",
         "desc": "Soft muted violet, refined and quiet"
       },
       "luxury": {
-        "name": "Luxury",
+        "name": "Gilded",
         "desc": "Steady gold-brown, understated elegance"
       },
       "rose": {

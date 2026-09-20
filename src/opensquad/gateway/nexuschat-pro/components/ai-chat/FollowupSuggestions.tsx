@@ -3,12 +3,17 @@
  *
  * The agent calls `followup_tools__suggest_followups` once at the end of its
  * tool flow; the Gateway forwards the `suggest_followups` info event and we
- * render 1–3 light-theme chips in the composer's approval slot (i.e. directly
- * under the agent's final answer). Tapping one sends that text verbatim as the
- * user's next message.
+ * render 1–3 light-theme chips at the TAIL of the transcript — i.e. directly
+ * below the agent's final answer, as the last element inside the scroll
+ * container (`ChatTimeline` `footer`). Never above the composer: an offer that
+ * floats over the input box reads as part of the input, not as the end of the
+ * answer. Tapping a chip sends that text verbatim as the user's next message.
  *
  * Unlike OptionsApprovalCard this is **non-blocking** — there is nothing to
  * resolve and no WS round-trip; the agent never waits.
+ *
+ * Placement is load-bearing and locked by `utils/followupSuggestions.scan.test.ts`
+ * R7/R11: the composer `approvalPanel` must not render these chips again.
  */
 import React from 'react';
 import { ArrowRight } from 'lucide-react';

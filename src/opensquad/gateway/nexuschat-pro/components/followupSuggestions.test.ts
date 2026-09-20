@@ -64,7 +64,7 @@ describe('FollowupSuggestions — rendering', () => {
     expect(container.querySelector('[data-testid="followup-suggestions"]')).not.toBeNull();
   });
 
-  it('renders nothing for an empty list (the composer slot collapses)', () => {
+  it('renders nothing for an empty list (the tail slot collapses)', () => {
     render(React.createElement(FollowupSuggestions, { suggestions: [], onPick: () => {} }));
     expect(container.querySelector('[data-testid="followup-suggestions"]')).toBeNull();
     expect(chips()).toHaveLength(0);

@@ -436,6 +436,11 @@ class BaseHandlerMixin:
             name = path.split("/")[3]
             body = self._read_body()
             return self._handle_put_config(name, body)
+        elif path.startswith("/api/agents/") and path.endswith("/profile"):
+            # PUT /api/agents/{name}/profile — group-chat profile (avatar).
+            name = path.split("/")[3]
+            body = self._read_body()
+            return self._handle_put_agent_profile(name, body)
         elif path.startswith("/api/agents/") and path.endswith("/role"):
             name = path.split("/")[3]
             body = self._read_body()

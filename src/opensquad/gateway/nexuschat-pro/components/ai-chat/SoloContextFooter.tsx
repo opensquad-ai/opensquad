@@ -133,6 +133,8 @@ export const SoloContextFooter: React.FC<SoloContextFooterProps> = ({
   const [cwdOpen, setCwdOpen] = useState(false);
   const [recents, setRecents] = useState<string[]>(() => loadCwdRecents());
   const [picking, setPicking] = useState(false);
+  const [copied, setCopied] = useState(false);
+  const copiedTimer = useRef<number | null>(null);
   const cwdRootRef = useRef<HTMLDivElement>(null);
 
   const used = tokenStats?.used ?? 0;
@@ -183,6 +185,29 @@ export const SoloContextFooter: React.FC<SoloContextFooterProps> = ({
     setRecents(pushCwdRecent(trimmed));
     setCwdOpen(false);
     await onSelectCwd(trimmed);
+  };
+
+  // 会话进行中（locked）路径为只读，点击复制绝对路径并短暂提示
+  const copyCwd = async () => {
+    if (!cwd) return;
+    try {
+      await navigator.clipboard.writeText(cwd);
+    } catch {
+      const ta = document.createElement('textarea');
+      ta.value = cwd;
+      ta.style.position = 'fixed';
+      ta.style.opacity = '0';
+      document.body.appendChild(ta);
+      ta.select();
+      try {
+        document.execCommand('copy');
+      } finally {
+        document.body.removeChild(ta);
+      }
+    }
+    setCopied(true);
+    if (copiedTimer.current) window.clearTimeout(copiedTimer.current);
+    copiedTimer.current = window.setTimeout(() => setCopied(false), 1500);
   };
 
   const handleOpenFolder = async () => {
@@ -355,13 +380,16 @@ export const SoloContextFooter: React.FC<SoloContextFooterProps> = ({
           <button
             type="button"
             onClick={() => {
-              if (!canPick) return;
-              setTokenOpen(false);
-              setCwdOpen((v) => !v);
+              if (canPick) {
+                // 新会话（未锁定）：点击仍打开目录选择弹层
+                setTokenOpen(false);
+                setCwdOpen((v) => !v);
+                return;
+              }
+              void copyCwd();
             }}
-            disabled={!canPick}
             className={`flex items-center gap-1 min-w-0 text-left border-0 bg-transparent p-0 group ${
-              canPick ? 'cursor-pointer' : 'cursor-default'
+              canPick || cwd ? 'cursor-pointer' : 'cursor-default'
             }`}
             title={cwd || 'Select project folder'}
           >
@@ -376,6 +404,17 @@ export const SoloContextFooter: React.FC<SoloContextFooterProps> = ({
               />
             )}
           </button>
+
+          {/* 复制成功提示：短暂显示后自动消失 */}
+          {copied && (
+            <div
+              className="absolute bottom-[calc(100%+6px)] left-0 z-50 flex items-center gap-1 rounded-md px-2 py-1 text-[11px] font-medium
+                bg-black/80 text-white dark:bg-white/90 dark:text-black shadow-lg pointer-events-none"
+            >
+              <Check size={11} />
+              <span>{t('common.copied', { defaultValue: '已复制' })}</span>
+            </div>
+          )}
 
           {cwdOpen && canPick && (
             <div className={`absolute bottom-[calc(100%+8px)] left-0 z-50 w-[min(420px,calc(100vw-2rem))] rounded-xl border border-border ${POPOVER_SURFACE_CLASS} overflow-hidden`}>

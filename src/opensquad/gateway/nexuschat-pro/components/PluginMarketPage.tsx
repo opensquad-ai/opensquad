@@ -221,7 +221,7 @@ const PluginCard: React.FC<PluginCardProps> = ({ plugin, installed, liked, onLik
         </div>
       </div>
       <div className="flex flex-col gap-1 flex-1 min-h-0">
-        <span className="font-bold text-textMain text-sm leading-tight line-clamp-1">{displayName}</span>
+        <span className="font-bold text-textMain text-sm leading-tight line-clamp-1" title={displayName}>{displayName}</span>
         <div className="text-[10px] text-textMuted">
           {plugin.author} · v{plugin.version}
         </div>

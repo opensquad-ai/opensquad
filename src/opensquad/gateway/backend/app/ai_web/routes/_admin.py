@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import json
 import logging
 import os
@@ -643,7 +644,261 @@ async def admin_update_config(name: str, body: dict = Body(...), current_user: U
     return result
 
 
-@admin_router.get("/admin/agents/{name}/role")
+# ============================================================
+# Agent avatars — custom upload / reset
+# ============================================================
+# A custom avatar is a real file under the workspace uploads dir, so the same
+# StaticFiles("/uploads") mount already used for chat attachments serves it:
+# one URL, one origin, no CDN, and no data-URI bloat in profile.json or in the
+# group-chat users row.
+_AVATAR_SUBDIR = "agent-avatars"
+_AVATAR_MAX_BYTES = 2 * 1024 * 1024
+# Content -> extension. The declared filename and MIME type are never trusted:
+# the stored extension comes from the bytes, so a ".png" that is really an SVG
+# (scriptable) cannot be walked into the served directory.
+_AVATAR_MAGIC: tuple[tuple[bytes, str], ...] = (
+    (b"\x89PNG\r\n\x1a\n", ".png"),
+    (b"\xff\xd8\xff", ".jpg"),
+    (b"GIF87a", ".gif"),
+    (b"GIF89a", ".gif"),
+)
+
+
+def _avatar_slug(name: str) -> str:
+    """Agent dir/id -> filename-safe slug ("" when nothing usable survives)."""
+    return re.sub(r"[^A-Za-z0-9_-]+", "-", name or "").strip("-").lower()[:64]
+
+
+def _agent_avatar_dir(slug: str) -> str:
+    """Per-agent avatar directory — cleanup can never reach another agent's file."""
+    return os.path.join(syscfg.workspace_uploads_dir(), _AVATAR_SUBDIR, slug)
+
+
+def _sniff_image_extension(blob: bytes) -> str | None:
+    """Extension implied by the content, or None when it is not a still image."""
+    for magic, ext in _AVATAR_MAGIC:
+        if blob.startswith(magic):
+            return ext
+    if len(blob) >= 12 and blob[:4] == b"RIFF" and blob[8:12] == b"WEBP":
+        return ".webp"
+    return None
+
+
+def _decode_avatar_payload(body: dict) -> bytes:
+    """Validate an upload body and return the image bytes.
+
+    Raises HTTPException whose detail is shown to the user verbatim, so it has
+    to say what is wrong rather than where it was detected.
+    """
+    if not isinstance(body, dict):
+        raise HTTPException(400, "Avatar upload body must be an object")
+    encoded = body.get("content")
+    if not isinstance(encoded, str) or not encoded.strip():
+        raise HTTPException(400, "Missing 'content' (base64 image) in body")
+    # Accept a pasted data-URI as well as the bare base64 the UI sends.
+    if encoded.startswith("data:"):
+        encoded = encoded.split(",", 1)[-1]
+    try:
+        blob = base64.b64decode(encoded, validate=True)
+    except Exception:
+        raise HTTPException(400, "Avatar is not valid base64 image data") from None
+    if not blob:
+        raise HTTPException(400, "Avatar is empty")
+    if len(blob) > _AVATAR_MAX_BYTES:
+        raise HTTPException(
+            400,
+            f"Avatar is too large ({len(blob) // 1024} KB; limit {_AVATAR_MAX_BYTES // 1024} KB)",
+        )
+    if _sniff_image_extension(blob) is None:
+        raise HTTPException(400, "Unsupported image format (use PNG, JPEG, WebP or GIF)")
+    return blob
+
+
+def _prune_agent_avatars(slug: str, keep: str = "") -> None:
+    """Drop this agent's previous avatar files; never leaves orphans behind."""
+    directory = _agent_avatar_dir(slug)
+    if not os.path.isdir(directory):
+        return
+    for entry in os.listdir(directory):
+        if entry == keep:
+            continue
+        try:
+            os.remove(os.path.join(directory, entry))
+        except OSError:
+            logger.debug("[admin] could not remove stale avatar %s/%s", slug, entry)
+
+
+async def _agent_chat_identity(name: str) -> dict:
+    """Resolve an agent dir name to its group-chat account and groups.
+
+    Read-only on purpose: changing an avatar must never provision a chat account
+    as a side effect — an agent with no account simply has nothing to sync, and
+    the avatar still lands in profile.json.
+    """
+    agent_id, email = "", ""
+    try:
+        data = await _proxy_get(f"/api/agents/{name}/config")
+        cfg = data.get("config") if isinstance(data, dict) else None
+        if not isinstance(cfg, dict):
+            cfg = data if isinstance(data, dict) else {}
+        group_cfg = cfg.get("group_chat") or {}
+        if not isinstance(group_cfg, dict):
+            group_cfg = {}
+        agent_id = str(cfg.get("agent_id") or "")
+        email = str(group_cfg.get("email") or "").strip()
+    except Exception:
+        logger.debug("[admin] no launcher identity for %s", name, exc_info=True)
+
+    identity = {"agent_id": agent_id, "email": email, "chat_user_id": "", "group_ids": []}
+    try:
+        from sqlalchemy import select
+
+        from app.auth import get_user_by_email, get_user_by_id
+        from app.database import AsyncSessionLocal
+        from app.models import group_members
+
+        async with AsyncSessionLocal() as db:
+            user = await get_user_by_id(db, agent_id) if agent_id else None
+            if user is None and email:
+                user = await get_user_by_email(db, email)
+            if user is not None:
+                identity["chat_user_id"] = str(user.id)
+                rows = await db.execute(select(group_members.c.group_id).where(group_members.c.user_id == user.id))
+                identity["group_ids"] = [str(row[0]) for row in rows.all()]
+    except Exception:
+        logger.warning("[admin] could not resolve chat account for %s", name, exc_info=True)
+    return identity
+
+
+async def _store_agent_chat_avatar(identity: dict, avatar: str) -> bool:
+    """Write User.avatar for the agent's chat account. True when it changed."""
+    chat_user_id = identity.get("chat_user_id") or ""
+    if not chat_user_id:
+        return False
+    try:
+        from app.auth import get_user_by_id
+        from app.database import AsyncSessionLocal
+
+        async with AsyncSessionLocal() as db:
+            user = await get_user_by_id(db, chat_user_id)
+            if user is None or (user.avatar or "") == avatar:
+                return False
+            user.avatar = avatar
+            await db.commit()
+            return True
+    except Exception:
+        logger.warning("[admin] group-chat avatar sync failed for user %s", chat_user_id, exc_info=True)
+        return False
+
+
+async def _notify_avatar_change(identity: dict, avatar: str) -> int:
+    """Push the new avatar to the groups the agent is already visible in.
+
+    The open panes render member avatars from the user map they loaded with the
+    group, so without this the picture only appears after a reload.
+    """
+    chat_user_id = identity.get("chat_user_id") or ""
+    group_ids = identity.get("group_ids") or []
+    if not chat_user_id or not group_ids:
+        return 0
+    try:
+        from app.websocket import manager as ws_manager
+
+        for group_id in group_ids:
+            await ws_manager.broadcast_to_group(
+                group_id,
+                {"type": "user_updated", "data": {"user_id": chat_user_id, "avatar": avatar}},
+            )
+        return len(group_ids)
+    except Exception:
+        logger.debug("[admin] avatar broadcast skipped", exc_info=True)
+        return 0
+
+
+async def _write_agent_profile(name: str, avatar: str) -> dict:
+    """Persist the avatar into the agent's profile.json (launcher owns the file)."""
+    result = await _proxy_put(f"/api/agents/{name}/profile", {"avatar": avatar})
+    if isinstance(result, dict) and isinstance(result.get("profile"), dict):
+        return result["profile"]
+    return {}
+
+
+@admin_router.post("/admin/agents/{name}/avatar")
+async def admin_upload_agent_avatar(
+    name: str, body: dict = Body(...), current_user: User = Depends(get_current_user_dep)
+):
+    """Set a custom avatar for an agent.
+
+    Three stores have to change together or the avatar desyncs: the image file,
+    ``data/profile.json`` (which feeds GET /api/agents → Agent Workstation,
+    sidebar, nav shortcuts) and the group-chat user row (group member lists and
+    message avatars).
+
+    Body: ``{"filename": "a.png", "content": "<base64>"}`` — JSON rather than
+    multipart because apiRequest() always sends Content-Type: application/json,
+    and a browser cannot add the multipart boundary under that header.
+    """
+    blob = _decode_avatar_payload(body)
+    extension = _sniff_image_extension(blob)  # not None: validated above
+    slug = _avatar_slug(name)
+    if not slug:
+        raise HTTPException(400, f"Agent name {name!r} has no filename-safe characters")
+
+    directory = _agent_avatar_dir(slug)
+    os.makedirs(directory, exist_ok=True)
+    filename = f"{hashlib.sha1(blob).hexdigest()[:12]}{extension}"
+    await blocking_io.write_bytes(os.path.join(directory, filename), blob)
+    _prune_agent_avatars(slug, keep=filename)
+
+    avatar = f"/uploads/{_AVATAR_SUBDIR}/{slug}/{filename}"
+    profile = await _write_agent_profile(name, avatar)
+    identity = await _agent_chat_identity(name)
+    changed = await _store_agent_chat_avatar(identity, avatar)
+    notified = await _notify_avatar_change(identity, avatar) if changed else 0
+
+    logger.info("[admin] avatar set for %s -> %s (chat=%s, groups=%d)", name, avatar, bool(changed), notified)
+    return {
+        "ok": True,
+        "avatar": avatar,
+        "profile": profile,
+        "chat_user_id": identity.get("chat_user_id") or None,
+        "groups_notified": notified,
+    }
+
+
+@admin_router.delete("/admin/agents/{name}/avatar")
+async def admin_reset_agent_avatar(name: str, current_user: User = Depends(get_current_user_dep)):
+    """Drop the custom avatar and go back to the generated default.
+
+    The default is written out explicitly (a deterministic robot SVG seeded by
+    the chat account id — the same value the agent writes on boot) instead of
+    left empty: an empty value makes the two surfaces disagree, because the chat
+    backfills a bot face for empty agent avatars while the Agent Workstation
+    would draw its type icon.
+    """
+    slug = _avatar_slug(name)
+    if slug:
+        _prune_agent_avatars(slug)
+
+    identity = await _agent_chat_identity(name)
+    seed = identity.get("chat_user_id") or identity.get("agent_id") or name
+    from opensquad.avatar_utils import local_bot_avatar_data_uri
+
+    avatar = local_bot_avatar_data_uri(str(seed))
+    profile = await _write_agent_profile(name, avatar)
+    changed = await _store_agent_chat_avatar(identity, avatar)
+    notified = await _notify_avatar_change(identity, avatar) if changed else 0
+
+    logger.info("[admin] avatar reset for %s (chat=%s, groups=%d)", name, bool(changed), notified)
+    return {
+        "ok": True,
+        "avatar": avatar,
+        "profile": profile,
+        "chat_user_id": identity.get("chat_user_id") or None,
+        "groups_notified": notified,
+    }
+
+
 async def admin_get_role(name: str, current_user: User = Depends(get_current_user_dep)):
     """Get Agent's role.md"""
     return await _proxy_get(f"/api/agents/{name}/role")

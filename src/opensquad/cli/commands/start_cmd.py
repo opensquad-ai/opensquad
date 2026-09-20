@@ -11,6 +11,8 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 
+from opensquad.proc_text import native_text_kwargs, to_text, utf8_text_kwargs
+
 # Default Vite dev server port; can be overridden by system_config.json ports.frontend
 _DEFAULT_VITE_PORT = 5173
 
@@ -323,7 +325,7 @@ def _kill_port_owners(*ports: int) -> None:
             result = subprocess.run(
                 ["netstat", "-ano"],
                 capture_output=True,
-                text=True,
+                **native_text_kwargs(),
                 timeout=8,
             )
             for line in result.stdout.splitlines():
@@ -357,7 +359,7 @@ def _kill_port_owners(*ports: int) -> None:
             result = subprocess.run(
                 ["lsof", "-ti", f":{port}"],
                 capture_output=True,
-                text=True,
+                **native_text_kwargs(),
                 timeout=10,
             )
             for pid in result.stdout.strip().splitlines():
@@ -749,7 +751,8 @@ def run_start(args):
                     cwd=_root,
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.PIPE,
-                    text=True,
+                    # Child inherits PYTHONUTF8=1 (set in run_start) → emits UTF-8.
+                    **utf8_text_kwargs(),
                 )
                 _track("watchdog", wd_p)
                 print(f"[start] Watchdog started (PID {wd_p.pid})")
@@ -805,7 +808,11 @@ def run_start(args):
                     stderr_text = ""
                     try:
                         if hasattr(p, "stderr") and p.stderr:
-                            stderr_text = p.stderr.read().decode("utf-8", errors="replace").strip()
+                            # Children run with PYTHONUTF8=1 → stderr is UTF-8.
+                            # to_text() also copes with the bytes-mode processes
+                            # (gateway/registry/launcher), which previously made
+                            # this read raise AttributeError and hide the crash.
+                            stderr_text = to_text(p.stderr.read(), encoding="utf-8").strip()
                     except Exception:
                         pass
                     print(f"[start] {name} (PID {p.pid}) exited with code {rc}")

@@ -23,6 +23,8 @@ from typing import Any, Callable
 
 import httpx
 
+from opensquad.proc_text import native_text_kwargs
+
 
 def _port_open(host: str, port: int, timeout: float = 0.4) -> bool:
     try:
@@ -163,7 +165,7 @@ def _pid_on_port(port: int) -> int | None:
             result = subprocess.run(
                 ["netstat", "-ano"],
                 capture_output=True,
-                text=True,
+                **native_text_kwargs(),
                 timeout=8,
             )
             want = str(int(port))

@@ -4,6 +4,8 @@ import json
 import os
 import sys
 
+from opensquad.proc_text import to_text
+
 try:
     import httpx
 except ImportError:
@@ -287,7 +289,7 @@ def _install_from_git(plugins_dir, git_url, mode, plugin_id=None):
         try:
             subprocess.run(["git", "clone", "--depth", "1", git_url, tmpdir], check=True, capture_output=True)
         except subprocess.CalledProcessError as e:
-            print(f"[plugin] Error: Git clone failed: {e.stderr.decode()}", file=sys.stderr)
+            print(f"[plugin] Error: Git clone failed: {to_text(e.stderr, encoding='utf-8')}", file=sys.stderr)
             sys.exit(1)
         except FileNotFoundError:
             print("[plugin] Error: Git not found. Install git first.", file=sys.stderr)

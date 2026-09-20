@@ -855,33 +855,47 @@ function messageHasVisibleChat(m: any): boolean {
   return cleaned.length > 0;
 }
 
-/** Collapse refresh-split activity chunks so one turn stays one fold (scroll box). */
+/** Collapse refresh-split activity chunks so one turn stays one fold (scroll box).
+ *  'prompt' entries render as null at top level, so they must NOT split two
+ *  workflow blocks apart (otherwise each round renders as its own fold row). */
 export function mergeAdjacentWorkflowEntries(timeline: TimelineEntry[]): TimelineEntry[] {
   const out: TimelineEntry[] = [];
+  // Index (in `out`) of the most recent workflow entry. 'prompt' entries are
+  // transparent: they neither reset nor advance this pointer.
+  let lastWfOutIdx = -1;
   for (const entry of timeline) {
-    const prev = out[out.length - 1];
-    if (entry.kind === 'workflow' && prev?.kind === 'workflow') {
-      const a = prev.data;
-      const b = entry.data;
-      const events = [...a.events, ...b.events];
-      const completed = a.completed && b.completed && isWorkflowSettled(events);
-      const startedNums = [a.started_ms, b.started_ms].filter(
-        (n): n is number => typeof n === 'number',
-      );
-      const elapsedSum =
-        (typeof a.elapsed_ms === 'number' ? a.elapsed_ms : 0)
-        + (typeof b.elapsed_ms === 'number' ? b.elapsed_ms : 0);
-      out[out.length - 1] = {
-        ...prev,
-        data: {
-          events,
-          status: completed ? null : (b.status || a.status || 'working'),
-          completed,
-          started_ms: startedNums.length ? Math.min(...startedNums) : undefined,
-          elapsed_ms: completed && elapsedSum > 0 ? elapsedSum : undefined,
-        },
-      };
-      continue;
+    if (entry.kind === 'workflow' && lastWfOutIdx >= 0) {
+      const between = out.slice(lastWfOutIdx + 1);
+      if (between.every((e) => e.kind === 'prompt')) {
+        const a = (out[lastWfOutIdx] as Extract<TimelineEntry, { kind: 'workflow' }>).data;
+        const b = entry.data;
+        const events = [...a.events, ...b.events];
+        const completed = a.completed && b.completed && isWorkflowSettled(events);
+        const startedNums = [a.started_ms, b.started_ms].filter(
+          (n): n is number => typeof n === 'number',
+        );
+        const elapsedSum =
+          (typeof a.elapsed_ms === 'number' ? a.elapsed_ms : 0)
+          + (typeof b.elapsed_ms === 'number' ? b.elapsed_ms : 0);
+        out[lastWfOutIdx] = {
+          ...(out[lastWfOutIdx] as Extract<TimelineEntry, { kind: 'workflow' }>),
+          data: {
+            events,
+            status: completed ? null : (b.status || a.status || 'working'),
+            completed,
+            started_ms: startedNums.length ? Math.min(...startedNums) : undefined,
+            elapsed_ms: completed && elapsedSum > 0 ? elapsedSum : undefined,
+          },
+        } as Extract<TimelineEntry, { kind: 'workflow' }>;
+        continue;
+      }
+    }
+    if (entry.kind === 'workflow') {
+      lastWfOutIdx = out.length;
+    } else if (entry.kind !== 'prompt') {
+      // Any visible non-workflow entry (message, status_hint, fold…) ends the
+      // mergeable run.
+      lastWfOutIdx = -1;
     }
     out.push(entry);
   }
@@ -1301,22 +1315,91 @@ export function sealWorkflowsFollowedByMessages(timeline: TimelineEntry[]): Time
   return changed ? next : timeline;
 }
 
+/**
+ * 封口"过期"的未完成 workflow 块。
+ *
+ * appendWorkflowEvent / upsertPartialToolCall 只会把新事件追加进最后一个
+ * 未完成块；一旦块后出现了更新的 workflow 块或消息（阶段气泡未触发封口、
+ * 或刷新后时间线重排），前面的未完成块永远不会再收到事件。不封口的话，
+ * 块尾思考行会一直按墙钟计时（表现为"深度思考 17s"永不冻结）。
+ *
+ * 'prompt' / 'status_hint' / 'model_switch' / 归档折叠视为透明分隔物。
+ * 封口时用后续活动的起始时间作为块结束，使思考耗时冻结在真实值。
+ */
+export function sealStaleWorkflowBlocks(timeline: TimelineEntry[]): TimelineEntry[] {
+  let changed = false;
+  const out = timeline.map((entry, i) => {
+    if (entry.kind !== 'workflow' || entry.data.completed) return entry;
+    let endTs: number | undefined;
+    for (let j = i + 1; j < timeline.length; j++) {
+      const e = timeline[j];
+      if (
+        e.kind === 'prompt' ||
+        e.kind === 'status_hint' ||
+        e.kind === 'model_switch' ||
+        e.kind === 'archived_section' ||
+        e.kind === 'task_fold'
+      ) {
+        continue;
+      }
+      if (e.kind === 'workflow') {
+        const nextWf = (e as Extract<TimelineEntry, { kind: 'workflow' }>).data;
+        const first = nextWf.events[0]?.timestamp;
+        endTs = typeof first === 'number' ? first : nextWf.started_ms;
+      } else if (e.kind === 'message') {
+        const m = (e as Extract<TimelineEntry, { kind: 'message' }>).data;
+        const ts = m?.timestamp ? new Date(m.timestamp).getTime() : NaN;
+        endTs = Number.isNaN(ts) ? undefined : ts;
+      }
+      break;
+    }
+    if (endTs == null) return entry; // 后面没有实质活动 — 仍然存活，不封口
+    const wf = entry.data;
+    const start =
+      typeof wf.started_ms === 'number'
+        ? wf.started_ms
+        : wf.events[0]?.timestamp;
+    const elapsed =
+      typeof wf.elapsed_ms === 'number'
+        ? wf.elapsed_ms
+        : typeof start === 'number' && endTs > start
+          ? endTs - start
+          : undefined;
+    changed = true;
+    return {
+      ...entry,
+      data: {
+        ...wf,
+        completed: true,
+        status: null,
+        started_ms: typeof start === 'number' ? start : wf.started_ms,
+        elapsed_ms: elapsed,
+      },
+    } as TimelineEntry;
+  });
+  return changed ? out : timeline;
+}
+
 function appendNewIncompleteWorkflow(
   prev: TimelineEntry[],
   event: WorkflowEvent,
   status: string | null,
 ): TimelineEntry[] {
-  const sealed = sealWorkflowsFollowedByMessages(prev);
-  // 新块之前残留的 assistant 阶段性文本（to_user 已提交、随后才到工具事件）
-  // 降级为 'process_output'，挂到新块首，避免以普通气泡形式出现。
-  return demoteIntermediateAssistantMessages([
-    ...sealed,
+  // 新块出现后，之前的未完成块都成了"过期块"——封口并以后续活动起点为
+  // 块结束，冻结块尾思考耗时（须在 sealWorkflowsFollowedByMessages 之前，
+  // 后者只置 completed 不盖 elapsed 戳）。
+  const staleSealed = sealStaleWorkflowBlocks([
+    ...prev,
     {
       kind: 'workflow',
       data: { events: [{ ...event, _uid: genTimelineUID() }], status, completed: false },
       _uid: genTimelineUID(),
     },
   ]);
+  const sealed = sealWorkflowsFollowedByMessages(staleSealed);
+  // 残留的 assistant 阶段性文本（to_user 已提交、随后才到工具事件）
+  // 降级为 'process_output'，挂到新块首，避免以普通气泡形式出现。
+  return demoteIntermediateAssistantMessages(sealed);
 }
 
 /**
@@ -1698,7 +1781,8 @@ export function upsertPartialToolCall(
       ...entry,
       data: { ...wf, events: nextEvents, status: status ?? wf.status, completed: false },
     };
-    return updated;
+    // 目标块之前的未完成块已不会再收到事件 — 封口防止块尾思考永久计时。
+    return sealStaleWorkflowBlocks(updated);
   }
   events.push({ ...event, _uid: genTimelineUID() });
 
@@ -1706,7 +1790,7 @@ export function upsertPartialToolCall(
     ...entry,
     data: { ...wf, events, status: status ?? wf.status, completed: false },
   };
-  return updated;
+  return sealStaleWorkflowBlocks(updated);
 }
 
 /**
@@ -1757,7 +1841,8 @@ export function promotePartialToolCall(
     ...entry,
     data: { ...wf, events: nextEvents, status: status ?? wf.status, completed: false },
   };
-  return updated;
+  // 目标块之前的未完成块已不会再收到事件 — 封口防止块尾思考永久计时。
+  return sealStaleWorkflowBlocks(updated);
 }
 
 /** Pull replace_in_file UI context fields off a tool_result payload. */
@@ -2092,11 +2177,11 @@ export function appendWorkflowEvent(
       ...updated[targetIdx],
       data: { events: newEvents, status, completed: false },
     } as TimelineEntry;
+    // 目标块之前的未完成块已不会再收到事件 — 封口防止块尾思考永久计时。
+    return sealStaleWorkflowBlocks(updated);
   } else {
     return appendNewIncompleteWorkflow(updated, event, status);
   }
-
-  return updated;
 }
 
 export function appendWorkflowEvents(
@@ -2951,9 +3036,15 @@ export function buildTimelineFromSession(
   // Stopped turns have no turn_usage — fall back to the persisted turn_summary
   // elapsed so the 消耗 badge still shows the round duration.
   const summaryStamped = stampTurnSummaries(usageStamped, turnSummaryEvents);
-  const mergedTimeline = demoteIntermediateAssistantMessages(
-    mergeAdjacentWorkflowEntries(
-      mergeOrphanedToolResultsAcrossWorkflows(summaryStamped),
+  // Order matters: demote FIRST (moves interim texts into their workflow
+  // blocks), then merge — otherwise the not-yet-demoted message entries sit
+  // between blocks and block the merge, leaving one fold row per round.
+  // sealStale 封口"后面已有更新活动"的未完成块，冻结其块尾思考计时。
+  const mergedTimeline = mergeAdjacentWorkflowEntries(
+    demoteIntermediateAssistantMessages(
+      sealStaleWorkflowBlocks(
+        mergeOrphanedToolResultsAcrossWorkflows(summaryStamped),
+      ),
     ),
   );
 

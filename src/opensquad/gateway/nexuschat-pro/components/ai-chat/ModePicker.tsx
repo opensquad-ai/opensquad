@@ -7,7 +7,9 @@ import { POPOVER_SURFACE_CLASS, usePopMenuMounted } from './popoverSurface';
 
 export type AgentMode = 'plan' | 'build';
 
-const MODES: { id: AgentMode; label: string; hint: string }[] = [
+/** Exported so the narrow-viewport overflow menu (MobileComposerMenu) renders
+ *  the same options — a second copy would drift the moment one is edited. */
+export const MODES: { id: AgentMode; label: string; hint: string }[] = [
   { id: 'build', label: 'Build', hint: 'Edit files & run shell' },
   { id: 'plan', label: 'Plan', hint: 'Read-only explore & plan' },
 ];

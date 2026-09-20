@@ -115,12 +115,24 @@ describe('R2 — the ramp is smooth and readable', () => {
     expect(alphas[alphas.length - 1]).toBeLessThan(1);
   });
 
-  it('never erases the older text', () => {
+  it('the newest line dissolves into the mist — history stays solid above', () => {
+    // Design update (user-requested "fleeting thought" effect): the newest
+    // streaming line now fades to (near) 0 so text emerges from the bottom
+    // mist instead of merely dimming. History readability is still guaranteed
+    // by the solid region covering the box down past the halfway mark —
+    // asserted by "keeps the fade on the newest lines" (≥50%).
     const alphas = stops.map(([a]) => a);
     expect(
       alphas[alphas.length - 1],
-      'a tail that reaches 0 makes history unreadable rather than dimmed',
-    ).toBeGreaterThanOrEqual(0.4);
+      'the tail must actually dissolve the newest line (near-0), not just dim it',
+    ).toBeLessThanOrEqual(0.2);
+    // …and the dissolve must be gradual, never a hard cut from solid to 0.
+    const lastSolidIdx = alphas.lastIndexOf(1);
+    const partial = alphas.slice(lastSolidIdx + 1, -1).filter((a) => a > 0 && a < 1);
+    expect(
+      partial.length,
+      'a hard cut from solid to transparent reads as flicker, not mist',
+    ).toBeGreaterThanOrEqual(2);
   });
 
   it('keeps the fade on the newest lines, not on the whole box', () => {

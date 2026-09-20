@@ -1,6 +1,19 @@
+import { existsSync } from 'node:fs';
 import { describe, it, expect } from 'vitest';
 import { buildTimelineFromSession, demoteIntermediateAssistantMessages } from './aiChatTimeline';
 import { collectTurnChangedFilesBefore } from '../components/ai-chat/TurnChangedFilesCard';
+
+// The two `REAL ...` cases below are probes against samples captured from a
+// running deployment, not fixtures: one is a session history from the local
+// runtime dir, the other a gateway payload parked in `.tmpscratch/`. Both live
+// outside the repo (`.tmpscratch/` is gitignored), so on any other machine —
+// CI included — reading them is a guaranteed ENOENT and used to fail the whole
+// frontend job before `npm run build` ever ran. They are skipped unless the
+// sample is actually present, which keeps them useful on the box that captured
+// them without pretending they are portable.
+const REAL_SESSION_FILE =
+  'C:/ai_work/pro0/opensquad_runtime_deploy/agents/agent305/data/history/20260913_132459_nmgl.json';
+const REAL_PAGED_FILE = 'c:/ai_work/pro0/opensquad_deploy_test/.tmpscratch/paged_payload.json';
 
 describe('turn files card survives history reload', () => {
   it('collects changed files from a reloaded (persisted) turn', () => {
@@ -99,9 +112,9 @@ describe('turn files card survives history reload', () => {
     expect(files.length).toBe(1);
   });
 
-  it('REAL session: narcissistic turn from disk', () => {
+  it.skipIf(!existsSync(REAL_SESSION_FILE))('REAL session: narcissistic turn from disk', () => {
     const fs = require('fs');
-    const raw = fs.readFileSync('C:/ai_work/pro0/opensquad_runtime_deploy/agents/agent305/data/history/20260913_132459_nmgl.json', 'utf-8');
+    const raw = fs.readFileSync(REAL_SESSION_FILE, 'utf-8');
     const session = JSON.parse(raw);
     const tl = buildTimelineFromSession(session.messages, session.events, session.archived_messages, session.archived_events);
     console.log('REAL kinds:', tl.map((e) => e.kind).join(','));
@@ -116,9 +129,9 @@ describe('turn files card survives history reload', () => {
     expect(files.length).toBe(1);
   });
 
-  it('REAL paged payload from gateway', () => {
+  it.skipIf(!existsSync(REAL_PAGED_FILE))('REAL paged payload from gateway', () => {
     const fs = require('fs');
-    const session = JSON.parse(fs.readFileSync('c:/ai_work/pro0/opensquad_deploy_test/.tmpscratch/paged_payload.json', 'utf-8'));
+    const session = JSON.parse(fs.readFileSync(REAL_PAGED_FILE, 'utf-8'));
     const tl = buildTimelineFromSession(session.messages, session.events, session.archived_messages, session.archived_events);
     console.log('PAGED kinds:', tl.map((e) => e.kind).join(','));
     const idx = tl.findIndex((e) => e.kind === 'message' && (e.data as any).role === 'assistant' && String((e.data as any).content || '').includes('文件已创建并验证通过'));

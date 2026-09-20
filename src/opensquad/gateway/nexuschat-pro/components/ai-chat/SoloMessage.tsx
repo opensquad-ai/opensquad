@@ -9,6 +9,8 @@ interface SoloMessageProps {
   message: ChatMessage;
   isStreaming?: boolean;
   senderName?: string;
+  /** Suppress the name line entirely (no "Agent" fallback). See MessageBubble. */
+  hideSenderLabel?: boolean;
   senderAvatar?: string | null;
   /** DOM id fragment for user-message nav jump targets */
   anchorId?: string;

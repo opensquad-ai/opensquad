@@ -6,7 +6,9 @@
  *   tool (`suggest_followups`)  →  `info` bus event + session persist
  *                               →  WS broadcast whitelist (already has `info`)
  *                               →  hook consumes `event === 'suggest_followups'`
- *                               →  chips rendered in the composer slot
+ *                               →  chips rendered at the TAIL of the timeline
+ *                                  (ChatTimeline `footer`), never above the
+ *                                  composer
  *
  * The two silent failure modes this file exists for:
  *   1. the hook forgets to `return`, so the event *also* falls through and is
@@ -26,6 +28,9 @@
  *   MU9 send no longer consumes the offer (chip lingers)             → R9
  *   MU10 hydration stops understanding the round-start marker        → R10
  *   MU11 backend renames/reshapes the `Workflow started` marker      → R10
+ *   MU12 chips move back into the composer approvalPanel             → R7
+ *   MU13 the settle gate is dropped (chips flash over a live turn)   → R7
+ *   MU14 the tool_call branch stops retiring an armed offer          → R11
  */
 import fs from 'node:fs';
 import path from 'node:path';
@@ -215,10 +220,47 @@ describe('R6 — the tool is registered everywhere a core tool is', () => {
   });
 });
 
-describe('R7 — chips live in the composer slot and die with the turn', () => {
-  it('AIChatPage renders them through the composer approvalPanel', () => {
+describe('R7 — chips sit at the TAIL of the output, never above the composer', () => {
+  it('AIChatPage renders them (import + render)', () => {
     expect(PAGE).toMatch(/<FollowupSuggestions/);
     expect(PAGE).toMatch(/import \{ FollowupSuggestions/);
+  });
+
+  it('they render inside the timeline footer, not the composer approvalPanel', () => {
+    const renderAt = PAGE.indexOf('<FollowupSuggestions');
+    expect(renderAt).toBeGreaterThan(-1);
+    const timelineAt = PAGE.indexOf('<ChatTimeline');
+    expect(timelineAt).toBeGreaterThan(-1);
+    // The live timeline must exist before the chips, and the chips must sit
+    // after its `footer={(` slot opener — i.e. inside the scroll container,
+    // below every entry, not in the docked composer area.
+    expect(renderAt).toBeGreaterThan(timelineAt);
+    const footerAt = PAGE.indexOf('footer={(', timelineAt);
+    expect(footerAt).toBeGreaterThan(timelineAt);
+    expect(renderAt).toBeGreaterThan(footerAt);
+
+    // The composer slot must be clean again. `approvalPanel` is an arrow-IIFE,
+    // so slicing to its first `})()}` cannot escape it.
+    const apAt = PAGE.indexOf('approvalPanel={(() => {');
+    expect(apAt).toBeGreaterThan(-1);
+    const apEnd = PAGE.indexOf('})()}', apAt);
+    expect(apEnd).toBeGreaterThan(apAt);
+    const approvalPanel = PAGE.slice(apAt, apEnd);
+    // Assert the RENDER, not the bare name — a mention in a comment must not
+    // satisfy a guard whose whole point is "these chips are not rendered here".
+    expect(approvalPanel).not.toContain('<FollowupSuggestions');
+  });
+
+  it('they are held back until the turn settles (no mid-turn flash, nothing to remove by hand)', () => {
+    // The offer is emitted *before* the final answer streams, so rendering it
+    // unconditionally would float chips over a still-running turn. The gate is
+    // what makes「最终输出底部」true — and what makes new output retire them
+    // visually before the hook clears the state.
+    const at = PAGE.indexOf('<FollowupSuggestions');
+    const guard = PAGE.slice(Math.max(0, at - 700), at);
+    expect(guard).toMatch(/followupSuggestions\.length > 0/);
+    expect(guard).toMatch(/!displayStreamingText/);
+    expect(guard).toMatch(/!isSessionBusy\(currentSessionId\)/);
   });
 
   it('picking one sends the text as the next user message (the send funnel consumes it)', () => {
@@ -387,5 +429,50 @@ describe('R8 — chips stay in the footer-metadata weight class, not button-size
     expect(preset).toContain('px-2.5 py-1.5');
     expect(preset).toContain('rounded-lg');
     expect(preset).toContain('text-[12px]');
+  });
+});
+
+describe('R11 — a later tool flow retires the offer', () => {
+  /**
+   * The chips are anchored to the TAIL. `suggest_followups` is emitted *before*
+   * the final answer streams, so "anything newer arrived" cannot be decided by
+   * the offer's own emission — the hook instead remembers that a real
+   * `suggest_followups` payload armed the offer, and the next tool flow retires
+   * it. Without this, an agent that keeps working after offering leaves a stale
+   * offer sitting under completely different output.
+   */
+  it('the tool_call branch drops an armed offer', () => {
+    const at = HOOK.indexOf("onWs('tool_call'");
+    expect(at).toBeGreaterThan(-1);
+    const body = HOOK.slice(at, at + 1200);
+    expect(body).toMatch(/followupOfferArmedRef\.current/);
+    expect(body).toMatch(/setFollowupSuggestions\(\[\]\)/);
+  });
+
+  it('the follow-up tool itself is exempt (tool_call vs info order is not fixed)', () => {
+    // Exempting by name is what makes the rule order-independent: whether the
+    // `tool_call` frame for `suggest_followups` lands before or after its `info`
+    // payload, the offer it belongs to must survive.
+    // Assert the exemption EXPRESSION, not the word: the comment above it also
+    // names the tool, so a bare `/suggest_followups/` match would survive
+    // deleting the guard — a false negative.
+    const at = HOOK.indexOf("onWs('tool_call'");
+    const body = HOOK.slice(at, at + 1200);
+    expect(body).toMatch(/!\/suggest_followups\/\.test\(String\(toolName\)\)/);
+  });
+
+  it('the offer is armed by the real suggest_followups payload', () => {
+    const at = HOOK.indexOf("evt === 'suggest_followups'");
+    expect(at).toBeGreaterThan(-1);
+    const body = HOOK.slice(at, at + 500);
+    expect(body).toMatch(/followupOfferArmedRef\.current = true/);
+    expect(body).toMatch(/setFollowupSuggestions\(parseFollowupSuggestions/);
+  });
+
+  it('a new user turn disarms it as well', () => {
+    const at = HOOK.indexOf('const unsubTurnStart');
+    expect(at).toBeGreaterThan(-1);
+    const body = HOOK.slice(at, at + 5000);
+    expect(body).toMatch(/followupOfferArmedRef\.current = false/);
   });
 });

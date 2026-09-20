@@ -8,6 +8,8 @@ import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+from opensquad.proc_text import native_text_kwargs
+
 
 def _get_opensquad_ports():
     """Return tuple of all OpenSquad-managed ports from configuration."""
@@ -191,7 +193,7 @@ def _collect_listening_pids_windows(ports: tuple[int, ...]) -> dict[int, list[st
         result = subprocess.run(
             ["netstat", "-ano"],
             capture_output=True,
-            text=True,
+            **native_text_kwargs(),
             timeout=5,
             check=False,
         )
@@ -236,7 +238,7 @@ def _collect_listening_pids_windows(ports: tuple[int, ...]) -> dict[int, list[st
                 f"| Select-Object LocalPort,OwningProcess | ConvertTo-Json -Compress",
             ],
             capture_output=True,
-            text=True,
+            **native_text_kwargs(),
             timeout=4,
             check=False,
         )
@@ -265,7 +267,7 @@ def _collect_listening_pids_windows(ports: tuple[int, ...]) -> dict[int, list[st
         result = subprocess.run(
             ["wmic", "process", "get", "ProcessId,CommandLine", "/format:csv"],
             capture_output=True,
-            text=True,
+            **native_text_kwargs(),
             timeout=10,
             check=False,
         )
@@ -301,7 +303,7 @@ def _collect_listening_pids_unix(ports: tuple[int, ...]) -> dict[int, list[str]]
         result = subprocess.run(
             ["lsof", "-nP", "-iTCP", "-sTCP:LISTEN", "-FpPn"],
             capture_output=True,
-            text=True,
+            **native_text_kwargs(),
             timeout=10,
             check=False,
         )
@@ -333,7 +335,7 @@ def _collect_listening_pids_unix(ports: tuple[int, ...]) -> dict[int, list[str]]
         result = subprocess.run(
             ["ss", "-tlnp"],
             capture_output=True,
-            text=True,
+            **native_text_kwargs(),
             timeout=10,
             check=False,
         )
@@ -471,7 +473,7 @@ def _snapshot_windows_procs() -> dict[int, tuple[int | None, str]]:
                 "/format:csv",
             ],
             capture_output=True,
-            text=True,
+            **native_text_kwargs(),
             timeout=15,
             check=False,
         )

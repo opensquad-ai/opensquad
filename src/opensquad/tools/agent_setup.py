@@ -19,6 +19,8 @@ import re
 import subprocess
 import sys
 
+from opensquad.proc_text import utf8_text_kwargs
+
 try:
     from ..tool import logger
 except ImportError:
@@ -81,7 +83,7 @@ def _clone_or_update(git_url: str) -> dict:
             ["git", "pull"],
             cwd=clone_dest,
             capture_output=True,
-            text=True,
+            **utf8_text_kwargs(),
             timeout=120,
         )
         if result.returncode != 0:
@@ -94,7 +96,7 @@ def _clone_or_update(git_url: str) -> dict:
         result = subprocess.run(
             ["git", "clone", "--depth=1", git_url, clone_dest],
             capture_output=True,
-            text=True,
+            **utf8_text_kwargs(),
             timeout=180,
         )
         if result.returncode != 0:
@@ -136,7 +138,11 @@ def _install_pip_deps_from_skill_json(skill_dir: str) -> list:
                 proc = subprocess.run(
                     [target_python, "-m", "pip", "install", *packages],
                     capture_output=True,
-                    text=True,
+                    # pip mixes UTF-8 and locale bytes in its progress/error
+                    # output; pin the child to UTF-8 and decode the same way so
+                    # failures never surface as mojibake or a dead reader.
+                    env={**os.environ, "PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8"},
+                    **utf8_text_kwargs(),
                     timeout=300,
                 )
                 if proc.returncode == 0:

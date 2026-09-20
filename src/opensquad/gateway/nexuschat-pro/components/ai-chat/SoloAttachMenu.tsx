@@ -102,6 +102,21 @@ export const SoloAttachMenu: React.FC<SoloAttachMenuProps> = ({
     };
   }, [open]);
 
+  // Skills flyout auto-dismiss: container onMouseLeave can be missed when the
+  // pointer exits quickly or across animated/portal edges, leaving the L2 list
+  // stuck open. Track document pointer movement as a deterministic fallback.
+  useEffect(() => {
+    if (!open || !skillsOpen) return;
+    const onMove = (e: MouseEvent) => {
+      const t = e.target as Node;
+      if (menuRef.current?.contains(t)) return;
+      if (rootRef.current?.contains(t)) return;
+      setSkillsOpen(false);
+    };
+    document.addEventListener('mousemove', onMove);
+    return () => document.removeEventListener('mousemove', onMove);
+  }, [open, skillsOpen]);
+
   const run = (fn: () => void) => {
     setOpen(false);
     setSkillsOpen(false);
@@ -141,6 +156,7 @@ export const SoloAttachMenu: React.FC<SoloAttachMenuProps> = ({
             <button
               key={item.key}
               type="button"
+              onMouseEnter={() => setSkillsOpen(false)}
               onClick={() => run(item.onClick)}
               className="w-full flex items-center gap-2 px-3 py-1.5 text-left text-[12px] text-textMain hover:bg-black/[0.06] dark:hover:bg-white/[0.10] transition-colors border-0 bg-transparent cursor-pointer"
             >
@@ -156,6 +172,7 @@ export const SoloAttachMenu: React.FC<SoloAttachMenuProps> = ({
             <div className="my-0.5 h-px bg-border/60" />
             <button
               type="button"
+              onMouseEnter={() => setSkillsOpen(false)}
               onClick={() => onToggleAutoSpeech(!autoSpeechEnabled)}
               className={`w-full flex items-center gap-2 px-3 py-1.5 text-left text-[12px] transition-colors border-0 cursor-pointer ${
                 autoSpeechEnabled

@@ -426,6 +426,10 @@ export const ServiceManagerPage: React.FC<ServiceManagerPageProps> = ({ onBack }
   const [configSaved, setConfigSaved] = useState<Record<string, boolean>>({});
   const [togglingAutoStart, setTogglingAutoStart] = useState<Record<string, boolean>>({});
 
+  // Uninstall — removes the plugin that owns this service (see confirmUninstall)
+  const [uninstallTarget, setUninstallTarget] = useState<ServiceStatus | null>(null);
+  const [uninstalling, setUninstalling] = useState(false);
+
   const [layoutMode, setLayoutMode] = useState<ServiceLayoutMode>(loadLayoutMode);
   const setLayout = useCallback((mode: ServiceLayoutMode) => {
     setLayoutMode(mode);
@@ -643,6 +647,49 @@ export const ServiceManagerPage: React.FC<ServiceManagerPageProps> = ({ onBack }
     setLogsOpen(prev => ({ ...prev, [pluginId]: !isOpen }));
   };
 
+  // ── Uninstall ──
+  // A service has no lifecycle of its own: it is a process its plugin starts.
+  // "Uninstall service" is therefore "uninstall the owning plugin", which is
+  // what /admin/plugins/{id} already does (hide in this workspace + drop the
+  // overlay). Stop first: deleting the directory under a live child would leave
+  // it holding its port with its files gone, and the launcher would keep
+  // respawning it on the next boot scan.
+  const handleUninstall = (svc: ServiceStatus) => setUninstallTarget(svc);
+
+  const confirmUninstall = async () => {
+    if (!uninstallTarget) return;
+    const target = uninstallTarget;
+    setUninstalling(true);
+    try {
+      try {
+        await pluginServiceAPI.stop(target.plugin_id);
+      } catch {
+        // Never started / already stopped — the uninstall below is what matters.
+      }
+      try {
+        await pluginAPI.uninstall(target.plugin_id);
+      } catch (e: any) {
+        const status = Number(e?.status);
+        const msg = String(e?.message || '');
+        const notFound = status === 404 || /not found/i.test(msg);
+        if (!notFound) throw e;
+      }
+      const data = await servicesAPI.list();
+      const list = data.services || [];
+      setServices(list);
+      setUninstallTarget(null);
+      // Hide is written to this workspace, but an older Gateway/Launcher still
+      // resolves the plugin by its plugin.json name → it may still be listed.
+      if (list.some(s => s.plugin_id === target.plugin_id)) {
+        alert(tr('pluginManager.uninstallNeedsRestart'));
+      }
+    } catch (e: any) {
+      alert(tr('pluginManager.uninstallFailedMsg', { error: e.message }));
+    } finally {
+      setUninstalling(false);
+    }
+  };
+
   const aliveCount = services.filter(s => s.alive).length;
   const totalCount = services.length;
 
@@ -753,11 +800,23 @@ export const ServiceManagerPage: React.FC<ServiceManagerPageProps> = ({ onBack }
                 editAutoStart={editAutoStart[svc.plugin_id] ?? svc.auto_start}
                 togglingAutoStart={togglingAutoStart[svc.plugin_id] || false}
                 onAutoStartToggle={() => handleAutoStartToggle(svc.plugin_id)}
+                // Uninstall
+                canUninstall={!svc.builtin}
+                onUninstall={() => handleUninstall(svc)}
               />
             ))}
           </div>
         )}
       </div>
+
+      {uninstallTarget && (
+        <UninstallServiceDialog
+          svc={uninstallTarget}
+          uninstalling={uninstalling}
+          onConfirm={confirmUninstall}
+          onCancel={() => { if (!uninstalling) setUninstallTarget(null); }}
+        />
+      )}
     </div>
   );
 };
@@ -788,6 +847,10 @@ interface ServiceCardProps {
   editAutoStart: boolean;
   togglingAutoStart: boolean;
   onAutoStartToggle: () => void;
+  // Uninstall
+  /** False for built-in plugins — the uninstall endpoint rejects those. */
+  canUninstall: boolean;
+  onUninstall: () => void;
 }
 
 const ServiceCard: React.FC<ServiceCardProps> = ({
@@ -796,6 +859,7 @@ const ServiceCard: React.FC<ServiceCardProps> = ({
   editPort, editHost, configDirty, savingConfig, configSaved,
   onConfigChange, onSaveConfig, onSaveAndRestartConfig,
   editAutoStart, togglingAutoStart, onAutoStartToggle,
+  canUninstall, onUninstall,
 }) => {
   const { t: tr } = useTranslation();
   const [configExpanded, setConfigExpanded] = useState(false);
@@ -879,6 +943,14 @@ const ServiceCard: React.FC<ServiceCardProps> = ({
       </button>
     );
   })();
+
+  // Uninstall: icon-only in list rows, labelled in grid cards. Both share these
+  // classes so the two layouts cannot drift apart (disabled = built-in plugin).
+  const uninstallBtnClass = `inline-flex items-center rounded-md text-[11px] font-medium transition-colors ${
+    canUninstall
+      ? 'text-textMuted hover:text-red-400 hover:bg-red-500/10'
+      : 'text-textMuted opacity-40 cursor-not-allowed'
+  }`;
 
   const settingsBtn = (
     <button
@@ -1024,7 +1096,7 @@ const ServiceCard: React.FC<ServiceCardProps> = ({
 
           <div className="flex-1 min-w-0">
             <div className="flex items-center gap-1.5 min-w-0">
-              <h3 className="text-[13px] font-semibold text-textMain truncate leading-tight">{svc.display_name}</h3>
+              <h3 className="text-[13px] font-semibold text-textMain truncate leading-tight cursor-default" title={svc.display_name}>{svc.display_name}</h3>
               {statusBadge}
               {svc.auto_start && (
                 <span className="inline-flex items-center gap-0.5 text-[9px] font-medium px-1.5 py-0.5 rounded-full bg-primary/10 text-primary border border-primary/20 shrink-0" title="Auto-start">
@@ -1049,6 +1121,14 @@ const ServiceCard: React.FC<ServiceCardProps> = ({
               <Terminal size={11} />
               {logsOpen ? <ChevronUp size={11} /> : <ChevronDown size={11} />}
             </button>
+            <button
+              onClick={onUninstall}
+              disabled={!canUninstall}
+              title={canUninstall ? tr('pluginManager.uninstallServiceTitle') : tr('pluginManager.cannotUninstallBundled')}
+              className={`${uninstallBtnClass} px-1.5 py-0.5`}
+            >
+              <Trash2 size={11} />
+            </button>
           </div>
         </div>
         <SetupHintBanner svc={svc} />
@@ -1071,7 +1151,7 @@ const ServiceCard: React.FC<ServiceCardProps> = ({
         </div>
 
         <div className="flex-1 min-w-0">
-          <h3 className="text-sm font-bold text-textMain truncate">{svc.display_name}</h3>
+          <h3 className="text-sm font-bold text-textMain truncate cursor-default" title={svc.display_name}>{svc.display_name}</h3>
           <p className="text-[10px] text-textMuted">{svc.plugin_id}</p>
         </div>
 
@@ -1175,9 +1255,87 @@ const ServiceCard: React.FC<ServiceCardProps> = ({
           Logs
           {logsOpen ? <ChevronUp size={11} /> : <ChevronDown size={11} />}
         </button>
+        <button
+          onClick={onUninstall}
+          disabled={!canUninstall}
+          title={canUninstall ? tr('pluginManager.uninstallServiceTitle') : tr('pluginManager.cannotUninstallBundled')}
+          className={`${uninstallBtnClass} gap-1 px-2 py-1`}
+        >
+          <Trash2 size={11} />
+          {tr('pluginManager.uninstallShort')}
+        </button>
       </div>
 
       {logsPanel}
+    </div>
+  );
+};
+
+// ---- Uninstall Confirm Dialog ----
+
+interface UninstallServiceDialogProps {
+  svc: ServiceStatus;
+  uninstalling: boolean;
+  onConfirm: () => void;
+  onCancel: () => void;
+}
+
+const UninstallServiceDialog: React.FC<UninstallServiceDialogProps> = ({
+  svc, uninstalling, onConfirm, onCancel,
+}) => {
+  const { t: tr } = useTranslation();
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm">
+      <div className="bg-panel border border-border rounded-xl shadow-2xl w-full max-w-sm mx-4 p-6 flex flex-col gap-4">
+        <div className="flex items-center gap-3">
+          <div className="flex-shrink-0 w-10 h-10 rounded-full bg-red-500/15 flex items-center justify-center">
+            <Trash2 size={18} className="text-red-400" />
+          </div>
+          <div>
+            <h3 className="text-sm font-bold text-textMain">{tr('pluginManager.uninstallServiceTitle')}</h3>
+            <p className="text-xs text-textMuted mt-0.5">{tr('pluginManager.uninstallIrreversible')}</p>
+          </div>
+        </div>
+
+        <div className="bg-bgLight rounded-lg border border-border/60 px-4 py-3">
+          <p className="text-sm font-medium text-textMain truncate" title={svc.display_name}>
+            {svc.display_name}
+          </p>
+          <p className="text-xs text-textMuted mt-0.5 font-mono truncate">{svc.plugin_id}</p>
+        </div>
+
+        <p className="text-xs text-textMuted leading-relaxed">
+          {tr('pluginManager.uninstallServiceWarning')}
+        </p>
+
+        {svc.alive && (
+          <div className="flex items-start gap-1.5 text-[11px] text-amber-400 bg-amber-500/10 rounded-md px-2 py-1.5">
+            <AlertTriangle size={12} className="shrink-0 mt-0.5" />
+            <span>{tr('pluginManager.uninstallServiceStopsHint')}</span>
+          </div>
+        )}
+
+        <div className="flex gap-2 justify-end">
+          <button
+            onClick={onCancel}
+            disabled={uninstalling}
+            className="px-4 py-1.5 rounded-lg text-sm font-medium border border-border text-textMain hover:bg-bgLight/80 transition-colors disabled:opacity-50"
+          >
+            {tr('common.cancel')}
+          </button>
+          <button
+            onClick={onConfirm}
+            disabled={uninstalling}
+            className="px-4 py-1.5 rounded-lg text-sm font-medium bg-red-500 hover:bg-red-600 text-white transition-colors disabled:opacity-60 flex items-center gap-1.5"
+          >
+            {uninstalling ? (
+              <><OpenSquadLoader size={14} />{tr('pluginManager.uninstalling')}</>
+            ) : (
+              <><Trash2 size={13} />{tr('pluginManager.confirmUninstall')}</>
+            )}
+          </button>
+        </div>
+      </div>
     </div>
   );
 };

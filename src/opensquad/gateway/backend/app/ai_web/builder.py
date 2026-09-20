@@ -4,6 +4,7 @@ import logging
 import os
 import subprocess
 
+from opensquad.proc_text import utf8_text_kwargs
 from opensquad.system_config import syscfg
 
 logger = logging.getLogger("plugin_builder")
@@ -62,8 +63,12 @@ class PluginBuilder:
                     r = subprocess.run(
                         [tool, "--version"],
                         capture_output=True,
-                        text=True,
-                        shell=_IS_WINDOWS,  # nosec B602 - intentional: Windows needs shell for tool probes timeout=10
+                        # node/pnpm print UTF-8; a strict locale decode here used
+                        # to kill the reader thread on non-ASCII output.
+                        **utf8_text_kwargs(),
+                        # nosec B602 - intentional: Windows needs shell for tool probes
+                        shell=_IS_WINDOWS,
+                        timeout=10,
                     )
                     results[tool] = r.returncode == 0
                     results[f"{tool}_version"] = r.stdout.strip() if r.returncode == 0 else None

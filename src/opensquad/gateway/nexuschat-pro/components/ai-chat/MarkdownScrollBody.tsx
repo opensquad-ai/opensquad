@@ -42,14 +42,23 @@ export const MarkdownScrollBody: React.FC<MarkdownScrollBodyProps> = ({
     if (softEdge) setStuck(true);
   }, [softEdge]);
 
+  // "Drift" upgrade: once the body is long enough to actually scroll, the
+  // bottom-only tail becomes a both-edge mask — older lines fade out at the
+  // top while the newest settle at the bottom (fleeting-thought effect).
+  const [overflowing, setOverflowing] = useState(false);
+
   const tail = softEdge && stuck;
+  const drift = tail && overflowing;
 
   return (
     <FollowScrollBox
       contentKey={text.length}
       follow={follow}
       onStickChange={softEdge ? setStuck : undefined}
-      className={`${maxHeightClass} overflow-y-auto ${tail ? 'os-thought-tail' : ''} ${
+      onOverflowChange={softEdge ? setOverflowing : undefined}
+      className={`${maxHeightClass} overflow-y-auto [scrollbar-gutter:stable] ${
+        drift ? 'os-thought-drift' : tail ? 'os-thought-tail' : ''
+      } ${
         softEdge ? 'os-thought-settle' : ''
       } ${className}`}
       style={style}

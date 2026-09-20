@@ -34,8 +34,10 @@ import {
   appendWorkflowEvent,
   composeAssistantDisplayContent,
   buildTimelineFromSession,
+  demoteIntermediateAssistantMessages,
   formatUserSkillDisplayContent,
   genTimelineUID,
+  mergeAdjacentWorkflowEntries,
   timelineHasVisibleChatContent,
   sealIncompleteWorkflows,
   sealPendingCompression,
@@ -1387,7 +1389,15 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
         );
         if (olderEntries.length > 0) {
           setTimeline(prev => {
-            const next = [...olderEntries, ...prev];
+            // Cross-seam renormalization: each page is rebuilt independently,
+            // so a turn split across the page boundary ends up as "tool folds
+            // stacked above, text bubbles below" (page-local demote cannot see
+            // the workflows of the other page). Re-run demote + merge over the
+            // combined array so the seam stitches back into one interleaved
+            // turn.
+            const next = mergeAdjacentWorkflowEntries(
+              demoteIntermediateAssistantMessages([...olderEntries, ...prev]),
+            );
             putCachedSessionTimeline(agentId, sid, next, {
               complete: !(session.has_more ?? false),
               messageCount: historyOffsetRef.current + (session.messages?.length || 0),
@@ -4140,33 +4150,11 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
           if (focusedPaneId !== paneId) return null;
           const pendingModes = modeApprovals.filter((a) => a.status === 'pending');
           const pendingOptions = optionsProposals.filter((p) => p.status === 'pending');
-          if (
-            pendingModes.length === 0 &&
-            pendingOptions.length === 0 &&
-            followupSuggestions.length === 0
-          ) {
+          if (pendingModes.length === 0 && pendingOptions.length === 0) {
             return null;
           }
           return (
             <>
-              {followupSuggestions.length > 0 && (
-                <div className="mb-2">
-                  <FollowupSuggestions
-                    suggestions={followupSuggestions}
-                    onPick={(text) => {
-                      // No local clear here: tapping is just another send, and
-                      // `handlePaneComposerSend` consumes the offer for every
-                      // send path (single owner — see `consumeFollowupOffer`).
-                      void handlePaneComposerSend(
-                        paneId,
-                        sessionId,
-                        { text, images: [], attachments: [] },
-                        { stay: true },
-                      );
-                    }}
-                  />
-                </div>
-              )}
               {pendingModes.map((req) => (
                 <ModeSwitchApprovalCard
                   key={req.id}
@@ -4958,7 +4946,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
           fileDirtyMap={fileDirtyMap}
           onResizeSplit={handleResizeSplit}
           handlers={{ makePaneHandlers }}
-          renderChatSlot={() => (
+          renderChatSlot={(slotPaneId) => (
       /* Main Chat Area — live messages only (agent chrome is above the split) */
       <div className="flex-1 flex flex-col h-full min-w-0">
         {/* Messages Area */}
@@ -5013,8 +5001,43 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
               isComplete={!isStreaming}
               avatarSrc={resolveChatAvatar(agentProfile?.chat_profile) ?? undefined}
               variant={isSolo ? 'solo' : 'classic'}
-              senderName={agentProfile?.agent_name}
+              // 流式文本前若是工作流组，名字已在工作流上方显示，避免重复
+              senderName={
+                displayTimeline.length > 0
+                && displayTimeline[displayTimeline.length - 1].kind === 'workflow'
+                  ? undefined
+                  : agentProfile?.agent_name
+              }
+              // 只传 undefined 不够 —— 组件会退化成兜底文案「Agent」。
+              hideSenderLabel={
+                displayTimeline.length > 0
+                && displayTimeline[displayTimeline.length - 1].kind === 'workflow'
+              }
             />
+          )}
+          {/* 对话后续预期：贴在「最终输出」末尾，而不是输入框上方。
+              仅在回合结束后出现（流式/进行中一律不渲染），因此新的工具流或
+              新的消息输出一旦开始，它就先被隐藏、随后由 hook 清空。 */}
+          {followupSuggestions.length > 0
+            && currentSessionId
+            && !displayStreamingText
+            && !isSessionBusy(currentSessionId) && (
+            <div className="mt-2" data-testid="followup-suggestions-tail">
+              <FollowupSuggestions
+                suggestions={followupSuggestions}
+                onPick={(text) => {
+                  // Tapping is just another send: `handlePaneComposerSend`
+                  // consumes the offer on every send path (single owner — see
+                  // `consumeFollowupOffer`), so there is no local clear here.
+                  void handlePaneComposerSend(
+                    slotPaneId,
+                    currentSessionId,
+                    { text, images: [], attachments: [] },
+                    { stay: true },
+                  );
+                }}
+              />
+            </div>
           )}
           <div ref={chatEndRef} />
             </>
@@ -5030,6 +5053,13 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
                   entry.data.role === 'user'
                     ? (currentUser?.name || undefined)
                     : (agentProfile?.agent_name || undefined),
+                // 助手回复紧跟工作流组时，名字已在工作流上方显示 —— 整行隐藏。
+                // 只把 senderName 传 undefined 是不够的：MessageBubble 会退化成
+                // 兜底文案「Agent」，于是统计行和正文之间夹出一行幽灵签名。
+                hideSenderLabel:
+                  entry.data.role === 'assistant'
+                  && i > 0
+                  && displayTimeline[i - 1].kind === 'workflow',
                 senderAvatar:
                   entry.data.role === 'user'
                     ? (currentUser?.avatar || null)
@@ -5112,13 +5142,19 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
               })();
               // Classic + Solo: document-style activity rows (thinking / tools)
               const curBlock = (entry as { kind: 'workflow'; data: WorkflowBlock }).data;
-              if (i > 0 && displayTimeline[i - 1].kind === 'workflow') {
+              // 'prompt' entries render as null — they must not split the
+              // workflow group into separate fold rows.
+              let prevIdx = i - 1;
+              while (prevIdx >= 0 && displayTimeline[prevIdx].kind === 'prompt') prevIdx -= 1;
+              if (prevIdx >= 0 && displayTimeline[prevIdx].kind === 'workflow') {
                 return null;
               }
               const blocks: WorkflowBlock[] = [curBlock];
               let j = i + 1;
-              while (j < displayTimeline.length && displayTimeline[j].kind === 'workflow') {
-                blocks.push((displayTimeline[j] as { kind: 'workflow'; data: WorkflowBlock }).data);
+              while (j < displayTimeline.length && (displayTimeline[j].kind === 'workflow' || displayTimeline[j].kind === 'prompt')) {
+                if (displayTimeline[j].kind === 'workflow') {
+                  blocks.push((displayTimeline[j] as { kind: 'workflow'; data: WorkflowBlock }).data);
+                }
                 j += 1;
               }
               const merged = blocks.length > 1 ? mergeWorkflowBlocks(blocks) : curBlock;
@@ -5141,16 +5177,23 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
                   lockLayout={lockLayout || (groupHasIncomplete && !turnDelivered)}
                   style={revealStyle}
                 >
-                  <SoloActivityRow
-                    block={merged}
-                    turnDelivered={turnDelivered}
-                    expandLevel={workflowExpandLevel}
-                    turnStartedMs={turnMs}
-                    shellStreams={shellStreams}
-                    onOpenFile={openProjectFile}
-                    embedVisualizations={false}
-                    uiMode={uiMode}
-                  />
+                  <div className="w-full min-w-0">
+                    {agentProfile?.agent_name && (
+                      <div className="text-[11px] font-medium text-textMuted/70 mb-2">
+                        {agentProfile.agent_name}
+                      </div>
+                    )}
+                    <SoloActivityRow
+                      block={merged}
+                      turnDelivered={turnDelivered}
+                      expandLevel={workflowExpandLevel}
+                      turnStartedMs={turnMs}
+                      shellStreams={shellStreams}
+                      onOpenFile={openProjectFile}
+                      embedVisualizations={false}
+                      uiMode={uiMode}
+                    />
+                  </div>
                 </TimelineRow>
               );
             }

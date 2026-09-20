@@ -4,6 +4,8 @@ import os
 import subprocess
 from datetime import datetime
 
+from opensquad.proc_text import utf8_text_kwargs
+
 logger = logging.getLogger(__name__)
 
 
@@ -32,7 +34,11 @@ class AuditLogManager:
         try:
             # Try to get the remote URL
             result = subprocess.run(
-                ["git", "remote", "get-url", "origin"], cwd=abs_path, capture_output=True, text=True, timeout=5
+                ["git", "remote", "get-url", "origin"],
+                cwd=abs_path,
+                capture_output=True,
+                **utf8_text_kwargs(),
+                timeout=5,
             )
             if result.returncode == 0:
                 url = result.stdout.strip()

@@ -19,6 +19,8 @@ from typing import Any
 
 import httpx
 
+from opensquad.utils.local_http import is_loopback_url
+
 logger = logging.getLogger(__name__)
 
 
@@ -97,7 +99,9 @@ async def _transcribe_b64(
     text_parts: list[str] = []
     final_text = ""
     try:
-        async with httpx.AsyncClient(timeout=timeout) as client:
+        # Loopback targets (built-in local ASR) must bypass any ambient
+        # HTTP_PROXY; cloud providers keep it.  See utils/local_http.
+        async with httpx.AsyncClient(timeout=timeout, trust_env=not is_loopback_url(url)) as client:
             async with client.stream("POST", url, headers=headers, json=payload) as resp:
                 if resp.status_code >= 400:
                     body = await resp.aread()

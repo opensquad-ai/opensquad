@@ -16,6 +16,8 @@ from typing import Any
 
 import httpx
 
+from opensquad.utils.local_http import is_loopback_url
+
 logger = logging.getLogger(__name__)
 
 _WHISPER_DOWN_HINT = (
@@ -75,7 +77,11 @@ async def transcribe_file(
             return {"success": False, "error": "audio file too small"}
 
         files = {"file": (filename, file_bytes, mime)}
-        async with httpx.AsyncClient(timeout=timeout) as client:
+        # Built-in ASR (SenseVoice / Whisper) is a loopback service.  An ambient
+        # HTTP_PROXY would otherwise hijack 127.0.0.1 and turn a healthy local
+        # service into an apparent failure.  Cloud endpoints keep the ambient
+        # proxy (some deployments require it).
+        async with httpx.AsyncClient(timeout=timeout, trust_env=not is_loopback_url(url)) as client:
             resp = await client.post(url, headers=headers, data=data, files=files)
     except httpx.ConnectError as e:
         logger.warning("[openai_asr] connect failed: %s", e)

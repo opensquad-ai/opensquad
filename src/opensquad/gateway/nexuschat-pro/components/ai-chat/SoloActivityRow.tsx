@@ -522,6 +522,13 @@ export function buildLines(
     // Skip orphan sub-agent events that somehow weren't nested (still hide from main stream
     // when they carry the flag — they belong in a delegate window).
     if (item.event.subAgent) continue;
+    // 纯 UI 工具（追问建议等）只在各自的前端卡片里出现，不在工具流明细里占行。
+    if (
+      (item.event.type === 'tool_call' || item.event.type === 'tool_result')
+      && isUiOnlyTool(toolNameOf(item.event))
+    ) {
+      continue;
+    }
     let built = lineCache?.get(item.event);
     if (!built) {
       built = eventToLines(item.event, item.key, !!block.completed, t);
@@ -666,6 +673,21 @@ function classifyWorkTool(name: string): WorkToolCategory {
   return 'other';
 }
 
+/**
+ * 纯 UI 交互工具（追问建议 / 选项确认 / 模式切换）—— 不是「工具流」的一部分。
+ *
+ * 这三者都不产出任何用户可见的动作：真正的 UI 是各自的前端组件（追问 chips、
+ * 选项确认卡、模式切换卡），工具行只是同一件事的第二遍陈述。所以它们既不进
+ * 「工具流统计」的计数（否则标题里会多出「向用户确认 1 次」），也不在工具流
+ * 明细里占一行。
+ *
+ * 只过滤**展示层**：`WorkflowBlock.events` 保持原样 —— 「是否还有未闭合工具」
+ * 「本轮是否已交付」等判定都读原始事件，不能被这里影响。
+ */
+function isUiOnlyTool(name: string): boolean {
+  return classifyWorkTool(name) === 'interaction';
+}
+
 /** Short, user-facing label for a tool name (websearch__search → 网络搜索 / Web search).
  *  Labels live in i18n under aiChat.toolFlow.{ns,fn}; falls back to the raw fn. */
 function friendlyToolName(name: string, t: TFunction): string {
@@ -716,6 +738,8 @@ function summarizeWorkTools(block: WorkflowBlock, t: TFunction): string {
     if (e.subAgent) continue; // nested delegate tools stay inside the delegate fold
     const data = typeof e.content === 'object' && e.content ? e.content : {};
     const name = String(data.name || data.tool || 'Tool');
+    // 纯 UI 交互工具不进统计 —— 它们是前端卡片，不是「做过的事」。
+    if (isUiOnlyTool(name)) continue;
     const cat = classifyWorkTool(name);
     counts.set(cat, (counts.get(cat) || 0) + 1);
   }
@@ -963,7 +987,7 @@ const TextChevronToggle: React.FC<{
         fail
       </span>
     ) : null}
-    <span className="text-[13px] font-normal leading-relaxed shrink-0" style={{ color: faint }}>
+    <span className="text-[13px] font-normal leading-relaxed shrink-0 inline-flex w-3.5 justify-center" style={{ color: faint }}>
       {(open ? '⌄' : '>')}
     </span>
   </button>
@@ -1270,11 +1294,6 @@ const SoloEventLine = React.memo(function SoloEventLine({
               <FileDiffBlock
                 info={line.fileEdit}
                 status={line.toolStatus || 'success'}
-                note={
-                  line.toolResult
-                    ? line.toolResult.split('\n').map((l) => l.trim()).find((l) => l.length > 0)?.slice(0, 120)
-                    : undefined
-                }
                 embedded
               />
             </div>
@@ -1813,7 +1832,7 @@ export const SoloActivityRow = React.memo(function SoloActivityRow({
         }}
         className={
           useStepsScrollBox
-            ? `mt-0.5 pl-3 pr-1 py-1 ${SOLO_STEPS_SCROLL_MAX_CLASS} overflow-y-auto overscroll-contain rounded-md border border-border/45 bg-bgLight ${
+            ? `mt-0.5 pl-3 pr-1 py-1 ${SOLO_STEPS_SCROLL_MAX_CLASS} overflow-y-auto overflow-x-hidden overscroll-contain [scrollbar-gutter:stable] rounded-md border border-border/45 bg-bgLight ${
                 virtSteps ? 'flex flex-col' : 'space-y-0.5'
               }`
             : 'mt-0.5 space-y-0.5 pl-4'

@@ -27,11 +27,29 @@ from __future__ import annotations
 
 import urllib.request
 from typing import Any
+from urllib.parse import urlsplit
 
 # Built once (module import) so the hot health-check path does not reallocate an
 # opener on every probe.  An empty ProxyHandler dict disables proxy detection
 # entirely for this opener.
 _NO_PROXY_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+
+def is_loopback_url(url: str) -> bool:
+    """True when ``url`` targets this machine, so no proxy should be consulted.
+
+    For ``httpx``/``requests`` clients the equivalent is ``trust_env=False``:
+    leave it at the default (``True``) and an ambient ``HTTP_PROXY`` will hijack
+    loopback traffic, because ``proxy_bypass("127.0.0.1")`` is ``False`` on
+    Windows.  Callers that must keep using the ambient proxy for outbound
+    traffic should set ``trust_env=not is_loopback_url(url)`` rather than
+    disabling it unconditionally.
+    """
+    try:
+        host = urlsplit(url).hostname or ""
+    except ValueError:
+        return False
+    return host in ("127.0.0.1", "localhost", "::1")
 
 
 def open_local(

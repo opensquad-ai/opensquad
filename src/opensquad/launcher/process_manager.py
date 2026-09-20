@@ -19,6 +19,8 @@ import time
 from collections import deque
 from datetime import datetime
 
+from opensquad.proc_text import native_text_kwargs, to_text, utf8_text_kwargs
+
 _log = logging.getLogger("launcher.process_manager")
 
 
@@ -106,10 +108,20 @@ def _resolve_packaged_python_executable() -> str | None:
                 try:
                     from opensquad.cli.win_process import hidden_run_kwargs
 
+                    # Force the probe child to speak UTF-8 on both ends: the
+                    # printed path can contain non-ASCII characters (Chinese
+                    # user names / folders), and a cp936-vs-utf-8 mismatch
+                    # either garbles it or kills the reader thread outright.
+                    _probe_env = {
+                        **os.environ,
+                        "PYTHONUTF8": "1",
+                        "PYTHONIOENCODING": "utf-8",
+                    }
                     proc = subprocess.run(
                         [py_launcher, f"-{ver}", "-c", "import sys; print(sys.executable)"],
                         capture_output=True,
-                        text=True,
+                        env=_probe_env,
+                        **utf8_text_kwargs(),
                         timeout=10,
                         **hidden_run_kwargs(),
                     )
@@ -431,7 +443,13 @@ def _kill_port_owner(port: int) -> bool:
             # tables; bound it so the launcher main thread never stalls here
             # (a stalled netstat previously froze Phase 7a and skipped Phase 8
             # agent auto-start entirely).
-            result = subprocess.run(["netstat", "-ano"], capture_output=True, text=True, check=False, timeout=8)
+            result = subprocess.run(
+                ["netstat", "-ano"],
+                capture_output=True,
+                check=False,
+                timeout=8,
+                **native_text_kwargs(),
+            )
             for line in result.stdout.splitlines():
                 if f":{port}" in line and "LISTENING" in line:
                     parts = line.split()
@@ -452,7 +470,12 @@ def _kill_port_owner(port: int) -> bool:
                     except ValueError:
                         pass
         else:
-            result = subprocess.run(["lsof", "-ti", f":{port}"], capture_output=True, text=True, check=False)
+            result = subprocess.run(
+                ["lsof", "-ti", f":{port}"],
+                capture_output=True,
+                check=False,
+                **native_text_kwargs(),
+            )
             if result.stdout.strip():
                 for pid_str in result.stdout.strip().splitlines():
                     try:
@@ -1758,7 +1781,7 @@ def _ensure_pip_and_install_unlocked(packages: list, label: str = "") -> bool:
             if r.returncode == 0:
                 _log.info(f"[Launcher] {label_prefix}uv install succeeded")
                 return True
-            stderr = r.stderr.decode(errors="replace").strip() if r.stderr else ""
+            stderr = to_text(r.stderr, encoding="utf-8").strip() if r.stderr else ""
             _log.warning(
                 f"[Launcher] {label_prefix}uv pip install failed (exit {r.returncode}): {stderr} — falling back to pip"
             )
@@ -1784,7 +1807,7 @@ def _ensure_pip_and_install_unlocked(packages: list, label: str = "") -> bool:
         )
         pip_available = r.returncode == 0
         if not pip_available:
-            stderr = r.stderr.decode(errors="replace")[:200] if r.stderr else ""
+            stderr = to_text(r.stderr, encoding="utf-8")[:200] if r.stderr else ""
             _log.info(f"[Launcher] {label_prefix}pip --version exit={r.returncode}, stderr={stderr!r}")
     except subprocess.TimeoutExpired:
         _log.warning(f"[Launcher] {label_prefix}pip --version timed out (15s)")
@@ -1826,7 +1849,7 @@ def _ensure_pip_and_install_unlocked(packages: list, label: str = "") -> bool:
                         env=clean_env,
                     )
                     if r2.returncode != 0:
-                        stderr2 = r2.stderr.decode(errors="replace")[:200] if r2.stderr else ""
+                        stderr2 = to_text(r2.stderr, encoding="utf-8")[:200] if r2.stderr else ""
                         _log.info(f"[Launcher] {label_prefix}get-pip.py also failed (exit {r2.returncode}): {stderr2}")
                         return False
                 finally:
@@ -1889,7 +1912,7 @@ def _ensure_pip_and_install_unlocked(packages: list, label: str = "") -> bool:
             env=clean_env,
         )
         if r.returncode != 0:
-            stderr = r.stderr.decode(errors="replace").strip() if r.stderr else ""
+            stderr = to_text(r.stderr, encoding="utf-8").strip() if r.stderr else ""
             _log.info(f"[Launcher] {label_prefix}pip install failed (exit {r.returncode}): {stderr}")
             return False
         return True
@@ -1924,7 +1947,7 @@ def _plugin_python_has_module(import_name: str) -> bool:
             env=_build_child_process_env(),
         )
         if r.returncode != 0:
-            stderr = r.stderr.decode(errors="replace")[:200] if r.stderr else ""
+            stderr = to_text(r.stderr, encoding="utf-8")[:200] if r.stderr else ""
             _log.debug(
                 f"[Launcher] _plugin_python_has_module('{import_name}') -> False "
                 f"(exit={r.returncode}, stderr={stderr!r})"
@@ -1990,8 +2013,8 @@ def _ensure_playwright_browser() -> bool:
                 f.write(time.strftime("%Y-%m-%dT%H:%M:%S"))
             _log.info("[Launcher] Playwright Chromium downloaded successfully")
             return True
-        stderr = r.stderr.decode(errors="replace")[:500] if r.stderr else ""
-        stdout = r.stdout.decode(errors="replace")[:500] if r.stdout else ""
+        stderr = to_text(r.stderr, encoding="utf-8")[:500] if r.stderr else ""
+        stdout = to_text(r.stdout, encoding="utf-8")[:500] if r.stdout else ""
         _log.error(f"[Launcher] Playwright browser install failed (exit {r.returncode}): {stderr or stdout}")
         return False
     except subprocess.TimeoutExpired:

@@ -4,12 +4,12 @@ import {
   Settings, FileText, Terminal, X, Save, ChevronDown, ChevronUp,
   Monitor, Code, PenTool, BarChart3, Globe, Bot, Wrench,
   Circle, MessageSquare, Trash2, Pencil, Eye, EyeOff,
-  FolderOpen, Menu, Shield,
+  FolderOpen, Menu, Shield, Camera, Undo2,
 } from 'lucide-react';
 import { marked } from 'marked';
 import { sanitizeHtml, escapeHtml } from '../utils/safeHtml';
 import { adminAPI, AdminAgent, TokenStats, ChatProfile, userAPI, pluginAPI, PluginInfo, modelCardAPI, ModelCardInfo, ModelCardDetail } from '../services/api';
-import { resolveChatAvatar, resolveChatName } from '../utils/image';
+import { resolveChatAvatar, resolveChatName, isUploadedAvatar } from '../utils/image';
 import { useTranslation, Trans } from 'react-i18next';
 import { OpenSquadLoader } from './OpenSquadLoader';
 import {
@@ -95,6 +95,89 @@ const Toggle: React.FC<{ value: boolean; onChange: (v: boolean) => void }> = ({ 
   </button>
 );
 
+// ---- Agent 头像 ----
+
+/** Mirrors the server-side limit (see _admin.py `_AVATAR_MAX_BYTES`). */
+const AVATAR_MAX_BYTES = 2 * 1024 * 1024;
+/** Mirrors the server-side magic-byte whitelist. */
+const AVATAR_MIME_TYPES = ['image/png', 'image/jpeg', 'image/webp', 'image/gif'];
+
+/** Base64 payload without the `data:` prefix (the endpoint strips it anyway). */
+function readFileAsBase64(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const result = String(reader.result || '');
+      const comma = result.indexOf(',');
+      resolve(comma >= 0 ? result.slice(comma + 1) : result);
+    };
+    reader.onerror = () => reject(reader.error || new Error('Could not read the file'));
+    reader.readAsDataURL(file);
+  });
+}
+
+/**
+ * The agent avatar, which doubles as the upload affordance: clicking it opens
+ * the file picker, and a reset badge appears only for an actually-uploaded
+ * picture (`isUploadedAvatar`) so a generated default never looks removable.
+ * Both overlays are hover/focus-only to keep the card calm at rest.
+ */
+const AgentAvatar: React.FC<{
+  avatarUrl: string | null;
+  isCustom: boolean;
+  busy: boolean;
+  /** Rendered when there is no avatar at all (the agent-type icon). */
+  fallback: React.ReactNode;
+  fallbackClass: string;
+  sizeClass: string;
+  iconSize: number;
+  pickTitle: string;
+  resetTitle: string;
+  onPick: () => void;
+  onReset: () => void;
+}> = ({
+  avatarUrl, isCustom, busy, fallback, fallbackClass, sizeClass, iconSize,
+  pickTitle, resetTitle, onPick, onReset,
+}) => (
+  <div className={`relative shrink-0 group/av ${sizeClass}`}>
+    <button
+      type="button"
+      onClick={onPick}
+      disabled={busy}
+      title={pickTitle}
+      aria-label={pickTitle}
+      className={`relative w-full h-full rounded-lg overflow-hidden flex items-center justify-center ${fallbackClass} ${
+        busy ? 'cursor-wait' : 'cursor-pointer'
+      }`}
+    >
+      {avatarUrl ? (
+        <img src={avatarUrl} alt="" className="w-full h-full object-cover" loading="lazy" />
+      ) : (
+        fallback
+      )}
+      <span className="absolute inset-0 hidden group-hover/av:flex group-focus-within/av:flex items-center justify-center bg-black/45 text-white">
+        <Camera size={iconSize} />
+      </span>
+    </button>
+    {isCustom && !busy && (
+      <button
+        type="button"
+        onClick={onReset}
+        title={resetTitle}
+        aria-label={resetTitle}
+        className="absolute -top-1.5 -right-1.5 hidden group-hover/av:flex group-focus-within/av:flex w-4 h-4 items-center justify-center rounded-full bg-panel border border-border text-textMuted hover:text-red-500 transition-colors"
+      >
+        <Undo2 size={10} />
+      </button>
+    )}
+    {busy && (
+      <span className="absolute inset-0 flex items-center justify-center rounded-lg bg-panel/70">
+        <OpenSquadLoader size={iconSize + 4} />
+      </span>
+    )}
+  </div>
+);
+
 // ---- 工具函数 ----
 
 function getAgentKey(a: AdminAgent): string {
@@ -176,6 +259,13 @@ export const AgentManagerPage: React.FC<AgentManagerPageProps> = ({ onBack, onCh
   const [saveSuccess, setSaveSuccess] = useState(false);
   const [actionLoading, setActionLoading] = useState<Record<string, boolean>>({});
   const [fsNewDir, setFsNewDir] = useState('');
+
+  // Agent avatar upload. One hidden <input type=file> is shared by every card,
+  // so the target agent travels in a ref instead of one input per card.
+  const [avatarBusy, setAvatarBusy] = useState<Record<string, boolean>>({});
+  const [notice, setNotice] = useState<string | null>(null);
+  const avatarInputRef = useRef<HTMLInputElement | null>(null);
+  const avatarTargetRef = useRef<string>('');
 
   // 创建新 Agent
   const [showCreate, setShowCreate] = useState(false);
@@ -430,6 +520,72 @@ export const AgentManagerPage: React.FC<AgentManagerPageProps> = ({ onBack, onCh
       alert(`${action} failed: ${e.message}`);
     } finally {
       setActionLoading(prev => ({ ...prev, [name]: false }));
+    }
+  };
+
+  // ---- Agent 头像上传 / 重置 ----
+
+  /** Patch the returned profile into the list (and the open detail panel) so the
+   *  new picture shows up before the next 30s poll lands. */
+  const applyAvatarResult = useCallback((name: string, profile: ChatProfile | null | undefined) => {
+    if (!profile) return;
+    const patch = (a: AdminAgent): AdminAgent =>
+      getAgentKey(a) === name ? { ...a, chat_profile: { ...(a.chat_profile || {}), ...profile } } : a;
+    setAgents(prev => prev.map(patch));
+    setDetailAgent(prev => (prev ? patch(prev) : prev));
+  }, []);
+
+  const openAvatarPicker = useCallback((agent: AdminAgent) => {
+    avatarTargetRef.current = getAgentKey(agent);
+    avatarInputRef.current?.click();
+  }, []);
+
+  const handleAvatarFile = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    // Clear first: re-picking the same file must fire `change` again.
+    event.target.value = '';
+    const name = avatarTargetRef.current;
+    if (!file || !name) return;
+    if (!AVATAR_MIME_TYPES.includes(file.type)) {
+      setNotice(null);
+      setError(t('agentManager.avatarBadType'));
+      return;
+    }
+    if (file.size > AVATAR_MAX_BYTES) {
+      setNotice(null);
+      setError(t('agentManager.avatarTooLarge', { size: Math.round(file.size / 1024) }));
+      return;
+    }
+    setError(null);
+    setNotice(null);
+    setAvatarBusy(prev => ({ ...prev, [name]: true }));
+    try {
+      const base64 = await readFileAsBase64(file);
+      const res = await adminAPI.uploadAgentAvatar(name, file.name, base64);
+      applyAvatarResult(name, res.profile);
+      setNotice(t('agentManager.avatarUploaded', { name, groups: res.groups_notified }));
+      void fetchAgents();
+    } catch (e: any) {
+      setError(`${t('agentManager.avatarUploadFailed')}: ${e.message}`);
+    } finally {
+      setAvatarBusy(prev => ({ ...prev, [name]: false }));
+    }
+  };
+
+  const handleAvatarReset = async (agent: AdminAgent) => {
+    const name = getAgentKey(agent);
+    setError(null);
+    setNotice(null);
+    setAvatarBusy(prev => ({ ...prev, [name]: true }));
+    try {
+      const res = await adminAPI.resetAgentAvatar(name);
+      applyAvatarResult(name, res.profile);
+      setNotice(t('agentManager.avatarReset', { name }));
+      void fetchAgents();
+    } catch (e: any) {
+      setError(`${t('agentManager.avatarUploadFailed')}: ${e.message}`);
+    } finally {
+      setAvatarBusy(prev => ({ ...prev, [name]: false }));
     }
   };
 
@@ -1128,6 +1284,23 @@ export const AgentManagerPage: React.FC<AgentManagerPageProps> = ({ onBack, onCh
         </div>
       )}
 
+      {/* 头像上传结果提示 */}
+      {notice && (
+        <div className="mx-4 mt-3 p-3 bg-green-50 border border-green-200 rounded-lg text-green-700 text-sm flex justify-between items-center">
+          <span>{notice}</span>
+          <button onClick={() => setNotice(null)} className="text-green-500 hover:text-green-700"><X size={16} /></button>
+        </div>
+      )}
+
+      {/* 共享的头像文件选择器（每张卡片复用同一个 input） */}
+      <input
+        ref={avatarInputRef}
+        type="file"
+        accept={AVATAR_MIME_TYPES.join(',')}
+        className="hidden"
+        onChange={handleAvatarFile}
+      />
+
       {/* 工作站矩阵网格 */}
       <div className="flex-1 overflow-y-auto p-4">
         {loading && agents.length === 0 ? (
@@ -1214,13 +1387,19 @@ export const AgentManagerPage: React.FC<AgentManagerPageProps> = ({ onBack, onCh
                       ready ? 'border-green-500/30' : starting ? 'border-yellow-400/30' : 'border-border'
                     }`}
                   >
-                    {avatarUrl ? (
-                      <img src={avatarUrl} alt={displayName} className="w-8 h-8 rounded-lg object-cover shrink-0" loading="lazy" />
-                    ) : (
-                      <div className={`w-8 h-8 rounded-lg flex items-center justify-center shrink-0 ${ready ? 'bg-green-500/10 text-green-600' : starting ? 'bg-yellow-400/10 text-yellow-600' : 'bg-primary/10 text-primary'}`}>
-                        {TYPE_ICONS[agent.agent_type] || <Wrench size={16} />}
-                      </div>
-                    )}
+                    <AgentAvatar
+                      avatarUrl={avatarUrl}
+                      isCustom={isUploadedAvatar(agent.chat_profile)}
+                      busy={avatarBusy[key] || false}
+                      fallback={TYPE_ICONS[agent.agent_type] || <Wrench size={16} />}
+                      fallbackClass={ready ? 'bg-green-500/10 text-green-600' : starting ? 'bg-yellow-400/10 text-yellow-600' : 'bg-primary/10 text-primary'}
+                      sizeClass="w-8 h-8"
+                      iconSize={12}
+                      pickTitle={t('agentManager.avatarUpload')}
+                      resetTitle={t('agentManager.avatarResetHint')}
+                      onPick={() => openAvatarPicker(agent)}
+                      onReset={() => handleAvatarReset(agent)}
+                    />
                     <div className="flex-1 min-w-0">
                       <div className="flex items-center gap-1.5 min-w-0">
                         <h3 className="text-[13px] font-semibold text-textMain truncate leading-tight">{displayName}</h3>
@@ -1266,13 +1445,19 @@ export const AgentManagerPage: React.FC<AgentManagerPageProps> = ({ onBack, onCh
 
                   {/* Agent 头像 + 名称 */}
                   <div className="flex items-center gap-3 mb-3">
-                    {avatarUrl ? (
-                      <img src={avatarUrl} alt={displayName} className="w-10 h-10 rounded-lg object-cover shrink-0" loading="lazy" />
-                    ) : (
-                      <div className={`w-10 h-10 rounded-lg flex items-center justify-center shrink-0 ${ready ? 'bg-green-500/10 text-green-600' : starting ? 'bg-yellow-400/10 text-yellow-600' : 'bg-primary/10 text-primary'}`}>
-                        {TYPE_ICONS[agent.agent_type] || <Wrench size={20} />}
-                      </div>
-                    )}
+                    <AgentAvatar
+                      avatarUrl={avatarUrl}
+                      isCustom={isUploadedAvatar(agent.chat_profile)}
+                      busy={avatarBusy[key] || false}
+                      fallback={TYPE_ICONS[agent.agent_type] || <Wrench size={20} />}
+                      fallbackClass={ready ? 'bg-green-500/10 text-green-600' : starting ? 'bg-yellow-400/10 text-yellow-600' : 'bg-primary/10 text-primary'}
+                      sizeClass="w-10 h-10"
+                      iconSize={14}
+                      pickTitle={t('agentManager.avatarUpload')}
+                      resetTitle={t('agentManager.avatarResetHint')}
+                      onPick={() => openAvatarPicker(agent)}
+                      onReset={() => handleAvatarReset(agent)}
+                    />
                     <div className="min-w-0">
                       <h3 className="font-semibold text-textMain text-sm truncate">{displayName}</h3>
                       <p className="text-[10px] text-textMuted truncate">{agent.agent_type} | {key}</p>
@@ -1342,13 +1527,19 @@ export const AgentManagerPage: React.FC<AgentManagerPageProps> = ({ onBack, onCh
             {/* 面板头 */}
             <div className="p-4 border-b border-border flex justify-between items-center shrink-0">
               <div className="flex items-center gap-2">
-                {resolveChatAvatar(detailAgent.chat_profile) ? (
-                  <img src={resolveChatAvatar(detailAgent.chat_profile)!} alt={resolveChatName(detailAgent.chat_profile)} className="w-8 h-8 rounded-lg object-cover" loading="lazy" />
-                ) : (
-                  <div className={`w-8 h-8 rounded-lg flex items-center justify-center ${detailAgent.process_status === 'running' ? 'bg-green-500/10 text-green-600' : 'bg-primary/10 text-primary'}`}>
-                    {TYPE_ICONS[detailAgent.agent_type] || <Wrench size={18} />}
-                  </div>
-                )}
+                <AgentAvatar
+                  avatarUrl={resolveChatAvatar(detailAgent.chat_profile)}
+                  isCustom={isUploadedAvatar(detailAgent.chat_profile)}
+                  busy={avatarBusy[getAgentKey(detailAgent)] || false}
+                  fallback={TYPE_ICONS[detailAgent.agent_type] || <Wrench size={18} />}
+                  fallbackClass={detailAgent.process_status === 'running' ? 'bg-green-500/10 text-green-600' : 'bg-primary/10 text-primary'}
+                  sizeClass="w-8 h-8"
+                  iconSize={12}
+                  pickTitle={t('agentManager.avatarUpload')}
+                  resetTitle={t('agentManager.avatarResetHint')}
+                  onPick={() => openAvatarPicker(detailAgent)}
+                  onReset={() => handleAvatarReset(detailAgent)}
+                />
                 <div>
                   <h3 className="font-semibold text-textMain text-sm">{detailAgent.agent_name || resolveChatName(detailAgent.chat_profile) || getAgentKey(detailAgent)}</h3>
                   <p className="text-[10px] text-textMuted">{getAgentKey(detailAgent)}</p>

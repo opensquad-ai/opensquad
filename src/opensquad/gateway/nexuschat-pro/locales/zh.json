@@ -186,6 +186,13 @@
   },
   "agentManager": {
     "title": "AI 助手管理",
+    "avatarUpload": "上传自定义头像",
+    "avatarUploaded": "{{name}} 的头像已更新（已同步 {{groups}} 个群聊）",
+    "avatarUploadFailed": "头像更新失败",
+    "avatarTooLarge": "图片过大（{{size}} KB，上限 2048 KB）",
+    "avatarBadType": "请选择 PNG / JPEG / WebP / GIF 格式的图片",
+    "avatarResetHint": "恢复默认头像",
+    "avatarReset": "{{name}} 已恢复为默认头像",
     "layoutGrid": "卡片排列",
     "layoutList": "列式排列",
     "noDescription": "暂无描述",
@@ -376,7 +383,12 @@
     "restartFailedMsg": "重启失败: {{error}}",
     "saveAndRestart": "保存并重启",
     "saveAndRestartFailedMsg": "保存并重启失败: {{error}}",
-    "portChangedRestartHint": "端口已修改 — 请重启服务后生效"
+    "portChangedRestartHint": "端口已修改 — 请重启服务后生效",
+    "uninstallServiceTitle": "卸载服务",
+    "uninstallServiceWarning": "卸载会删除该服务所属的插件目录并清除其配置数据：服务将不再出现在列表里，也无法再启动。",
+    "uninstallServiceStopsHint": "该服务正在运行，卸载前会先将其停止。",
+    "uninstallShort": "卸载",
+    "noServices": "暂无服务"
   },
   "pluginMarket": {
     "title": "插件",
@@ -1591,23 +1603,23 @@
         "desc": "每次点击生成一套柔和配色"
       },
       "inkGreen": {
-        "name": "墨绿",
+        "name": "松墨",
         "desc": "经典深青绿，暖米色背景"
       },
       "lakeBlue": {
-        "name": "霁青",
+        "name": "湖光",
         "desc": "克制中性色 × 湖蓝色调"
       },
       "minimal": {
-        "name": "极简",
+        "name": "静蓝",
         "desc": "清爽专业的深蓝商务风格"
       },
       "violet": {
-        "name": "紫虹",
+        "name": "紫烟",
         "desc": "低饱和紫调，细腻含蓄"
       },
       "luxury": {
-        "name": "奢华",
+        "name": "鎏金",
         "desc": "沉稳金棕，极简贵气"
       },
       "rose": {

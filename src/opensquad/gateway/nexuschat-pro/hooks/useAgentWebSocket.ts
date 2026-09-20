@@ -70,6 +70,18 @@ export type AgentWebWsCtx = Record<string, any>;
 export function useAgentWebSocket(agentId: string, ctx: AgentWebWsCtx) {
   const ctxRef = useRef(ctx);
   ctxRef.current = ctx;
+  /**
+   * The follow-up offer only ever belongs at the TAIL of the output.
+   *
+   * `suggest_followups` lands *before* the final answer streams (the rule tells
+   * the agent to call it right before writing that answer), so at emit time the
+   * offer is not yet the last thing in the transcript — AIChatPage hides the
+   * chips while the turn is in flight and shows them once it settles. This flag
+   * records that a real `suggest_followups` payload armed the offer, so a LATER
+   * tool flow (same-turn continuation / agent self-continuation) retires it
+   * instead of letting a stale offer reappear under brand-new output.
+   */
+  const followupOfferArmedRef = useRef(false);
 
   useEffect(() => {
     if (!agentId) return;
@@ -696,6 +708,13 @@ export function useAgentWebSocket(agentId: string, ctx: AgentWebWsCtx) {
       if (isSidStopped()) return;
       const data = msg.content || msg.data;
       const toolName = typeof data === 'object' ? (data.name || data.tool || 'Tool') : 'Tool';
+      // 新的工具流 → 之前那批追问建议已不在输出末尾，直接撤掉。
+      // `suggest_followups` 自身的 tool_call 放行：它相对 info 事件的先后顺序
+      // 取决于派发/执行时机，误杀会让刚发出的建议立刻消失。
+      if (!/suggest_followups/.test(String(toolName)) && followupOfferArmedRef.current) {
+        followupOfferArmedRef.current = false;
+        setFollowupSuggestions([]);
+      }
       const isSubAgent = typeof data === 'object' && !!data.sub_agent;
       const event: WorkflowEvent = {
         type: 'tool_call',
@@ -1358,10 +1377,11 @@ export function useAgentWebSocket(agentId: string, ctx: AgentWebWsCtx) {
           return;
         }
 
-        // 对话后续预期 — agent-offered follow-up chips shown under its final answer.
-        // Non-blocking offer: consume it and stop here so it never appears as a
-        // timeline "Activity" block (the chips render in the composer slot).
+        // 对话后续预期 — agent-offered follow-up chips shown at the end of its
+        // final answer. Non-blocking offer: consume it and stop here so it never
+        // appears as a timeline "Activity" block.
         if (evt === 'suggest_followups') {
+          followupOfferArmedRef.current = true;
           setFollowupSuggestions(parseFollowupSuggestions((detailed as any).suggestions));
           return;
         }
@@ -1443,6 +1463,7 @@ export function useAgentWebSocket(agentId: string, ctx: AgentWebWsCtx) {
         lastAutoSpokenRef.current = '';
         stopAutoTts();
         // A new user turn supersedes any follow-up chips from the previous answer.
+        followupOfferArmedRef.current = false;
         setFollowupSuggestions([]);
       }
       if (turnSid) {
@@ -2196,7 +2217,14 @@ export function useAgentWebSocket(agentId: string, ctx: AgentWebWsCtx) {
               ...(session.events || []),
             ];
             setOptionsProposals(hydrateOptionsProposalsFromEvents(allEvents));
-            setFollowupSuggestions(hydrateFollowupsFromEvents(allEvents));
+            {
+              // A rehydrated offer already sits at the tail (it survived the
+              // round-start check), so arm it: a later tool flow must be able to
+              // retire it exactly like a live one.
+              const hydratedFollowups = hydrateFollowupsFromEvents(allEvents);
+              followupOfferArmedRef.current = hydratedFollowups.length > 0;
+              setFollowupSuggestions(hydratedFollowups);
+            }
             // Restore live Working timer from disk started_ms after refresh.
             {
               let restoredStart: number | undefined;
@@ -2235,6 +2263,7 @@ export function useAgentWebSocket(agentId: string, ctx: AgentWebWsCtx) {
           } else {
             // Disk session unavailable — use buffered WS history as fallback
             setOptionsProposals([]);
+            followupOfferArmedRef.current = false;
             setFollowupSuggestions([]);
             const buffered = pendingHydrationMediaRef.current;
             pendingHydrationMediaRef.current = [];

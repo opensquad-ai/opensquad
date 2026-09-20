@@ -1018,7 +1018,11 @@ async def group_transcribe_audio(
     language: str = Form("zh"),
 ):
     """
-    Speech-to-text for group chat using the model card marked ``group_asr: true``.
+    Speech-to-text for group chat using the **built-in** ASR service.
+
+    Group chat voice input is a built-in capability (the local SenseVoice /
+    Whisper plugin service), not a user model card — see
+    ``opensquad.audio.resolve_group_asr_card``.
     """
     from opensquad.audio import resolve_group_asr_card
     from opensquad.audio.stepfun_asr import transcribe_with_card
@@ -1027,7 +1031,8 @@ async def group_transcribe_audio(
     if not card:
         raise HTTPException(
             400,
-            "No group ASR model card. Open Models → ASR card → enable「设为群聊语音转文本」(group_asr).",
+            "内置语音转文本不可用：请在「服务管理」启用并启动 SenseVoice（或 Whisper）"
+            "内置 ASR 服务后重试。(built-in ASR unavailable)",
         )
 
     audio_path: str | None = None

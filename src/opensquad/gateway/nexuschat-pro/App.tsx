@@ -862,6 +862,22 @@ const App: React.FC = () => {
       }
     });
 
+    // user_updated — an avatar was changed outside the chat (Agent Workstation
+    // upload). Member lists read this map, so patch it in place; without this
+    // the new picture would only appear after a reload.
+    const unsubscribeUserUpdated = wsService.on('user_updated', (message) => {
+      const userData = message?.data || {};
+      const userId = userData.user_id || userData.id;
+      if (!userId || typeof userData.avatar !== 'string') return;
+      setState(prev => ({
+        ...prev,
+        users: {
+          ...prev.users,
+          [userId]: { ...(prev.users[userId] || { id: userId, name: userId }), avatar: userData.avatar },
+        },
+      }));
+    });
+
     return () => {
       // Drop any queued frame so a flush cannot run against an unmounted tree
       if (pendingFlushRef.current !== null) {
@@ -877,6 +893,7 @@ const App: React.FC = () => {
       unsubscribePresence();
       unsubscribeUserOnline();
       unsubscribeUserOffline();
+      unsubscribeUserUpdated();
     };
   }, [enqueueIncomingMessage]);
 
