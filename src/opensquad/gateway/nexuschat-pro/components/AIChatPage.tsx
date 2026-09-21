@@ -22,6 +22,7 @@ import {
   Moon, Zap, Bell,
   RefreshCw,
   Clock,
+  Reply, Pencil, Trash2,
 } from 'lucide-react';
 
 import { useTranslation } from 'react-i18next';
@@ -35,9 +36,11 @@ import {
   composeAssistantDisplayContent,
   buildTimelineFromSession,
   demoteIntermediateAssistantMessages,
+  dropEntriesAlreadyPresent,
   formatUserSkillDisplayContent,
   genTimelineUID,
   mergeAdjacentWorkflowEntries,
+  sessionMessageIdentity,
   timelineHasVisibleChatContent,
   sealIncompleteWorkflows,
   sealPendingCompression,
@@ -764,6 +767,16 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
   const [hasMoreHistory, setHasMoreHistory] = useState(false);
   const [isLoadingMore, setIsLoadingMore] = useState(false);
   const historyOffsetRef = useRef(0);        // how many messages already loaded (from the end)
+  /**
+   * Identity of the oldest message currently loaded FROM THE PAGED ENDPOINT.
+   * `historyOffsetRef` counts from the tail, so it silently re-aims backwards
+   * every time the live turn appends messages — the next page then overlaps
+   * what is already painted and the user's own bubbles render twice. This
+   * anchor pins the window to a message instead, so pages can never overlap.
+   * Kept separate from the timeline head: the head may be archived content,
+   * which the paged endpoint's `messages` array does not contain.
+   */
+  const pagedAnchorIdRef = useRef<string | null>(null);
   const loadingSessionIdRef = useRef<string | null>(null); // session being lazily loaded
 
   // Session loading state (加载/创建会话中)
@@ -811,6 +824,8 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     /** Target session for multi-pane / multi-tab sends */
     sessionId?: string;
     paneId?: string;
+    /** 引导注入：已发往后端注入队列，等当前工具轮结束后的下一轮进模型上下文。 */
+    steered?: boolean;
   }
   const [pendingMessages, setPendingMessages] = useState<PendingMessage[]>([]);
   const [pendingCollapsed, setPendingCollapsed] = useState(false);
@@ -879,6 +894,14 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     if (prev.length === 0) return;
     const finished = prev.filter((id) => !next.includes(id));
     if (finished.length === 0) return;
+    // 引导消息随回合结束兜底清理：后端要么已注入、要么把残留插话开成了新
+    // 回合；消费回执（steer_consumed）丢失时避免条目滞留在引导队列里。
+    setPendingMessages((prevQ) => {
+      const nextQ = prevQ.filter(
+        (m) => !(m.steered && m.sessionId && finished.includes(m.sessionId)),
+      );
+      return nextQ.length === prevQ.length ? prevQ : nextQ;
+    });
     const viewed = viewedSessionIdRef.current;
     const newlyUnseen = finished.filter((id) => id && id !== viewed);
     if (newlyUnseen.length === 0) return;
@@ -1376,10 +1399,14 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     setIsLoadingMore(true);
     const el = messagesContainerRef.current;
     const prevScrollHeight = el ? el.scrollHeight : 0;
+    // Snapshot BEFORE this page is counted; the state updater below runs after
+    // the synchronous body, so reading the ref there would double-count.
+    const loadedBeforePage = historyOffsetRef.current;
 
     try {
       const resp = await agentSessionAPI.getSessionHistoryPaged(
-        agentId, sid, historyOffsetRef.current, 50
+        agentId, sid, historyOffsetRef.current, 50,
+        pagedAnchorIdRef.current || undefined,
       );
       const session = resp.session;
       if (session && (session.messages?.length > 0 || session.events?.length > 0)) {
@@ -1387,6 +1414,11 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
           session.messages || [],
           session.events || [],
         );
+        // The anchor of the NEXT page is this page's oldest message — it is
+        // what "strictly older than" must mean, regardless of how much the
+        // live turn has appended in the meantime.
+        pagedAnchorIdRef.current =
+          sessionMessageIdentity((session.messages || [])[0]) || pagedAnchorIdRef.current;
         if (olderEntries.length > 0) {
           setTimeline(prev => {
             // Cross-seam renormalization: each page is rebuilt independently,
@@ -1395,13 +1427,25 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
             // the workflows of the other page). Re-run demote + merge over the
             // combined array so the seam stitches back into one interleaved
             // turn.
+            //
+            // `dropEntriesAlreadyPresent` first: prepending is the only path
+            // that concatenates two independently deduped arrays, so it is the
+            // only place a message already on screen can slip back in.
             const next = mergeAdjacentWorkflowEntries(
-              demoteIntermediateAssistantMessages([...olderEntries, ...prev]),
+              demoteIntermediateAssistantMessages([
+                ...dropEntriesAlreadyPresent(olderEntries, prev),
+                ...prev,
+              ]),
             );
             putCachedSessionTimeline(agentId, sid, next, {
               complete: !(session.has_more ?? false),
-              messageCount: historyOffsetRef.current + (session.messages?.length || 0),
+              // NOTE: computed from the ref's pre-increment value below —
+              // reading it here would already include this page (React runs
+              // updaters after the synchronous body), inflating the count and
+              // desyncing `historyOffsetRef` on the next cache restore.
+              messageCount: loadedBeforePage,
               totalMessages: session.total_messages,
+              oldestMessageId: pagedAnchorIdRef.current || undefined,
             });
             return next;
           });
@@ -1875,8 +1919,10 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
       skillName?: string;
       /** Target session for parallel multi-session sends */
       sessionId?: string;
+      /** steer 消费回执对账 id（= PendingMessage.id），普通发送不用 */
+      clientId?: string;
     },
-    opts?: { clearInputState?: boolean; salvageStream?: boolean },
+    opts?: { clearInputState?: boolean; salvageStream?: boolean; steer?: boolean },
   ) => {
     const { text, images: imgState, attachments: attState, skillDir, skillName } = payload;
     const targetSessionId = (payload.sessionId || currentSessionIdRef.current || '').trim();
@@ -1930,6 +1976,35 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
       if (imageMarkers) {
         wsText = wsText ? `${wsText}\n\n${imageMarkers}` : imageMarkers;
       }
+    }
+
+    // ---- Steer（引导注入）分支 ----
+    // 会话忙时的插话：照常构建 wsText（skill 标签 / 文件 / 图片标记），立即经
+    // WS 发往后端注入队列。runner 会在当前工具轮结束后的下一轮把它塞进模型
+    // 上下文，不打断连续工具流；消费后回发 steer_consumed，这里不入时间线、
+    // 不抢焦点、不做 checkpoint（撤回由 cancel_steer 命令负责）。
+    if (opts?.steer) {
+      const steerUid = payload.clientId || genUID();
+      const steerCard =
+        (targetSessionId && cardNameBySessionRef.current[targetSessionId]) ||
+        currentCardNameRef.current ||
+        undefined;
+      wsServiceRef.current?.sendMessage(
+        wsText,
+        allImages.length > 0 ? allImages : undefined,
+        nonImageAttachments,
+        {
+          client_id: steerUid,
+          session_id: targetSessionId || undefined,
+          model_card: steerCard,
+        },
+      );
+      console.info('[AIChatPage] deliverMessage → WS steer', {
+        targetSessionId,
+        clientId: steerUid,
+        textHead: wsText.slice(0, 80),
+      });
+      return;
     }
 
     // Build structured file attachments for display
@@ -2145,6 +2220,26 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     }
   }, [currentSessionId, agentId]);
 
+  // 引导注入（steer）：忙时会话的排队消息在入队的同时立即经 WS 发往后端，
+  // 由 runner 在当前工具轮/普通输出结束后的下一轮塞进模型上下文——不打断
+  // 连续工具流，但模型能看见这条消息。本地队列条目仅作展示（steered=true），
+  // 消费回执（steer_consumed）到达后挪进时间线。
+  const steerPendingSnapshot = useCallback((snapshot: PendingMessage) => {
+    setPendingMessages((prev) => prev.map((m) => (m.id === snapshot.id ? { ...m, steered: true } : m)));
+    deliverMessage(
+      {
+        text: snapshot.text,
+        images: snapshot.images,
+        attachments: snapshot.attachments,
+        skillDir: snapshot.skillDir,
+        skillName: snapshot.skillName,
+        sessionId: snapshot.sessionId,
+        clientId: snapshot.id,
+      },
+      { clearInputState: false, salvageStream: false, steer: true },
+    );
+  }, [deliverMessage]);
+
   const handleSend = () => {
     // A user send consumes the agent's follow-up offer (see
     // `consumeFollowupOffer`), whether the message goes out now or is parked.
@@ -2195,6 +2290,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
           sessionId: sid || undefined,
         };
         setPendingMessages((prev) => [...prev, snapshot]);
+        steerPendingSnapshot(snapshot);
         setInputText('');
         setImages([]);
         setAttachments([]);
@@ -2258,6 +2354,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
           sessionId: sid || undefined,
         };
         setPendingMessages((prev) => [...prev, snapshot]);
+        steerPendingSnapshot(snapshot);
         setInputText('');
         setImages([]);
         setAttachments([]);
@@ -2314,6 +2411,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
         sessionId: sid || undefined,
       };
       setPendingMessages(prev => [...prev, snapshot]);
+      steerPendingSnapshot(snapshot);
       // Clear the composer only — do not touch streaming state (agent is busy).
       setInputText('');
       setPendingSkill(null);
@@ -2363,10 +2461,12 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
             session.archived_events,
           );
           const hasMore = !!session.has_more;
+          pagedAnchorIdRef.current = sessionMessageIdentity(messages[0]) || null;
           putCachedSessionTimeline(agentId, sid, entries, {
             complete: !hasMore,
             messageCount: messages.length,
             totalMessages: session.total_messages,
+            oldestMessageId: pagedAnchorIdRef.current || undefined,
           });
           setTimeline(entries);
           setShellStreams(rebuildShellStreamsFromTimeline(entries));
@@ -2405,32 +2505,98 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     );
   }, [agentId, armOutboundTurnPending, deliverMessage]);
 
-  const handleSendPendingNow = useCallback((id: string) => {
-    const target = pendingMessagesRef.current.find(m => m.id === id);
+  // 引导消息撤回：从注入队列撤回到输入框重新编辑（后端尚未消费时同步移除；
+  // 已被模型消费的条目此前已随 steer_consumed 移出队列，不存在该入口）。
+  const handleEditPending = useCallback((id: string) => {
+    const target = pendingMessagesRef.current.find((m) => m.id === id);
     if (!target) return;
-    setPendingMessages(prev => prev.filter(m => m.id !== id));
-    void flushPendingMessage(target);
-  }, [flushPendingMessage]);
+    setPendingMessages((prev) => prev.filter((m) => m.id !== id));
+    wsServiceRef.current?.cancelSteer((target.sessionId || '').trim() || undefined, target.id);
+    // 回填输入框：文本追加/还原，媒体与技能一并恢复，便于重新编辑后再发送。
+    setInputText((prev) => {
+      const t = (target.text || '').trim();
+      return prev.trim() ? (t ? `${prev}\n${t}` : prev) : t;
+    });
+    if (target.skillDir) {
+      setPendingSkill({ dir: target.skillDir, name: target.skillName || target.skillDir });
+    }
+    if (target.images.length > 0) setImages((prev) => [...prev, ...target.images]);
+    if (target.attachments.length > 0) {
+      setAttachments((prev) => [...prev, ...target.attachments.map((a) => ({ ...a }))]);
+    }
+    if (inputRef.current) inputRef.current.style.height = 'auto';
+    inputRef.current?.focus();
+  }, []);
 
-  // Cancel / remove a pending message without sending it.
-  const handleCancelPending = useCallback((id: string) => {
-    setPendingMessages(prev => prev.filter(m => m.id !== id));
+  // 引导消息删除：直接丢弃（后端同步从注入队列移除）。
+  const handleDeletePending = useCallback((id: string) => {
+    const target = pendingMessagesRef.current.find((m) => m.id === id);
+    if (!target) return;
+    setPendingMessages((prev) => prev.filter((m) => m.id !== id));
+    wsServiceRef.current?.cancelSteer((target.sessionId || '').trim() || undefined, target.id);
   }, []);
 
   // Header "Send now": release only the first queued message (sequential drain).
+  // 已引导注入的条目不重发（后端注入队列里已在排队）。
   const handleSendNextPending = useCallback(() => {
     const queue = pendingMessagesRef.current;
     if (queue.length === 0) return;
-    const next = queue[0];
+    const next = queue.find((m) => !m.steered);
+    if (!next) return;
     setPendingMessages(prev => prev.filter(m => m.id !== next.id));
     void flushPendingMessage(next);
   }, [flushPendingMessage]);
 
-  // Clear the entire queue without sending anything.
+  // Clear the entire queue without sending anything. 已引导条目需同步撤销后端注入。
   const handleCancelAllPending = useCallback(() => {
+    for (const m of pendingMessagesRef.current) {
+      if (m.steered) {
+        wsServiceRef.current?.cancelSteer((m.sessionId || '').trim() || undefined, m.id);
+      }
+    }
     setPendingMessages([]);
     clearOutboundTurnPending();
   }, [clearOutboundTurnPending]);
+
+  // 引导消息被模型消费（随本轮工具结果进入上下文）：把用户气泡插入时间线，
+  // 并从引导队列移除对应条目（按入队时的 client_id 对账）。
+  useEffect(() => {
+    const svc = wsServiceRef.current;
+    if (!svc) return;
+    return svc.on('steer_consumed', (raw: any) => {
+      const inner = raw?.content ?? raw?.data ?? {};
+      const payload = typeof inner === 'object' && inner !== null ? inner : {};
+      const messageId = String(payload.message_id || '').trim();
+      const text = String(payload.content ?? '').trim();
+      const sid = String(raw?.sid || payload.session_id || '').trim();
+      if (messageId) {
+        setPendingMessages((prev) => prev.filter((m) => !(m.steered && m.id === messageId)));
+      }
+      if (!text) return;
+      const uid = genUID();
+      const userMsg: ChatMessage = {
+        role: 'user',
+        content: formatUserSkillDisplayContent(text),
+        timestamp: new Date().toISOString().replace(/\.\d{3}Z$/, 'Z'),
+        message_id: uid,
+      };
+      const prevBucket = sid
+        ? (liveTimelinesBySessionRef.current[sid] ?? [])
+        : (timelineRef.current ?? []);
+      const nextEntries: TimelineEntry[] = [
+        ...sealIncompleteWorkflows(prevBucket, { fallbackStartedMs: turnStartedMsRef.current }),
+        { kind: 'message', data: userMsg, _uid: uid },
+      ];
+      if (sid) {
+        const out = { ...liveTimelinesBySessionRef.current, [sid]: nextEntries };
+        liveTimelinesBySessionRef.current = out;
+        setLiveTimelinesBySession(out);
+      }
+      if (!sid || sid === (currentSessionIdRef.current || '')) {
+        setTimelineState(nextEntries);
+      }
+    });
+  }, [agentId]);
 
   // Auto-drain: when idle, release exactly ONE pending message (any session),
   // switching without stop_task, then wait for that turn before the next.
@@ -2440,6 +2606,8 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     const queue = pendingMessagesRef.current;
     if (queue.length === 0) return;
     const next = queue.find((m) => {
+      // 已引导注入的条目由后端消费（steer_consumed / 回合结束清理），绝不重发。
+      if (m.steered) return false;
       const sid = (m.sessionId || "").trim();
       if (sid && isSessionBusy(sid)) return false;
       if (sid && isOutboundPending(sid)) return false;
@@ -2772,6 +2940,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     setHasMoreHistory(false);
     setIsLoadingMore(false);
     historyOffsetRef.current = 0;
+    pagedAnchorIdRef.current = null;
     loadingSessionIdRef.current = null;
 
     // Fallback: if Runner/Gateway WS ack (current_session) is delayed or lost,
@@ -2808,6 +2977,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
       requestSessionListRefresh(agentId, currentSid);
       diskSessionLoadedRef.current = msgCount > 0;
       historyOffsetRef.current = msgCount;
+      pagedAnchorIdRef.current = sessionMessageIdentity(session?.messages?.[0]) || null;
       setHasMoreHistory(session?.has_more ?? false);
       if (msgCount === 0 && !timelineHasVisibleChatContent(entries)) {
         pinComposerLanding(currentSid);
@@ -2899,10 +3069,15 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
         session.archived_events,
       );
       const hasMore = !!session.has_more;
+      // This page replaces the timeline, so it also re-anchors scroll-up: the
+      // oldest message of the page is the boundary everything older must come
+      // strictly before.
+      pagedAnchorIdRef.current = sessionMessageIdentity(messages[0]) || null;
       putCachedSessionTimeline(agentId, sessionId, entries, {
         complete: !hasMore,
         messageCount: messages.length,
         totalMessages: session.total_messages,
+        oldestMessageId: pagedAnchorIdRef.current || undefined,
       });
       eventSidRef.current = sessionId;
       setTimeline(entries);
@@ -2938,6 +3113,10 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
           setShellStreams(rebuildShellStreamsFromTimeline(cached));
           loadingSessionIdRef.current = sessionId;
           historyOffsetRef.current = meta.messageCount || cached.filter((e) => e.kind === 'message').length;
+          // Restore the paged anchor so scroll-up resumes from the exact
+          // message the cached window ended on instead of the tail-relative
+          // offset (which drifts once the live turn appends messages).
+          pagedAnchorIdRef.current = meta.oldestMessageId || null;
           setHasMoreHistory(!meta.complete);
         }
         requestSessionTokenStats(sessionId);
@@ -3796,6 +3975,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
         paneId,
       };
       setPendingMessages((prev) => [...prev, snapshot]);
+      steerPendingSnapshot(snapshot);
       return;
     }
 
@@ -3875,7 +4055,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
               {t('aiChat.pendingCount', { count: queue.length })}
             </span>
             <span className="text-[10px] text-textMuted">
-              · ↗ {t('aiChat.pendingAutoSendHint')}
+              · ↗ {t('aiChat.pendingSteerHint')}
             </span>
             <div className="flex-1" />
             <button
@@ -3938,19 +4118,27 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
                     <div className="flex-shrink-0 flex items-center gap-0.5 opacity-60 group-hover:opacity-100 transition-opacity">
                       <button
                         type="button"
-                        onClick={() => handleSendPendingNow(pm.id)}
+                        onClick={(e) => e.stopPropagation()}
                         className="p-1 rounded text-primary hover:bg-primary/10 transition-colors"
-                        title={t('aiChat.sendNow')}
+                        title={t('aiChat.steerHint')}
                       >
-                        <Zap size={12} />
+                        <Reply size={12} />
                       </button>
                       <button
                         type="button"
-                        onClick={() => handleCancelPending(pm.id)}
+                        onClick={() => handleEditPending(pm.id)}
                         className="p-1 rounded text-textMuted hover:bg-primary/10 hover:text-textMain transition-colors"
-                        title={t('aiChat.cancelPending')}
+                        title={t('aiChat.editPending')}
                       >
-                        <X size={12} />
+                        <Pencil size={12} />
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleDeletePending(pm.id)}
+                        className="p-1 rounded text-textMuted hover:bg-primary/10 hover:text-textMain transition-colors"
+                        title={t('aiChat.deletePending')}
+                      >
+                        <Trash2 size={12} />
                       </button>
                     </div>
                   </div>
@@ -5178,11 +5366,22 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
                   style={revealStyle}
                 >
                   <div className="w-full min-w-0">
-                    {agentProfile?.agent_name && (
-                      <div className="text-[11px] font-medium text-textMuted/70 mb-2">
-                        {agentProfile.agent_name}
-                      </div>
-                    )}
+                    {/* 尾部"幽灵签名"守卫：组里只剩无正文 info 事件（如回合结束后的
+                        suggest_followups 回执）时 SoloActivityRow 什么都不画，caption
+                        也必须跟着消失，否则推荐追问上方会悬一行孤立的 agent 名。 */}
+                    {agentProfile?.agent_name
+                      && merged.events.some((e) => {
+                        if (e.type !== 'info') return true;
+                        const c = e.content as any;
+                        const s = (typeof e.content === 'string' ? e.content : c?.text || c?.message || '').trim();
+                        return !!s
+                          && !/^New session started$/i.test(s)
+                          && !/^Workflow started$/i.test(s);
+                      }) && (
+                        <div className="text-[11px] font-medium text-textMuted/70 mb-2">
+                          {agentProfile.agent_name}
+                        </div>
+                      )}
                     <SoloActivityRow
                       block={merged}
                       turnDelivered={turnDelivered}

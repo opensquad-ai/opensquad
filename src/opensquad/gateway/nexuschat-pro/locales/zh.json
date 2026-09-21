@@ -857,6 +857,8 @@
         "task_watch": "任务盯守",
         "memory": "长期记忆",
         "goal": "目标进度",
+        "reminder": "定时提醒",
+        "scheduled_tasks": "定时任务",
         "vision": "图像理解",
         "media": "多媒体",
         "whisper": "语音转写",
@@ -889,7 +891,11 @@
         "get_shell_session_status": "终端状态",
         "update_task_progress": "更新待办",
         "batch_update_tasks": "更新待办",
-        "add_task": "更新待办"
+        "add_task": "更新待办",
+        "wait": "等待",
+        "sleep": "等待",
+        "set_state": "切换状态",
+        "set_wake_mode": "唤醒模式"
       },
       "summary": {
         "read": "读取 {{n}} 个文件",
@@ -906,6 +912,7 @@
         "media": "多媒体处理 {{n}} 次",
         "mcp": "调用 MCP 工具 {{n}} 次",
         "list": "浏览目录 {{n}} 次",
+        "system": "系统控制 {{n}} 次",
         "other": "调用工具 {{n}} 次"
       },
       "line": {
@@ -1024,13 +1031,14 @@
     "archivedCollapse": "收起已归档",
     "archivedCount": "{{count}} 条已归档",
     "pendingLabel": "待发送",
-    "pendingQueueHint": "{{count}} 条待发送消息，Agent 空闲后逐条发送",
-    "sendNow": "立即发送",
+    "pendingQueueHint": "{{count}} 条引导消息，不打断当前任务、下一轮注入",
     "sendNext": "发送下一条",
-    "cancelPending": "取消",
     "queueMessage": "排队等待发送",
-    "pendingCount": "{{count}} 条待发送",
-    "pendingAutoSendHint": "空闲后逐条发送（一条完成后再发下一条）",
+    "pendingCount": "{{count}} 条引导中",
+    "pendingSteerHint": "已引导注入，模型下一轮可见、不中断",
+    "steerHint": "引导会话，消息将被发出但模型不会中断",
+    "editPending": "撤回到输入框编辑",
+    "deletePending": "删除",
     "pendingCollapse": "收起",
     "pendingExpand": "展开",
     "pendingClearAll": "全部清空",
@@ -1570,7 +1578,14 @@
     "kindWake": "唤醒",
     "kindStateChange": "状态变更",
     "kindOverhead": "其它",
-    "sessionUsage": "本轮用量"
+    "sessionUsage": "本轮用量",
+    "cacheHitRate": "缓存命中率",
+    "cacheHit": "输入 · 命中缓存",
+    "cacheMiss": "输入 · 未命中缓存",
+    "inputTokens": "输入合计",
+    "outputTokens": "输出",
+    "cacheHitUnknown": "—",
+    "cacheHitUnavailable": "该模型未返回用量数据，无法统计缓存命中率"
   },
   "toolCall": {
     "deliveryWarning": "文件已上传但未投递到任何在线 Web 客户端。请确认已打开该 agent 的 AI Chat 页面并保持连接后重试。"

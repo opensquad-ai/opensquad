@@ -15,6 +15,7 @@ import {
   genTimelineUID,
   isFinalFlag,
   isToolResultFailure,
+  isUiOnlyToolName,
   isWorkflowSettled,
   LIVE_XML_TOOL_ID,
   mergeOrphanedToolResultsAcrossWorkflows,
@@ -494,11 +495,18 @@ describe('buildTimelineFromSession', () => {
     ];
     const tl = buildTimelineFromSession(messages, []);
     const messageEntries = tl.filter((e: any) => e.kind === 'message');
-    expect(messageEntries.length).toBe(3); // user + 2 assistant, no tool bubble
+    // user + final assistant. "working..." is interim text: this session has no
+    // workflow events at all, so it folds into a process-only block instead of
+    // staying on screen as if it were the reply.
+    expect(messageEntries.length).toBe(2);
+    expect(messageEntries.map((e: any) => e.data.content)).toEqual(['hi', 'done']);
     const leaked = messageEntries.some(
       (e: any) => e.data && String(e.data.content || '').includes('file line'),
     );
     expect(leaked).toBe(false);
+    const folded = tl.find((e: any) => e.kind === 'workflow') as any;
+    expect(folded?.data.events.map((ev: any) => ev.type)).toEqual(['process_output']);
+    expect(folded?.data.events[0].content).toBe('working...');
   });
 
   it('drops a second message with the same message_id (no duplicate React key)', () => {
@@ -2067,5 +2075,23 @@ describe('compression_progress field names (`is_final`, snake_case)', () => {
     if (sealed[0].kind !== 'workflow') throw new Error('shape');
     expect(sealed[0].data.completed).toBe(true);
     expect(isWorkflowSettled(sealed[0].data.events)).toBe(true);
+  });
+});
+
+describe('isUiOnlyToolName', () => {
+  it('flags the UI-card namespaces and the bare housekeeping name', () => {
+    expect(isUiOnlyToolName('followup_tools__suggest_followups')).toBe(true);
+    expect(isUiOnlyToolName('choice_tools__confirm')).toBe(true);
+    expect(isUiOnlyToolName('agent_mode__set')).toBe(true);
+    // 剥掉命名空间后上报的名字（runner 侧同样按后缀判定 housekeeping）
+    expect(isUiOnlyToolName('suggest_followups')).toBe(true);
+    expect(isUiOnlyToolName('x__suggest_followups')).toBe(true);
+  });
+
+  it('leaves real work alone', () => {
+    expect(isUiOnlyToolName('filesystem__read_file')).toBe(false);
+    expect(isUiOnlyToolName('system__run_session_job')).toBe(false);
+    expect(isUiOnlyToolName('websearch__search')).toBe(false);
+    expect(isUiOnlyToolName('')).toBe(false);
   });
 });

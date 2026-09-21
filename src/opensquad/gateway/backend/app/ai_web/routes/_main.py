@@ -1481,17 +1481,22 @@ async def agent_session_history_paged(
     session_id: str,
     offset: int = Query(0, ge=0),
     limit: int = Query(50, ge=1, le=200),
+    before_id: str | None = Query(None),
     current_user: User = Depends(get_current_user_dep),
 ):
     """
     Get paginated session data (messages + events), newest first.
     offset=0 returns the most recent `limit` messages.
+
+    `before_id` anchors the page to a message identity (the oldest one the
+    client already holds) and returns the `limit` messages strictly older than
+    it, so scroll-up pages can never overlap regardless of tail growth.
     """
     reader = await async_get_agent_session_reader(agent_id)
     if not reader:
         raise HTTPException(404, f"Agent not found: {agent_id}")
 
-    data = await reader.async_get_session_history_paged(session_id, offset=offset, limit=limit)
+    data = await reader.async_get_session_history_paged(session_id, offset=offset, limit=limit, before_id=before_id)
     if not data:
         raise HTTPException(404, f"Session not found: {session_id}")
 

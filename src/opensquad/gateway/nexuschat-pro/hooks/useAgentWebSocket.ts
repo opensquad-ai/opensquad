@@ -10,10 +10,12 @@ import {
   composeAssistantDisplayContent,
   buildTimelineFromSession,
   compressionProgressContent,
+  demoteIntermediateAssistantMessages,
   extractLiveToolCallFromMarkup,
   foldTaskProcessSinceLastUser,
   genTimelineUID,
   isFinalFlag,
+  isUiOnlyToolName,
   sealIncompleteWorkflows,
   toWebMediaUrl,
   type TimelineEntry,
@@ -307,6 +309,14 @@ export function useAgentWebSocket(agentId: string, ctx: AgentWebWsCtx) {
         const hasParentTool = items.some(
           (it) => it.event.type === 'tool_call' && !it.event.subAgent,
         );
+        // 真正的活儿（排除追问/选项/模式切换这类纯 UI 工具——那类回合会就地结束，
+        // 同回合的文本就是给用户的回复，不能被折进工具流）。
+        const hasParentWork = items.some((it) => {
+          if (it.event.type !== 'tool_call' || it.event.subAgent) return false;
+          const c = it.event.content;
+          const name = typeof c === 'object' && c ? String((c as any).name || (c as any).tool || '') : '';
+          return !isUiOnlyToolName(name);
+        });
         let commitText = '';
         if (hasParentTool) {
           const focused = currentSessionIdRef.current || '';
@@ -332,9 +342,18 @@ export function useAgentWebSocket(agentId: string, ctx: AgentWebWsCtx) {
             }
           }
         }
-        setTimeline((prev) => appendLiveWorkflowBatch(prev, items, {
-          commitAssistantText: commitText,
-        }));
+        setTimeline((prev) => {
+          const appended = appendLiveWorkflowBatch(prev, items, {
+            commitAssistantText: commitText,
+          });
+          // A parent tool_call means more agent output is coming in this turn,
+          // so prose already on screen as a bubble is 过程输出, not the final
+          // reply. Fold it now — waiting for the turn's next frame left it
+          // sitting in the pane looking like the answer for the whole tool phase.
+          return hasParentWork
+            ? demoteIntermediateAssistantMessages(appended, { demoteTrailing: true })
+            : appended;
+        });
       });
       eventSidRef.current = prevSid;
     };
@@ -1829,13 +1848,41 @@ export function useAgentWebSocket(agentId: string, ctx: AgentWebWsCtx) {
             setIsLoadingSession(true);
             setSessionLoadingLabel(t('aiChat.loadingSession'));
           }
-          const resp = await Promise.race([
-            // First page only — older turns load on scroll-up via loadMoreHistory.
-            agentSessionAPI.getCurrentSession(agentId, 0, SESSION_HISTORY_PAGE_SIZE),
-            new Promise<never>((_, reject) =>
-              setTimeout(() => reject(new Error('Hydration timeout (10s)')), 10000)
-            ),
-          ]);
+          const attemptFetch = () =>
+            Promise.race([
+              // First page only — older turns load on scroll-up via loadMoreHistory.
+              agentSessionAPI.getCurrentSession(agentId, 0, SESSION_HISTORY_PAGE_SIZE),
+              new Promise<never>((_, reject) =>
+                setTimeout(() => reject(new Error('Hydration timeout (10s)')), 10000)
+              ),
+            ]);
+          // Right after an agent/gateway restart the first /current fetch can
+          // transiently fail (agent still booting, cold 3MB+ session parse under
+          // full CPU load → 10s timeout, or a mid-boot 404/503). Without a retry
+          // the pane falls back to the empty post-reconnect WS history and the
+          // user sees no prior messages until they send something. Retry gently.
+          let resp: Awaited<ReturnType<typeof attemptFetch>> | null = null;
+          let lastErr: unknown;
+          for (let attempt = 1; attempt <= 3 && !resp; attempt++) {
+            try {
+              resp = await attemptFetch();
+            } catch (err) {
+              lastErr = err;
+              if (seq !== sessionReloadSeqRef.current) {
+                return;
+              }
+              if (attempt < 3) {
+                console.warn(
+                  `[AIChatPage] getCurrentSession attempt ${attempt} failed, retrying:`,
+                  (err as any)?.message || err,
+                );
+                await new Promise((r) => setTimeout(r, 2000 * attempt));
+              }
+            }
+          }
+          if (!resp) {
+            throw lastErr;
+          }
           if (seq !== sessionReloadSeqRef.current || viewingHistorySessionRef.current || newSessionPendingRef.current) {
             return;
           }

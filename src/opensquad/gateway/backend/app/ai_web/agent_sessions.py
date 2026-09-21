@@ -955,9 +955,9 @@ class AgentSessionReader:
         return await asyncio.to_thread(self.get_session_history, session_id)
 
     async def async_get_session_history_paged(
-        self, session_id: str, offset: int = 0, limit: int = 50
+        self, session_id: str, offset: int = 0, limit: int = 50, before_id: str | None = None
     ) -> dict[str, Any] | None:
-        return await asyncio.to_thread(self.get_session_history_paged, session_id, offset, limit)
+        return await asyncio.to_thread(self.get_session_history_paged, session_id, offset, limit, before_id)
 
     async def async_delete_session(self, session_id: str) -> bool:
         return await asyncio.to_thread(self.delete_session, session_id)
@@ -973,16 +973,56 @@ class AgentSessionReader:
         """Fuzzy search across user input and agent non-tool text messages."""
         return await asyncio.to_thread(self.search_sessions, query, limit)
 
+    @staticmethod
+    def _message_index_of(messages: list[Any], wanted: str | None) -> int | None:
+        """Index of the message whose stable identity equals ``wanted``.
+
+        Mirrors the frontend's ``stableMsgId`` precedence
+        (``message_id`` → ``client_id`` → ``id`` → ``extra.{message_id,id}``)
+        so a page boundary anchored by the client lands on the exact same
+        record the client already rendered.
+        """
+        if not wanted:
+            return None
+        w = str(wanted)
+        for key in ("message_id", "client_id", "id"):
+            for i, m in enumerate(messages):
+                if not isinstance(m, dict):
+                    continue
+                v = m.get(key)
+                if v is not None and str(v) == w:
+                    return i
+        for i, m in enumerate(messages):
+            if not isinstance(m, dict):
+                continue
+            extra = m.get("extra")
+            if isinstance(extra, dict):
+                for key in ("message_id", "id"):
+                    v = extra.get(key)
+                    if v is not None and str(v) == w:
+                        return i
+        return None
+
     def get_session_history_paged(
         self,
         session_id: str,
         offset: int = 0,
         limit: int = 50,
+        before_id: str | None = None,
     ) -> dict[str, Any] | None:
         """
         Get a session's data with pagination (from the end, backwards).
 
         offset=0 means the most recent messages.
+
+        ``before_id`` anchors the window to a message identity instead of a
+        tail-relative count: the page returns the ``limit`` messages strictly
+        OLDER than that message. Tail-relative ``offset`` is only stable while
+        nothing is appended, but a live session grows at the tail on every
+        turn — a client that paged up and then received messages would re-fetch
+        an overlapping window and render the same bubbles twice. When the
+        anchor is absent from the file the request degrades to ``offset``.
+
         Returns: {
             id, messages, events, total_messages, total_events, has_more,
             last_updated, created_at
@@ -1003,7 +1043,7 @@ class AgentSessionReader:
         # the events in that window) made every new output slide the window and
         # hide/overwrite the earlier output + tool-flow. For these sessions,
         # offset=0 returns the complete set so history is never lost from view.
-        if offset == 0 and (full.get("origin") or "") == "scheduled_task":
+        if offset == 0 and not before_id and (full.get("origin") or "") == "scheduled_task":
             return {
                 "id": session_id,
                 "title": full.get("title"),
@@ -1019,13 +1059,22 @@ class AgentSessionReader:
                 "created_at": full.get("created_at"),
             }
 
-        # Slice messages from end: offset=0 → last `limit` messages
-        if total_messages == 0:
-            paged_messages = []
-        else:
-            end_idx = total_messages - offset
-            start_idx = max(0, end_idx - limit)
-            paged_messages = [] if end_idx <= 0 else all_messages[start_idx:end_idx]
+        # Slice messages from the end: offset=0 → last `limit` messages.
+        # An explicit `before_id` wins over the tail-relative offset (see the
+        # docstring) and yields a window that cannot overlap any earlier page.
+        end_idx = total_messages - offset
+        anchored = False
+        if before_id and total_messages > 0:
+            anchor_idx = self._message_index_of(all_messages, before_id)
+            if anchor_idx is not None:
+                end_idx = anchor_idx
+                anchored = True
+        start_idx = max(0, end_idx - limit)
+        paged_messages = [] if end_idx <= 0 else all_messages[start_idx:end_idx]
+        # "Latest page" behaviours (trailing in-progress events, the 1-page
+        # event cap, the archived_* payload) only apply to a genuine tail page,
+        # never to a page anchored somewhere in the middle of the session.
+        is_latest_page = offset == 0 and not anchored
 
         # Slice events by timestamp range of the paged messages.
         # Proportional slicing is fundamentally wrong: events are not
@@ -1065,7 +1114,7 @@ class AgentSessionReader:
                     # Latest page (offset=0): also keep trailing in-progress events
                     # after the last message (tool_call_delta / thoughts mid-turn).
                     t_min = f - timedelta(seconds=30)
-                    if offset == 0:
+                    if is_latest_page:
                         from datetime import timezone as _tz
 
                         now_utc = datetime.now(_tz.utc)
@@ -1111,7 +1160,7 @@ class AgentSessionReader:
         # Latest page: once we have any matched event, keep every subsequent
         # event through end-of-file. Timestamp/round_id windows otherwise drop
         # mid-turn tool_call_delta / thoughts that lack matching metadata.
-        if offset == 0 and total_events > 0 and paged_events:
+        if is_latest_page and total_events > 0 and paged_events:
             matched_ids = {id(e) for e in paged_events}
             first_idx = next(
                 (i for i, e in enumerate(all_events) if id(e) in matched_ids),
@@ -1119,7 +1168,7 @@ class AgentSessionReader:
             )
             if first_idx is not None:
                 paged_events = all_events[first_idx:]
-        elif offset == 0 and total_events > 0 and len(paged_messages) >= total_messages:
+        elif is_latest_page and total_events > 0 and len(paged_messages) >= total_messages:
             # Full message set on first page — return all events.
             paged_events = list(all_events)
 
@@ -1128,14 +1177,16 @@ class AgentSessionReader:
         # of them on offset=0 balloons the response to 1.5MB+ and stalls the
         # frontend hydrate (client aborts after 10s → "加载中…" forever). Keep
         # the newest events, which pair with the newest messages on this page.
-        if offset == 0 and len(paged_events) > _MAX_FIRST_PAGE_EVENTS:
+        if is_latest_page and len(paged_events) > _MAX_FIRST_PAGE_EVENTS:
             paged_events = paged_events[-_MAX_FIRST_PAGE_EVENTS:]
 
-        has_more = (total_messages - offset - limit) > 0
+        # `start_idx > 0` and the old tail-relative formula agree for offset
+        # pages, and it stays correct for a page anchored by `before_id`.
+        has_more = start_idx > 0
 
         # Archived content only on the first page — later pages would duplicate
         # a potentially huge archived_* payload on every scroll-up request.
-        if offset == 0:
+        if is_latest_page:
             archived_messages = full.get("archived_messages") or []
             archived_events = full.get("archived_events") or []
         else:
@@ -1313,9 +1364,13 @@ class _RemoteSessionReader:
         session_id: str,
         offset: int = 0,
         limit: int = 50,
+        before_id: str | None = None,
     ) -> dict | None:
         try:
-            return self._get(f"/{session_id}/paged", {"offset": offset, "limit": limit}).get("session")
+            params: dict[str, Any] = {"offset": offset, "limit": limit}
+            if before_id:
+                params["before_id"] = before_id
+            return self._get(f"/{session_id}/paged", params).get("session")
         except Exception as e:
             logger.error(f"Remote get_session_history_paged failed for {session_id}: {e}")
             return None
@@ -1365,8 +1420,10 @@ class _RemoteSessionReader:
     async def async_get_session_history(self, session_id: str) -> dict | None:
         return await asyncio.to_thread(self.get_session_history, session_id)
 
-    async def async_get_session_history_paged(self, session_id: str, offset: int = 0, limit: int = 50) -> dict | None:
-        return await asyncio.to_thread(self.get_session_history_paged, session_id, offset, limit)
+    async def async_get_session_history_paged(
+        self, session_id: str, offset: int = 0, limit: int = 50, before_id: str | None = None
+    ) -> dict | None:
+        return await asyncio.to_thread(self.get_session_history_paged, session_id, offset, limit, before_id)
 
     async def async_delete_session(self, session_id: str) -> bool:
         return await asyncio.to_thread(self.delete_session, session_id)
@@ -1428,11 +1485,15 @@ class _WsSessionReader:
         session_id: str,
         offset: int = 0,
         limit: int = 50,
+        before_id: str | None = None,
     ) -> dict[str, Any] | None:
         try:
             from urllib.parse import urlencode
 
-            qs = urlencode({"offset": offset, "limit": limit})
+            params: dict[str, Any] = {"offset": offset, "limit": limit}
+            if before_id:
+                params["before_id"] = before_id
+            qs = urlencode(params)
             result = await self._call("GET", f"{self._base}/{session_id}/paged?{qs}")
             return result.get("session")
         except Exception as e:

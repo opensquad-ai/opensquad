@@ -857,6 +857,8 @@
         "task_watch": "Task watching",
         "memory": "Long-term memory",
         "goal": "Goal progress",
+        "reminder": "Reminder",
+        "scheduled_tasks": "Scheduled tasks",
         "vision": "Vision",
         "media": "Media",
         "whisper": "Transcription",
@@ -889,7 +891,11 @@
         "get_shell_session_status": "Terminal status",
         "update_task_progress": "Update todos",
         "batch_update_tasks": "Update todos",
-        "add_task": "Update todos"
+        "add_task": "Update todos",
+        "wait": "Wait",
+        "sleep": "Wait",
+        "set_state": "Set state",
+        "set_wake_mode": "Wake mode"
       },
       "summary": {
         "read": "Read {{n}} files",
@@ -906,6 +912,7 @@
         "media": "Media ops {{n}} times",
         "mcp": "Called MCP tools {{n}} times",
         "list": "Browsed {{n}} folders",
+        "system": "System control {{n}} times",
         "other": "Tool calls {{n}}"
       },
       "line": {
@@ -1026,13 +1033,14 @@
     "archivedCollapse": "Hide archived",
     "archivedCount": "{{count}} archived items",
     "pendingLabel": "Pending",
-    "pendingQueueHint": "{{count}} pending message(s); sent one-by-one when agent is idle",
-    "sendNow": "Send now",
+    "pendingQueueHint": "{{count}} steered message(s); injected next round without interrupting",
     "sendNext": "Send next",
-    "cancelPending": "Cancel",
     "queueMessage": "Queue message",
-    "pendingCount": "{{count}} Queued",
-    "pendingAutoSendHint": "sent one-by-one when idle (next after each reply)",
+    "pendingCount": "{{count}} Steered",
+    "pendingSteerHint": "steered in — visible to the model next round, no interruption",
+    "steerHint": "Steer the conversation: the message is sent but won't interrupt the model",
+    "editPending": "Withdraw to composer for editing",
+    "deletePending": "Delete",
     "pendingCollapse": "Collapse",
     "pendingExpand": "Expand",
     "pendingClearAll": "Clear all",
@@ -1572,7 +1580,14 @@
     "kindWake": "Wake",
     "kindStateChange": "State Change",
     "kindOverhead": "Overhead",
-    "sessionUsage": "This session"
+    "sessionUsage": "This session",
+    "cacheHitRate": "Cache hit rate",
+    "cacheHit": "Input · cached",
+    "cacheMiss": "Input · uncached",
+    "inputTokens": "Input",
+    "outputTokens": "Output",
+    "cacheHitUnknown": "—",
+    "cacheHitUnavailable": "This model returned no usage data, so the cache hit rate cannot be measured."
   },
   "toolCall": {
     "deliveryWarning": "File uploaded but not delivered to any online web client. Please confirm you have opened the agent's AI Chat page and kept the connection active, then try again."

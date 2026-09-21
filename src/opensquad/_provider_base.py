@@ -60,7 +60,13 @@ except ImportError:  # pragma: no cover
     bus = None
 
 
-__all__ = ["ContextOverflowError", "ProviderAPIBase"]
+__all__ = [
+    "ContextOverflowError",
+    "ProviderAPIBase",
+    "cache_miss_tokens",
+    "extract_cached_tokens",
+    "has_estimated_usage",
+]
 
 
 class ContextOverflowError(RuntimeError):
@@ -72,6 +78,108 @@ class ContextOverflowError(RuntimeError):
     such a request is guaranteed to come back 400, so the turn fails fast with
     an actionable message instead.
     """
+
+
+#: Field paths (relative to a provider ``usage`` record) that carry the
+#: *cache-hit* half of the prompt tokens.  Order does not matter — the largest
+#: value wins, see :func:`extract_cached_tokens`.
+CACHE_HIT_USAGE_PATHS: tuple[tuple[str, ...], ...] = (
+    # OpenAI, Volcengine Ark (doubao), Gemini's OpenAI-compatible endpoint.
+    ("prompt_tokens_details", "cached_tokens"),
+    # DeepSeek official + Ark `deepseek-*` models.
+    ("prompt_cache_hit_tokens",),
+    # Gemini native `usage_metadata`.
+    ("cached_content_token_count",),
+)
+
+
+def _usage_get(usage: object, *path: str) -> object | None:
+    """Read a nested *path* from an SDK model **or** a plain dict.
+
+    The OpenAI SDK uses ``extra="allow"`` pydantic models, so a provider's
+    non-standard field (DeepSeek's ``prompt_cache_hit_tokens``) lands in
+    ``model_extra`` rather than as a declared attribute.  Proxies that bypass
+    the SDK hand back plain dicts instead.  Both are supported; anything
+    missing resolves to ``None`` rather than raising.
+    """
+    cur: object | None = usage
+    for key in path:
+        if cur is None:
+            return None
+        if isinstance(cur, dict):
+            cur = cur.get(key)
+            continue
+        nxt = getattr(cur, key, None)
+        if nxt is None:
+            extra = getattr(cur, "model_extra", None)
+            nxt = extra.get(key) if isinstance(extra, dict) else None
+        cur = nxt
+    return cur
+
+
+def extract_cached_tokens(usage: object) -> int:
+    """Cache-hit prompt tokens reported by *usage*; 0 when the provider omits them.
+
+    Every provider spells this differently and none of them errors when the
+    field is absent, so a naive read silently reports "0% cache" forever — the
+    exact failure this helper exists to prevent.
+
+    The value is a **subset** of the provider's prompt-token count on all three
+    backends (OpenAI ``prompt_tokens``, Gemini ``prompt_token_count``, Claude's
+    ``input_tokens + cache_read + cache_creation`` unification), which is what
+    lets the UI derive "cache miss = input - hit".
+
+    Claude is deliberately absent: ``claude_api`` reads
+    ``cache_read_input_tokens`` inline because it pairs it with
+    ``cache_creation_input_tokens`` in the same accounting step.
+    """
+    best = 0
+    for path in CACHE_HIT_USAGE_PATHS:
+        raw = _usage_get(usage, *path)
+        try:
+            best = max(best, int(raw or 0))
+        except (TypeError, ValueError):
+            # A provider that returns a string/None-ish placeholder must not
+            # take the turn down — the panel simply shows 0%.
+            continue
+    return best
+
+
+def cache_miss_tokens(input_tokens: object, cache_read_tokens: object) -> int:
+    """Prompt tokens that were **not** served from cache: ``input − hit``, floored at 0.
+
+    ``cache_read`` is a subset of the provider's prompt tokens on every backend
+    this project supports, so the difference is the uncached remainder that the
+    context panel shows next to the hit rate.  Clamping matters because the two
+    counters come from *different* API responses and can therefore disagree for
+    one turn after a provider-side cache eviction — a negative "miss" would
+    render as a >100% hit rate.
+    """
+    try:
+        total = int(input_tokens or 0)
+        hit = int(cache_read_tokens or 0)
+    except (TypeError, ValueError):
+        return 0
+    return max(0, total - hit)
+
+
+def has_estimated_usage(estimated_turns: object) -> bool:
+    """True when a client ran turns without provider usage data.
+
+    Those turns contribute tokenizer estimates to ``total_input_tokens`` and a
+    hard 0 to ``total_cache_read_tokens``, so any cache ratio derived from the
+    two is meaningless.  Consumers must show "unavailable" rather than a
+    real-looking number.
+
+    Module-level on purpose: ``runner`` builds the ``token_stats`` payload from
+    a duck-typed chat client (``getattr`` everywhere), so the rule must be
+    callable without that client implementing anything — same shape as
+    :func:`cache_miss_tokens`.
+    """
+    try:
+        return int(estimated_turns or 0) > 0
+    except (TypeError, ValueError):
+        return False
 
 
 class ProviderAPIBase:
@@ -89,6 +197,18 @@ class ProviderAPIBase:
         self._user_id_provider = None  # Injected by Runner; user_id for this turn
         self._latest_summary = ""  # Compressed-context summary ({{CONTEXT_SUMMARY}})
         self._auto_compressed = False  # Did auto-compression run in the last chat()?
+
+        # ── Billed-usage provenance ──
+        # Streaming responses only carry a `usage` object when the request asks
+        # for one (`stream_options.include_usage`).  Without it the counters
+        # fall back to a local tokenizer estimate, which knows nothing about
+        # provider-side prompt caching and therefore reports cache read as 0 —
+        # indistinguishable, in the UI, from "this prompt never hit the cache".
+        # Track the two cases so the panel can say "unavailable" instead of
+        # printing a confident 0.0%.
+        self.usage_reported_turns = 0  # turns whose usage came from the provider
+        self.usage_estimated_turns = 0  # turns that fell back to the local estimate
+        self._stream_options_rejected = False  # endpoint 400s on stream_options
         self._auto_compress_stats: dict[str, Any] = {}
         # CRITICAL: must be handed back to DeepSeek V4 on the next turn when tools are involved
         self._prev_reasoning_content = ""
@@ -226,6 +346,16 @@ class ProviderAPIBase:
             "cache_read_tokens": self.total_cache_read_tokens,
             "cache_creation_tokens": self.total_cache_creation_tokens,
         }
+
+    def usage_is_estimated(self) -> bool:
+        """True when any turn ran without provider usage data.
+
+        Those turns contribute tokenizer estimates to ``total_input_tokens``
+        and a hard 0 to ``total_cache_read_tokens``, so any cache ratio derived
+        from the two is meaningless.  Consumers must show "unavailable" rather
+        than a real-looking number.
+        """
+        return has_estimated_usage(self.usage_estimated_turns)
 
     # ────────────────────────── token accounting ──────────────────────────
 

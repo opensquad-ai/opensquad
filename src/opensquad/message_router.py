@@ -36,6 +36,13 @@ class MessageRouter:
         self._await_reply_seconds = (
             30  # reply-wait timeout in seconds (reduced from 120s to 30s to avoid long blocking)
         )
+        # Content-level dedup: (group|sender|content) -> last seen timestamp.
+        # The queue dedups by message id only, so a client double-POST (two
+        # different ids, same text — e.g. IME confirm Enter firing onSend twice)
+        # slips past it and wakes the agent twice. Seen 2026-09-21 (agent305):
+        # duplicated user bubble AND two near-identical agent replies.
+        self._recent_contents: dict[str, float] = {}
+        self._content_dedup_window = 10.0  # seconds
 
     def set_cooldown(self, seconds: float | None = None):
         """Set the message-filter cooldown period (filter only, no wake trigger)."""
@@ -135,6 +142,30 @@ class MessageRouter:
             raw_data=msg_data,
             images=msg_data.get("_image_paths", []),
         )
+
+        # Content-level dedup (before the id-based queue dedup): a client
+        # double-POST produces two messages with different ids but identical
+        # text within the same second, so id dedup cannot catch it. Drop the
+        # repeat entirely — queueing it would feed the agent the same line
+        # twice and can trigger a second wake.
+        content_key = f"{queue_msg.source_id}|{queue_msg.sender_id}|{queue_msg.content}"
+        now_ts = time.time()
+        self._recent_contents = {
+            k: t for k, t in self._recent_contents.items() if now_ts - t < self._content_dedup_window
+        }
+        last_seen = self._recent_contents.get(content_key)
+        if last_seen is not None:
+            result.update(
+                {
+                    "action": "duplicate_dropped",
+                    "queued": False,
+                    "pushed": False,
+                    "reason": f"identical content from same sender within {self._content_dedup_window:.0f}s window",
+                }
+            )
+            logger.info(f"[Router] Duplicate content dropped before wake: {sender_name}: {content}")
+            return result
+        self._recent_contents[content_key] = now_ts
 
         # ``put`` returns False when this id is already inside the queue's dedup
         # window. A duplicate has to stop HERE: the queue silently dropped it, but

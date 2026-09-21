@@ -46,9 +46,12 @@ class WebSocketService {
       return;
     }
 
-    // 如果已经连接，不要重复连接
-    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-      console.log('[WebSocket] Already connected');
+    // 如果已经连接或正在握手，不要重复连接。
+    // CONNECTING 同样要拦截：React StrictMode 开发模式下 effect 会双调 init()，
+    // 若第一次还在握手就再次 connect()，旧 socket 会被静默遗弃但仍保持打开并
+    // 继续收消息 → 服务端同一用户挂 N 条连接，每条广播都被投递 N 次（重复气泡）。
+    if (this.ws && (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING)) {
+      console.log('[WebSocket] Already connected/connecting, skipping duplicate connect');
       return;
     }
 

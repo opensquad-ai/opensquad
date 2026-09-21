@@ -411,7 +411,15 @@ const App: React.FC = () => {
       for (const gid of groupIds) {
         const existing = nextMessages[gid] || [];
         const knownIds = new Set(existing.map(m => m.id));
-        const incoming = batch[gid].filter(m => !knownIds.has(m.id));
+        // Intra-batch dedupe: a duplicate socket delivery (or server double-send)
+        // lands all copies inside ONE animation-frame batch; filtering only
+        // against `existing` would let them all through and render N bubbles.
+        const incoming: Message[] = [];
+        for (const m of batch[gid]) {
+          if (knownIds.has(m.id)) continue;
+          knownIds.add(m.id);
+          incoming.push(m);
+        }
         if (incoming.length > 0) {
           let merged = [...existing, ...incoming];
           // Background groups: keep only the newest page-worth of messages.

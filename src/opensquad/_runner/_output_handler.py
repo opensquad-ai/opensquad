@@ -13,6 +13,7 @@ import json
 from collections.abc import Callable
 from typing import Any
 
+from opensquad._provider_base import cache_miss_tokens, has_estimated_usage
 from opensquad.tool import logger
 
 __all__ = ["OutputHandler"]
@@ -213,6 +214,16 @@ class OutputHandler:
                     "output_tokens": getattr(chat_api, "total_output_tokens", 0),
                     "requests": getattr(chat_api, "total_requests", 0),
                     "cache_read_tokens": getattr(chat_api, "total_cache_read_tokens", 0),
+                    # Prompt-token split + provenance, matching runner.py's
+                    # payload.  Kept in sync deliberately: whichever emitter a
+                    # future refactor keeps, the panel must still be able to
+                    # tell a real 0% hit rate from "usage was never reported".
+                    "cache_miss_tokens": cache_miss_tokens(
+                        getattr(chat_api, "total_input_tokens", 0),
+                        getattr(chat_api, "total_cache_read_tokens", 0),
+                    ),
+                    "cache_creation_tokens": getattr(chat_api, "total_cache_creation_tokens", 0),
+                    "usage_estimated": has_estimated_usage(getattr(chat_api, "usage_estimated_turns", 0)),
                 },
                 "breakdown": stats,
             }

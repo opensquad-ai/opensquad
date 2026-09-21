@@ -307,6 +307,12 @@ async def apply_model_reload(runner, new_model: dict, *, chat_api=None) -> None:
         new_api.total_output_tokens = getattr(chat_api, "total_output_tokens", 0)
         new_api.total_requests = getattr(chat_api, "total_requests", 0)
         new_api.total_cache_read_tokens = getattr(chat_api, "total_cache_read_tokens", 0)
+        new_api.total_cache_creation_tokens = getattr(chat_api, "total_cache_creation_tokens", 0)
+        # Usage provenance travels with the counters: a session that already
+        # contains estimated turns must keep reporting the hit rate as
+        # unavailable after a switch, not silently start printing one.
+        new_api.usage_reported_turns = getattr(chat_api, "usage_reported_turns", 0)
+        new_api.usage_estimated_turns = getattr(chat_api, "usage_estimated_turns", 0)
         chat_api = new_api
         if session_scoped:
             # Caller must reassign into _session_chat_apis[sid]

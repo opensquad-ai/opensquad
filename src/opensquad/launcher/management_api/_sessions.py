@@ -107,13 +107,20 @@ class SessionsMixin:
             return self._send_json({"error": f"Failed to get current session: {e!s}"}, 500)
         return self._send_json({"current_session_id": current_id, "session": session})
 
-    def _handle_session_paged(self, agent_id: str, session_id: str, offset: int, limit: int):
+    def _handle_session_paged(
+        self,
+        agent_id: str,
+        session_id: str,
+        offset: int,
+        limit: int,
+        before_id: str | None = None,
+    ):
         """GET /api/sessions/{agent_id}/{session_id}/paged?offset=0&limit=50"""
         reader = self._get_session_reader(agent_id)
         if reader is None:
             return self._send_json({"error": f"Agent not found: {agent_id}"}, 404)
         try:
-            session = reader.get_session_history_paged(session_id, offset, limit)
+            session = reader.get_session_history_paged(session_id, offset, limit, before_id)
         except Exception as e:
             import httpx
 

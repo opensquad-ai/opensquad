@@ -372,6 +372,28 @@ class GatewayAdapter(BaseAgent):
                 logger.warning(f"[Adapter] stop_session_job {job_id} failed", exc_info=True)
             return
 
+        if command == "cancel_steer":
+            # Steer（引导注入）撤回：把一条已发出但模型尚未消费的消息从
+            # 注入队列移除。两段队列都可能持有它：input_hub 会话队列
+            # （turn 边界之前）与 event_pipeline 桶（边界之后、工具消费之前）。
+            sid = str(cmd_data.get("session_id") or "").strip()
+            message_id = str(cmd_data.get("message_id") or "").strip()
+            removed = False
+            if sid and message_id:
+                from opensquad.event_pipeline import event_pipeline
+
+                removed = input_hub.cancel_session_item(sid, message_id)
+                if not removed:
+                    removed = event_pipeline.cancel_user_event(sid, message_id)
+            logger.info(
+                "[Adapter] cancel_steer sid=%s message_id=%s removed=%s (user=%s)",
+                sid or "-",
+                message_id or "-",
+                removed,
+                user_id or "-",
+            )
+            return
+
         if command == "set_primary_session":
             sid = str(cmd_data.get("session_id") or "").strip()
             sm = None

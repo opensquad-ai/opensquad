@@ -57,6 +57,11 @@ def version_string(v: int) -> str:
 #   * ``turn_cancelled``  — was missing from the dispatch gate only (the
 #                           frontend has a handler for it; the frame was dropped
 #                           before ever reaching the browser)
+#   * ``to_user_end_task``— same shape as ``turn_cancelled``, but worse: a turn
+#                           ending on the end-task tag emits it as its ONLY
+#                           final frame, so the Web UI streamed the answer and
+#                           then never cleared the streaming cursor.  Users had
+#                           to press Stop to unstick the pane.
 #
 # Derived-only rule: never hand-write a type list at a registration point.
 # ``tests/test_ws_event_contract.py`` fails if a literal reappears.
@@ -72,6 +77,7 @@ EVENT_TYPES: frozenset[str] = frozenset(
         "to_user_end_task",
         "thought",
         "stream",
+        "steer_consumed",
         "tool_call",
         "tool_call_delta",
         "tool_result",
@@ -129,8 +135,15 @@ AGENT_OUTPUT_BROADCAST_TYPES: frozenset[str] = frozenset(
     {
         "message",
         "response",
+        # A turn that ends on the end-task tag emits this INSTEAD of
+        # ``to_user_final`` — it is the terminal frame of that turn, and the
+        # frontend folds the task process on it.  Not broadcast-eligible meant
+        # the frame was dropped at the gate and the pane stayed "streaming"
+        # forever.
+        "to_user_end_task",
         "thought",
         "stream",
+        "steer_consumed",
         "tool_call",
         "tool_call_delta",
         "tool_result",
@@ -188,19 +201,16 @@ AGENT_OUTPUT_DISPATCH_TYPES: frozenset[str] = frozenset(set(AGENT_OUTPUT_BROADCA
 # relayed type that the gateway would silently drop therefore fails the guard
 # instead of disappearing.
 #
-# NOTE (open discrepancy, deliberately recorded rather than silently tolerated):
-# ``to_user_end_task`` is relayed by the launcher and the dispatch *body* already
-# contains a branch for it (it is part of the gateway-side history-cache write
-# condition), yet it is absent from the membership gate, so today that branch is
-# unreachable and the frame is dropped.  Adding it to the gate would start
-# forwarding a new frame to the browser, which is a product decision — not part
-# of the convergence change.
+# NOTE (resolved 2026-09-21): ``to_user_end_task`` used to be listed here.  It is
+# agent output — the terminal frame of an end-task turn — not a relay
+# diagnostic, and the dispatch body already had a branch for it (the
+# history-cache write), which was therefore unreachable.  It now lives in
+# ``AGENT_OUTPUT_BROADCAST_TYPES`` above, so that branch runs again.
 RELAYED_WITHOUT_DISPATCH: frozenset[str] = frozenset(
     {
         "agent_ready_stage",
         "group_member_update",
         "user_status_update",
-        "to_user_end_task",
     }
 )
 
@@ -229,6 +239,7 @@ GENERIC_RELAY_TOPICS: tuple[str, ...] = (
     "sleep",
     "info",
     "status",
+    "steer_consumed",
     "turn_start",
     "token_stats",
     "current_session",

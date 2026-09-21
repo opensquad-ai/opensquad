@@ -95,6 +95,7 @@ const SESSION_PASSTHROUGH_TYPES = new Set([
   'primary_session',
   'scheduled_execution',
   'scheduled_task_turn_done',
+  'steer_consumed',
   // System info (model switch confirm/fail, mode changes) must not be dropped
   // when sid ≠ activeSessionId — otherwise Switching… spinner never clears.
   'info',
@@ -262,6 +263,17 @@ class AIWebSocketService {
   /** Withdraw a user turn (truncate session from timestamp) after file revert. */
   withdrawTurn(data: { message_id?: string; timestamp?: string }) {
     this._sendCommand('withdraw_turn', data || {});
+  }
+
+  /**
+   * Steer（引导注入）撤回：把一条已发出但模型尚未消费的排队消息从后端
+   * 注入队列移除（用于撤回编辑 / 删除）。若模型已消费则后端尽力而为。
+   */
+  cancelSteer(sessionId?: string, messageId?: string) {
+    const data: Record<string, unknown> = {};
+    if (sessionId) data.session_id = sessionId;
+    if (messageId) data.message_id = messageId;
+    this._sendCommand('cancel_steer', data);
   }
 
   /**

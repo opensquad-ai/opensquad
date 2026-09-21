@@ -2169,6 +2169,11 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
     }
   };
 
+  // 同文防抖：Enter+点击双触发、IME 组合结束补发 keydown 等路径会在同一 tick
+  // 内携带相同文本调两次 handleSend（composer 的 ref 尚未清空），产生两条同内容
+  // 消息行。1.5s 内的完全相同文本直接丢弃。
+  const lastSentRef = useRef<{ text: string; at: number }>({ text: '', at: 0 });
+
   const handleSend = (text: string) => {
     const hasText = text.trim().length > 0;
     const hasStaged = stagedItems.length > 0;
@@ -2176,6 +2181,15 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
 
     // Don't send while any file is still uploading
     if (stagedItems.some(i => i.uploading)) return;
+
+    if (hasText) {
+      const now = Date.now();
+      if (lastSentRef.current.text === text && now - lastSentRef.current.at < 1500) {
+        composerRef.current?.clear();
+        return;
+      }
+      lastSentRef.current = { text, at: now };
+    }
 
     const attachments = stagedItems
       .map(i => i.attachment)

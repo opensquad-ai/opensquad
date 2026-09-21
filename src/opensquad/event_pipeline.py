@@ -137,6 +137,42 @@ class EventPipeline:
             self._stats["drained"] += len(events)
         return events
 
+    def cancel_user_event(self, session_id: str | None, client_id: str) -> bool:
+        """Remove one pending user event (by client_id) from a session bucket.
+
+        Used by the steer（引导注入）撤回：消息已发出但模型尚未消费时，把它从
+        注入队列里撤掉。只撤 web/gateway 来源的用户事件，不影响 vision 注入
+        等内部事件。返回是否找到并移除。
+        """
+        cid = (client_id or "").strip()
+        if not cid:
+            return False
+        sid = resolve_pipeline_session_id(session_id)
+        with self._lock:
+            bucket = self._events_by_sid.get(sid or "")
+            if not bucket:
+                return False
+            kept = deque(maxlen=self._max_size)
+            removed = False
+            for evt in bucket:
+                if (
+                    not removed
+                    and evt.source in ("web", "gateway", "dm")
+                    and str(evt.metadata.get("client_id") or "") == cid
+                ):
+                    removed = True
+                    continue
+                kept.append(evt)
+            if not removed:
+                return False
+            if kept:
+                self._events_by_sid[sid or ""] = kept
+            else:
+                self._events_by_sid.pop(sid or "", None)
+        if removed:
+            logger.info("[EventPipeline] Cancelled user event sid=%s client_id=%s", sid or "-", cid)
+        return removed
+
     def drain_formatted_sync(self, session_id: str | None = None) -> str:
         """Sync drain + format as LLM-readable string for one session."""
         events = self.drain_sync(session_id=session_id)

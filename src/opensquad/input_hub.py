@@ -216,6 +216,31 @@ class InputHub:
                 break
         return items
 
+    def cancel_session_item(self, session_id: str, client_id: str) -> bool:
+        """Remove one pending item (by client_id) from a session's normal queue.
+
+        Steer（引导注入）撤回：消息已在注入队列但尚未被 turn 边界消费时，
+        重建队列剔除该项。返回是否找到并移除。
+        """
+        sid = (session_id or "").strip()
+        cid = (client_id or "").strip()
+        q = self._session_queues.get(sid)
+        if not q or not cid:
+            return False
+        items = []
+        while True:
+            try:
+                items.append(q.get_nowait())
+            except asyncio.QueueEmpty:
+                break
+        kept = [it for it in items if str(it.get("client_id") or "") != cid]
+        removed = len(kept) != len(items)
+        for it in kept:
+            q.put_nowait(it)
+        if removed:
+            logger.info("[InputHub] Cancelled steer item sid=%s client_id=%s", sid, cid)
+        return removed
+
     async def get_user_response(self) -> dict[str, Any]:
         """
         Wait for user input while automatically checking the message pipeline.

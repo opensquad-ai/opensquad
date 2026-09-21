@@ -540,6 +540,20 @@ class TurnLoop:
         if tool_calls:
             tc_log.info("[runner] [tool] Executing %d parallel tool call(s)", len(tool_calls))
 
+            # Housekeeping-only batch: the visible answer was already emitted
+            # (to_user_final above) and the ONLY tool calls are pure side-channel
+            # UI tools (suggest_followups — its receipt carries no information the
+            # model needs). Forcing another LLM round after committing them used to
+            # leave the web UI frozen on "进行中" for minutes with zero events
+            # (seen 2026-09-21: full summary on screen, counters frozen, follow-up
+            # chips hidden because the session still looked busy, until the user
+            # pressed Stop). End the turn instead — same contract as a plain
+            # text-only reply. A suggest_followups call WITHOUT visible text still
+            # continues normally: the model owes the user the answer.
+            _housekeeping_only_turn = bool(user_msg.strip()) and all(
+                t_name.endswith("suggest_followups") for t_name, _ in tool_calls
+            )
+
             # Phase 1: Execute ALL tools and collect results (no add_tool_result yet)
             _tool_results = []  # List of dicts with tool metadata for batch commit
             _control_flow_return = None  # If a control tool requests immediate return
@@ -786,6 +800,15 @@ class TurnLoop:
                             sid=_tool_sid or None,
                         )
                         await self.runner._emit("user_msg", evt.content)
+                        # Steer（引导注入）消费回执：该用户插话已随本轮工具结果
+                        # 进入模型上下文。携带 client_id 供前端把引导气泡挪进
+                        # 时间线（steer_consumed 在 protocol_version 注册）。
+                        _steer_cid = str(evt.metadata.get("client_id") or "")
+                        if _steer_cid:
+                            await self.runner._emit(
+                                "steer_consumed",
+                                {"message_id": _steer_cid, "content": evt.content},
+                            )
                     if evt.source == "vision_tool" and evt.metadata.get("action") == "inject_images":
                         img_paths = evt.metadata.get("image_paths", [])
                         if img_paths:
@@ -1109,6 +1132,12 @@ class TurnLoop:
                     len(_saved_msg),
                     _elapsed_ms,
                 )
+            if _housekeeping_only_turn:
+                logger.info(
+                    "[Runner] Answer already delivered + suggest_followups-only batch -> ending turn "
+                    "(skipping the extra LLM round that used to freeze the UI after the final summary)"
+                )
+                return True, "", False
             return False, "", False
 
         # Check for auto-continue (trailing colon indicating tool intent)

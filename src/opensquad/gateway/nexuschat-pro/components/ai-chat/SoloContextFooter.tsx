@@ -30,6 +30,21 @@ export interface SoloTokenStats {
   session?: {
     total_tokens?: number;
     total_requests?: number;
+    /** Prompt tokens for this session — cache hit + cache miss. */
+    input_tokens?: number;
+    total_input_tokens?: number;
+    output_tokens?: number;
+    total_output_tokens?: number;
+    /** Prompt tokens served from the provider's cache (subset of input). */
+    cache_read_tokens?: number;
+    /** Input − cache hit, precomputed server-side; derived when absent. */
+    cache_miss_tokens?: number;
+    /**
+     * True when a turn ran without provider usage (the endpoint sent no usage
+     * chunk), so the counters above are tokenizer estimates and cache read is
+     * structurally 0. The panel must not present that as a real 0% hit rate.
+     */
+    usage_estimated?: boolean;
   } | null;
 }
 
@@ -82,6 +97,19 @@ const SEGMENTS: Array<{
   { key: 'response', labelKey: 'contextViewer.kindAssistant', fallback: 'Assistant', color: '#60a5fa', bar: 'bg-blue-400' },
   { key: 'overhead', labelKey: 'contextViewer.kindOverhead', fallback: 'Other', color: '#64748b', bar: 'bg-slate-500' },
 ];
+
+/** One legend row of the panel: colour chip · label · right-aligned count. */
+const TokenRow: React.FC<{ color: string; label: string; value: string }> = ({
+  color,
+  label,
+  value,
+}) => (
+  <div className="flex items-center gap-2 text-[12px]">
+    <span className="w-2 h-2 rounded-[3px] shrink-0" style={{ backgroundColor: color }} />
+    <span className="flex-1 min-w-0 truncate text-textMuted">{label}</span>
+    <span className="font-mono text-textMain/80 tabular-nums shrink-0">{value}</span>
+  </div>
+);
 
 const TokenRing: React.FC<{ pct: number; size?: number }> = ({ pct, size = 14 }) => {
   const r = (size - 3) / 2;
@@ -152,6 +180,36 @@ export const SoloContextFooter: React.FC<SoloContextFooterProps> = ({
   }, [tokenStats?.breakdown, t]);
 
   const barMax = max > 0 ? max : 1;
+
+  // ── Prompt-cache split: input = 命中缓存 + 未命中缓存 ──────────────────
+  // `cache_read_tokens` is a *subset* of the session input tokens on every
+  // provider (OpenAI/Ark/Gemini `cached_tokens`, DeepSeek `prompt_cache_hit`,
+  // Claude `cache_read_input_tokens`), which is what makes a hit rate
+  // well-defined as read / (read + miss).  `cache_miss_tokens` is precomputed
+  // server-side; deriving it here only keeps older payloads working.
+  const cache = useMemo(() => {
+    const s: NonNullable<SoloTokenStats['session']> | null = tokenStats?.session ?? null;
+    if (!s) return null;
+    const input = Number(s.input_tokens ?? s.total_input_tokens ?? 0) || 0;
+    const output = Number(s.output_tokens ?? s.total_output_tokens ?? 0) || 0;
+    const hit = Math.max(0, Number(s.cache_read_tokens ?? 0) || 0);
+    const miss = typeof s.cache_miss_tokens === 'number'
+      ? Math.max(0, s.cache_miss_tokens)
+      : Math.max(0, input - hit);
+    const billed = hit + miss;
+    if (billed <= 0 && output <= 0) return null;
+    return {
+      hit,
+      miss,
+      /** The three rows sum to this, so they always reconcile on screen. */
+      input: billed,
+      output,
+      hitPct: billed > 0 ? (hit / billed) * 100 : 0,
+      hitShare: billed > 0 ? (hit / billed) * 100 : 0,
+      /** Provider never reported usage → hit/miss split is not trustworthy. */
+      estimated: s.usage_estimated === true,
+    };
+  }, [tokenStats?.session]);
 
   useEffect(() => {
     if (cwd) setRecents(pushCwdRecent(cwd));
@@ -281,7 +339,9 @@ export const SoloContextFooter: React.FC<SoloContextFooterProps> = ({
                 </div>
               </div>
 
-              <div className="px-3.5 pb-3 space-y-1.5 max-h-[220px] overflow-y-auto">
+              {/* Breakdown + session row + cache hit/miss split; scrolls once
+                  the cache block is present. */}
+              <div className="px-3.5 pb-3 space-y-1.5 max-h-[300px] overflow-y-auto">
                 {segments.length === 0 ? (
                   <div className="text-[12px] text-textMuted py-2">No breakdown yet</div>
                 ) : (
@@ -308,6 +368,77 @@ export const SoloContextFooter: React.FC<SoloContextFooterProps> = ({
                     <span className="font-mono text-textMuted tabular-nums shrink-0 text-[11px]">
                       · {tokenStats.session.total_requests ?? 0} req
                     </span>
+                  </div>
+                )}
+                {cache && (
+                  <div className="pt-2 mt-0.5 border-t border-border/50 space-y-1.5">
+                    <div className="flex items-baseline justify-between gap-2">
+                      <span className="text-[12px] text-textMuted">
+                        {t('contextViewer.cacheHitRate', { defaultValue: 'Cache hit rate' })}
+                      </span>
+                      <span className="font-mono text-[12px] font-semibold text-textMain tabular-nums">
+                        {cache.estimated
+                          ? t('contextViewer.cacheHitUnknown', { defaultValue: '—' })
+                          : `${cache.hitPct.toFixed(1)}%`}
+                      </span>
+                    </div>
+                    {cache.estimated ? (
+                      // No provider usage: the split would be a fabricated
+                      // 0 / everything-uncached pair, so it is not rendered.
+                      <>
+                        <p className="text-[11px] text-textMuted leading-snug">
+                          {t('contextViewer.cacheHitUnavailable', {
+                            defaultValue:
+                              'This model returned no usage data, so the cache hit rate cannot be measured.',
+                          })}
+                        </p>
+                        <TokenRow
+                          color="#94a3b8"
+                          label={t('contextViewer.inputTokens', { defaultValue: 'Input' })}
+                          value={`~${fmtTokens(cache.input)}`}
+                        />
+                        <TokenRow
+                          color="#60a5fa"
+                          label={t('contextViewer.outputTokens', { defaultValue: 'Output' })}
+                          value={`~${fmtTokens(cache.output)}`}
+                        />
+                      </>
+                    ) : (
+                      <>
+                        <div className="flex h-1.5 rounded-full overflow-hidden bg-black/[0.06] dark:bg-white/[0.08]">
+                          <div
+                            className="bg-emerald-500 transition-all"
+                            style={{ width: `${cache.hitShare}%` }}
+                            title={`${t('contextViewer.cacheHit', { defaultValue: 'Input · cached' })}: ${fmtTokens(cache.hit)}`}
+                          />
+                          <div
+                            className="bg-amber-500 transition-all"
+                            style={{ width: `${100 - cache.hitShare}%` }}
+                            title={`${t('contextViewer.cacheMiss', { defaultValue: 'Input · uncached' })}: ${fmtTokens(cache.miss)}`}
+                          />
+                        </div>
+                        <TokenRow
+                          color="#10b981"
+                          label={t('contextViewer.cacheHit', { defaultValue: 'Input · cached' })}
+                          value={fmtTokens(cache.hit)}
+                        />
+                        <TokenRow
+                          color="#f59e0b"
+                          label={t('contextViewer.cacheMiss', { defaultValue: 'Input · uncached' })}
+                          value={fmtTokens(cache.miss)}
+                        />
+                        <TokenRow
+                          color="#94a3b8"
+                          label={t('contextViewer.inputTokens', { defaultValue: 'Input' })}
+                          value={fmtTokens(cache.input)}
+                        />
+                        <TokenRow
+                          color="#60a5fa"
+                          label={t('contextViewer.outputTokens', { defaultValue: 'Output' })}
+                          value={fmtTokens(cache.output)}
+                        />
+                      </>
+                    )}
                   </div>
                 )}
               </div>

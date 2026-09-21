@@ -41,11 +41,15 @@ export const FollowScrollBox: React.FC<FollowScrollBoxProps> = ({
 }) => {
   const ref = useRef<HTMLDivElement | HTMLPreElement | null>(null);
   const stickRef = useRef(true);
-  // Last observed scrollHeight — lets onScroll tell "content streamed in"
-  // apart from "the reader scrolled", so a temporarily large bottom gap
-  // during fast streaming never flips the stick state (the tail class would
-  // flap on every chunk — the visible "jitter" while a thought streams).
+  // Last observed scrollHeight — the very first observation is only a baseline
+  // (not a growth signal); afterwards it lets onScroll tell "content streamed
+  // in" apart from "the reader scrolled" when the two are otherwise ambiguous.
   const lastScrollHeightRef = useRef(0);
+  // 最后一次"程序贴底"写入的 scrollTop。scroll 事件无法区分来源：程序贴底
+  // 写入与用户滚动都会触发事件。回声事件（scrollTop === lastSetTop）必须忽略，
+  // 否则流式期间会被误判为用户离开 → 贴底/离开来回翻转（抖动）；反过来，
+  // 用户在流式期间的真实滚动必须被尊重，否则贴底会与用户拖动的滑块"拉扯"。
+  const lastSetTopRef = useRef(-1);
   // Latest-ref: keeps `publish` stable so the effects below do not re-run when
   // a parent re-renders (it does, on every streamed chunk).
   const notifyRef = useRef(onStickChange);
@@ -70,6 +74,14 @@ export const FollowScrollBox: React.FC<FollowScrollBoxProps> = ({
     notifyRef.current?.(next);
   };
 
+  /** 单一贴底写入点：写 scrollTop 并登记 lastSetTop，供 onScroll 识别回声。 */
+  const pinToBottom = (el: HTMLDivElement | HTMLPreElement) => {
+    el.scrollTop = el.scrollHeight;
+    lastSetTopRef.current = el.scrollTop;
+    lastScrollHeightRef.current = el.scrollHeight;
+    checkOverflow();
+  };
+
   useEffect(() => {
     if (follow) publish(true);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -78,16 +90,18 @@ export const FollowScrollBox: React.FC<FollowScrollBoxProps> = ({
   useLayoutEffect(() => {
     const el = ref.current;
     if (!el) return;
-    if (!stickRef.current) return;
-    el.scrollTop = el.scrollHeight;
-    lastScrollHeightRef.current = el.scrollHeight;
-    checkOverflow();
+    if (!stickRef.current) {
+      // 用户离开过底部。但流式增长会把"贴近底部"的视口越推越远：若此刻
+      // 已在贴底容差内（刚拖回底部、或松手后滑块只差一点），重新武装跟随，
+      // 否则滑块会在后续输出中越漂越远（"拖到底了又自动跑上去"）。
+      if (el.scrollHeight - el.scrollTop - el.clientHeight >= NEAR_BOTTOM_PX) return;
+      publish(true);
+    }
+    pinToBottom(el);
     // Second pass after paint — streaming fonts/wrap can grow height one frame late.
     const id = requestAnimationFrame(() => {
       if (!stickRef.current || !ref.current) return;
-      ref.current.scrollTop = ref.current.scrollHeight;
-      lastScrollHeightRef.current = ref.current.scrollHeight;
-      checkOverflow();
+      pinToBottom(ref.current);
     });
     return () => cancelAnimationFrame(id);
     // Intentionally omit `children`: parent re-renders (elapsed tick, live
@@ -95,17 +109,31 @@ export const FollowScrollBox: React.FC<FollowScrollBoxProps> = ({
     // wiping text selection. contentKey already tracks content growth.
   }, [contentKey, follow]);
 
+  // 内容尺寸观察：contentKey 只覆盖文本长度，代码围栏闭合后的重排、字体
+  // 加载引起的换行变化同样会改变 scrollHeight —— 这些也要补一次贴底。
+  useEffect(() => {
+    const el = ref.current;
+    if (!el || typeof ResizeObserver === 'undefined') return;
+    const ro = new ResizeObserver(() => {
+      if (!stickRef.current || !ref.current) return;
+      pinToBottom(ref.current);
+    });
+    ro.observe(el.firstElementChild ?? el);
+    return () => ro.disconnect();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   const onScroll = () => {
     const el = ref.current;
     if (!el) return;
-    // scrollHeight changed since the last event → content streamed in, and
-    // the pin effect re-arms right after. A large bottom gap at that moment
-    // is a race, not a user scroll — keep the stick state instead of flapping.
-    // The very first observation is a baseline, not a growth signal.
     const prev = lastScrollHeightRef.current;
     lastScrollHeightRef.current = el.scrollHeight;
     checkOverflow();
-    if (prev > 0 && prev !== el.scrollHeight && stickRef.current) return;
+    const grew = prev > 0 && prev !== el.scrollHeight;
+    // 内容增长 + scrollTop 没变 → 程序贴底写入的回声，不是用户滚动，忽略
+    // （快速流式时误翻转会让尾迹雾化闪烁）。scrollTop 变了才是用户：
+    // 拖回底部（gap 小）→ 重新跟随；往上翻（gap 大）→ 进入阅读模式。
+    if (grew && el.scrollTop === lastSetTopRef.current) return;
     publish(el.scrollHeight - el.scrollTop - el.clientHeight < NEAR_BOTTOM_PX);
   };
 

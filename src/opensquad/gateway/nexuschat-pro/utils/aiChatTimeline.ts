@@ -781,6 +781,24 @@ function appendEventIntoWorkflowBlock(
   return [...wf.events, event];
 }
 
+/**
+ * Tool namespaces that are pure UI chrome, not work: 追问建议 / 选项确认 / 模式切换。
+ * Each is rendered by its own widget (`SoloActivityRow` hides the tool row), and
+ * a round whose ONLY calls are these does not continue the work — the runner
+ * ends the turn on ``suggest_followups`` and the choice/mode cards wait for the
+ * user — so the text emitted alongside them IS that turn's reply.
+ */
+export const UI_ONLY_TOOL_NAMESPACES = ['choice_tools', 'followup_tools', 'agent_mode'] as const;
+
+/** Is this tool call UI chrome (does no work, and its round may end the turn)? */
+export function isUiOnlyToolName(name: string): boolean {
+  const raw = String(name || '');
+  const ns = raw.split('__')[0] || '';
+  if ((UI_ONLY_TOOL_NAMESPACES as readonly string[]).includes(ns)) return true;
+  // 裸名兜底：部分链路会剥掉命名空间再上报（runner 侧同样按后缀判定）。
+  return /(^|__)suggest_followups$/i.test(raw);
+}
+
 /** True when nothing in the block is still in-flight (open tools / live summary). */
 export function isWorkflowSettled(events: WorkflowEvent[]): boolean {
   for (const e of events) {
@@ -909,10 +927,19 @@ export function mergeAdjacentWorkflowEntries(timeline: TimelineEntry[]): Timelin
  *
  * 挂靠规则：优先挂到其后（同一 turn 内、下一条用户消息之前）最近的
  * workflow 块首；其后没有 workflow 时挂到其前最近的 workflow 块尾；
- * 两者皆无（纯文本连续回复）则保持普通消息。
+ * 该 turn 内一个 workflow 块都没有时，就地新建一个只装过程输出的块
+ * （否则中间文本会以「给用户的普通输出」气泡留在时间线上——模型把工具调用
+ * 写成正文、事件流里没有 tool_call 的回合就是这样）。
  * 带媒体（图片/附件/音频）或 end_task 的消息永不降级。
+ *
+ * @param opts.demoteTrailing 实时专用：连本 turn 最后一条 assistant 文本一起
+ *   降级。调用方只在「此刻正在追加工具活动」时传——那一瞬间尾随文本必然不是
+ *   本回合的最终回复。（落盘重建不传，最后一条回复永远是真正的用户输出。）
  */
-export function demoteIntermediateAssistantMessages(timeline: TimelineEntry[]): TimelineEntry[] {
+export function demoteIntermediateAssistantMessages(
+  timeline: TimelineEntry[],
+  opts?: { demoteTrailing?: boolean },
+): TimelineEntry[] {
   const demotableText = (m: ChatMessage): string | null => {
     if (!m || m.role !== 'assistant' || m.end_task) return null;
     if (
@@ -927,8 +954,25 @@ export function demoteIntermediateAssistantMessages(timeline: TimelineEntry[]): 
     return text || null;
   };
 
-  const inserts = new Map<number, { front: WorkflowEvent[]; end: WorkflowEvent[] }>();
+  const inserts = new Map<number, {
+    front: WorkflowEvent[];
+    end: WorkflowEvent[];
+    /** Events placed by their own timestamp instead of block front/end. */
+    timed: Array<{ evt: WorkflowEvent; ts: number }>;
+  }>();
   const removeIdx = new Set<number>();
+
+  // Which user message opens each index's turn — the grouping key for the
+  // no-workflow-anywhere case below, and the boundary every search stops at.
+  const turnStartOf: number[] = new Array(timeline.length).fill(-1);
+  let openTurn = -1;
+  for (let i = 0; i < timeline.length; i++) {
+    const e = timeline[i];
+    if (e.kind === 'message' && (e.data as ChatMessage).role === 'user') openTurn = i;
+    turnStartOf[i] = openTurn;
+  }
+  /** turn key → the process_output events that had no block to attach to. */
+  const orphanFold = new Map<number, { anchor: number; events: WorkflowEvent[] }>();
 
   for (let i = 0; i < timeline.length; i++) {
     const entry = timeline[i];
@@ -954,8 +998,9 @@ export function demoteIntermediateAssistantMessages(timeline: TimelineEntry[]): 
         break;
       }
     }
-    // The turn's final reply is real user-facing output — never demote.
-    if (isLastAssistantInTurn) continue;
+    // The turn's final reply is real user-facing output — never demote it
+    // unless the caller knows tool work is starting right now (see opts).
+    if (isLastAssistantInTurn && !opts?.demoteTrailing) continue;
 
     // Preferred: first workflow after this message within the turn → block front.
     let target = -1;
@@ -983,8 +1028,6 @@ export function demoteIntermediateAssistantMessages(timeline: TimelineEntry[]): 
         }
       }
     }
-    if (target < 0) continue;
-
     const ts = m.timestamp ? new Date(m.timestamp).getTime() : NaN;
     const evt: WorkflowEvent = {
       _uid: entry._uid || genTimelineUID(),
@@ -992,28 +1035,84 @@ export function demoteIntermediateAssistantMessages(timeline: TimelineEntry[]): 
       content: text,
       timestamp: Number.isFinite(ts) ? ts : Date.now(),
     };
-    const slot = inserts.get(target) || { front: [], end: [] };
-    if (atFront) slot.front.push(evt);
+
+    if (target < 0) {
+      // No workflow block in this turn to hang the process output on. Leaving
+      // the bubble in place is what surfaced interim prose as a user-facing
+      // reply (a turn whose tool calls never became events — unparsed /
+      // unsupported native FC — renders as N narration bubbles, one per retry).
+      // Build a block for the turn instead, anchored at the first such message.
+      const turn = turnStartOf[i];
+      const bucket = orphanFold.get(turn);
+      if (bucket) bucket.events.push(evt);
+      else orphanFold.set(turn, { anchor: i, events: [evt] });
+      removeIdx.add(i);
+      continue;
+    }
+
+    const slot = inserts.get(target) || { front: [], end: [], timed: [] };
+    // Chronological placement: a block can hold work from several rounds, so
+    // front/end only happens to be right when the narration is newer (or older)
+    // than every event in it. When a flush is delayed/merged, several narrations
+    // pile up in front of one block and their tool calls sink below them — the
+    // fold then reads as N 过程输出 rows with no tool between. Slot the narration
+    // by its own timestamp instead; blocks without timestamps keep front/end.
+    const blockEvents = (timeline[target] as Extract<TimelineEntry, { kind: 'workflow' }>).data.events;
+    const blockHasTs = blockEvents.some((e) => Number.isFinite(Number(e.timestamp)));
+    if (blockHasTs && Number.isFinite(ts)) slot.timed.push({ evt, ts });
+    else if (atFront) slot.front.push(evt);
     else slot.end.push(evt);
     inserts.set(target, slot);
     removeIdx.add(i);
   }
 
   if (removeIdx.size === 0) return timeline;
-  return timeline
-    .map((entry, idx) => {
-      const slot = inserts.get(idx);
-      if (entry.kind !== 'workflow' || !slot) return entry;
-      if (slot.front.length === 0 && slot.end.length === 0) return entry;
-      return {
-        ...entry,
-        data: {
-          ...entry.data,
-          events: [...slot.front, ...entry.data.events, ...slot.end],
-        },
-      };
-    })
-    .filter((_, idx) => !removeIdx.has(idx));
+  const orphanAt = new Map<number, WorkflowEvent[]>();
+  for (const { anchor, events } of orphanFold.values()) orphanAt.set(anchor, events);
+
+  const out: TimelineEntry[] = [];
+  timeline.forEach((entry, idx) => {
+    if (removeIdx.has(idx)) {
+      const events = orphanAt.get(idx);
+      if (events) {
+        out.push({
+          kind: 'workflow',
+          data: { events, status: null, completed: true },
+          _uid: genTimelineUID(),
+        });
+      }
+      return;
+    }
+    const slot = inserts.get(idx);
+    if (entry.kind !== 'workflow' || !slot) {
+      out.push(entry);
+      return;
+    }
+    if (slot.front.length === 0 && slot.end.length === 0 && slot.timed.length === 0) {
+      out.push(entry);
+      return;
+    }
+    let events = [...slot.front, ...entry.data.events];
+    // Ties keep the event first: a narration stamped in the same millisecond as
+    // a tool call happened after it (frames carry ms-resolution timestamps).
+    for (const { evt, ts } of [...slot.timed].sort((a, b) => a.ts - b.ts)) {
+      let at = 0;
+      while (at < events.length) {
+        const evtTs = Number(events[at].timestamp);
+        if (Number.isFinite(evtTs) && evtTs > ts) break;
+        at++;
+      }
+      events = [...events.slice(0, at), evt, ...events.slice(at)];
+    }
+    out.push({
+      ...entry,
+      data: {
+        ...entry.data,
+        events: [...events, ...slot.end],
+      },
+    });
+  });
+  return out;
 }
 
 const STOPPED_TURN_REASONS = new Set(['user_stop', 'withdraw', 'agent_crash']);
@@ -2462,6 +2561,93 @@ export function mergeOrphanedToolResultsAcrossWorkflows(timeline: TimelineEntry[
   return result;
 }
 
+/**
+ * Stable cross-source identity for a raw session message.
+ *
+ * The ONLY definition of "which message is this". `buildTimelineFromSession`
+ * stamps it onto `data.message_id` (and `_uid`), and the paged-history anchor
+ * sends it back to the server as `before_id`. If these two ever disagree, a
+ * page boundary lands on the wrong record or misses the rendered copy and the
+ * same bubble is drawn twice — so both must go through here.
+ */
+export function sessionMessageIdentity(m: any): string {
+  if (!m || typeof m !== 'object') return '';
+  const extra = (m as any).extra;
+  return String(
+    (m as any).message_id ||
+      (m as any).client_id ||
+      (m as any).id ||
+      (extra && (extra.message_id || extra.id)) ||
+      '',
+  ).trim();
+}
+
+/** Identity of an already-rendered timeline entry ('' when it has none). */
+export function timelineEntryIdentity(entry: TimelineEntry): string {
+  if (entry.kind !== 'message') return '';
+  const d = entry.data as any;
+  return String(d?.message_id || d?.client_id || d?.id || '').trim();
+}
+
+/**
+ * Content+time signature used only when neither copy carries an identity.
+ * Requires a timestamp so two genuinely identical messages sent at different
+ * moments are never collapsed into one.
+ */
+function entrySignature(entry: TimelineEntry): string {
+  if (entry.kind !== 'message') return '';
+  const d = entry.data as any;
+  const ts = String(d?.timestamp || '').trim();
+  if (!ts) return '';
+  return `${d?.role || ''}\u0000${String(d?.content ?? '')}\u0000${ts}`;
+}
+
+/**
+ * Drop entries from a freshly fetched OLDER page that the timeline already
+ * renders. Prepending is the one path that concatenates two independently
+ * built arrays, so it is the only place a duplicate can survive: each page is
+ * deduped internally, never across the seam.
+ *
+ * Identity is authoritative. The role+content+timestamp signature is consulted
+ * ONLY for copies that carry no identity at all (some persisted assistant
+ * records) — checking it for identified messages would wrongly collapse two
+ * distinct records that happen to share content and a second-precision
+ * timestamp.
+ */
+export function dropEntriesAlreadyPresent(
+  olderEntries: TimelineEntry[],
+  existing: TimelineEntry[],
+): TimelineEntry[] {
+  const seenIds = new Set<string>();
+  const seenSignatures = new Set<string>();
+  for (const entry of existing) {
+    const id = timelineEntryIdentity(entry);
+    if (id) {
+      seenIds.add(id);
+      continue;
+    }
+    const sig = entrySignature(entry);
+    if (sig) seenSignatures.add(sig);
+  }
+  const kept: TimelineEntry[] = [];
+  for (const entry of olderEntries) {
+    const id = timelineEntryIdentity(entry);
+    if (id) {
+      if (seenIds.has(id)) continue;
+      seenIds.add(id);
+      kept.push(entry);
+      continue;
+    }
+    const sig = entrySignature(entry);
+    if (sig) {
+      if (seenSignatures.has(sig)) continue;
+      seenSignatures.add(sig);
+    }
+    kept.push(entry);
+  }
+  return kept;
+}
+
 export function buildTimelineFromSession(
   messages: any[],
   events: any[],
@@ -2934,13 +3120,7 @@ export function buildTimelineFromSession(
     }
 
     // Only user and assistant messages reach here (system/hidden handled above)
-    const stableMsgId = String(
-      (m as any).message_id ||
-        (m as any).client_id ||
-        (m as any).id ||
-        ((m as any).extra && ((m as any).extra.message_id || (m as any).extra.id)) ||
-        '',
-    ).trim();
+    const stableMsgId = sessionMessageIdentity(m);
     // Skip the second copy of a message that shares this identity. Keeps the
     // first occurrence so ordering matches the disk array; the content-based
     // dup merge above already handles near-identical repeats.

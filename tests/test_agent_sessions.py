@@ -711,6 +711,140 @@ class TestAgentSessionReader:
         assert r1["archived_messages"] == []
         assert r1["archived_events"] == []
 
+    def _write_paged_session(self, tmp_path, messages, **extra):
+        save_dir = tmp_path / "sessions"
+        history_dir = tmp_path / "history"
+        os.makedirs(save_dir, exist_ok=True)
+        os.makedirs(history_dir, exist_ok=True)
+        (save_dir / "current_session.json").write_text(
+            json.dumps({"id": "cur-1", "messages": []}),
+            encoding="utf-8",
+        )
+        (history_dir / "paged.json").write_text(
+            json.dumps({"messages": messages, "events": [], **extra}),
+            encoding="utf-8",
+        )
+        return AgentSessionReader(str(save_dir), str(history_dir))
+
+    def test_paged_before_id_returns_strictly_older_messages(self, tmp_path):
+        """`before_id` anchors the window on a message, not on a tail count."""
+        msgs = [{"role": "user", "content": f"msg {i}", "message_id": f"m{i}"} for i in range(20)]
+        reader = self._write_paged_session(tmp_path, msgs)
+
+        r = reader.get_session_history_paged("paged", limit=5, before_id="m10")
+        assert [m["content"] for m in r["messages"]] == [
+            "msg 5",
+            "msg 6",
+            "msg 7",
+            "msg 8",
+            "msg 9",
+        ]
+        # The anchor itself must NOT come back — it is already on screen.
+        assert all(m["message_id"] != "m10" for m in r["messages"])
+        assert r["has_more"] is True
+        assert r["total_messages"] == 20
+
+        # Walking to the top terminates and never repeats a message.
+        seen: list[str] = []
+        anchor = "m10"
+        while anchor:
+            page = reader.get_session_history_paged("paged", limit=5, before_id=anchor)
+            seen = [m["message_id"] for m in page["messages"]] + seen
+            if not page["has_more"]:
+                break
+            anchor = page["messages"][0]["message_id"]
+        assert seen == [f"m{i}" for i in range(10)]
+
+    def test_paged_before_id_survives_tail_growth(self, tmp_path):
+        """The anchored page is immune to messages appended after the paint.
+
+        This is the reported regression: a tail-relative offset re-aims
+        backwards when the session grows, so the next page re-sends bubbles
+        that are already rendered.
+        """
+        msgs = [{"role": "user", "content": f"msg {i}", "message_id": f"m{i}"} for i in range(20)]
+        reader = self._write_paged_session(tmp_path, msgs)
+        first = reader.get_session_history_paged("paged", limit=5)  # offset=0
+        offset_after_paint = len(first["messages"])
+
+        # A live turn appends 4 messages; the client's offset is NOT advanced.
+        grown = msgs + [{"role": "user", "content": "live", "message_id": f"live{i}"} for i in range(4)]
+        reader2 = self._write_paged_session(tmp_path, grown)
+
+        drifted = reader2.get_session_history_paged("paged", offset=offset_after_paint, limit=5)
+        drifted_ids = {m["message_id"] for m in drifted["messages"]}
+        on_screen_ids = {m["message_id"] for m in first["messages"]}
+        assert drifted_ids & on_screen_ids  # the bug: the tail grew, window slipped back
+
+        anchored = reader2.get_session_history_paged(
+            "paged",
+            offset=offset_after_paint,
+            limit=5,
+            before_id=first["messages"][0]["message_id"],
+        )
+        anchored_ids = {m["message_id"] for m in anchored["messages"]}
+        assert not (anchored_ids & on_screen_ids)
+        assert anchored_ids == {"m10", "m11", "m12", "m13", "m14"}
+
+    def test_paged_before_id_matches_client_identity_precedence(self, tmp_path):
+        """Anchors resolve via message_id → client_id → id → extra.*, like the UI."""
+        msgs = [
+            {"role": "user", "content": "0", "client_id": "c0"},
+            {"role": "user", "content": "1", "id": "i1"},
+            {"role": "user", "content": "2", "extra": {"message_id": "x2"}},
+            {"role": "user", "content": "3", "message_id": "m3"},
+        ]
+        reader = self._write_paged_session(tmp_path, msgs)
+        for anchor, expected in (
+            ("c0", []),
+            ("i1", ["0"]),
+            ("x2", ["0", "1"]),
+            ("m3", ["0", "1", "2"]),
+        ):
+            r = reader.get_session_history_paged("paged", limit=9, before_id=anchor)
+            assert [m["content"] for m in r["messages"]] == expected, anchor
+
+    def test_paged_unknown_before_id_falls_back_to_offset(self, tmp_path):
+        """A stale anchor degrades to the offset window instead of erroring."""
+        msgs = [{"role": "user", "content": f"msg {i}", "message_id": f"m{i}"} for i in range(20)]
+        reader = self._write_paged_session(tmp_path, msgs)
+        r = reader.get_session_history_paged("paged", offset=5, limit=5, before_id="gone")
+        assert [m["content"] for m in r["messages"]] == [
+            "msg 10",
+            "msg 11",
+            "msg 12",
+            "msg 13",
+            "msg 14",
+        ]
+
+    def test_paged_before_id_keeps_archived_payload_off_mid_pages(self, tmp_path):
+        """A mid-session anchor is not a first page: no archived_* re-send."""
+        msgs = [{"role": "user", "content": f"msg {i}", "message_id": f"m{i}"} for i in range(20)]
+        reader = self._write_paged_session(
+            tmp_path,
+            msgs,
+            archived_messages=[{"role": "user", "content": "old archived"}],
+            archived_events=[{"name": "tool_use", "data": "ls"}],
+        )
+        r = reader.get_session_history_paged("paged", offset=5, limit=5, before_id="m10")
+        assert r["archived_messages"] == []
+        assert r["archived_events"] == []
+
+    def test_paged_has_more_matches_start_index(self, tmp_path):
+        """`has_more` stays true while older messages remain beyond the window."""
+        msgs = [{"role": "user", "content": f"msg {i}", "message_id": f"m{i}"} for i in range(20)]
+        reader = self._write_paged_session(tmp_path, msgs)
+        r = reader.get_session_history_paged("paged", limit=5, before_id="m5")
+        assert [m["content"] for m in r["messages"]] == [
+            "msg 0",
+            "msg 1",
+            "msg 2",
+            "msg 3",
+            "msg 4",
+        ]
+        assert r["has_more"] is False
+        assert r["messages"][0]["content"] == "msg 0"
+
     def test_cache_get_returns_shallow_copy(self, tmp_path):
         """Default cache get avoids deepcopy while still isolating list containers."""
         save_dir = tmp_path / "sessions"

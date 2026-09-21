@@ -17,6 +17,7 @@ from . import session_manager as _session_module
 from . import state_manager as _state_module
 
 # Compression logic lives in the _runner sub-package (extracted from this file).
+from ._provider_base import cache_miss_tokens, has_estimated_usage
 from ._runner._compression import (
     build_summary_payload as _build_summary_payload,
 )
@@ -1526,6 +1527,9 @@ class AgentRunner:
                     "source": "input_hub",
                     "images": _sup_imgs,
                     "attachments": _sup_atts,
+                    # client_id 用于 steer（引导注入）：消费时回发
+                    # steer_consumed，前端据此把气泡从引导队列挪进时间线。
+                    "client_id": str(item.get("client_id") or ""),
                 },
                 session_id=sid,
             )
@@ -2021,6 +2025,44 @@ class AgentRunner:
                 pass
         finally:
             input_hub.clear_session_stop(sid)
+            # Steer（引导注入）残留兜底：turn 边界已把会话队列里的用户插话
+            # 挪进 event_pipeline，但若模型这一轮直接输出正文（无工具调用），
+            # per-tool drain 不会执行，插话会滞留在管道里（可能数小时后才被
+            # 未来的工具调用捎带）。这里在回合收尾时清空该 sid 的管道：
+            # web/gateway 用户消息重新入队（dispatcher 立即开一个正常回合
+            # 送进模型），其余内部事件（vision 注入等）原样放回。
+            try:
+                from opensquad.event_pipeline import event_pipeline as _ep
+
+                _leftover = _ep.drain_sync(session_id=sid)
+                for _evt in _leftover:
+                    _txt = str(_evt.content or "").strip()
+                    if _evt.source in ("web", "gateway", "dm") and _txt and not _txt.startswith("__"):
+                        input_hub.push(
+                            _evt.content,
+                            source=_evt.source,
+                            images=_evt.metadata.get("images") or None,
+                            attachments=_evt.metadata.get("attachments") or None,
+                            channel=_evt.metadata.get("channel", ""),
+                            sender_name=_evt.metadata.get("sender_name", ""),
+                            user_id=_evt.metadata.get("user_id", ""),
+                            client_id=_evt.metadata.get("client_id", ""),
+                            session_id=sid,
+                        )
+                        logger.info(
+                            "[Runner] Leftover steer/user event re-queued as new turn sid=%s content=%r",
+                            sid,
+                            _txt[:80],
+                        )
+                    else:
+                        _ep.push_nowait(
+                            source=_evt.source,
+                            content=_evt.content,
+                            metadata=dict(_evt.metadata or {}),
+                            session_id=sid,
+                        )
+            except Exception:
+                logger.debug("[Runner] steer leftover sweep failed sid=%s", sid, exc_info=True)
             # Drop agent-wide Stop latch once this turn is done so the next
             # user message is not immediately aborted.
             if input_hub.is_stop_requested():
@@ -4961,6 +5003,22 @@ class AgentRunner:
                     "requests": getattr(chat_api, "total_requests", 0),
                     "total_requests": getattr(chat_api, "total_requests", 0),
                     "cache_read_tokens": getattr(chat_api, "total_cache_read_tokens", 0),
+                    # Prompt-token split for the context panel's cache hit rate.
+                    # `cache_read` is a subset of `input` on every provider (see
+                    # extract_cached_tokens), so miss = input - read.  Computed
+                    # here so the UI never re-derives a provider-specific rule.
+                    "cache_miss_tokens": cache_miss_tokens(
+                        getattr(chat_api, "total_input_tokens", 0),
+                        getattr(chat_api, "total_cache_read_tokens", 0),
+                    ),
+                    "cache_creation_tokens": getattr(chat_api, "total_cache_creation_tokens", 0),
+                    # True when a turn ran without provider usage, so the two
+                    # counters above mix tokenizer estimates with real numbers
+                    # and the hit rate is unknown — not zero.  The panel shows
+                    # "unavailable" instead of 0.0% in that case.  Read off the
+                    # counter (not a method) so duck-typed chat clients in tests
+                    # and plugins keep working.
+                    "usage_estimated": has_estimated_usage(getattr(chat_api, "usage_estimated_turns", 0)),
                 },
             }
 

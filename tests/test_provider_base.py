@@ -14,6 +14,9 @@ This module is the anti-regression guard for that consolidation:
 
 from __future__ import annotations
 
+import tokenize
+from pathlib import Path
+
 import pytest
 
 from opensquad import _provider_base as pb
@@ -365,3 +368,322 @@ def test_summary_prompt_asks_for_the_current_task():
     assert "## Current Task" in prompt
     assert "## Original Goal" in prompt
     assert "CONV-TEXT" in prompt
+
+
+# ── invariant: cache-hit prompt tokens are read the same way everywhere ──
+#
+# The context panel's "cache hit rate" is only as good as the counter behind
+# it.  Each backend spells the field differently and none of them errors when
+# it is absent, so a provider that forgets one spelling reports "0% cache"
+# forever with no visible failure — the pre-refactor code did exactly that for
+# DeepSeek (`prompt_cache_hit_tokens` was never read) and for Gemini
+# (`cached_content_token_count` was never read).
+
+
+class _OpenAIUsage:
+    """``usage.prompt_tokens_details.cached_tokens`` — OpenAI, Ark, Gemini-compat."""
+
+    def __init__(self, prompt: int, cached: int) -> None:
+        self.prompt_tokens = prompt
+        self.completion_tokens = 1
+        self.prompt_tokens_details = type("_D", (), {"cached_tokens": cached})()
+
+
+class _DeepSeekUsage:
+    """``prompt_cache_hit_tokens`` is undeclared, so pydantic parks it in model_extra."""
+
+    def __init__(self, prompt: int, hit: int) -> None:
+        self.prompt_tokens = prompt
+        self.completion_tokens = 1
+        self.model_extra = {"prompt_cache_hit_tokens": hit}
+
+
+class _GeminiUsage:
+    """Native ``usage_metadata.cached_content_token_count``."""
+
+    def __init__(self, prompt: int, cached: int) -> None:
+        self.prompt_token_count = prompt
+        self.candidates_token_count = 1
+        self.cached_content_token_count = cached
+
+
+@pytest.mark.parametrize(
+    "usage",
+    [
+        _OpenAIUsage(1000, 800),
+        _DeepSeekUsage(1000, 800),
+        _GeminiUsage(1000, 800),
+        {"prompt_tokens_details": {"cached_tokens": 800}},
+        {"prompt_cache_hit_tokens": 800},
+    ],
+    ids=["openai-sdk", "deepseek-extra", "gemini-native", "openai-dict", "deepseek-dict"],
+)
+def test_extract_cached_tokens_reads_every_provider_spelling(usage):
+    assert pb.extract_cached_tokens(usage) == 800
+
+
+@pytest.mark.parametrize(
+    "usage",
+    [None, {}, {"prompt_tokens_details": None}, {"prompt_cache_hit_tokens": "n/a"}],
+    ids=["none", "empty-dict", "null-details", "garbage"],
+)
+def test_extract_cached_tokens_is_zero_not_an_exception(usage):
+    """A provider that omits or mangles the field must not take the turn down."""
+    assert pb.extract_cached_tokens(usage) == 0
+
+
+def test_cache_miss_is_input_minus_hit_floored_at_zero():
+    assert pb.cache_miss_tokens(1000, 800) == 200
+    assert pb.cache_miss_tokens(1000, 0) == 1000
+    # Stale counter after a provider-side eviction: never negative.
+    assert pb.cache_miss_tokens(100, 500) == 0
+    assert pb.cache_miss_tokens(None, None) == 0
+    assert pb.cache_miss_tokens("n/a", 1) == 0
+
+
+def _code_without_comments(path: Path) -> str:
+    """Source with ``#`` comments dropped, string literals kept.
+
+    Comments must go: they legitimately *name* the provider fields (e.g. the
+    note above ``extract_cached_tokens``), and a scan that matched them would
+    fail for the right fix and pass for the wrong one.
+    """
+    with path.open(encoding="utf-8") as fh:
+        return " ".join(tok.string for tok in tokenize.generate_tokens(fh.readline) if tok.type != tokenize.COMMENT)
+
+
+def test_only_the_base_knows_the_provider_cache_field_names():
+    """No provider may re-implement the field lookup — that is how it drifted."""
+    src_dir = Path(pb.__file__).resolve().parent
+    base_src = _code_without_comments(src_dir / "_provider_base.py")
+    assert "prompt_tokens_details" in base_src, "the extractor lost its OpenAI spelling"
+
+    for name in ("chat_api.py", "claude_api.py", "google_api.py"):
+        provider_src = _code_without_comments(src_dir / name)
+        assert "prompt_tokens_details" not in provider_src, (
+            f"{name} reads the provider-specific cache field directly — "
+            "route it through _provider_base.extract_cached_tokens instead"
+        )
+
+    # The two OpenAI-compatible paths must actually *call* the extractor and
+    # feed the counter.  Asserting the bare name would pass on the import line
+    # alone, so match the call and the accumulation.
+    for name, arg in (("chat_api.py", "stream_usage"), ("google_api.py", "usage")):
+        compact = _code_without_comments(src_dir / name).replace(" ", "")
+        assert f"extract_cached_tokens({arg})" in compact, (
+            f"{name} stopped counting cache hits (extractor imported but unused)"
+        )
+        assert ".total_cache_read_tokens+=" in compact, f"{name} computes cache hits but never accumulates them"
+    # Claude has its own pair (read + creation) but must keep feeding both counters.
+    claude_src = _code_without_comments(src_dir / "claude_api.py")
+    assert "total_cache_read_tokens += _cache_read" in claude_src
+
+
+def test_every_token_stats_emitter_publishes_the_cache_split():
+    """The panel reads input/cached/miss + provenance off `token_stats.session`.
+
+    Both emitters must carry them: `runner._broadcast_token_stats` is the live
+    one, `_runner/_output_handler.OutputHandler` is the extracted copy a future
+    refactor will swap in — and wiring up a payload without provenance is
+    exactly how "estimated 0" comes back as a confident 0.0%.
+    """
+    src_dir = Path(pb.__file__).resolve().parent
+    for rel in ("runner.py", "_runner/_output_handler.py"):
+        src = _code_without_comments(src_dir / rel)
+        # `_code_without_comments` re-joins tokens with spaces, so compare compacted.
+        compact = src.replace(" ", "")
+        assert '"cache_read_tokens"' in src, rel
+        assert '"cache_miss_tokens"' in src, rel
+        assert "cache_miss_tokens(" in compact, f"{rel}: the split must use the shared clamp helper"
+        # Provenance travels to the UI: without it a session whose usage was
+        # estimated renders a confident 0.0% hit rate instead of "unavailable".
+        assert '"usage_estimated"' in src, rel
+        assert "has_estimated_usage(getattr(" in compact, rel
+
+
+def test_streaming_requests_ask_the_provider_for_usage():
+    """A stream only carries `usage` when the request opts in.
+
+    Measured against the Ark endpoint this project is configured with
+    (``glm-5.3-flash``): the same completion returns 66 chunks and
+    ``usage=None`` without ``stream_options.include_usage``, and
+    ``prompt_tokens_details.cached_tokens = 4800`` with it.  Without the
+    opt-in every counter takes the local-tokenizer fallback, so
+    ``total_cache_read_tokens`` can never leave 0 and the panel prints a
+    fabricated 0% — the reported bug.
+    """
+    api, client = _run_one_turn()
+
+    assert client.calls[0]["stream_options"] == {"include_usage": True}
+    assert api.total_cache_read_tokens == 4800, "the usage chunk must be counted"
+    assert api.total_input_tokens == 4827
+    assert api.usage_reported_turns == 1
+    assert api.usage_is_estimated() is False
+
+
+def test_a_stream_without_usage_is_marked_estimated_not_zero():
+    """The fallback still counts tokens, but must admit it cannot know the split."""
+    api, _client = _run_one_turn(emit_usage=False)
+
+    assert api.total_cache_read_tokens == 0
+    assert api.usage_estimated_turns == 1
+    assert api.usage_reported_turns == 0
+    assert api.usage_is_estimated() is True, "a 0 here is 'unknown', not 'no cache hits'"
+
+
+def test_endpoints_that_reject_stream_options_still_complete_the_turn():
+    """A strict proxy must cost us usage stats, never the answer.
+
+    The stub 400s while ``stream_options`` is present, so the turn only
+    succeeds if the parameter is dropped and the request retried.  Such an
+    endpoint never emits usage either, hence the estimate that follows.
+    """
+    api, client = _run_one_turn(emit_usage=False, reject_stream_options=True)
+
+    turn1 = client.calls
+    assert len(turn1) >= 2, "the request must be retried without the parameter"
+    assert "stream_options" in turn1[0]
+    assert "stream_options" not in turn1[-1], "the parameter must be dropped on retry"
+    assert api._stream_options_rejected is True
+    assert api.usage_is_estimated() is True, "retrying is not free: no usage came back"
+
+    # And the decision sticks: a later turn must not pay the 400 again.
+    before = len(client.calls)
+    _run_one_turn(api=api, client=client)
+    assert "stream_options" not in client.calls[before], "the rejection must be remembered across turns"
+
+
+def test_model_switch_keeps_the_usage_provenance():
+    """Swapping the model mid-session must not launder estimated turns."""
+    src = _code_without_comments(Path(pb.__file__).resolve().parent / "model_switch.py").replace(" ", "")
+    assert "new_api.usage_reported_turns=getattr(chat_api," in src
+    assert "new_api.usage_estimated_turns=getattr(chat_api," in src
+
+
+def test_a_session_with_an_estimated_turn_cannot_claim_a_hit_rate():
+    """`usage_is_estimated` / `has_estimated_usage` is the gate the UI keys off.
+
+    The pure helper is what `runner` applies to a duck-typed chat client's
+    counters, so it must survive junk the same way `cache_miss_tokens` does.
+    """
+    api = ProviderAPIBase()
+    api._init_provider_base()
+    assert api.usage_is_estimated() is False, "a fresh client has nothing estimated yet"
+
+    api.usage_reported_turns = 3
+    api.usage_estimated_turns = 1
+    assert api.usage_is_estimated() is True
+
+    api.usage_estimated_turns = 0
+    assert api.usage_is_estimated() is False
+
+    assert pb.has_estimated_usage(1) is True
+    assert pb.has_estimated_usage(0) is False
+    assert pb.has_estimated_usage(None) is False
+    assert pb.has_estimated_usage("n/a") is False
+    assert pb.has_estimated_usage("2") is True
+
+
+def test_ark_usage_shape_yields_a_real_hit_rate():
+    """Numbers captured from the live Ark endpoint (cached 4800 of 4827)."""
+    usage = _OpenAIUsage(4827, 4800)
+    hit = pb.extract_cached_tokens(usage)
+    assert hit == 4800
+    assert pb.cache_miss_tokens(4827, hit) == 27
+    # The panel's denominator is hit+miss, which must reconstruct the prompt.
+    assert hit + pb.cache_miss_tokens(4827, hit) == 4827
+
+
+# ─────────────────── streaming usage: a real turn, stubbed transport ──────────
+#
+# The counters above are only reachable if the request asks for usage, so these
+# drive the actual `ChatAPI.chat()` against a stub client rather than scanning
+# source.  A source scan cannot tell "the parameter is sent" apart from "the
+# parameter was deleted from a branch nothing executes".
+
+
+class _StubDelta:
+    def __init__(self, content: str | None) -> None:
+        self.content = content
+        self.reasoning_content = None
+        self.tool_calls = None
+        self.audio = None
+
+
+class _StubChoice:
+    def __init__(self, content: str | None, finish: str | None) -> None:
+        self.delta = _StubDelta(content)
+        self.finish_reason = finish
+        self.index = 0
+
+
+class _StubChunk:
+    def __init__(self, content: str | None = None, usage: object = None, finish: str | None = None) -> None:
+        # A usage-only chunk carries an EMPTY choices list, exactly like the
+        # OpenAI-compatible streaming protocol.
+        self.choices = [_StubChoice(content, finish)] if (content is not None or finish) else []
+        self.usage = usage
+
+
+class _StubUsage:
+    """The Ark shape captured live: cached 4800 of a 4827-token prompt."""
+
+    def __init__(self) -> None:
+        self.prompt_tokens = 4827
+        self.completion_tokens = 5
+        self.total_tokens = 4832
+        self.prompt_tokens_details = type("_D", (), {"cached_tokens": 4800})()
+        self.model_extra: dict = {}
+
+
+class _BadRequestError(Exception):
+    """400 from a strict proxy: the parameter name it did not recognise."""
+
+
+class _StubClient:
+    def __init__(self, emit_usage: bool, reject_stream_options: bool) -> None:
+        self.calls: list[dict] = []
+        self.emit_usage = emit_usage
+        self.reject_stream_options = reject_stream_options
+        # Mimic the SDK's `client.chat.completions.create` nesting.
+        self.chat = type("_Chat", (), {"completions": self})()
+
+    async def create(self, **kwargs):
+        self.calls.append(dict(kwargs))
+        if self.reject_stream_options and "stream_options" in kwargs:
+            # Bounded: after three rejections the stub plays along, so a
+            # regression that never drops the parameter fails the assertions
+            # instead of hanging the suite in a retry loop.
+            if sum("stream_options" in c for c in self.calls) <= 3:
+                raise _BadRequestError("400 Bad Request - Unknown parameter: 'stream_options'")
+
+        emit_usage = self.emit_usage
+
+        async def gen():
+            yield _StubChunk("Hello", finish="stop")
+            if emit_usage:
+                yield _StubChunk(usage=_StubUsage())
+
+        return gen()
+
+
+def _run_one_turn(*, emit_usage: bool = True, reject_stream_options: bool = False, api=None, client=None):
+    """Drive one real ChatAPI turn over the stub transport.
+
+    Runs its own event loop, so it stays a plain sync test under
+    ``asyncio_mode = auto`` without leaking a loop into the shared fixtures.
+    Pass *api*/*client* to run a second turn against the same pair.
+    """
+    import asyncio
+
+    if api is None:
+        api = ChatAPI(api_key="sk-test", model="glm-5.3-flash", prompt="You are a test.")
+        api.base_url = "https://ark.cn-beijing.volces.com/api/coding/v3"
+    if client is None:
+        client = _StubClient(emit_usage=emit_usage, reject_stream_options=reject_stream_options)
+    # Bypass the real SDK entirely — no network, no credentials.
+    api._ensure_client = lambda: client
+
+    result = asyncio.run(api.chat("hi"))
+    assert result["text"] == "Hello", result
+    return api, client

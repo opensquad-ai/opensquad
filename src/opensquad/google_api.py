@@ -29,7 +29,7 @@ except ImportError:
     syscfg = None
     ModelConfig = None
 
-from ._provider_base import ProviderAPIBase
+from ._provider_base import ProviderAPIBase, extract_cached_tokens
 from .utils import CharPrinter
 
 # google.generativeai is very slow to import (~10s). Defer until GoogleAPI is
@@ -166,8 +166,10 @@ class GoogleAPI(ProviderAPIBase):
 
         # Google API's prompt_token_count is cumulative (not incremental);
         # record the previous value and only accumulate the delta each time to
-        # avoid triangular inflation.
+        # avoid triangular inflation.  `cached_content_token_count` follows the
+        # same rule, so it gets its own watermark.
         self._last_prompt_token_count = 0
+        self._last_cached_token_count = 0
 
         if tiktoken:
             try:
@@ -907,6 +909,11 @@ class GoogleAPI(ProviderAPIBase):
                     self._last_prompt_token_count = prompt_count
                     self.total_input_tokens += delta_input
                     self.total_output_tokens += getattr(usage, "candidates_token_count", 0) or 0
+                    # Cache-hit half of the prompt (cached_content_token_count
+                    # is a subset of prompt_token_count); delta it too.
+                    cached_count = extract_cached_tokens(usage)
+                    self.total_cache_read_tokens += max(0, cached_count - self._last_cached_token_count)
+                    self._last_cached_token_count = cached_count
                 except Exception:
                     self.total_input_tokens += self._count_tokens(all_msgs)
                     if self.encoding and full_text:

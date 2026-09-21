@@ -119,4 +119,24 @@ describe('工具流 — 纯 UI 交互工具既不进统计，也不占步骤行'
       expect(render(block(evs))).not.toContain('向用户确认');
     }
   });
+
+  it('R4 — 系统控制工具（等待 / 定时提醒）有正式名称与归类，不再以裸名充当"其他工具"', () => {
+    const evs = [
+      ...READ_ONLY(),
+      toolCall('system.wait'), toolResult('system.wait'),
+      toolCall('reminder.set'), toolResult('reminder.set'),
+    ];
+    // 统计标题进入"系统控制"分类，而不是裸名/其他工具。
+    expect(render(block(evs))).toContain('系统控制 2 次');
+    // 行标签来自 toolFlow.fn / toolFlow.ns 映射，而非原始工具名。
+    const labels = buildLines(block(evs), {}, i18n.t.bind(i18n))
+      .filter((l) => l.kind === 'tool')
+      .map((l) => l.primary);
+    expect(labels).toContain('等待');
+    expect(labels).toContain('定时提醒');
+    expect(labels).not.toContain('wait');
+    expect(labels).not.toContain('set');
+    // 系统控制是真实动作：计入统计（不像纯 UI 工具被过滤）。
+    expect(stepCount(block(evs))).toBe(stepCount(block(READ_ONLY())) + 4);
+  });
 });

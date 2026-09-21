@@ -17,6 +17,13 @@ export type SessionTimelineCacheMeta = {
   messageCount: number;
   /** Server total_messages when known (from paged API). */
   totalMessages?: number;
+  /**
+   * Identity (message_id/client_id/id) of the OLDEST message that came from the
+   * server's paged `messages` array. Scroll-up anchors its next page on this so
+   * the window cannot overlap what is already painted (a tail-relative offset
+   * drifts as soon as the live turn appends messages).
+   */
+  oldestMessageId?: string;
   at: number;
 };
 
@@ -54,6 +61,7 @@ export type PutCachedSessionTimelineOpts = {
   complete?: boolean;
   messageCount?: number;
   totalMessages?: number;
+  oldestMessageId?: string;
 };
 
 export function putCachedSessionTimeline(
@@ -77,6 +85,10 @@ export function putCachedSessionTimeline(
     complete,
     messageCount,
     totalMessages: opts?.totalMessages ?? prev?.totalMessages,
+    // Keep the previous anchor when a writer has no paged payload to offer
+    // (e.g. a live-stream cache write) — dropping it would force the next
+    // scroll-up back onto the drift-prone offset path.
+    oldestMessageId: opts?.oldestMessageId ?? prev?.oldestMessageId,
     at: Date.now(),
   });
   if (cache.size <= CACHE_MAX) return;

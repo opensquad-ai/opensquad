@@ -16,7 +16,7 @@ import contextlib
 import os
 
 from . import session_manager as _session_module
-from ._provider_base import ProviderAPIBase
+from ._provider_base import ProviderAPIBase, extract_cached_tokens
 from .input_hub import input_hub
 from .model_config import ModelConfig
 from .utils import CharPrinter, blocking_io
@@ -1296,6 +1296,16 @@ class ChatAPI(ProviderAPIBase):
         # Build API request parameters
         request_params = {"model": self.model, "messages": messages, "stream": True, "temperature": self.temperature}
 
+        # Streaming usage: without this OpenAI-compatible endpoints send NO
+        # `usage` object at all (verified against Ark: 66 chunks, usage=None),
+        # so the counters below silently degrade to a local tokenizer estimate
+        # and `total_cache_read_tokens` can never leave 0.  The field is
+        # standard on every OpenAI-compatible backend; endpoints that reject it
+        # are handled by dropping the parameter and retrying (see the
+        # `_stream_options_rejected` branch in the retry loop).
+        if not self._stream_options_rejected:
+            request_params["stream_options"] = {"include_usage": True}
+
         from opensquad.reasoning_effort import apply_openai_compat_thinking_params
 
         apply_openai_compat_thinking_params(
@@ -1397,6 +1407,21 @@ class ChatAPI(ProviderAPIBase):
                 or ("econnaborted" in msg)
                 or ("econnreset" in msg)
                 or ("econnrefused" in msg)
+            )
+
+        def _is_stream_options_unsupported_error(exc: Exception) -> bool:
+            """Detect an endpoint rejecting ``stream_options`` (unknown parameter).
+
+            Strict OpenAI-compatible proxies answer 400 with the parameter name
+            in the message; some only say "extra fields not permitted".  Either
+            way the request is otherwise valid, so the caller retries without it
+            rather than failing the turn.
+            """
+            msg = str(exc).lower()
+            if "stream_options" not in msg and "include_usage" not in msg:
+                return False
+            return any(
+                token in msg for token in ("unknown", "unsupported", "not support", "unrecognized", "invalid", "400")
             )
 
         def _is_image_not_supported_error(exc: Exception) -> bool:
@@ -1616,6 +1641,7 @@ class ChatAPI(ProviderAPIBase):
                 is_rate_limit = _is_rate_limit_error(e)
                 is_connection = _is_connection_error(e)
                 is_image_error = _is_image_not_supported_error(e)
+                is_stream_options_error = _is_stream_options_unsupported_error(e)
                 is_auth_error = _is_auth_error(e)
                 can_retry_timeout = is_timeout and (timeout_retries < max_stream_retries) and (not got_any_chunk)
                 can_retry_rate_limit = is_rate_limit and (rate_retries < max_stream_retries)
@@ -1627,6 +1653,20 @@ class ChatAPI(ProviderAPIBase):
                     logger.warning("[ChatAPI] API auth error (not retrying): %s", e)
                     full_response.append(f"\n[Error: {type(e).__name__} - {e}]")
                     break
+
+                if is_stream_options_error and "stream_options" in request_params:
+                    # Endpoint predates stream_options. Drop it and retry: the
+                    # turn still works, it just loses provider usage (and with
+                    # it the cache hit rate) — the panel reports that as
+                    # "unavailable" rather than a fake 0%.
+                    logger.warning(
+                        "[ChatAPI] Endpoint rejected stream_options.include_usage, "
+                        "retrying without it — provider usage stats will be unavailable: %s",
+                        e,
+                    )
+                    request_params.pop("stream_options", None)
+                    self._stream_options_rejected = True
+                    continue
 
                 if can_retry_image:
                     # Model/provider doesn't support image input -- strip images and retry
@@ -1754,14 +1794,19 @@ class ChatAPI(ProviderAPIBase):
             # API returned real usage data
             self.total_input_tokens += getattr(stream_usage, "prompt_tokens", 0) or 0
             self.total_output_tokens += getattr(stream_usage, "completion_tokens", 0) or 0
-            # OpenAI cached tokens: usage.prompt_tokens_details.cached_tokens
-            details = getattr(stream_usage, "prompt_tokens_details", None)
-            if details:
-                self.total_cache_read_tokens += getattr(details, "cached_tokens", 0) or 0
+            # Cache-hit prompt tokens.  OpenAI/Ark use
+            # `usage.prompt_tokens_details.cached_tokens`, DeepSeek puts
+            # `prompt_cache_hit_tokens` at the top level, Gemini's compat layer
+            # may return either — one extractor covers all of them.
+            self.total_cache_read_tokens += extract_cached_tokens(stream_usage)
+            self.usage_reported_turns += 1
         else:
-            # Fallback: estimate based on tiktoken
+            # Fallback: estimate based on tiktoken. Cache read is unknowable
+            # here, so the turn is recorded as estimated and the context panel
+            # refuses to print a hit rate for it.
             self.total_input_tokens += self._count_tokens(messages, self._last_tools)
             self.total_output_tokens += len(self.encoding.encode(res_text)) if res_text else 0
+            self.usage_estimated_turns += 1
 
         from opensquad.turn_trace import has_unclosed_tool_call
 

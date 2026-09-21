@@ -224,6 +224,7 @@ def test_broadcast_and_dispatch_agree_on_the_shared_core() -> None:
         "turn_usage",
         "token_stats",  # 消耗 badge
         "turn_cancelled",  # frontend has a handler; used to be dropped
+        "to_user_end_task",  # end-task turn's ONLY terminal frame; used to be dropped
         "compression_progress",
         "task_update",
         "task_removed",

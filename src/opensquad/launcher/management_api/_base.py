@@ -292,7 +292,8 @@ class BaseHandlerMixin:
             agent_id, session_id = parts[3], parts[4]
             offset = int(qs.get("offset", ["0"])[0])
             limit = int(qs.get("limit", ["50"])[0])
-            return self._handle_session_paged(agent_id, session_id, offset, limit)
+            before_id = (qs.get("before_id", [""])[0] or "") or None
+            return self._handle_session_paged(agent_id, session_id, offset, limit, before_id)
         elif re.search(r"^/api/sessions/[^/]+/[^/]+$", path):
             parts = path.split("/")
             agent_id, session_id = parts[3], parts[4]

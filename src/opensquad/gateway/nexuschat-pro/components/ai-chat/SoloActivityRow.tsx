@@ -28,10 +28,11 @@ import {
   Database,
   Target,
   Image,
+  Clock,
 } from 'lucide-react';
 import type { WorkflowBlock, WorkflowEvent } from '../../utils/aiChatTimeline';
 import { isFinalFlag, isToolResultFailure } from '../../utils/aiChatTimeline';
-import { hasOpenAsyncDelegate } from '../../utils/aiChatTimeline';
+import { hasOpenAsyncDelegate, isUiOnlyToolName } from '../../utils/aiChatTimeline';
 import { FileDiffBlock, extractFileEditInfo, parsePartialFileToolArgs, applyEditDiffContext, type FileEditInfo } from './FileDiffBlock';
 import { formatElapsedAtLeastOneSecond } from '../../utils/formatElapsed';
 import { buildDisplayWorkflowItems, type DelegateBundle } from '../../utils/delegateGrouping';
@@ -616,7 +617,7 @@ function frozenElapsedMs(block: WorkflowBlock, turnStartedMs?: number): number |
  */
 type WorkToolCategory =
   | 'read' | 'search' | 'edit' | 'list' | 'terminal' | 'web' | 'skill' | 'task'
-  | 'interaction' | 'collab' | 'memory' | 'goal' | 'media' | 'mcp' | 'other';
+  | 'interaction' | 'collab' | 'memory' | 'goal' | 'media' | 'mcp' | 'system' | 'other';
 
 /** Tool names arrive as `namespace__function` (e.g. websearch__search,
  *  filesystem__read_file, system__run_session_job, mcp__server__tool). */
@@ -640,11 +641,13 @@ function classifyWorkTool(name: string): WorkToolCategory {
   if (ns.startsWith('skill')) return 'skill';
   if (ns === 'websearch' || ns === 'web' || ns === 'bocha') return 'web';
   // 用户交互：确认卡 / 追问建议 / 模式切换。
-  if (ns === 'choice_tools' || ns === 'followup_tools' || ns === 'agent_mode') return 'interaction';
+  if (isUiOnlyToolName(name)) return 'interaction';
   // 多智能体协作与消息：delegate_task 通常已被 delegation 折叠消费，兜底归协作。
   if (ns === 'collaboration' || ns === 'delegate_task' || ns === 'im' || ns === 'task_watch') return 'collab';
   if (ns === 'memory') return 'memory';
   if (ns === 'goal') return 'goal';
+  // 系统控制：等待（system.wait）/ 定时提醒（reminder.set 等闹钟类）/ 状态切换。
+  if (ns === 'reminder' || ns === 'scheduled_tasks') return 'system';
   // 多媒体（插件）：图像理解 / 媒体生成 / 语音转写。
   if (ns === 'vision' || ns === 'media' || ns.startsWith('whisper')) return 'media';
   if (ns === 'filesystem') {
@@ -661,8 +664,12 @@ function classifyWorkTool(name: string): WorkToolCategory {
   if (ns === 'system') {
     if (/shell|session|job|(^|_)(run|bash|exec|command|terminal)($|_)/.test(fn)) return 'terminal';
     if (/(^|_)(write|binary)($|_)/.test(fn)) return 'edit';
+    // 等待 / 睡眠 / 状态切换是系统控制，不是"其他工具"。
+    if (/^(wait|sleep|set_state|set_wake_mode)$/.test(fn)) return 'system';
     return 'other';
   }
+  // 裸名兜底（部分链路会剥掉 system. 前缀再上报）。
+  if (/^(wait|sleep|set_state|set_wake_mode)$/.test(fn)) return 'system';
   if (/(^|_)(read_file|read_multiple_files|view_file|read|cat|view)($|_)/.test(fn)) return 'read';
   if (/(^|_)(grep|search_files|find_files|search|glob)($|_)/.test(fn)) return 'search';
   if (/(^|_)(write_file|edit_file|replace_in_file|str_replace|patch|apply_diff|write|edit|replace)($|_)/.test(fn)) return 'edit';
@@ -683,9 +690,12 @@ function classifyWorkTool(name: string): WorkToolCategory {
  *
  * 只过滤**展示层**：`WorkflowBlock.events` 保持原样 —— 「是否还有未闭合工具」
  * 「本轮是否已交付」等判定都读原始事件，不能被这里影响。
+ *
+ * 判定本身住在 `aiChatTimeline.isUiOnlyToolName`：实时时间线要用同一份名单，
+ * 才知道一个 tool_call 之后是否还有真正的活儿（见 `demoteTrailing`）。
  */
 function isUiOnlyTool(name: string): boolean {
-  return classifyWorkTool(name) === 'interaction';
+  return isUiOnlyToolName(name);
 }
 
 /** Short, user-facing label for a tool name (websearch__search → 网络搜索 / Web search).
@@ -722,6 +732,7 @@ function toolIcon(name: string): React.ReactNode {
     case 'memory': return <Database size={size} className={cls} />;
     case 'goal': return <Target size={size} className={cls} />;
     case 'media': return <Image size={size} className={cls} />;
+    case 'system': return <Clock size={size} className={cls} />;
     default: return <Wrench size={size} className={cls} />;
   }
 }
@@ -744,7 +755,7 @@ function summarizeWorkTools(block: WorkflowBlock, t: TFunction): string {
     counts.set(cat, (counts.get(cat) || 0) + 1);
   }
   const parts: string[] = [];
-  for (const cat of ['read', 'search', 'edit', 'list', 'terminal', 'web', 'skill', 'task', 'interaction', 'collab', 'memory', 'goal', 'media', 'mcp', 'other'] as WorkToolCategory[]) {
+  for (const cat of ['read', 'search', 'edit', 'list', 'terminal', 'web', 'skill', 'task', 'interaction', 'collab', 'memory', 'goal', 'media', 'mcp', 'system', 'other'] as WorkToolCategory[]) {
     const n = counts.get(cat);
     if (!n) continue;
     parts.push(t(`aiChat.toolFlow.summary.${cat}`, { n }));

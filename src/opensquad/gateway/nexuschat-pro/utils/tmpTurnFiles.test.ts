@@ -203,15 +203,40 @@ describe('intermediate assistant output demotion (过程输出)', () => {
     expect(lastEvt.content).toBe('阶段总结：一切正常');
   });
 
-  it('never demotes the final reply, media messages, or pure-text turns', () => {
-    // 纯文本 turn：无 workflow → 不动
+  it('demotes interim text even when the turn has no workflow block at all', () => {
+    // 模型把 tool_call 写成正文（不支持原生 FC）时事件流里没有 workflow，
+    // 旧规则「两者皆无则保持普通消息」会把每一段叙述都留在时间线上当回复。
     const tl1: any[] = [
       msg('user', 'hi', '2026-09-13T02:00:00.000Z'),
       msg('assistant', '第一步', '2026-09-13T02:01:00.000Z'),
       msg('assistant', '最终回复', '2026-09-13T02:02:00.000Z'),
     ];
-    expect(demoteIntermediateAssistantMessages(tl1 as any)).toHaveLength(3);
+    const out1 = demoteIntermediateAssistantMessages(tl1 as any);
+    expect(out1.filter((e) => e.kind === 'message')).toHaveLength(2); // user + final
+    const built = out1.find((e) => e.kind === 'workflow') as any;
+    expect(built).toBeTruthy();
+    expect(built.data.completed).toBe(true);
+    expect(built.data.events.map((e: any) => e.type)).toEqual(['process_output']);
+    expect(built.data.events[0].content).toBe('第一步');
+  });
 
+  it('demoteTrailing folds the turn tail only when the caller says work follows', () => {
+    const tail: any[] = [
+      msg('user', 'hi', '2026-09-13T02:00:00.000Z'),
+      msg('assistant', '先说一句，随后调用工具', '2026-09-13T02:01:00.000Z'),
+      wf(false, 2000),
+    ];
+    // 落盘/重建：最后一条 assistant 文本永远当作真正的用户输出
+    expect(demoteIntermediateAssistantMessages(tail as any).filter((e) => e.kind === 'message')).toHaveLength(2);
+    // 实时：调用方正在追加父级 tool_call，尾随文本必然是过程输出
+    const live = demoteIntermediateAssistantMessages(tail as any, { demoteTrailing: true });
+    expect(live.filter((e) => e.kind === 'message')).toHaveLength(1);
+    const wfBlock = live.find((e) => e.kind === 'workflow') as any;
+    expect(wfBlock.data.events[0].type).toBe('process_output');
+    expect(wfBlock.data.events[0].content).toBe('先说一句，随后调用工具');
+  });
+
+  it('never demotes the final reply or media messages', () => {
     // 带图片的中间消息不降级
     const tl2: any[] = [
       msg('user', '看图', '2026-09-13T02:00:00.000Z'),

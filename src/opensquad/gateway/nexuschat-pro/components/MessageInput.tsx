@@ -192,6 +192,14 @@ export const MessageInput: React.FC<MessageInputProps> = ({
     // 检测是否为移动端
     const isMobile = window.innerWidth < 768;
 
+    // IME 组合态守卫：中文输入法按 Enter 确认候选词时 key 也是 'Enter'
+    // （isComposing=true，部分引擎 keyCode=229），且组合结束后可能再补发一次
+    // Enter keydown —— 两次都命中下面的发送分支，导致同一条消息 POST 两遍。
+    const native = e.nativeEvent as KeyboardEvent;
+    if (native.isComposing || native.keyCode === 229) {
+      return;
+    }
+
     // 移动端：Enter 直接发送
     if (isMobile && e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();

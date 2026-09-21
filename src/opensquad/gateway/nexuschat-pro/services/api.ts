@@ -2446,8 +2446,23 @@ export const agentSessionAPI = {
     }>(`/ai-web/agent-sessions/${agentId}/${sessionId}`);
   },
 
-  /** Get paginated session history (newest first, offset=0 = most recent) */
-  getSessionHistoryPaged: async (agentId: string, sessionId: string, offset: number = 0, limit: number = 50) => {
+  /**
+   * Get paginated session history (newest first, offset=0 = most recent).
+   *
+   * `beforeId` anchors the page to a message identity (the oldest message the
+   * caller already holds) and returns the `limit` messages strictly older than
+   * it. Preferred over `offset` for scroll-up: `offset` counts from the tail,
+   * so it silently re-aims backwards whenever the live turn appends messages,
+   * which makes consecutive pages overlap and render the same bubble twice.
+   */
+  getSessionHistoryPaged: async (
+    agentId: string,
+    sessionId: string,
+    offset: number = 0,
+    limit: number = 50,
+    beforeId?: string,
+  ) => {
+    const anchor = (beforeId || '').trim();
     return apiRequest<{
       agent_id: string;
       session: AgentSessionData & {
@@ -2455,7 +2470,10 @@ export const agentSessionAPI = {
         total_events: number;
         has_more: boolean;
       };
-    }>(`/ai-web/agent-sessions/${agentId}/${sessionId}/paged?offset=${offset}&limit=${limit}`);
+    }>(
+      `/ai-web/agent-sessions/${agentId}/${sessionId}/paged?offset=${offset}&limit=${limit}`
+      + (anchor ? `&before_id=${encodeURIComponent(anchor)}` : '')
+    );
   },
 
   /** Delete a history session */
