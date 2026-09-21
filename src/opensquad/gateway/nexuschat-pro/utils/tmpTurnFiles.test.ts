@@ -171,9 +171,9 @@ describe('intermediate assistant output demotion (过程输出)', () => {
   it('demotes interim message into the FOLLOWING workflow block front', () => {
     const tl: any[] = [
       msg('user', '开始', '2026-09-13T02:00:00.000Z'),
-      wf(true, 1000),
+      wf(true, Date.parse('2026-09-13T02:04:00.000Z')),
       msg('assistant', '现在让我用 Playwright 验证一下', '2026-09-13T02:05:00.000Z'),
-      wf(true, 2000),
+      wf(true, Date.parse('2026-09-13T02:06:00.000Z')),
       msg('assistant', '最终回复', '2026-09-13T02:09:00.000Z'),
     ];
     const out = demoteIntermediateAssistantMessages(tl as any);
@@ -190,7 +190,7 @@ describe('intermediate assistant output demotion (过程输出)', () => {
   it('demotes interim message into the PRECEDING workflow block end when no workflow follows', () => {
     const tl: any[] = [
       msg('user', '开始', '2026-09-13T02:00:00.000Z'),
-      wf(true, 1000),
+      wf(true, Date.parse('2026-09-13T02:04:00.000Z')),
       msg('assistant', '阶段总结：一切正常', '2026-09-13T02:05:00.000Z'),
       msg('assistant', '最终回复', '2026-09-13T02:09:00.000Z'),
     ];
@@ -224,7 +224,7 @@ describe('intermediate assistant output demotion (过程输出)', () => {
     const tail: any[] = [
       msg('user', 'hi', '2026-09-13T02:00:00.000Z'),
       msg('assistant', '先说一句，随后调用工具', '2026-09-13T02:01:00.000Z'),
-      wf(false, 2000),
+      wf(false, Date.parse('2026-09-13T02:01:30.000Z')),
     ];
     // 落盘/重建：最后一条 assistant 文本永远当作真正的用户输出
     expect(demoteIntermediateAssistantMessages(tail as any).filter((e) => e.kind === 'message')).toHaveLength(2);
@@ -234,6 +234,52 @@ describe('intermediate assistant output demotion (过程输出)', () => {
     const wfBlock = live.find((e) => e.kind === 'workflow') as any;
     expect(wfBlock.data.events[0].type).toBe('process_output');
     expect(wfBlock.data.events[0].content).toBe('先说一句，随后调用工具');
+  });
+
+  it('slots each process_output at its own time, not at the block front', () => {
+    // 一个 block 可以横跨好几轮：叙述是「给用户看的过程输出」，工具行才是它那一轮
+    // 的动作。旧规则一律插到块首，于是多段叙述挤成一排、它们的工具全沉到下面
+    // （用户看到「过程输出 / 过程输出 / 过程输出 / 过程输出 / 一堆工具」）。
+    const t = (s: string) => Date.parse(s);
+    const tl: any[] = [
+      msg('user', '开始', '2026-09-13T02:00:00.000Z'),
+      msg('assistant', '第一轮叙述', '2026-09-13T02:01:00.000Z'),
+      msg('assistant', '第二轮叙述', '2026-09-13T02:03:00.000Z'),
+      wf(true, t('2026-09-13T02:02:00.000Z'), 1),
+      wf(true, t('2026-09-13T02:04:00.000Z'), 1),
+      msg('assistant', '最终回复', '2026-09-13T02:05:00.000Z'),
+    ];
+    const out = demoteIntermediateAssistantMessages(tl as any);
+    const events = out.flatMap((e: any) => (e.kind === 'workflow' ? e.data.events : []));
+    expect(events.map((e: any) => e.type)).toEqual([
+      'process_output', 'tool_call',
+      'process_output', 'tool_call',
+    ]);
+    expect(events[0].content).toBe('第一轮叙述');
+    expect(events[2].content).toBe('第二轮叙述');
+  });
+
+  it('keeps a block without timestamps on the legacy front/end rule', () => {
+    const tl: any[] = [
+      msg('user', '开始', '2026-09-13T02:00:00.000Z'),
+      {
+        kind: 'workflow',
+        data: {
+          events: [
+            { _uid: 'a', type: 'tool_call', content: { name: 'filesystem__read_file' }, result: 'ok' },
+            { _uid: 'b', type: 'tool_call', content: { name: 'filesystem__read_file' }, result: 'ok' },
+          ],
+          status: null,
+          completed: true,
+        },
+        _uid: 'wf-untimed',
+      },
+      msg('assistant', '中间叙述', '2026-09-13T02:05:00.000Z'),
+      msg('assistant', '最终回复', '2026-09-13T02:09:00.000Z'),
+    ];
+    const out = demoteIntermediateAssistantMessages(tl as any);
+    const wfBlock = out.find((e: any) => e.kind === 'workflow') as any;
+    expect(wfBlock.data.events[wfBlock.data.events.length - 1].type).toBe('process_output');
   });
 
   it('never demotes the final reply or media messages', () => {
