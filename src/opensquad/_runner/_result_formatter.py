@@ -5,15 +5,17 @@ Extracted from runner.py to reduce its size.
 
 Note on liveness: ``truncate_result_text`` / ``summarize_result`` below are the
 *shadow* copies of what ``_runner/_tool_executor`` still binds onto the runner.
-The two helpers at the bottom of this file (``is_failure_result`` and
-``format_result_for_llm``) are different — they are the live path, imported by
-``_runner/_turn_loop``.
+The helpers at the bottom of this file (``is_failure_result``,
+``format_result_for_llm`` and ``failure_key``) are different — they are the live
+path, imported by ``_runner/_turn_loop``.
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import os
+import re
 from datetime import datetime
 from typing import Any
 
@@ -161,3 +163,64 @@ def format_result_for_llm(result: Any) -> str:
     if not details:
         return message
     return message + "\n" + "\n".join(details)
+
+
+# ---------------------------------------------------------------------------
+# failure_key — the stable identity of a failure, for the repeat guard
+# ---------------------------------------------------------------------------
+
+# Identifiers of the *attempt*, not properties of the *failure*.  A loop that
+# retries under a fresh shell changes exactly these, so anything hashing them
+# sees a brand-new problem every round.
+_VOLATILE_KEYS = frozenset({"session_id", "call_id", "tool_call_id"})
+
+# Numbers are volatile across retries of one and the same problem: exit code,
+# pid, port, line number, date.  "exit code 1" and "exit code 2" are the same
+# complaint; masking them keeps one streak without merging genuinely different
+# failures (those differ in words, not in digits).
+_DIGITS_RE = re.compile(r"\d+")
+_WHITESPACE_RE = re.compile(r"\s+")
+
+
+def _mask_volatile(text: str) -> str:
+    """Replace runs of digits with ``#`` and collapse whitespace."""
+    return _WHITESPACE_RE.sub(" ", _DIGITS_RE.sub("#", text)).strip()
+
+
+def failure_key(result: Any) -> str:
+    """Stable identity of *what went wrong*, independent of the attempt.
+
+    This is the FAILURE signal of the repeated-action guard.  Two aborts that
+    differ only in the shell that produced them MUST fingerprint identically:
+    the model in session ``20260921_084718_9l88`` minted a fresh ``session_id``
+    every round (``chk`` → ``chk24``), and because the rendered result text
+    carries ``session_id`` (see ``_RESULT_DETAIL_KEYS``) a guard that digested
+    that text reset its counter every round — it never fired once in 40 rounds
+    on the very payload it was written for.
+
+    So the identity is *our own taxonomy* and never the identifiers of the
+    attempt.  Precedence:
+
+    1. ``reason`` — our machine-readable failure kind.  When a tool sets it, that
+       *is* the identity; the prose beside it is derived (and frequently echoes
+       the command), so letting it in would re-import the volatility.
+    2. ``status`` + the message with digits masked — for tools that report only a
+       status, which on its own is too coarse to be an identity.
+    3. a rendering of the remaining fields with the volatile ids removed.
+    """
+    if isinstance(result, dict):
+        kind = result.get("reason")
+        if kind is not None and str(kind).strip():
+            return str(kind).strip()
+        parts: list[str] = []
+        status = result.get("status")
+        if status is not None and str(status).strip():
+            parts.append(str(status).strip())
+        message = result.get("message")
+        if isinstance(message, str) and message.strip():
+            parts.append(_mask_volatile(message))
+        if parts:
+            return " | ".join(parts)
+        rest = {k: v for k, v in result.items() if k not in _VOLATILE_KEYS}
+        return _mask_volatile(json.dumps(rest, sort_keys=True, ensure_ascii=False, default=str))
+    return _mask_volatile(str(result))

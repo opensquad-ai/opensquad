@@ -71,7 +71,7 @@ def _unparsed_tool_name(raw: str) -> str:
 # Helpers that still live on runner.py; imported lazily at call time so the
 # module can be imported independently of runner state.
 from opensquad._runner import _repeat_guard
-from opensquad._runner._result_formatter import format_result_for_llm, is_failure_result
+from opensquad._runner._result_formatter import failure_key, format_result_for_llm, is_failure_result
 from opensquad.runner import _get_session_manager, _get_state_manager
 from opensquad.sleep_controller import sleep_controller
 from opensquad.task_logger import task_logger
@@ -993,6 +993,11 @@ class TurnLoop:
                         # Raw-signal flag for the repeated-action guard: "this
                         # call did not do its job" (aborted / timed out / error).
                         "failed": is_failure_result(result),
+                        # …and the *stable* identity of that failure. The guard
+                        # must not digest `result_text`: it names the session the
+                        # retry just created, so a fresh session_id every round
+                        # would reset the counter forever (see failure_key).
+                        "failure_key": failure_key(result),
                     }
                 )
                 if _stopped_by_user or _turn_stop_requested():

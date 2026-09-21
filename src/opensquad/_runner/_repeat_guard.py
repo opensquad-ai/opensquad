@@ -24,6 +24,12 @@ FAILURE
     ``FAILURE_STALENESS_ROUNDS`` quiet rounds, resets the streak — so a genuinely
     new problem is never blamed on an old one, and a legitimate poll that returns
     a *successful* (changing) result is never flagged at all.
+
+    "Same failure" is decided by ``_result_formatter.failure_key`` — our own
+    taxonomy (``reason``/``status`` + digit-masked message), never the rendered
+    text: that text contains the ``session_id`` the retry just minted, so
+    digesting it would reset the counter on every round and the signal would be
+    dead on exactly the incident it exists for.
 """
 
 from __future__ import annotations
@@ -71,7 +77,11 @@ def failure_signature(results: list[dict]) -> str | None:
     Arguments and the tool name are deliberately absent — the whole point is that
     changing them must not launder the loop.
     """
-    digests = [_digest(r.get("result_text", "")) for r in results if r.get("failed")]
+    digests = [
+        _digest(r["failure_key"]) if r.get("failure_key") else _digest(r.get("result_text", ""))
+        for r in results
+        if r.get("failed")
+    ]
     return "|".join(digests) if digests else None
 
 

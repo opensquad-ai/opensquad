@@ -16,6 +16,12 @@ ids and burned 48 rounds.
 The same file also locked the ``system.py`` side: "the user pressed stop" and
 "the shell process exited on its own" used to be indistinguishable, and the
 message that ended up in front of the model was identical for both.
+
+A third concern lives here too: ``failure_key``.  Making the result verbose
+(above) is what killed the repeated-action guard's failure signal — the verbose
+text names the session the retry just minted, so digesting it reset the counter
+every round.  The guard digests ``failure_key`` instead: our own taxonomy
+(``reason``/``status`` + digit-masked message), stable across attempts.
 """
 
 from __future__ import annotations
@@ -27,6 +33,7 @@ import pytest
 
 from opensquad._runner._result_formatter import (
     _RESULT_DETAIL_KEYS,
+    failure_key,
     format_result_for_llm,
     is_failure_result,
 )
@@ -100,6 +107,74 @@ def test_the_keys_dropped_by_the_incident_are_covered():
         assert key in _RESULT_DETAIL_KEYS, key
 
 
+# ── failure_key ────────────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    ("first", "second"),
+    [
+        ("chk5", "chk24"),
+        # The letters matter: digit masking would accidentally equalise the pair
+        # above, so an id scheme without digits is the case that actually proves
+        # the key ignores the attempt rather than merely scrubbing its numbers.
+        ("sess-alpha", "sess-omega"),
+    ],
+)
+def test_the_failure_key_ignores_which_shell_produced_it(first, second):
+    """The retry mints a fresh session_id; that must not read as a new problem."""
+    a = failure_key({**ABORTED_SHELL_RESULT, "session_id": first})
+    b = failure_key({**ABORTED_SHELL_RESULT, "session_id": second})
+    assert a == b
+
+
+def test_the_failure_key_survives_a_changed_exit_code():
+    """Same crash, different exit code — one complaint, one streak."""
+    crash_1 = {**ABORTED_SHELL_RESULT, "return_code": 1}
+    crash_9009 = {
+        **ABORTED_SHELL_RESULT,
+        "return_code": 9009,
+        "message": (
+            "Command aborted: the shell process exited on its own (exit code 9009) before the command finished."
+        ),
+    }
+    assert failure_key(crash_1) == failure_key(crash_9009)
+
+
+def test_the_failure_key_separates_different_reasons():
+    """A deliberate stop must never be counted as "the shell died again"."""
+    stopped = {**ABORTED_SHELL_RESULT, "reason": "session_stopped"}
+    assert failure_key(ABORTED_SHELL_RESULT) != failure_key(stopped)
+
+
+def test_the_failure_key_separates_different_statuses():
+    assert failure_key({"status": "error", "message": "boom"}) != failure_key({"status": "timeout", "message": "boom"})
+
+
+def test_the_failure_key_separates_different_messages():
+    assert failure_key({"status": "error", "message": "disk full"}) != failure_key(
+        {"status": "error", "message": "permission denied"}
+    )
+
+
+def test_the_failure_key_still_masks_incidental_numbers():
+    assert failure_key({"status": "error", "message": "boom at line 41"}) == failure_key(
+        {"status": "error", "message": "boom at line 99"}
+    )
+
+
+def test_the_failure_key_falls_back_for_text_and_bare_results():
+    assert failure_key("Error: nope") == failure_key("Error: nope")
+    assert failure_key("Error: nope") != failure_key("Error: other")
+    assert failure_key(42) == failure_key(42)
+
+
+def test_the_failure_key_prefers_the_taxonomy_over_the_prose():
+    """When `reason` is present it is the identity — the prose may be reworded."""
+    a = {"status": "error", "reason": "shell_exited", "message": "the shell died"}
+    b = {"status": "error", "reason": "shell_exited", "message": "the shell exited unexpectedly"}
+    assert failure_key(a) == failure_key(b)
+
+
 # ── is_failure_result ──────────────────────────────────────────────────────
 
 
@@ -139,6 +214,12 @@ def test_turn_loop_never_collapses_a_result_to_message_alone():
 def test_every_collected_tool_result_carries_its_failure_flag():
     """The FAILURE guard signal reads `failed`; dropping it disables the signal."""
     assert '"failed": is_failure_result(result),' in TURN_LOOP_SRC
+
+
+def test_the_guard_is_handed_the_stable_failure_key():
+    """Digesting the rendered text instead is what left the guard dead for 40 rounds."""
+    assert "from opensquad._runner._result_formatter import failure_key" in TURN_LOOP_SRC
+    assert '"failure_key": failure_key(result),' in TURN_LOOP_SRC
 
 
 def test_the_repeat_guard_reads_the_pure_core():
