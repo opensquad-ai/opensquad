@@ -9,7 +9,6 @@ a minimal fake runner (see tests/test_turn_loop.py).
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import re
@@ -71,6 +70,8 @@ def _unparsed_tool_name(raw: str) -> str:
 
 # Helpers that still live on runner.py; imported lazily at call time so the
 # module can be imported independently of runner state.
+from opensquad._runner import _repeat_guard
+from opensquad._runner._result_formatter import format_result_for_llm, is_failure_result
 from opensquad.runner import _get_session_manager, _get_state_manager
 from opensquad.sleep_controller import sleep_controller
 from opensquad.task_logger import task_logger
@@ -857,11 +858,12 @@ class TurnLoop:
                         for _k in ("diff_old", "diff_new", "diff_start_line"):
                             if _k in result and result[_k] is not None:
                                 _ui_extras[_k] = result[_k]
-                        _display = result.get("message")
-                        if isinstance(_display, str) and _display.strip():
-                            _tool_result_text = _display
-                        else:
-                            _tool_result_text = str(result) if result else "(empty result)"
+                        # Never collapse a result down to `message` alone. A
+                        # shell that died mid-command says "Command aborted
+                        # (...)" and the discarded partial_data / reason /
+                        # return_code were exactly what the model needed to tell
+                        # "retry" from "switch strategy" (see _result_formatter).
+                        _tool_result_text = format_result_for_llm(result)
                         # vision.read_image returns image_paths — inject even if
                         # event_pipeline push was skipped / drained elsewhere.
                         _vision_paths = result.get("image_paths")
@@ -988,6 +990,9 @@ class TurnLoop:
                         "call_id": call_id,
                         "pipeline_events": _pipeline_events,
                         "ui_extras": _ui_extras,
+                        # Raw-signal flag for the repeated-action guard: "this
+                        # call did not do its job" (aborted / timed out / error).
+                        "failed": is_failure_result(result),
                     }
                 )
                 if _stopped_by_user or _turn_stop_requested():
@@ -1036,58 +1041,38 @@ class TurnLoop:
                 if task_logger.has_active_task():
                     task_logger.increment_turn(entry["name"])
 
-            # ── Repeated-action guard: break runaway identical tool loops ──
-            # Observed failure mode: an agent repeated the SAME read_file
-            # (name+args) with byte-identical results for 172 consecutive rounds
-            # (42 min of pure waste) because tool history was lost between turns.
-            # Guard on BOTH signals — identical call AND identical result — so
-            # legitimate polling (results change) is never flagged. After N rounds
-            # inject a corrective tool message; after M more, abort the turn.
+            # ── Repeated-action guard: break runaway tool loops ──
+            # Two independent signals, both decided by the pure core in
+            # `_runner/_repeat_guard.py`:
+            #   STRICT  — same call AND same result (the original read_file loop)
+            #   FAILURE — same failure text with *changing* args, which is how a
+            #             dead shell laundered the strict signal for 48 rounds
+            #             (measured 2026-09-21, session 20260921_084718_9l88).
             try:
-                _REPEAT_GUARD_ROUNDS = 8
-                _REPEAT_ABORT_ROUNDS = 12
-                _fp_parts = []
-                for _t in _tool_results:
-                    _fp_parts.append(
-                        f"{_t['name']}|{_t['args_json']}|{hashlib.md5(str(_t['result_text']).encode('utf-8', errors='replace'), usedforsecurity=False).hexdigest()[:8]}"
-                    )
-                _fp = ";;".join(_fp_parts)
                 _sid_key = str(getattr(self.runner, "_turn_sid", "") or "")
-                _st = self.runner._tool_repeat_state.setdefault(_sid_key, {"count": 0, "last": None, "guarded": False})
-                if _st["last"] == _fp:
-                    _st["count"] += 1
-                else:
-                    _st["count"] = 1
-                    _st["guarded"] = False
-                    _st["last"] = _fp
+                _st = self.runner._tool_repeat_state.setdefault(_sid_key, _repeat_guard.new_state())
+                _decision = _repeat_guard.evaluate(_st, _tool_results)
 
-                if _st["count"] >= _REPEAT_ABORT_ROUNDS and _st["guarded"]:
-                    _abort_msg = (
-                        f"[Repeated-Action Guard] 已连续 {_st['count']} 轮执行完全相同的工具调用且结果不变"
-                        f"（{_tool_results[0]['name'] if _tool_results else '?'}），判定为失忆循环，已中止本轮任务。"
-                        f"建议：切换模型、检查工具结果是否进入上下文，或分步下达指令。"
-                    )
+                if _decision["action"] == "abort":
+                    _abort_msg = _repeat_guard.abort_message(_decision)
                     logger.warning(f"[Runner] {_abort_msg}")
                     await self.runner._emit("error", {"message": _abort_msg})
                     await self.runner._emit("to_user_final", f"[Error] {_abort_msg}")
                     _get_session_manager().add_event(
                         "info",
-                        {"event": "repeated_action_guard", "text": _abort_msg},
+                        {
+                            "event": "repeated_action_guard",
+                            "signal": _decision["signal"],
+                            "rounds": _decision["rounds"],
+                            "text": _abort_msg,
+                        },
                         turn_id=self.runner._current_turn,
                         round_id=self.runner._current_round,
                     )
                     return True, "", False
 
-                if _st["count"] == _REPEAT_GUARD_ROUNDS and not _st["guarded"]:
-                    _st["guarded"] = True
-                    _guard_text = (
-                        f"[Repeated-Action Guard] 注意：你已连续 {_st['count']} 轮执行完全相同的工具调用"
-                        f"（{_tool_results[0]['name'] if _tool_results else '?'}，参数与结果均未变化）。"
-                        f"这通常意味着你在原地打转。请立即改变策略："
-                        f"1) 若需继续读同一文件，请用 start_line 翻页且只读未读部分；"
-                        f"2) 若已获得足够信息，请尽快推进任务（输出结论/计划）或询问用户；"
-                        f"3) 若任务需要执行操作（如启动服务），请在 Plan 模式下调用 agent_mode__request_switch 切换到 Build。"
-                    )
+                if _decision["action"] == "hint":
+                    _guard_text = _repeat_guard.hint_message(_decision)
                     logger.warning(f"[Runner] {_guard_text}")
                     self.runner.chat_api.add_tool_result(
                         tool_name="__repeated_action_guard__",

@@ -589,7 +589,17 @@ class ShellSession:
 
     def execute(self, command: str, timeout: float = 120.0) -> dict[str, Any]:
         if not self._ensure_alive():
-            return {"status": "error", "message": "Session shell is not running."}
+            return {
+                "status": "error",
+                "session_id": self.session_id,
+                "reason": "shell_not_running",
+                "message": f"Session shell is not running (session '{self.session_id}' could not be started).",
+                "working_directory": self.working_directory,
+                "hint": (
+                    "The persistent shell for this session is dead and could not be restarted. "
+                    "Create a new shell session, or use a tool that does not need one."
+                ),
+            }
         command = _prepare_shell_command(command)
         denied = _sandbox_check(command)
         if denied:
@@ -671,16 +681,50 @@ class ShellSession:
                 with self._lock:
                     partial = "".join(self.output_buffer[start_index:])
                 _emit_new_chunks(partial)
-                _finish_status("aborted", reason="shell_exited")
-                if not (self.process and self.process.poll() is None):
-                    self._recycle("shell-exited-mid-command")
+                # ── Two very different causes used to share one sentence ──
+                # `_stop_event` is only ever set by close() (user stop / session
+                # teardown); a dead process with the event clear means the shell
+                # died on its own. Reporting both as "Command aborted (shell
+                # closed or process exited)" left the model unable to tell "the
+                # run was interrupted" from "this shell is broken", and it
+                # retried the same command 25 times under fresh session ids
+                # (session 20260921_084718_9l88, 48 wasted rounds). Reason, exit
+                # code and the captured output now travel with the result.
+                if self._stop_event.is_set():
+                    _finish_status("aborted", reason="session_stopped")
+                    # Do NOT recycle here: the session was stopped on purpose and
+                    # a fresh shell would silently undo that. `_ensure_alive()`
+                    # lazily restarts one if the agent works in it again.
+                    return {
+                        "status": "error",
+                        "session_id": self.session_id,
+                        "reason": "session_stopped",
+                        "message": "Command aborted: the shell session was stopped (user stop or session closed).",
+                        "partial_data": partial,
+                        "working_directory": self.working_directory,
+                        "aborted": True,
+                        "hint": "This is a deliberate interruption, not a tool failure. Do not retry automatically.",
+                    }
+                _exit_code = self.process.returncode if self.process else None
+                _finish_status("aborted", return_code=_exit_code, reason="shell_exited")
+                self._recycle("shell-exited-mid-command")
                 return {
                     "status": "error",
                     "session_id": self.session_id,
-                    "message": "Command aborted (shell closed or process exited)",
+                    "reason": "shell_exited",
+                    "return_code": _exit_code,
+                    "message": (
+                        f"Command aborted: the shell process exited on its own "
+                        f"(exit code {_exit_code}) before the command finished."
+                    ),
                     "partial_data": partial,
                     "working_directory": self.working_directory,
                     "aborted": True,
+                    "hint": (
+                        "Anything the command printed before the shell died is in partial_data. "
+                        "Do not blindly re-run it in a new session: check partial_data, the "
+                        "working directory and the command itself first."
+                    ),
                 }
             if _user_stop_requested():
                 with self._lock:
@@ -691,10 +735,12 @@ class ShellSession:
                 return {
                     "status": "error",
                     "session_id": self.session_id,
-                    "message": "Command aborted by user stop",
+                    "reason": "user_stop",
+                    "message": "Command aborted: the user requested a stop.",
                     "partial_data": partial,
                     "working_directory": self.working_directory,
                     "aborted": True,
+                    "hint": "The user interrupted this run on purpose. Do not retry automatically — wait for the user.",
                 }
             with self._lock:
                 combined = "".join(self.output_buffer[start_index:])
@@ -720,10 +766,12 @@ class ShellSession:
         return {
             "status": "error",
             "session_id": self.session_id,
-            "message": f"Command timed out after {timeout}s",
+            "reason": "timeout",
+            "message": f"Command timed out after {timeout}s (the shell was recycled).",
             "partial_data": partial,
             "working_directory": self.working_directory,
             "timed_out": True,
+            "hint": "The command was killed for exceeding the timeout; whatever it printed is in partial_data.",
         }
 
     def close(self):

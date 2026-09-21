@@ -2,6 +2,12 @@
 Result formatting module — functions for formatting tool execution results.
 
 Extracted from runner.py to reduce its size.
+
+Note on liveness: ``truncate_result_text`` / ``summarize_result`` below are the
+*shadow* copies of what ``_runner/_tool_executor`` still binds onto the runner.
+The two helpers at the bottom of this file (``is_failure_result`` and
+``format_result_for_llm``) are different — they are the live path, imported by
+``_runner/_turn_loop``.
 """
 
 from __future__ import annotations
@@ -82,3 +88,76 @@ def summarize_result(name: str, result: Any, config_path: str = "") -> str:
 
     res_str = truncate_result_text(res_str, max_len)
     return f"[{now}] Tool '{name}' executed. Result: {res_str}"
+
+
+# ---------------------------------------------------------------------------
+# Live helpers (the runtime path, used by _runner/_turn_loop.py)
+# ---------------------------------------------------------------------------
+
+# Keys carrying the *diagnostic* payload of a tool result whose human-readable
+# summary lives in `message`.  The turn loop used to collapse any result dict
+# that had a `message` key down to that one string, so a shell that died
+# mid-command told the model "Command aborted (shell closed or process exited)"
+# while the captured output, the exit code and the session id were thrown away.
+# The model could not tell "retry" from "switch strategy" and looped 48 rounds
+# (session 20260921_084718_9l88).  Order matters: the trailing entries are the
+# ones `truncate_result_text`'s tail window keeps.
+_RESULT_DETAIL_KEYS = (
+    "reason",
+    "session_id",
+    "working_directory",
+    "return_code",
+    "exit_code",
+    "partial_data",
+    "output",
+    "stdout",
+    "stderr",
+    "error",
+    "detail",
+    "hint",
+)
+
+# `status` values that mean the call did not do its job.
+_FAILURE_STATUSES = frozenset({"error", "failed", "failure"})
+
+
+def is_failure_result(result: Any) -> bool:
+    """True when a tool result represents a failure to execute / make progress.
+
+    ``completed=False`` is deliberately NOT a failure: "still running" is a
+    legitimate poll result, and counting it would flag long builds.
+    """
+    if isinstance(result, str):
+        return result.startswith("Error:")
+    if not isinstance(result, dict):
+        return False
+    if result.get("aborted") or result.get("timed_out"):
+        return True
+    status = result.get("status")
+    return isinstance(status, str) and status.strip().lower() in _FAILURE_STATUSES
+
+
+def format_result_for_llm(result: Any) -> str:
+    """Render a tool result as the text the model actually receives.
+
+    A dict whose ``message`` reads as a human summary stays headline-first, but
+    the diagnostic siblings listed in ``_RESULT_DETAIL_KEYS`` are appended
+    instead of being dropped.  Anything else keeps the historical
+    ``str(result)`` rendering.
+    """
+    if not isinstance(result, dict):
+        return str(result) if result else "(empty result)"
+    message = result.get("message")
+    if not (isinstance(message, str) and message.strip()):
+        return str(result) if result else "(empty result)"
+    details: list[str] = []
+    for key in _RESULT_DETAIL_KEYS:
+        if key not in result:
+            continue
+        value = result[key]
+        if value is None:
+            continue
+        details.append(f"[{key}] {str(value).strip() or '(empty)'}")
+    if not details:
+        return message
+    return message + "\n" + "\n".join(details)

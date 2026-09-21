@@ -9,6 +9,7 @@ Structure:
     _input_handler.py — Internal command routing (__STOP__, __NEW_SESSION__, etc.)
     _tool_executor.py — Tool call dispatch, result handling, retry logic
     _hot_reload.py    — Config and plugin hot-reload logic
+    _repeat_guard.py  — Pure core: runaway tool-loop detection (repeated call / repeated failure)
     _turn_loop.py     — Per-turn execution (assembles all above)
 """
 
