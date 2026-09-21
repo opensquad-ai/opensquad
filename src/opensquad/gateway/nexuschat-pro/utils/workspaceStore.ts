@@ -651,6 +651,35 @@ export function findWorkspaceByPath(agentId: string, rootPath: string): Workspac
   return loadWorkspaceStore(agentId).workspaces.find((w) => pathsEqual(w.rootPath, n)) || null;
 }
 
+/**
+ * Which workspace a session belongs to.
+ *
+ * `meta.workspaceId` wins (it is written when the session is bound to a
+ * workspace), and a dangling id — the workspace was removed, or this origin
+ * merged a registry that no longer has it — degrades to a root-path match on
+ * `meta.projectPath`. Returns null when neither resolves, so callers keep
+ * whatever workspace is active.
+ *
+ * Why this exists: registering a workspace (`ensureWorkspace`) never opens it,
+ * and every session tab is created *inside* some workspace's layout. A session
+ * whose workspace is only registered therefore has nowhere to appear — its
+ * workspace shows up in the `+` menu (which lists the whole registry) but never
+ * as a tab, and `SessionSidebar.belongsToWorkspace()` filters the session out
+ * of the sidebar entirely while another workspace is active.
+ */
+export function resolveSessionWorkspaceId(
+  workspaces: Workspace[],
+  meta: { workspaceId?: string | null; projectPath?: string | null } | null | undefined,
+): string | null {
+  if (!meta || !Array.isArray(workspaces)) return null;
+  const id = (meta.workspaceId || '').trim();
+  if (id && workspaces.some((w) => w.id === id)) return id;
+  const p = (meta.projectPath || '').trim();
+  if (!p) return null;
+  const hit = workspaces.find((w) => pathsEqual(w.rootPath, p));
+  return hit ? hit.id : null;
+}
+
 function ensureWorkspaceLayout(chrome: OpenChromeState, workspaceId: string): SplitNode {
   if (!chrome.layoutByWorkspace[workspaceId]) {
     const leaf = createLeaf();

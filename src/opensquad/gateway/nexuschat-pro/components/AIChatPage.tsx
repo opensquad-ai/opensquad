@@ -96,6 +96,7 @@ import {
   migrateProjectPathsToWorkspaces,
   ensureWorkspace,
   ensureActiveWorkspaceFromRoot,
+  resolveSessionWorkspaceId,
   openWorkspaceTab,
   closeWorkspaceTab,
   openContentTab,
@@ -2209,6 +2210,13 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
       try {
         const ws = ensureWorkspace(agentId, path);
         setSessionWorkspaceId(agentId, currentSessionId, ws.id, path);
+        // Registering is not opening. The user is provably working in this
+        // folder right now, so its workspace must be open — otherwise it only
+        // ever appears in the `+` menu while the tab strip and the sidebar keep
+        // showing some other project. (No refresh call here: `openWorkspaceTab`
+        // saves through the store, which emits WORKSPACES_CHANGED_EVENT and the
+        // listener below refreshes the snapshot.)
+        openWorkspaceTab(agentId, ws.id);
       } catch {
         /* ignore */
       }
@@ -2479,10 +2487,17 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
       }
       if (target.paneId) {
         const snap = loadWorkspaceStore(agentId);
-        const wsId = snap.chrome.activeWorkspaceId;
+        // Same owner rule as every other session-tab site (see
+        // resolveSessionWorkspaceId), falling back to the active workspace.
+        const wsId =
+          resolveSessionWorkspaceId(snap.workspaces, getSessionMeta(agentId, sid))
+          || snap.chrome.activeWorkspaceId;
         if (wsId) {
-          setFocusedPane(agentId, target.paneId);
-          openContentTab(agentId, wsId, { kind: 'session', id: sid }, target.paneId);
+          const sameWorkspace = wsId === snap.chrome.activeWorkspaceId;
+          if (!sameWorkspace) openWorkspaceTab(agentId, wsId);
+          const pane = sameWorkspace ? target.paneId : null;
+          if (pane) setFocusedPane(agentId, pane);
+          openContentTab(agentId, wsId, { kind: 'session', id: sid }, pane);
           setWsSnap(loadWorkspaceStore(agentId));
         }
       }
@@ -2834,13 +2849,25 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
         clearOutboundTurnPending();
         pinComposerLanding(draftSid);
         if (activeWorkspace) {
-          const targetPane =
-            pendingTargetPaneIdRef.current || focusedPaneId || null;
+          // A folder-scoped new session targets `boundPath`, which is not
+          // necessarily the active workspace — file the draft tab under the
+          // workspace that owns it (see resolveSessionWorkspaceId).
+          const ownerId =
+            (boundPath
+              ? resolveSessionWorkspaceId(wsSnap.workspaces, { projectPath: boundPath })
+              : null) || activeWorkspace.id;
+          const sameWorkspace = ownerId === activeWorkspace.id;
+          // A pane id from the workspace we are leaving does not resolve in the
+          // new layout — let openContentTab pick that workspace's own pane.
+          const targetPane = sameWorkspace
+            ? (pendingTargetPaneIdRef.current || focusedPaneId || null)
+            : null;
           pendingTargetPaneIdRef.current = null;
           pendingOpenSessionTabRef.current = false;
+          if (!sameWorkspace) openWorkspaceTab(agentId, ownerId);
           openContentTab(
             agentId,
-            activeWorkspace.id,
+            ownerId,
             { kind: 'session', id: draftSid },
             targetPane,
           );
@@ -3587,19 +3614,42 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     if (!currentSessionId || !activeWorkspace) return;
     if (!pendingOpenSessionTabRef.current) return;
     pendingOpenSessionTabRef.current = false;
-    const targetPane =
-      pendingTargetPaneIdRef.current || focusedPaneId || null;
+    // A session belongs to exactly one workspace, and its tab has to live in
+    // that workspace's layout. Filing it under whichever tab happens to be
+    // active leaves the workspace it actually works in unopened — visible in
+    // the `+` menu, absent from the tab strip (and its sessions filtered out of
+    // the sidebar). Bring the owner forward first.
+    const ownerId =
+      resolveSessionWorkspaceId(
+        wsSnap.workspaces,
+        getSessionMeta(agentId, currentSessionId),
+      ) || activeWorkspace.id;
+    const sameWorkspace = ownerId === activeWorkspace.id;
+    if (!sameWorkspace) openWorkspaceTab(agentId, ownerId);
+    // A pane id from the workspace we are leaving does not resolve in the new
+    // layout — let openContentTab pick that workspace's own focused pane.
+    const targetPane = sameWorkspace
+      ? (pendingTargetPaneIdRef.current || focusedPaneId || null)
+      : null;
     pendingTargetPaneIdRef.current = null;
     openContentTab(
       agentId,
-      activeWorkspace.id,
+      ownerId,
       { kind: 'session', id: currentSessionId },
       targetPane,
     );
     pinComposerLanding(currentSessionId);
     if (targetPane) setFocusedPane(agentId, targetPane);
     refreshWsSnap();
-  }, [currentSessionId, activeWorkspace?.id, agentId, refreshWsSnap, focusedPaneId, pinComposerLanding]);
+  }, [
+    currentSessionId,
+    activeWorkspace?.id,
+    agentId,
+    wsSnap.workspaces,
+    refreshWsSnap,
+    focusedPaneId,
+    pinComposerLanding,
+  ]);
 
   useEffect(() => {
     if (!sessionTitleUpdate) return;
@@ -3819,11 +3869,23 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
       setSessionSidebarOpen(false);
       setFilesPanelOpen(false);
     }
-    if (activeWorkspace) {
-      const pane = focusedPaneId;
+    // The session's own workspace owns the tab (see resolveSessionWorkspaceId):
+    // a sidebar click must reveal the project the session works in, not file it
+    // under whichever workspace happens to be active.
+    const ownerId = resolveSessionWorkspaceId(
+      wsSnap.workspaces,
+      getSessionMeta(agentId, sessionId),
+    );
+    const wsId = ownerId || activeWorkspace?.id || null;
+    if (wsId) {
+      const sameWorkspace = wsId === activeWorkspace?.id;
+      if (!sameWorkspace) openWorkspaceTab(agentId, wsId);
+      // A pane id from the workspace we are leaving does not resolve in the new
+      // layout — let openContentTab pick that workspace's own focused pane.
+      const pane = sameWorkspace ? focusedPaneId : null;
       openContentTab(
         agentId,
-        activeWorkspace.id,
+        wsId,
         { kind: 'session', id: sessionId },
         pane,
       );
@@ -3929,11 +3991,19 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     requestSessionListRefresh(agentId, sessionId);
     setFocusedPane(agentId, paneId);
     if (!opts?.stay) {
+      // Same owner rule as every other session-tab site: a send in a session
+      // whose workspace is not the active one must not file the tab under the
+      // active workspace (see resolveSessionWorkspaceId).
+      const ownerId =
+        resolveSessionWorkspaceId(wsSnap.workspaces, getSessionMeta(agentId, sessionId))
+        || activeWorkspace.id;
+      const sameWorkspace = ownerId === activeWorkspace.id;
+      if (!sameWorkspace) openWorkspaceTab(agentId, ownerId);
       openContentTab(
         agentId,
-        activeWorkspace.id,
+        ownerId,
         { kind: 'session', id: sessionId },
-        paneId,
+        sameWorkspace ? paneId : null,
       );
       refreshWsSnap();
     }
@@ -4663,16 +4733,26 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
   useEffect(() => {
     const handler = (e: any) => {
       const sessionId: string | undefined = e?.detail?.sessionId;
-      if (!sessionId || !activeWorkspace) return;
+      if (!sessionId) return;
+      // Same rule as a sidebar click: the tab belongs to the session's own
+      // workspace (a scheduled/parallel run may well live in another one).
+      const ownerId = resolveSessionWorkspaceId(
+        wsSnap.workspaces,
+        getSessionMeta(agentId, sessionId),
+      );
+      const wsId = ownerId || activeWorkspace?.id || null;
+      if (!wsId) return;
       setLibraryView(null);
-      const pane = focusedPaneId;
-      openContentTab(agentId, activeWorkspace.id, { kind: 'session', id: sessionId }, pane);
+      const sameWorkspace = wsId === activeWorkspace?.id;
+      if (!sameWorkspace) openWorkspaceTab(agentId, wsId);
+      const pane = sameWorkspace ? focusedPaneId : null;
+      openContentTab(agentId, wsId, { kind: 'session', id: sessionId }, pane);
       if (pane) setFocusedPane(agentId, pane);
       refreshWsSnap();
     };
     window.addEventListener(OPEN_SESSION_TAB_EVENT, handler as EventListener);
     return () => window.removeEventListener(OPEN_SESSION_TAB_EVENT, handler as EventListener);
-  }, [activeWorkspace, focusedPaneId, agentId, refreshWsSnap]);
+  }, [activeWorkspace, wsSnap.workspaces, focusedPaneId, agentId, refreshWsSnap]);
 
   // Open in-chat Skill 库 / 插件 / 角色 from nested views.
   useEffect(() => {
