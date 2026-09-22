@@ -1041,6 +1041,7 @@
     "steerHint": "Steer the conversation: the message is sent but won't interrupt the model",
     "editPending": "Withdraw to composer for editing",
     "deletePending": "Delete",
+    "turnCancelled": "Task cancelled",
     "pendingCollapse": "Collapse",
     "pendingExpand": "Expand",
     "pendingClearAll": "Clear all",

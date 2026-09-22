@@ -546,20 +546,11 @@ export function buildLines(
         const nextEvt =
           next && 'event' in next ? next.event : next && 'bundle' in next ? next.bundle?.parent : undefined;
         let nextTs = nextEvt?.timestamp;
-        // 历史数据防御：flush 补写的思考事件时间戳可能晚于其后的工具事件
-        // （时间戳倒挂）。向前扫描第一个更晚的事件作为耗时终点。
-        if (typeof ts === 'number' && typeof nextTs === 'number' && nextTs <= ts) {
-          for (let k = i + 2; k < items.length; k++) {
-            const later = items[k];
-            const laterEvt =
-              later && 'event' in later ? later.event : later && 'bundle' in later ? later.bundle?.parent : undefined;
-            const laterTs = laterEvt?.timestamp;
-            if (typeof laterTs === 'number' && laterTs > ts) {
-              nextTs = laterTs;
-              break;
-            }
-          }
-        }
+        // 历史数据防御：flush 补写的思考事件时间戳可能与其后的工具事件相同
+        // （同轮批量落盘压缩到同一毫秒）。此时无法推导真实思考时长 —— 绝不
+        // 向前扫描更晚的事件作为终点：那会跳过整个工具执行、甚至跳到下一轮
+        // 的时间戳，把工具耗时算进"深度思考 Ns"（用户可见的计时不准）。
+        // 推导不出就干脆不显示耗时。
         if (typeof ts === 'number' && typeof nextTs === 'number' && nextTs > ts) {
           lines.push({ ...l, secondary: formatElapsedAtLeastOneSecond(nextTs - ts) });
           continue;

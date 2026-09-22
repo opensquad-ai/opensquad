@@ -21,6 +21,7 @@ import {
   SESSION_HISTORY_PAGE_SIZE,
 } from '../../utils/sessionTimelineCache';
 import { useWorkflowExpandLevel, type WorkflowExpandLevel } from '../../utils/workflowExpandPref';
+import { CHAT_DOCUMENT_COLUMN_CLASS } from '../../utils/chatLayout';
 import { useTextSelectionFreeze } from '../../hooks/useTextSelectionFreeze';
 import { ChatTimeline } from './ChatTimeline';
 import { ChatScrollComposerHint, ChatScrollHud } from './ChatScrollHud';
@@ -68,7 +69,7 @@ export const SessionChatPane: React.FC<SessionChatPaneProps> = ({
   liveTimeline,
   isSolo = true,
   expandLevel: expandLevelProp,
-  columnClass = 'max-w-3xl mx-auto w-full',
+  columnClass = CHAT_DOCUMENT_COLUMN_CLASS,
   userName,
   agentName,
   onFocus,

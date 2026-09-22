@@ -1039,6 +1039,7 @@
     "steerHint": "引导会话，消息将被发出但模型不会中断",
     "editPending": "撤回到输入框编辑",
     "deletePending": "删除",
+    "turnCancelled": "任务已取消",
     "pendingCollapse": "收起",
     "pendingExpand": "展开",
     "pendingClearAll": "全部清空",

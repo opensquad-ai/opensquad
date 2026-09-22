@@ -202,6 +202,14 @@ export function renderFencedMarkdown(text: string): string {
     },
   );
 
+  // GFM table → scroll box. `marked` emits a bare <table>, and a scrollable
+  // <table> cannot be combined with `width: max-content`, so the overflow
+  // lives on a wrapper (see `.ai-table-wrap` in index.html). Without it a wide
+  // table (代码 / 名称 / 依据原句) is squeezed into the chat column until the
+  // stock code wraps onto a second line.
+  html = html.replace(/<table\b([^>]*)>/gi, '<div class="ai-table-wrap"><table$1>');
+  html = html.replace(/<\/table>/gi, '</table></div>');
+
   // Sanitize last: every branch above returns HTML that is injected verbatim
   // into the DOM by the caller.
   return sanitizeHtml(html);

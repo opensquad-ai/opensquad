@@ -359,17 +359,33 @@ class GatewayAdapter(BaseAgent):
 
         if command == "stop_session_job":
             # Kill a single background shell job (composer terminal bar trash icon).
+            # Two target kinds:
+            #   job_id          — async start_job instance (tools.system._JOBS)
+            #   shell_session_id — stuck sync/persistent shell session
+            #                      (tools.system._SESSIONS, e.g. a hung cmd call
+            #                      that never returned a job_id)
             job_id = str(cmd_data.get("job_id") or "").strip()
-            if not job_id:
-                logger.warning(f"[Adapter] stop_session_job from user {user_id}: missing job_id")
+            shell_session_id = str(cmd_data.get("shell_session_id") or "").strip()
+            if not job_id and not shell_session_id:
+                logger.warning(f"[Adapter] stop_session_job from user {user_id}: missing job_id/shell_session_id")
                 return
             try:
-                from opensquad.tools.system import stop_job
+                if job_id:
+                    from opensquad.tools.system import stop_job
 
-                res = stop_job(job_id)
-                logger.info(f"[Adapter] stop_session_job {job_id} by user {user_id}: {res.get('status')}")
+                    res = stop_job(job_id)
+                    logger.info(f"[Adapter] stop_session_job {job_id} by user {user_id}: {res.get('status')}")
+                else:
+                    from opensquad.tools.system import close_shell_session
+
+                    res = close_shell_session(shell_session_id)
+                    logger.info(
+                        f"[Adapter] stop_session_job shell session {shell_session_id} by user {user_id}: {res.get('status')}"
+                    )
             except Exception:
-                logger.warning(f"[Adapter] stop_session_job {job_id} failed", exc_info=True)
+                logger.warning(
+                    f"[Adapter] stop_session_job failed (job={job_id} shell={shell_session_id})", exc_info=True
+                )
             return
 
         if command == "cancel_steer":

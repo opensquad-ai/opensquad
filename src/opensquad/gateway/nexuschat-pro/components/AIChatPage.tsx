@@ -155,6 +155,7 @@ import {
 } from './ai-chat/AgentWebComposer';
 import { ShellTerminalsBar } from './ai-chat/ShellTerminalsBar';
 import { useWorkflowExpandLevel } from '../utils/workflowExpandPref';
+import { CHAT_DOCUMENT_COLUMN_CLASS } from '../utils/chatLayout';
 import {
   SoloUserNavRail,
   buildUserNavNodesFromTimeline,
@@ -1047,7 +1048,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
   }, []);
 
   // Document column for both classic + solo (classic: user bubble + agent doc stream)
-  const soloColumnClass = 'max-w-3xl mx-auto w-full';
+  const soloColumnClass = CHAT_DOCUMENT_COLUMN_CLASS;
 
   // Right-edge user-turn nav — available in classic + solo (not solo-only).
   const soloUserNavNodes = useMemo(
@@ -2732,7 +2733,10 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     const stopElapsedMs = stopStartedMs > 0 ? Math.max(0, Date.now() - stopStartedMs) : 0;
     const stoppedMsg: ChatMessage = {
       role: 'assistant',
-      content: (currentText ? `${currentText}\n\n` : '') + '[Stopped]',
+      // No "[Stopped]" text in the body — MessageBubble renders the styled
+      // 任务已取消 badge from the `stopped` flag instead of raw marker text.
+      content: currentText.replace(/\s+$/, ''),
+      stopped: true,
       timestamp: new Date().toISOString(),
       ...(stopElapsedMs > 0
         ? {
@@ -4393,8 +4397,12 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
             <ShellTerminalsBar
               jobs={runningShellJobs}
               onStopJob={(job) => {
-                if (!job.jobId) return;
-                wsServiceRef.current?.stopSessionJob(job.jobId, job.sessionId || sessionId);
+                if (job.jobId) {
+                  wsServiceRef.current?.stopSessionJob(job.jobId, job.sessionId || sessionId);
+                } else if (job.sessionId) {
+                  // Sync/persistent shell call — no job_id; kill its shell session.
+                  wsServiceRef.current?.stopSessionJob(undefined, sessionId, job.sessionId);
+                }
               }}
             />
           ) : null

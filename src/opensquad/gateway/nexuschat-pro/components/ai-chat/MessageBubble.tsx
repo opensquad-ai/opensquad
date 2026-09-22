@@ -7,7 +7,7 @@
  * Supports file attachments displayed as cards (structured or parsed from text).
  */
 import React, { useMemo } from 'react';
-import { Copy, Check, FileText, Volume2, Square, Undo2 } from 'lucide-react';
+import { Copy, Check, FileText, Volume2, Square, Undo2, Ban } from 'lucide-react';
 import { SERVER_BASE_URL, agentSessionAPI } from '../../services/api';
 import { useTranslation } from 'react-i18next';
 import { AI_MARKDOWN_CLASS, renderFencedMarkdown } from '../../utils/fencedMarkdown';
@@ -59,6 +59,8 @@ export interface ChatMessage {
   output_images?: string[];
   /** Complex-task final report — UI folds prior agent process when set. */
   end_task?: boolean;
+  /** Turn was cancelled by the user (Stop) — renders the styled 取消 badge. */
+  stopped?: boolean;
   /** This round's total token cost (turn_usage event), rendered as the 消耗 badge. */
   usage?: MessageUsage;
 }
@@ -156,11 +158,20 @@ const MessageBubbleInner: React.FC<MessageBubbleProps> = ({
   // throw and blank the whole message list. Timeline normalizes upstream too.
   const safeContent = normalizeContent(message.content);
 
+  // Legacy/local stop marker ("[Stopped]") is never user-facing text: strip it
+  // from the body and remember the turn was cancelled so the styled badge
+  // renders instead (disk history persists the marker inside content).
+  const hadStoppedMarker = /\[Stopped\]/i.test(safeContent);
+  const isStoppedTurn = !!message.stopped || hadStoppedMarker;
+  const bodyContent = isStoppedTurn
+    ? safeContent.replace(/\s*\[Stopped\]\s*/gi, '\n').trim()
+    : safeContent;
+
   // Parse file attachments from message text (for historical messages loaded
   // from disk that don't have structured attachments).
   const { displayContent, fileAttachments } = useMemo(() => {
     const atts: FileAttachment[] = message.attachments ? [...message.attachments] : [];
-    let content = safeContent;
+    let content = bodyContent;
 
     // Extract [File: ...] patterns and convert to structured attachments
     // for BOTH user and assistant messages (important for session replay fallback).
@@ -318,7 +329,7 @@ const MessageBubbleInner: React.FC<MessageBubbleProps> = ({
       .trim();
 
     return { displayContent: content, fileAttachments: dedupedAtts };
-  }, [safeContent, message.attachments]);
+  }, [bodyContent, message.attachments]);
 
   const renderedHtml = useMemo(() => {
     if (isUser) return '';
@@ -336,7 +347,7 @@ const MessageBubbleInner: React.FC<MessageBubbleProps> = ({
 
   const handleCopy = async () => {
     try {
-      await navigator.clipboard.writeText(safeContent);
+      await navigator.clipboard.writeText(bodyContent);
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
     } catch { /* ignore */ }
@@ -355,14 +366,14 @@ const MessageBubbleInner: React.FC<MessageBubbleProps> = ({
   React.useEffect(() => () => stopTts(), [stopTts]);
 
   const handleSpeak = async () => {
-    if (!agentId || !safeContent?.trim()) return;
+    if (!agentId || !bodyContent?.trim()) return;
     if (ttsState === 'playing' || ttsState === 'loading') {
       stopTts();
       return;
     }
     setTtsState('loading');
     try {
-      const res = await agentSessionAPI.synthesize(agentId, safeContent);
+      const res = await agentSessionAPI.synthesize(agentId, bodyContent);
       const url = res.url?.startsWith('http')
         ? res.url
         : `${SERVER_BASE_URL}${res.url?.startsWith('/') ? res.url : `/${res.url}`}`;
@@ -623,6 +634,15 @@ const MessageBubbleInner: React.FC<MessageBubbleProps> = ({
             className={AI_MARKDOWN_CLASS}
             dangerouslySetInnerHTML={{ __html: renderedHtml }}
           />
+          {isStoppedTurn && !isUser && (
+            <div
+              data-testid="msg-stopped-badge"
+              className="mt-2 inline-flex select-none items-center gap-1.5 rounded-full border border-border/70 bg-bgLight/60 px-2.5 py-[3px] text-[11px] font-medium tracking-[0.18em] text-textMuted/90"
+            >
+              <Ban size={11} className="opacity-60" aria-hidden />
+              {t('aiChat.turnCancelled')}
+            </div>
+          )}
           {fileAttachments.length > 0 && (
             <div className={`flex flex-wrap gap-2 ${displayContent ? 'mt-2' : ''}`}>
               {fileAttachments.map((att, i) => renderAttachment(att, `att-${i}`))}
@@ -672,9 +692,9 @@ const MessageBubbleInner: React.FC<MessageBubbleProps> = ({
           <span className={`text-[11px] font-medium ${isUser ? 'text-primary' : 'text-textMuted'}`}>
             {label}
           </span>
-          {!isStreaming && (safeContent || (isUser && canWithdraw && onWithdraw)) && (
+          {!isStreaming && (bodyContent || (isUser && canWithdraw && onWithdraw)) && (
             <div className="flex items-center gap-0.5">
-              {safeContent ? (
+              {bodyContent ? (
               <button
                 onClick={handleCopy}
                 className="opacity-0 group-hover:opacity-100 transition-opacity text-textMuted hover:text-primary p-0.5"
@@ -693,7 +713,7 @@ const MessageBubbleInner: React.FC<MessageBubbleProps> = ({
                   <Undo2 size={12} />
                 </button>
               ) : null}
-              {agentId && safeContent ? (
+              {agentId && bodyContent ? (
                 <button
                   onClick={() => void handleSpeak()}
                   disabled={ttsState === 'loading'}
@@ -743,13 +763,13 @@ const MessageBubbleInner: React.FC<MessageBubbleProps> = ({
   }
 
   // Classic: user = right bubble; agent = document stream (no bubble)
-  const actionRow = !isStreaming && (safeContent || (isUser && canWithdraw && onWithdraw)) ? (
+  const actionRow = !isStreaming && (bodyContent || (isUser && canWithdraw && onWithdraw)) ? (
     <div
       className={`flex items-center gap-0.5 mt-1.5 transition-opacity ${
         ttsState !== 'idle' ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'
       } ${isUser ? 'justify-end' : 'justify-start'}`}
     >
-      {safeContent ? (
+      {bodyContent ? (
       <button
         onClick={handleCopy}
         className="text-textMuted hover:text-primary p-0.5 border-0 bg-transparent cursor-pointer"
@@ -871,6 +891,8 @@ export function areMessageBubblePropsEqual(prev: MessageBubbleProps, next: Messa
     && prev.message.message_id === next.message.message_id
     && prev.message.type === next.message.type
     && prev.message.end_task === next.message.end_task
+    // Stopped badge is patched in place on Stop — must re-render.
+    && prev.message.stopped === next.message.stopped
     // Footer renders the exact timestamp (full-date popover) — must be compared.
     && prev.message.timestamp === next.message.timestamp
     // 消耗 badge: stamped in place by the turn_usage WS frame / history rebuild.

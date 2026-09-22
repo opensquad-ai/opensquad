@@ -73,10 +73,11 @@ describe('deep-think durations inside a completed fold', () => {
     const lines = buildLines(block, {}, t);
     const thoughts = lines.filter((l) => l.kind === 'thought');
     expect(thoughts.length).toBe(3);
-    // 修复后：即使时间戳倒挂，思考行也应有耗时兜底（不再空白）。
     expect(thoughts[0].secondary).toBe('3s');
-    // narration(9s) 的下一事件倒挂(8s) → 向前扫描到 think2(12s) → 3s。
-    expect(thoughts[1].secondary).toBe('3s');
+    // narration(9s) 的下一事件倒挂(8s)：时间戳已不可信 —— 不再向前扫描，
+    // 否则会把工具执行、甚至下一轮的耗时整段算进"深度思考 Ns"（虚高）。
+    // 推导不出就显示空白。
+    expect(thoughts[1].secondary).toBe('');
     // 末尾思考按块结束时间冻结：25s - 12s = 13s。
     expect(thoughts[2].secondary).toBe('13s');
   });

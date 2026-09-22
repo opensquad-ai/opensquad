@@ -143,6 +143,22 @@ html.dark .file-indent-guides {
   --file-indent-guide: rgba(255, 255, 255, 0.11);
 }
 
+/* Skill manager preview wells (skill.json / .py / other sources) — follow the
+   appearance like every other code surface, not a hardcoded dark well that
+   floats as a black block on light-themed pages. */
+.skill-code-well {
+  background: color-mix(in srgb, rgb(var(--color-bg)) 88%, rgb(var(--color-text-muted)) 12%);
+}
+html.dark .skill-code-well {
+  background: #0b0f17;
+}
+.skill-md-prose pre {
+  background: color-mix(in srgb, rgb(var(--color-bg)) 88%, rgb(var(--color-text-muted)) 12%);
+}
+html.dark .skill-md-prose pre {
+  background: #0b0f17;
+}
+
 /* Fullscreen diagram viewer (zoom / pan) */
 .ai-mmd-modal {
   position: fixed;
@@ -671,6 +687,10 @@ html.dark .file-indent-guides {
   min-height: 0;
   flex: 1;
   overflow: hidden;
+  /* Size container so the landing dock offset below scales with the PANE
+     height (cqh), not the viewport — in split panes 36vh overshoots the
+     pane top and pins the composer to the pane's top edge. */
+  container-type: size;
 }
 .os-chat-session-messages {
   flex: 1 1 0;
@@ -702,9 +722,10 @@ html.dark .file-indent-guides {
   transition: transform var(--duration-composer-dock) var(--ease-composer-dock);
   will-change: transform;
 }
-/* Sit near vertical center while empty; ease down to the bottom on first send */
+/* Sit near vertical center while empty; ease down to the bottom on first send.
+   cqh = % of the session shell (pane) height — correct inside split panes. */
 .os-composer-landing-dock.is-landing {
-  transform: translate3d(0, calc(-1 * min(36vh, 280px)), 0);
+  transform: translate3d(0, calc(-1 * min(36cqh, 280px)), 0);
 }
 .os-composer-landing-dock.is-docked {
   transform: translate3d(0, 0, 0);
@@ -847,7 +868,7 @@ html.dark .file-indent-guides {
 .os-chat-scroll .ai-markdown > h6,
 .os-chat-scroll .ai-markdown > ul,
 .os-chat-scroll .ai-markdown > ol,
-.os-chat-scroll .ai-markdown > table,
+.os-chat-scroll .ai-markdown > .ai-table-wrap,
 .os-chat-scroll .ai-markdown > pre,
 .os-chat-scroll .ai-markdown > blockquote,
 .os-chat-scroll .ai-markdown > hr,

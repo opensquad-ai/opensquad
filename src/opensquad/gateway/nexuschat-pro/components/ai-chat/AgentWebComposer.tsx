@@ -15,6 +15,7 @@ import React, {
 import { FileIcon, FileText, Mic, Send, Square, X } from 'lucide-react';
 import { agentSessionAPI, type ModelCardInfo, type SkillInfo } from '../../services/api';
 import { blobToWavFile } from '../../utils/mediaDevices';
+import { CHAT_DOCUMENT_COLUMN_CLASS } from '../../utils/chatLayout';
 import { ModePicker, type AgentMode } from './ModePicker';
 import { MobileComposerMenu } from './MobileComposerMenu';
 import { SoloModelPicker } from './SoloModelPicker';
@@ -151,7 +152,7 @@ export interface AgentWebComposerProps {
 export const AgentWebComposer = forwardRef<AgentWebComposerHandle, AgentWebComposerProps>(function AgentWebComposer(
   {
     agentId,
-    columnClass = 'max-w-3xl mx-auto w-full',
+    columnClass = CHAT_DOCUMENT_COLUMN_CLASS,
     disabled = false,
     landing = false,
     busy = false,

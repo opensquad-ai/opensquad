@@ -63,6 +63,22 @@ describe('renderFencedMarkdown', () => {
     expect(html).not.toContain('ai-code-wrap');
     expect(decodeURIComponent(/data-src="([^"]+)"/.exec(html)?.[1] || '')).toContain('flowchart TD');
   });
+
+  it('wraps GFM tables in the scroll box the table CSS targets', () => {
+    const html = renderFencedMarkdown(
+      '| 代码 | 名称 | 依据原句 |\n| --- | --- | --- |\n| 688131 | 皓元医药 | 年报命中 AI 制药 4 词 |\n',
+    );
+    expect(html).toMatch(/<div class="ai-table-wrap"><table[^>]*>/);
+    expect(html).toContain('</table></div>');
+    expect(html).toContain('<th>代码</th>');
+    expect(html).toContain('688131');
+  });
+
+  it('leaves a <table> written inside a fenced block alone', () => {
+    const html = renderFencedMarkdown('```html\n<table><tr><td>x</td></tr></table>\n```');
+    expect(html).toContain('ai-code-wrap');
+    expect(html).not.toContain('ai-table-wrap');
+  });
 });
 
 /**

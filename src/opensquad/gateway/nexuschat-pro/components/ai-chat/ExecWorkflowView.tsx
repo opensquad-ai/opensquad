@@ -431,7 +431,6 @@ export const ExecWorkflowView: React.FC<Props> = ({
             liveTimeline={paneTimeline}
             pollIntervalMs={panePollMs}
             isSolo
-            columnClass="max-w-3xl mx-auto w-full"
             agentName={task?.delegate_agent || agentName}
           />
         ) : (
@@ -450,7 +449,6 @@ export const ExecWorkflowView: React.FC<Props> = ({
 
       <AgentWebComposer
         agentId={sessionAgentId}
-        columnClass="max-w-3xl mx-auto w-full"
         disabled={!hasSession}
         busy={composerBusy}
         agentMode={mode}

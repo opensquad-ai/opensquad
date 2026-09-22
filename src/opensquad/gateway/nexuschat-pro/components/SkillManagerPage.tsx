@@ -453,10 +453,10 @@ const SkillDetailView: React.FC<{
             {activeTab === 'skill_md' && source.skill_md ? (
               <div className="p-4 md:p-6 max-w-4xl">
                 <div
-                  className="prose prose-sm prose-invert max-w-none
+                  className="skill-md-prose prose prose-sm prose-invert max-w-none
                     prose-headings:text-textMain prose-p:text-textMuted prose-li:text-textMuted
                     prose-a:text-primary prose-code:text-primary prose-code:bg-primary/10 prose-code:px-1 prose-code:py-0.5 prose-code:rounded
-                    prose-pre:bg-[#1e1e2e] prose-pre:border prose-pre:border-border prose-pre:rounded-xl
+                    prose-pre:border prose-pre:border-border prose-pre:rounded-xl
                     prose-strong:text-textMain prose-em:text-textMuted
                     prose-h1:text-xl prose-h2:text-lg prose-h3:text-base
                     prose-h1:border-b prose-h1:border-border prose-h1:pb-2
@@ -466,7 +466,7 @@ const SkillDetailView: React.FC<{
               </div>
             ) : activeTab === 'skill_json' && source.skill_json ? (
               <div className="p-4 md:p-6">
-                <pre className="bg-[#1e1e2e] border border-border rounded-xl p-4 text-sm font-mono text-textMuted overflow-x-auto whitespace-pre-wrap">
+                <pre className="skill-code-well border border-border rounded-xl p-4 text-sm font-mono text-textMuted overflow-x-auto whitespace-pre-wrap">
                   {JSON.stringify(source.skill_json, null, 2)}
                 </pre>
               </div>
@@ -479,7 +479,7 @@ const SkillDetailView: React.FC<{
                     ({source.py_sources[activeTab].split('\n').length} lines)
                   </span>
                 </div>
-                <pre className="bg-[#1e1e2e] border border-border rounded-xl p-4 text-sm font-mono text-textMuted overflow-x-auto whitespace-pre-wrap leading-relaxed">
+                <pre className="skill-code-well border border-border rounded-xl p-4 text-sm font-mono text-textMuted overflow-x-auto whitespace-pre-wrap leading-relaxed">
                   {source.py_sources[activeTab]}
                 </pre>
               </div>
@@ -491,10 +491,10 @@ const SkillDetailView: React.FC<{
                 </div>
                 {activeTab.endsWith('.md') ? (
                   <div
-                    className="prose prose-sm prose-invert max-w-none
+                    className="skill-md-prose prose prose-sm prose-invert max-w-none
                       prose-headings:text-textMain prose-p:text-textMuted prose-li:text-textMuted
                       prose-a:text-primary prose-code:text-primary prose-code:bg-primary/10 prose-code:px-1 prose-code:py-0.5 prose-code:rounded
-                      prose-pre:bg-[#1e1e2e] prose-pre:border prose-pre:border-border prose-pre:rounded-xl
+                      prose-pre:border prose-pre:border-border prose-pre:rounded-xl
                       prose-strong:text-textMain prose-em:text-textMuted
                       prose-h1:text-xl prose-h2:text-lg prose-h3:text-base
                       prose-h1:border-b prose-h1:border-border prose-h1:pb-2
@@ -502,7 +502,7 @@ const SkillDetailView: React.FC<{
                     dangerouslySetInnerHTML={{ __html: sanitizeHtml(marked.parse((source.other_sources || {})[activeTab]) as string) }}
                   />
                 ) : (
-                  <pre className="bg-[#1e1e2e] border border-border rounded-xl p-4 text-sm font-mono text-textMuted overflow-x-auto whitespace-pre-wrap leading-relaxed">
+                  <pre className="skill-code-well border border-border rounded-xl p-4 text-sm font-mono text-textMuted overflow-x-auto whitespace-pre-wrap leading-relaxed">
                     {(source.other_sources || {})[activeTab]}
                   </pre>
                 )}

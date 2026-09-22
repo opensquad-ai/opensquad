@@ -248,9 +248,12 @@ class AIWebSocketService {
     this._sendCommand('stop_task', Object.keys(data).length ? data : undefined);
   }
 
-  /** Force-terminate a single background shell job (terminal bar trash icon). */
-  stopSessionJob(jobId: string, sessionId?: string) {
-    const data: Record<string, unknown> = { job_id: jobId };
+  /** Force-terminate a single background shell job (terminal bar trash icon).
+   *  Pass shellSessionId (no jobId) to kill a stuck sync/persistent shell session. */
+  stopSessionJob(jobId: string | undefined, sessionId?: string, shellSessionId?: string) {
+    const data: Record<string, unknown> = {};
+    if (jobId) data.job_id = jobId;
+    if (shellSessionId) data.shell_session_id = shellSessionId;
     if (sessionId) data.session_id = sessionId;
     this._sendCommand('stop_session_job', data);
   }

@@ -276,8 +276,53 @@
       /* Ensure markdown content doesn't overflow containers */
       .ai-markdown { overflow-wrap: break-word; word-break: break-word; }
       .ai-markdown pre { overflow-x: auto; max-width: 100%; }
-      .ai-markdown table { display: block; overflow-x: auto; max-width: 100%; }
       .ai-markdown img { max-width: 100%; height: auto; }
+
+      /* Markdown tables: bordered grid, tinted header, own scroll box.
+         The scrollbox is the WRAPPER (emitted by renderFencedMarkdown), not the
+         <table> itself — a scrollable <table> cannot size to its content. */
+      .ai-markdown .ai-table-wrap {
+        overflow-x: auto;
+        max-width: 100%;
+        margin: 0.65em 0;
+        border: 1px solid rgb(var(--color-border));
+        border-radius: 0.5rem;
+      }
+      .ai-markdown .ai-table-wrap > table {
+        border-collapse: collapse;
+        width: 100%;
+        font-size: 0.86em;
+      }
+      .ai-markdown .ai-table-wrap th,
+      .ai-markdown .ai-table-wrap td {
+        padding: 0.45em 0.7em;
+        text-align: left;
+        vertical-align: top;
+        border-right: 1px solid rgb(var(--color-border));
+        border-bottom: 1px solid rgb(var(--color-border));
+        /* Short cells (代码 / 名称) must stay on one line. Under `table-layout:
+           auto` a long prose column absorbs every spare pixel and squeezes its
+           neighbours down to CJK min-content — one character per line
+           ("东软集 / 团"). The break rules below undo `.ai-markdown
+           { word-break: break-word }` and `.prose code { word-break: break-all }`,
+           which split "688131" across two lines; `break-word` still rescues a
+           token that is wider than its column. */
+        white-space: nowrap;
+        word-break: normal;
+        overflow-wrap: break-word;
+      }
+      /* Only the LAST body column is allowed to wrap, so the prose column stays
+         the one that gives. Headers keep `nowrap` — that is what stops a narrow
+         trailing column (评分 / 状态) from collapsing to one char per line while
+         the table still has slack to give. */
+      .ai-markdown .ai-table-wrap tbody td:last-child { white-space: normal; }
+      .ai-markdown .ai-table-wrap th:last-child,
+      .ai-markdown .ai-table-wrap td:last-child { border-right: 0; }
+      .ai-markdown .ai-table-wrap tbody tr:last-child td { border-bottom: 0; }
+      .ai-markdown .ai-table-wrap thead th {
+        background-color: rgb(var(--color-text-main) / 0.06);
+        font-weight: 600;
+      }
 
       .dark ::-webkit-scrollbar-thumb { background: #30363d; }
       .dark ::-webkit-scrollbar-thumb:hover { background: #484f58; }

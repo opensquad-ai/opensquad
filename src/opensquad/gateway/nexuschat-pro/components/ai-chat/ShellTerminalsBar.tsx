@@ -104,7 +104,7 @@ export const ShellTerminalsBar: React.FC<{
                       ? formatElapsed(Date.now() - j.startedMs)
                       : ''}
                 </span>
-                {onStopJob && j.jobId ? (
+                {onStopJob && (j.jobId || j.sessionId) ? (
                   <button
                     type="button"
                     onClick={(e) => {
