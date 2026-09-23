@@ -2,8 +2,13 @@
  * HtmlEmbedBlock — sandboxed iframe for visualization.create HTML embeds.
  * Classic Agent Web: tool call stays in the activity stream; the interactive
  * iframe is rendered below the assistant's final reply (not inside the fold).
+ *
+ * Form bridge: the embedded page may post
+ * `window.parent.postMessage({ type: 'os_form_submit', payload: ... }, '*')`
+ * (also accepts a plain string payload). The host forwards the payload to the
+ * agent as a user message — see `onFormSubmit`.
  */
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Check, Copy, ExternalLink, Maximize2, Minimize2 } from 'lucide-react';
 import type { TimelineEntry, WorkflowEvent } from '../../utils/aiChatTimeline';
 
@@ -20,6 +25,15 @@ export interface HtmlEmbedPayload {
 const MAX_HEIGHT = 1200;
 const MIN_HEIGHT = 200;
 const DEFAULT_HEIGHT = 480;
+
+/** How long the ✓ acknowledgement stays visible after a form submit. */
+const SUBMIT_FEEDBACK_MS = 2200;
+/**
+ * Drop a repeat submit from the same embed inside this window (double-click,
+ * or a page whose submit handler fires twice). Deliberately NOT a permanent
+ * latch: the user may fix a field and submit the same embedded form again.
+ */
+const DUPLICATE_SUBMIT_MS = 1000;
 
 /** Detect visualization tool names: visualization / visualization.create / … */
 export function isVisualizationToolName(name: string | null | undefined): boolean {
@@ -167,6 +181,13 @@ export function collectHtmlEmbedsPrecedingMessage(
  * One forward pass over a timeline: assistant-message index → embeds since
  * the previous user turn. Same semantics as calling
  * collectHtmlEmbedsPrecedingMessage at every assistant row.
+ *
+ * Orphans: a turn can create an embed and never produce a reply for it to hang
+ * under — the model answers with a bare tool call (`content: null`), or the user
+ * sends the next message first. Those payloads used to be discarded at the turn
+ * boundary, so an agent reply saying "表格已生成，就在这条回复下方 👇" rendered
+ * nothing at all. They are now flushed onto the newest reply row that exists
+ * instead of being dropped: the iframe always reaches the screen.
  */
 export function indexHtmlEmbedsByAssistantMessage(
   entries: TimelineEntry[],
@@ -175,11 +196,20 @@ export function indexHtmlEmbedsByAssistantMessage(
   if (!entries.length) return map;
   let pending: HtmlEmbedPayload[] = [];
   const seen = new Set<string>();
+  /** Newest assistant row so far — the fallback home for an orphaned embed. */
+  let lastAssistantIdx = -1;
+
+  const claim = (idx: number) => {
+    if (idx < 0 || !pending.length) return;
+    const existing = map.get(idx);
+    map.set(idx, existing ? [...existing, ...pending] : pending.slice());
+    pending = [];
+  };
 
   for (let i = 0; i < entries.length; i++) {
     const entry = entries[i];
     if (entry.kind === 'message' && entry.data.role === 'user') {
-      pending = [];
+      claim(lastAssistantIdx);
       seen.clear();
       continue;
     }
@@ -193,10 +223,13 @@ export function indexHtmlEmbedsByAssistantMessage(
       }
       continue;
     }
-    if (entry.kind === 'message' && entry.data.role === 'assistant' && pending.length) {
-      map.set(i, pending.slice());
+    if (entry.kind === 'message' && entry.data.role === 'assistant') {
+      lastAssistantIdx = i;
+      claim(i);
     }
   }
+  // Tail: the last turn's tool work produced an embed and no reply followed (yet).
+  claim(lastAssistantIdx);
   return map;
 }
 
@@ -213,16 +246,26 @@ interface HtmlEmbedBlockProps {
    */
   variant?: 'chrome' | 'seamless';
   className?: string;
+  /**
+   * Form bridge: invoked when the embedded page posts an `os_form_submit`
+   * message. Receives the raw payload (object/string) plus the embed title.
+   */
+  onFormSubmit?: (payload: unknown, embedTitle: string) => void;
 }
 
 export const HtmlEmbedBlock: React.FC<HtmlEmbedBlockProps> = ({
   payload,
   variant = 'chrome',
   className = '',
+  onFormSubmit,
 }) => {
   const [expanded, setExpanded] = useState(false);
   const [copied, setCopied] = useState(false);
+  const [submitFlashAt, setSubmitFlashAt] = useState(0);
+  const iframeRef = useRef<HTMLIFrameElement | null>(null);
+  const lastSubmitAtRef = useRef(0);
   const seamless = variant === 'seamless';
+  const showSubmitted = submitFlashAt > 0;
   const height = clampHeight(payload.height);
   const displayHeight = expanded
     ? Math.min(MAX_HEIGHT, Math.max(height, seamless ? 900 : 720))
@@ -254,6 +297,34 @@ export const HtmlEmbedBlock: React.FC<HtmlEmbedBlockProps> = ({
     return doc;
   }, [payload.html, seamless]);
 
+  // Form bridge: the sandboxed iframe (opaque origin) posts
+  // `{ type: 'os_form_submit', payload }` to window.parent; only accept events
+  // whose source is THIS embed's iframe, so parallel cards never cross-talk.
+  // A burst repeat (double-click / double-fire) is dropped; the ✓ flash is
+  // transient and auto-hides.
+  useEffect(() => {
+    if (!onFormSubmit) return;
+    const onMessage = (event: MessageEvent) => {
+      if (!iframeRef.current || event.source !== iframeRef.current.contentWindow) return;
+      const data = event.data as { type?: string; payload?: unknown } | string | null;
+      if (!data || typeof data !== 'object' || data.type !== 'os_form_submit') return;
+      const now = Date.now();
+      if (now - lastSubmitAtRef.current < DUPLICATE_SUBMIT_MS) return;
+      lastSubmitAtRef.current = now;
+      const formPayload = data.payload !== undefined ? data.payload : '';
+      onFormSubmit(formPayload, payload.title || payload.filename || 'Visualization');
+      setSubmitFlashAt(now);
+    };
+    window.addEventListener('message', onMessage);
+    return () => window.removeEventListener('message', onMessage);
+  }, [onFormSubmit, payload.title, payload.filename]);
+
+  useEffect(() => {
+    if (!submitFlashAt) return;
+    const timer = window.setTimeout(() => setSubmitFlashAt(0), SUBMIT_FEEDBACK_MS);
+    return () => window.clearTimeout(timer);
+  }, [submitFlashAt]);
+
   const handleCopy = async () => {
     try {
       await navigator.clipboard.writeText(payload.html);
@@ -274,11 +345,12 @@ export const HtmlEmbedBlock: React.FC<HtmlEmbedBlockProps> = ({
   if (seamless) {
     return (
       <div
-        className={`w-full my-2 overflow-hidden border-0 shadow-none rounded-none ${className}`}
+        className={`relative w-full my-2 overflow-hidden border-0 shadow-none rounded-none ${className}`}
         data-html-embed="1"
         data-html-embed-variant="seamless"
       >
         <iframe
+          ref={iframeRef}
           title={title}
           srcDoc={srcDoc}
           sandbox="allow-scripts allow-forms allow-modals"
@@ -286,6 +358,18 @@ export const HtmlEmbedBlock: React.FC<HtmlEmbedBlockProps> = ({
           className="w-full border-0 block"
           style={{ height: displayHeight }}
         />
+        {/* No header in this variant — float the acknowledgement over the
+            embed so a submit is never silent. Transient + click-through. */}
+        {showSubmitted && onFormSubmit && (
+          <span
+            data-html-embed-submitted="1"
+            role="status"
+            aria-label="Submitted"
+            className="absolute top-2 right-2 pointer-events-none rounded-full bg-emerald-600/90 px-2 py-0.5 text-[11px] leading-4 text-white shadow-sm"
+          >
+            ✓
+          </span>
+        )}
       </div>
     );
   }
@@ -298,6 +382,16 @@ export const HtmlEmbedBlock: React.FC<HtmlEmbedBlockProps> = ({
     >
       <div className="flex items-center gap-2 px-3 py-2 border-b border-border/50 bg-bgLight">
         <span className="text-[12px] font-medium text-textMain truncate flex-1 min-w-0">{title}</span>
+        {showSubmitted && onFormSubmit && (
+          <span
+            data-html-embed-submitted="1"
+            role="status"
+            aria-label="Submitted"
+            className="text-[10px] text-emerald-600 bg-emerald-500/10 rounded-full px-2 py-0.5"
+          >
+            ✓
+          </span>
+        )}
         <button
           type="button"
           onClick={() => void handleCopy()}
@@ -324,6 +418,7 @@ export const HtmlEmbedBlock: React.FC<HtmlEmbedBlockProps> = ({
         </button>
       </div>
       <iframe
+        ref={iframeRef}
         title={title}
         srcDoc={srcDoc}
         sandbox="allow-scripts allow-forms allow-modals"

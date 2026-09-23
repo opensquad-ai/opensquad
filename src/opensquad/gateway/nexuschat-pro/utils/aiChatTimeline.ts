@@ -1000,7 +1000,15 @@ export function demoteIntermediateAssistantMessages(
     }
     // The turn's final reply is real user-facing output — never demote it
     // unless the caller knows tool work is starting right now (see opts).
-    if (isLastAssistantInTurn && !opts?.demoteTrailing) continue;
+    //
+    // `demoteTrailing` only covers the message at the very TAIL of the timeline
+    // (nothing after it): that is the text a live flush just committed ahead of
+    // the tool work that follows it. Letting the flag cover *every* turn's last
+    // message folded a finished turn's answer into 过程输出 the moment the user
+    // sent the next message — the reply they had just read got collected into
+    // the previous turn's fold.
+    const atTimelineTail = boundary === timeline.length;
+    if (isLastAssistantInTurn && !(opts?.demoteTrailing && atTimelineTail)) continue;
 
     // Preferred: first workflow after this message within the turn → block front.
     let target = -1;

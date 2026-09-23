@@ -1037,9 +1037,11 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     }
   });
   const isSolo = uiMode === 'solo';
+  // Both render modes put visualization iframes below the reply — solo used to
+  // skip the index entirely, which silently dropped every HTML embed there.
   const htmlEmbedsByAssistantIndex = useMemo(
-    () => (isSolo ? null : indexHtmlEmbedsByAssistantMessage(displayTimeline)),
-    [isSolo, displayTimeline],
+    () => indexHtmlEmbedsByAssistantMessage(displayTimeline),
+    [displayTimeline],
   );
   const setUiModePersisted = useCallback((mode: AiChatUiMode) => {
     setUiMode(mode);
@@ -2613,6 +2615,49 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
       }
     });
   }, [agentId]);
+
+  /** Interactive-form bridge: forward an embedded page's `os_form_submit`
+   *  payload to the agent as a user message — same queue/steer path as a
+   *  manual send, so it lands safely whether the session is busy or idle. */
+  const submitEmbedForm = useCallback(
+    (payloadData: unknown, embedTitle: string) => {
+      let body: string;
+      try {
+        body =
+          typeof payloadData === 'string'
+            ? payloadData
+            : JSON.stringify(payloadData, null, 2);
+      } catch {
+        body = String(payloadData);
+      }
+      if (!body.trim()) body = '(empty submission)';
+      const text = `[${t('aiChat.formSubmission')}] ${embedTitle}\n\n\`\`\`json\n${body}\n\`\`\``;
+      const sid = (currentSessionIdRef.current || '').trim();
+      const shouldQueue =
+        isSessionBusy(sid) ||
+        isOutboundPending(sid) ||
+        pendingMessagesRef.current.some((m) => (m.sessionId || '') === sid);
+      if (shouldQueue) {
+        const snapshot: PendingMessage = {
+          id: genUID(),
+          text,
+          images: [],
+          attachments: [],
+          fileAtts: [],
+          sessionId: sid || undefined,
+        };
+        setPendingMessages((prev) => [...prev, snapshot]);
+        steerPendingSnapshot(snapshot);
+        return;
+      }
+      armOutboundTurnPending(sid);
+      deliverMessage(
+        { text, images: [], attachments: [] },
+        { clearInputState: false, salvageStream: true },
+      );
+    },
+    [t],
+  );
 
   // Auto-drain: when idle, release exactly ONE pending message (any session),
   // switching without stop_task, then wait for that turn before the next.
@@ -5355,10 +5400,10 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
                 entry.data.role === 'assistant'
                   ? collectTurnChangedFilesBefore(displayTimeline, i)
                   : [];
-              // Classic: visualization iframes sit below the final assistant reply
-              // (tool stream keeps the normal tool_call row only).
+              // Visualization iframes sit below the reply (the tool stream keeps
+              // the normal tool_call row only) — in classic *and* solo.
               const replyEmbeds: HtmlEmbedPayload[] =
-                !isSolo && entry.data.role === 'assistant'
+                entry.data.role === 'assistant'
                   ? (htmlEmbedsByAssistantIndex?.get(i) ?? [])
                   : [];
               const turnFilesCard =
@@ -5401,6 +5446,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
                           payload={payload}
                           variant="seamless"
                           className="my-0"
+                          onFormSubmit={submitEmbedForm}
                         />
                       ))}
                       {turnFilesCard}
@@ -5526,7 +5572,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
             }
             if (entry.kind === 'task_fold') {
               const fold = entry.data;
-              const foldEmbedIndex = !isSolo ? indexHtmlEmbedsByAssistantMessage(fold.entries) : null;
+              const foldEmbedIndex = indexHtmlEmbedsByAssistantMessage(fold.entries);
               return (
                 <TimelineRow key={entryKey} lockLayout={lockLayout} style={revealStyle}>
                 <TaskFoldBlock
@@ -5559,7 +5605,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
                             : undefined,
                       };
                       const replyEmbeds: HtmlEmbedPayload[] =
-                        !isSolo && nested.data.role === 'assistant'
+                        nested.data.role === 'assistant'
                           ? (foldEmbedIndex?.get(ni) ?? [])
                           : [];
                       const bubble = isSolo
@@ -5578,6 +5624,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
                                 payload={payload}
                                 variant="seamless"
                                 className="my-0"
+                                onFormSubmit={submitEmbedForm}
                               />
                             ))}
                           </div>

@@ -1042,11 +1042,8 @@ def _build_app_class():
                 self._paint_prompt_meta_only()
                 self._static_set("#header-bar", self._header_bar_markup())
                 if not freeze_input:
-                    try:
-                        fpath = self.query_one("#footer-path", Static)
-                        fpath.update(self._footer_path_markup())
-                    except Exception:
-                        pass
+                    # _static_set diffs content — footer only repaints on cwd/theme change
+                    self._static_set("#footer-path", self._footer_path_markup())
                 return
             try:
                 inp = self.query_one("#chat-input", Input)
@@ -1075,11 +1072,12 @@ def _build_app_class():
             self._static_set("#header-bar", self._header_bar_markup())
             self._paint_prompt_meta_only()
             if not freeze_input:
-                try:
-                    fpath = self.query_one("#footer-path", Static)
-                    fpath.update(self._footer_path_markup())
-                except Exception:
-                    pass
+                # Same diff as the wait branch above. _refresh_chrome is called
+                # on *every* side-stream chunk (_on_side_chunk's 0.08s throttle
+                # guards only _paint_live_side), and the footer changes only on
+                # cwd / theme — a bare update() rebuilt the markup and repainted
+                # the row for nothing.
+                self._static_set("#footer-path", self._footer_path_markup())
 
         def log_line(self, text: str, style: str = "") -> None:
             """Thread-safe append to chat log (OpenCode-style blocks)."""

@@ -909,6 +909,12 @@ class ClaudeAPI(ProviderAPIBase):
                         self.total_output_tokens += final_msg.usage.output_tokens
                         self.total_cache_read_tokens += _cache_read
                         self.total_cache_creation_tokens += _cache_creation
+                        # Anthropic's `input_tokens` excludes cached reads, so the
+                        # comparable "real prompt size" is the same sum billed above.
+                        # all_msgs is exactly what was sent (see _prepare_messages).
+                        self.record_token_calibration(
+                            final_msg.usage.input_tokens + _cache_read + _cache_creation, all_msgs, self._last_tools
+                        )
                     else:
                         self.total_input_tokens += self._count_tokens(all_msgs)
                         self.total_output_tokens += len(self.encoding.encode(full_text)) if self.encoding else 0

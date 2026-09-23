@@ -914,6 +914,13 @@ class GoogleAPI(ProviderAPIBase):
                     cached_count = extract_cached_tokens(usage)
                     self.total_cache_read_tokens += max(0, cached_count - self._last_cached_token_count)
                     self._last_cached_token_count = cached_count
+                    # NOTE: deliberately not feeding record_token_calibration here.
+                    # We only have this endpoint's cumulative `prompt_token_count`
+                    # (see the note at `_last_prompt_token_count`), so the sample
+                    # could be an increment rather than the prompt size — a wrong
+                    # ratio would move compression policy, and this provider still
+                    # has the uncalibrated x3 hard guard. Verify the semantics of
+                    # the gateway's usage_metadata before wiring it up.
                 except Exception:
                     self.total_input_tokens += self._count_tokens(all_msgs)
                     if self.encoding and full_text:

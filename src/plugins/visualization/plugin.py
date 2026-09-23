@@ -63,13 +63,15 @@ class VisualizationPlugin(Plugin):
         auto_register=True,
         description=(
             "Create an interactive HTML visualization for the Agent Web chat UI. "
-            "Provide a complete HTML page (or fragment) in `html`. "
-            "Do NOT paste the HTML into the chat reply — the host embeds it below "
-            "your final reply automatically. "
-            "Prefer self-contained HTML (inline CSS/JS). "
-            "Interactive JS is supported (CSS animations, canvas, confetti, click handlers, timers). "
-            "Avoid remote script CDNs when possible; keep colors/backgrounds self-contained "
-            "so the page remains readable inside the chat."
+            "Provide a complete, self-contained HTML page (or fragment) in `html` — "
+            "the host embeds it below your final reply, so do NOT paste the HTML into "
+            "the reply text. Interactive JS is supported (inline CSS/JS, canvas, click "
+            "handlers, timers); avoid remote script CDNs. "
+            "FORMS: to collect user input (e.g. plugin/API configuration), have the "
+            "form's submit handler call "
+            "window.parent.postMessage({ type: 'os_form_submit', payload: {...} }, '*'); "
+            "the host forwards the payload back to you as a user message. "
+            "See §2.26 for the full form contract."
         ),
     )
     def create(
@@ -80,7 +82,7 @@ class VisualizationPlugin(Plugin):
         filename: str | None = None,
     ) -> dict[str, Any]:
         """
-        Create a visualization from HTML for Agent Web to embed.
+        Create interactive HTML for Agent Web; forms return values via os_form_submit.
 
         Args:
             html: Self-contained HTML document or fragment to render.

@@ -608,7 +608,7 @@ class ToolModuleWrapper:
         self._namespace = namespace
         self._functions: dict[str, Callable] = {}
 
-    def add_method(self, method_name: str, bound_method: Callable, doc: str = ""):
+    def _add_method(self, method_name: str, bound_method: Callable, doc: str = ""):
         """
         Add a bound method as a plain function attribute.
 
@@ -616,6 +616,11 @@ class ToolModuleWrapper:
         that ToolRegistry's inspect-based discovery works correctly.
         Preserves *args / **kwargs from the original signature so that
         variadic tool methods are callable with positional args too.
+
+        Private on purpose: ToolRegistry exposes every *public* member of the
+        registered object as a tool (it scans `isfunction` + `ismethod`), so a
+        public helper here would ship as a bogus `<namespace>__add_method`
+        tool in every plugin namespace.
         """
 
         # Create a wrapper function that strips 'self' from the signature

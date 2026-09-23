@@ -1040,6 +1040,7 @@
     "editPending": "撤回到输入框编辑",
     "deletePending": "删除",
     "turnCancelled": "任务已取消",
+    "formSubmission": "表单提交",
     "pendingCollapse": "收起",
     "pendingExpand": "展开",
     "pendingClearAll": "全部清空",
@@ -1606,6 +1607,24 @@
     "serif": "衬线体",
     "fontSmall": "小",
     "fontLarge": "大",
+    "textSize": {
+      "label": "文字大小",
+      "small": "小",
+      "medium": "中",
+      "large": "大"
+    },
+    "uiScale": {
+      "label": "界面缩放",
+      "small": "小",
+      "standard": "标准",
+      "large": "大"
+    },
+    "contentWidth": {
+      "label": "内容宽度",
+      "standard": "标准",
+      "wide": "宽",
+      "full": "通栏"
+    },
     "fontPreview": "这是对话中的预览文字效果。The quick brown fox jumps over the lazy dog.",
     "done": "完成",
     "mode": {

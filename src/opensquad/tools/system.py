@@ -501,6 +501,11 @@ class ShellSession:
         self.session_id = session_id
         self.shell_type = shell_type or ("cmd" if os.name == "nt" else "bash")
         self.working_directory = _resolve_working_directory(working_directory)
+        # Owning chat session, captured at creation exactly like ``Job.ui_sid``.
+        # A session-scoped abort needs it to recycle *this* session's shells —
+        # a hung synchronous run_session_job has no job_id to match on — while
+        # leaving sibling panes' shells (and their in-flight commands) alone.
+        self.ui_sid = str(get_tool_call_context().get("sid") or "")
         self.output_buffer: list[str] = []
         self._max_buffer_size = 10000
         self._lock = threading.Lock()
@@ -963,8 +968,8 @@ def abort_all_tool_processes(reason: str = "user stop", session_id: str | None =
     Called from ``input_hub.request_stop()`` so UI Stop actually unblocks hung
     tools (git/cmd/shell) instead of waiting for their natural timeout.
 
-    When *session_id* is set, only Jobs tagged with that chat sid are aborted.
-    Sibling panes' shells and OS children are left alone.
+    When *session_id* is set, only Jobs and ShellSessions owned by that chat
+    sid are aborted. Sibling panes' shells and their OS children are left alone.
     """
     stopped_jobs = 0
     closed_sessions = 0
@@ -1014,13 +1019,34 @@ def abort_all_tool_processes(reason: str = "user stop", session_id: str | None =
                     "state": "aborted",
                 },
             )
+        # Shells belonging to the stopped session only. A hung synchronous
+        # run_session_job never got a job_id, so filtering Jobs alone left the
+        # very thing that blocks the turn alive — it kept hanging until the tool
+        # timeout. Sibling panes' shells stay untouched (`sess.close()` tree-kills
+        # this shell's own children, so no process sweep is needed here).
+        for shell_sid in list(_SESSIONS.keys()):
+            sess = _SESSIONS.get(shell_sid)
+            if sess is None or str(getattr(sess, "ui_sid", "") or "") != sid_filter:
+                continue
+            try:
+                _SESSIONS.pop(shell_sid, None)
+                sess.close()
+                closed_sessions += 1
+            except Exception:
+                logger.debug("[system] abort owned shell failed sid=%s", shell_sid, exc_info=True)
         logger.info(
-            "[system] abort_all_tool_processes(%s, sid=%s): jobs=%d (session-scoped, shells/children kept)",
+            "[system] abort_all_tool_processes(%s, sid=%s): jobs=%d shells=%d (session-scoped, siblings kept)",
             reason,
             sid_filter,
             stopped_jobs,
+            closed_sessions,
         )
-        return {"jobs": stopped_jobs, "sessions": 0, "children": 0, "session_id": sid_filter}
+        return {
+            "jobs": stopped_jobs,
+            "sessions": closed_sessions,
+            "children": 0,
+            "session_id": sid_filter,
+        }
 
     for sid in list(_SESSIONS.keys()):
         try:

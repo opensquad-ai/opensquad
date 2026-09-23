@@ -493,6 +493,10 @@ class ToolRegistry:
             "quick_note",
             "scheduled_tasks",
             "web_automation",
+            # Agent Web renders interactive HTML below the reply, and the host
+            # routes form submissions back to the agent — without this the
+            # namespace is missing from the default "high" schema entirely.
+            "visualization",
         }
 
         # Determine which namespaces to include

@@ -1,11 +1,25 @@
 import asyncio
 import logging
+import os
 import queue
 from typing import Any
 
 from opensquad.message_queue import get_message_queue
 
 logger = logging.getLogger(__name__)
+
+
+def _norm_path(path: str | None) -> str:
+    """Normalise a path for equality comparison.
+
+    Mirrors what ``filesystem.set_session_cwd`` does before storing the value
+    into ``AgentContext.session_cwd`` (``normcase(abspath(...))``); comparing
+    raw strings against that stored form fails on Windows whenever the drive
+    letter case or separator style differs.
+    """
+    if not path:
+        return ""
+    return os.path.normcase(os.path.abspath(str(path).strip()))
 
 
 class InputHub:
@@ -51,12 +65,10 @@ class InputHub:
         if not self.agent_dir:
             logger.debug("[InputHub] _check_session_cwd: agent_dir not set, skipping")
             return
-        import os as _os
-
         from opensquad.utils.session_cwd import read_session_cwd, session_cwd_path
 
         cwd_file = session_cwd_path(self.agent_dir)
-        if not _os.path.isfile(cwd_file):
+        if not os.path.isfile(cwd_file):
             try:
                 from opensquad._context import get_current_context
                 from opensquad.utils.path_utils import set_session_cwd_override
@@ -75,18 +87,27 @@ class InputHub:
             return
         new_cwd = (data.get("path") or "").strip()
 
-        if not new_cwd or not _os.path.isdir(new_cwd):
+        if not new_cwd or not os.path.isdir(new_cwd):
             logger.warning(
-                f"[InputHub] _check_session_cwd: invalid path '{new_cwd}' (isdir={_os.path.isdir(new_cwd) if new_cwd else 'N/A'})"
+                f"[InputHub] _check_session_cwd: invalid path '{new_cwd}' (isdir={os.path.isdir(new_cwd) if new_cwd else 'N/A'})"
             )
             return
 
-        # Check if already applied (avoid re-applying on every turn)
+        # Check if already applied (avoid re-applying on every turn).
+        #
+        # Compare NORMALISED paths. The signal file stores
+        # ``os.path.abspath(p)`` verbatim, while ``set_session_cwd`` records
+        # ``os.path.normcase(os.path.abspath(p))`` into ``ctx.session_cwd`` —
+        # on Windows that lower-cases the drive letter, so a plain ``==``
+        # never matches and the cwd was re-applied on *every* turn. Each
+        # re-apply closes every live shell session (see
+        # ``filesystem.set_session_cwd``), which is what killed shell commands
+        # that were still running mid-turn.
         try:
             from opensquad._context import get_current_context
 
             ctx = get_current_context()
-            if ctx and ctx.session_cwd == new_cwd:
+            if ctx and ctx.session_cwd and _norm_path(ctx.session_cwd) == _norm_path(new_cwd):
                 logger.debug(f"[InputHub] _check_session_cwd: already applied '{new_cwd}', skipping")
                 return
             logger.info(

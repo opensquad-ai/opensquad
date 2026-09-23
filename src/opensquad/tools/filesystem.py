@@ -146,20 +146,34 @@ def set_session_cwd(path: str) -> dict[str, Any]:
 
         _set_allowed_dirs_unified(_EXTRA_ALLOWED_DIRS)
 
-    # 3. Reset persistent shell sessions so they pick up the new cwd.
-    #    Existing ShellSession objects keep their old working_directory;
-    #    clearing _SESSIONS forces _get_or_create_session() to create fresh
-    #    ones with the updated session_cwd on the next run_session_job call.
+    # 3. Recycle only the shells this cwd change actually invalidates.
+    #    Existing ShellSession objects keep their old working_directory, so a
+    #    shell still sitting in a different directory must be recreated to pick
+    #    up the new one — but a shell ALREADY in the target directory is
+    #    unaffected, and closing it would abort whatever command it is running
+    #    (the command came back as reason=session_stopped). The signal file is
+    #    agent-scoped and this runs before a session is known, so "belongs to
+    #    this session" can only be decided by what the change invalidates.
     try:
         from opensquad.tools import system as _sysmod
 
-        for sid, sess in list(_sysmod._SESSIONS.items()):
+        stale: list[str] = []
+        kept = 0
+        for shell_sid, sess in list(_sysmod._SESSIONS.items()):
+            shell_cwd = getattr(sess, "working_directory", "") or ""
+            if shell_cwd and os.path.normcase(os.path.abspath(shell_cwd)) == abs_path:
+                kept += 1
+                continue
+            stale.append(shell_sid)
+        for shell_sid in stale:
+            sess = _sysmod._SESSIONS.pop(shell_sid, None)
+            if sess is None:
+                continue
             try:
                 sess.close()
             except Exception:
                 pass
-        _sysmod._SESSIONS.clear()
-        logger.info(f"[filesystem] Cleared {len(_sysmod._SESSIONS)} shell session(s) for new cwd")
+        logger.info(f"[filesystem] Recycled {len(stale)} shell session(s) for new cwd (kept {kept} already in target)")
     except Exception as e:
         logger.warning(f"[filesystem] Could not clear shell sessions: {e}")
 

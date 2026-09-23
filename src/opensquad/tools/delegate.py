@@ -1,5 +1,5 @@
 """
-Delegate Task Tool v1.1
+Delegate Task Tool v1.2
 
 Delegates sub-tasks to a temporary sub-agent that shares the parent agent's configuration
 and runs independently. Sub-agents run in-process (lightweight executor), supporting
@@ -12,6 +12,11 @@ Tool list:
   delegate_task_submit   -- Async submit; returns job_id immediately (concurrent scenarios)
   delegate_task_result   -- Poll query for job_id execution status and result
   delegate_task_list     -- List all active sub-tasks (for debugging)
+
+Model selection: delegate_task / delegate_task_submit accept an optional `model`
+argument naming a model card (see the model card library, e.g. "deepseek-v4-flash").
+The sub-agent then runs on that card instead of the parent's current model —
+useful to run cheap cards for parallel grunt work. Unset/empty = inherit parent.
 
 Constraints:
 - Maximum recursion depth: 3 levels (delegate_task tool is automatically removed inside sub-agents
@@ -142,7 +147,40 @@ def _build_sub_prompt(parent_prompt: str) -> str:
     return SUB_AGENT_HEADER + cleaned
 
 
-def _build_runner(depth: int, task_preview: str):
+def _apply_model_override(sub_cfg: dict, model: str) -> str | None:
+    """Override the sub-agent's LLM with a named model card.
+
+    Resolves `model` against the workspace model card library (same resolver as
+    runtime model switching) and copies the connection fields onto `sub_cfg`.
+    Returns an error string on failure, or None on success / when `model` is
+    empty (inherit parent's current model).
+    """
+    name = (model or "").strip()
+    if not name:
+        return None
+    try:
+        from opensquad.model_switch import resolve_card
+
+        card = resolve_card(name)
+    except Exception as e:
+        logger.warning("[delegate_task] model override %r failed: %s", name, e)
+        return f"Error: model card not found or invalid: {name} ({e})"
+    card_model = str(card.get("model_name") or "").strip()
+    if card_model:
+        sub_cfg["model"] = card_model
+        sub_cfg["model_name"] = card_model
+    for key in ("api_key", "base_url", "api_protocol", "provider"):
+        if card.get(key):
+            sub_cfg[key] = card[key]
+    logger.info(
+        "[delegate_task] sub-agent model override -> %s (api_protocol=%s).",
+        name,
+        sub_cfg.get("api_protocol", "?"),
+    )
+    return None
+
+
+def _build_runner(depth: int, task_preview: str, model: str = ""):
     """Build a SubAgentRunner instance (with depth check). Returns (runner, error_str)."""
     from opensquad.sub_agent_runner import MAX_DEPTH, SubAgentRunner
 
@@ -158,6 +196,12 @@ def _build_runner(depth: int, task_preview: str):
     with _chat_api_cfg_lock:
         sub_cfg = dict(_chat_api_cfg)
         parent_prompt = _chat_api_cfg.get("parent_prompt", "")
+
+    # Optional per-delegation model card override (empty = inherit parent).
+    override_err = _apply_model_override(sub_cfg, model)
+    if override_err:
+        return None, override_err
+
     # Build a cleaned prompt: strip non-tool {{PLACEHOLDER}} tokens from the parent
     # prompt and prepend a sub-agent-specific header. Keep {{TOOL_DESCRIPTIONS}} so
     # XMLToolCallStrategy can inject the live tool list.
@@ -201,7 +245,7 @@ def _build_full_task(task: str, context: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-async def delegate_task(task: str, context: str = "", depth: int = 0) -> str:
+async def delegate_task(task: str, context: str = "", depth: int = 0, model: str = "") -> str:
     """
     [Sub-task Delegation - Sync] Delegate a sub-task to a temporary sub-agent and block until
     it completes, then return the result.
@@ -217,6 +261,9 @@ async def delegate_task(task: str, context: str = "", depth: int = 0) -> str:
         task: Sub-task description (detailed goal, constraints, and expected output format).
         context: Optional supplementary context (background information, relevant data snippets).
         depth: Current delegation depth (managed automatically; do not set manually).
+        model: Optional model card name for the sub-agent (e.g. "deepseek-v4-flash").
+            Empty = inherit the parent's current model. Use a cheaper/faster card for
+            parallel grunt work, or a stronger card for hard reasoning sub-tasks.
 
     Returns:
         Text result after the sub-agent completes.
@@ -228,9 +275,10 @@ async def delegate_task(task: str, context: str = "", depth: int = 0) -> str:
     # Guard: LLM sometimes wraps both fields into the task argument as a dict
     if isinstance(task, dict):
         context = task.get("context", context)
+        model = task.get("model", model)
         task = task.get("task", "")
 
-    runner, err = _build_runner(depth, task[:80])
+    runner, err = _build_runner(depth, task[:80], model=model)
     if err:
         return err
 
@@ -246,7 +294,7 @@ async def delegate_task(task: str, context: str = "", depth: int = 0) -> str:
 # ---------------------------------------------------------------------------
 
 
-async def delegate_task_submit(task: str, context: str = "", depth: int = 0) -> str:
+async def delegate_task_submit(task: str, context: str = "", depth: int = 0, model: str = "") -> str:
     """
     [Sub-task Delegation - Async Submit] Start a sub-agent in the background to execute a task
     and return a job_id immediately.
@@ -256,6 +304,9 @@ async def delegate_task_submit(task: str, context: str = "", depth: int = 0) -> 
       2. Use delegate_task_result(job_id) to poll each task's status
       3. Aggregate results after all are done
 
+    Each submitted sub-task may use its own `model` card — e.g. fan out cheap cards for
+    independent scraping jobs while keeping the parent's model free.
+
     IMPORTANT: Sub-agents inherit the parent's full tool set (except recursive delegate_task).
     Do NOT claim in `task` that the sub-agent lacks filesystem or tool access.
 
@@ -263,6 +314,8 @@ async def delegate_task_submit(task: str, context: str = "", depth: int = 0) -> 
         task: Sub-task description (detailed goal, constraints, and expected output format).
         context: Optional supplementary context.
         depth: Current delegation depth (managed automatically).
+        model: Optional model card name for this sub-agent (e.g. "deepseek-v4-flash").
+            Empty = inherit the parent's current model.
 
     Returns:
         JSON string in the format: {"job_id": "...", "status": "running", "label": "..."}
@@ -274,9 +327,10 @@ async def delegate_task_submit(task: str, context: str = "", depth: int = 0) -> 
     # Guard: LLM sometimes wraps both fields into the task argument as a dict
     if isinstance(task, dict):
         context = task.get("context", context)
+        model = task.get("model", model)
         task = task.get("task", "")
 
-    runner, err = _build_runner(depth, task[:80])
+    runner, err = _build_runner(depth, task[:80], model=model)
     if err:
         return err
 

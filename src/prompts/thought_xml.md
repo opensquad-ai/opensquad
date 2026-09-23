@@ -194,6 +194,7 @@ Before executing an assigned task, call `board_list_items(collab_id, scope="all"
 {{include:parts/common_2.23_error_handling.md}}
 {{include:parts/common_2.24_anti_patterns.md}}
 {{include:parts/common_2.25_safety_privacy_boundaries.md}}
+{{include:parts/common_2.26_agent_web_interactive_html.md}}
 {{include:parts/common_3._tools_skills.md}}
 {{include:parts/tool_xml_3.1_built-in_tools_mcp_tools.md}}
 {{include:parts/common_3.2_mcp_service_usage_guide.md}}

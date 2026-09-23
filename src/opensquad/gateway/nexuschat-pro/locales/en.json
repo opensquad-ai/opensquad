@@ -1042,6 +1042,7 @@
     "editPending": "Withdraw to composer for editing",
     "deletePending": "Delete",
     "turnCancelled": "Task cancelled",
+    "formSubmission": "Form submission",
     "pendingCollapse": "Collapse",
     "pendingExpand": "Expand",
     "pendingClearAll": "Clear all",
@@ -1608,6 +1609,24 @@
     "serif": "Serif",
     "fontSmall": "S",
     "fontLarge": "L",
+    "textSize": {
+      "label": "Text size",
+      "small": "Small",
+      "medium": "Medium",
+      "large": "Large"
+    },
+    "uiScale": {
+      "label": "Interface scale",
+      "small": "Small",
+      "standard": "Standard",
+      "large": "Large"
+    },
+    "contentWidth": {
+      "label": "Content width",
+      "standard": "Standard",
+      "wide": "Wide",
+      "full": "Full"
+    },
     "fontPreview": "Preview of conversation text. The quick brown fox jumps over the lazy dog.",
     "done": "Done",
     "mode": {

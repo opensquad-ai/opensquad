@@ -210,6 +210,11 @@ class ProviderAPIBase:
         self.usage_estimated_turns = 0  # turns that fell back to the local estimate
         self._stream_options_rejected = False  # endpoint 400s on stream_options
         self._auto_compress_stats: dict[str, Any] = {}
+        # Measured ratio between provider-reported input tokens and the local
+        # estimate (None until a response actually reports usage). Drives the
+        # compression trigger, replacing the blind x3 multiplier that used to
+        # absorb tokenizer error — see record_token_calibration().
+        self._token_scale: float | None = None
         # CRITICAL: must be handed back to DeepSeek V4 on the next turn when tools are involved
         self._prev_reasoning_content = ""
         self._last_tools: list[dict] | None = None
@@ -234,6 +239,57 @@ class ProviderAPIBase:
     def _provider_label(self) -> str:
         """Log/`status` prefix, e.g. ``[ClaudeAPI]``."""
         return f"[{type(self).__name__}]"
+
+    # ────────────────────────── token calibration ──────────────────────────
+
+    def record_token_calibration(
+        self, reported_input_tokens: int, sent_messages: list[dict], tools: Any = None
+    ) -> None:
+        """Learn the real/estimated token ratio from provider-reported usage.
+
+        Every size decision in this class compares a *local estimate* against the
+        window, and tiktoken is not every model's tokenizer: CJK text is the worst
+        case (``len(str)//4`` undercounts Chinese by ~4.7x, measured), and a
+        provider with its own tokenizer is off by a smaller but consistent
+        factor. The old code absorbed all of that with a blind x3 multiplier on
+        the hard guard — which is both too much for an accurate estimate and too
+        little for a 4.7x one. Measuring the ratio on real traffic is strictly
+        better; the multipliers shrink to a sane margin once it is known.
+        """
+        try:
+            reported = int(reported_input_tokens or 0)
+        except (TypeError, ValueError):
+            return
+        if reported <= 0:
+            return
+        try:
+            estimated = self._count_tokens(sent_messages, tools if tools is not None else self._last_tools)
+        except Exception:
+            logger.debug("%s token calibration skipped: estimate failed", self._provider_label(), exc_info=True)
+            return
+        if estimated <= 0:
+            return
+        # Clamp before smoothing: one wild sample (provider-side truncation, a
+        # cached prefix the endpoint does not bill, a summariser call) must not
+        # flip compression policy for the rest of the session.
+        ratio = min(max(reported / estimated, 0.2), 5.0)
+        previous = self._token_scale
+        self._token_scale = ratio if previous is None else previous * 0.7 + ratio * 0.3
+        logger.info(
+            "%s token calibration: reported=%d estimated=%d ratio=%.2f scale=%.2f",
+            self._provider_label(),
+            reported,
+            estimated,
+            ratio,
+            self._token_scale,
+        )
+
+    def _calibrated_token_scale(self) -> tuple[float, bool]:
+        """``(scale, calibrated)`` — the measured ratio, or 1.0 until known."""
+        scale = self._token_scale
+        if not scale or scale <= 0:
+            return 1.0, False
+        return float(scale), True
 
     # ────────────────────────── provider hooks ──────────────────────────
 
@@ -548,7 +604,20 @@ class ProviderAPIBase:
         )
 
     @staticmethod
-    def _summary_user_prompt(conv_text: str) -> str:
+    def _summary_user_prompt(conv_text: str, previous_summary: str = "") -> str:
+        carry = ""
+        if previous_summary and previous_summary.strip():
+            # Without this the new summary REPLACES the old one in the system
+            # prompt while the messages it described are already gone — every
+            # compaction silently dropped everything the previous one captured.
+            carry = (
+                "[Previous Context Summary — you are extending it, not replacing it]\n"
+                f"{previous_summary.strip()}\n\n"
+                "[Rules for the previous summary]\n"
+                "- Its facts stay true unless the history below contradicts them; carry them forward.\n"
+                "- Do NOT copy it verbatim into every section — merge it into the right sections.\n"
+                "- Drop only what the history below shows is no longer relevant (finished side quests).\n\n"
+            )
         return (
             "You are compressing conversation history for an AI Agent that is currently executing a task.\n"
             "The compression result will replace this history; the Agent must be able to seamlessly continue working based on your summary.\n\n"
@@ -558,6 +627,7 @@ class ProviderAPIBase:
             "- The original text of all error messages\n"
             "- Requirements, constraints, or preferences explicitly specified by the user\n"
             "- The most recent user request (what the agent is currently working on)\n\n"
+            f"{carry}"
             "[Output format - be specific, include exact values, avoid vague summaries]\n\n"
             "## Current Task\n"
             "(What the agent is working on RIGHT NOW — the most recent user request in detail)\n\n"
@@ -581,25 +651,35 @@ class ProviderAPIBase:
 
         Prompt assembly, the prompt-size trace and every failure path are
         shared; only the transport lives in :meth:`_summarizer_request`.
+
+        The summary being superseded (``_latest_summary``, overwritten right
+        after this returns) is handed to the summariser: the messages it
+        described are already out of context and cannot be re-read, so a summary
+        built without it drops that knowledge for good.
         """
         budget = syscfg.ctx_conv_text_budget_chars()
         max_tokens = syscfg.ctx_summary_max_tokens()
         conv_text = self._build_conv_text(messages, budget)
+        previous_summary = (getattr(self, "_latest_summary", "") or "").strip()
 
         system_prompt = self._summary_system_prompt()
-        user_prompt = self._summary_user_prompt(conv_text)
+        user_prompt = self._summary_user_prompt(conv_text, previous_summary)
 
         try:
-            from .chat_api import _get_tiktoken
-
             full_prompt_text = system_prompt + "\n" + user_prompt
-            estimated_prompt_tokens = len(_get_tiktoken().encode(full_prompt_text))
+            # `_get_tiktoken()` returns the tiktoken MODULE, which has no
+            # `encode` — the old call raised AttributeError straight into the
+            # except below, so this trace never printed a number.
+            encoder = getattr(self, "encoding", None)
+            estimated_prompt_tokens = len(encoder.encode(full_prompt_text)) if encoder else len(full_prompt_text) // 4
             logger.info(
-                "[CompressTrace] summary prompt: model=%s, chars=%d, estimated_tokens=%d, max_tokens=%d",
+                "[CompressTrace] summary prompt: model=%s, chars=%d, estimated_tokens=%d, max_tokens=%d, "
+                "previous_summary_chars=%d",
                 self._summarizer_model(),
                 len(full_prompt_text),
                 estimated_prompt_tokens,
                 max_tokens,
+                len(previous_summary.strip()),
             )
         except Exception:
             pass  # Tokenizer may fail; continue anyway
@@ -608,17 +688,24 @@ class ProviderAPIBase:
             return self._summarizer_request(system_prompt, user_prompt, max_tokens)
         except Exception as e:
             logger.error(f"{self._provider_label()} Summary generation failed: {e}")
-            return "Summary generation failed. Please rely on the First User Query."
+            # The compressed middle is gone for good, so point the model at what
+            # it *does* still have — the pinned opening request this used to
+            # reference is no longer carried in the request (see step 5 above).
+            return (
+                "Summary generation failed. The older conversation is no longer in context — continue "
+                "from the retained recent messages and the current request, and ask the user if a detail "
+                "you need is missing."
+            )
 
     # ────────────────────────── context compression ──────────────────────────
 
     def _irreducible_prompt_tokens(self) -> int:
         """Tokens that survive *every* compression path.
 
-        ``_prepare_messages`` rebuilds the request as
-        ``[system_msg, first_user, *recent]`` in all branches, so the system
-        message and the tool schemas are a hard lower bound on the size of any
-        request this provider will ever send. Nothing can summarise them away.
+        ``_prepare_messages`` rebuilds the request as ``[system_msg, *recent]``
+        in all branches, so the system message and the tool schemas are a hard
+        lower bound on the size of any request this provider will ever send.
+        Nothing can summarise them away.
         """
         if not self.req:
             return 0
@@ -635,8 +722,11 @@ class ProviderAPIBase:
         The single algorithm used by every provider:
 
         1. Trigger at ``token_max * trigger_threshold`` (default 0.75), plus a
-           x3-scaled hard guard at 85% of the window to absorb the systematic
-           undercount of the local tiktoken estimate.
+           hard guard at 85% of the window for callers whose local estimate is
+           still uncorrected. Both compare the *calibrated* count once a provider
+           has reported real usage (see :meth:`record_token_calibration`); until
+           then the hard guard keeps its historical x3 multiplier to absorb the
+           systematic undercount of the local tiktoken estimate.
         2. Retention boundary = newest messages within
            ``ctx_keep_recent_fraction`` of the current tokens, then widened —
            never past ``ctx_recent_hard_cap_frac`` — to cover the last
@@ -647,6 +737,12 @@ class ProviderAPIBase:
            token-budget-only split so the summariser actually runs; a
            degenerate conversation is compacted without a summary rather than
            returned uncompressed.
+        5. The rebuilt request is ``[system_msg, *recent]``. The session's first
+           user request is *summarised*, not pinned: keeping it in the request
+           presented the original task as a live instruction again, and the model
+           restarted it right after a compaction.
+        6. Short histories (fewer than 5 messages) are left alone only when no
+           single message could blow the window by itself.
         """
         _t0 = _time.monotonic()
 
@@ -674,26 +770,37 @@ class ProviderAPIBase:
             self._emit_with_sid("status", "System prompt alone exceeds the model window; aborting.")
             raise ContextOverflowError(detail)
 
-        # 1. Count current tokens (uses the incremental cache when available)
-        current_tokens = self.get_current_token_count(self._last_tools)
+        # 1. Count current tokens (uses the incremental cache when available).
+        #    `raw_tokens` is the local estimate; `current_tokens` is that estimate
+        #    corrected by the measured provider/local ratio. Only the size
+        #    *decisions* (trigger, guard) use the corrected number — the retention
+        #    boundary below is a relative split, so it stays in the raw unit and
+        #    the retained message set does not move with the calibration.
+        raw_tokens = self.get_current_token_count(self._last_tools)
+        scale, calibrated = self._calibrated_token_scale()
+        current_tokens = int(raw_tokens * scale)
         threshold = syscfg.ctx_trigger_threshold()
         threshold_tokens = int(self.token_max * threshold)
 
-        # Hard guard: if the *scaled* estimate would pass a high watermark,
-        # force compression so the request never hits a provider 400.
-        scaled_estimate = current_tokens * 3
+        # Hard guard: force compression before the request reaches a high
+        # watermark, for callers whose local estimate is still uncorrected.
+        # Uncalibrated keeps the historical x3 (it exists to absorb unknown
+        # tokenizer error); calibrated only needs a margin for whatever the
+        # ratio is still off by.
+        hard_estimate = int(current_tokens * (1.15 if calibrated else 3))
         hard_watermark = int(self.token_max * 0.85)
-        if scaled_estimate > hard_watermark and current_tokens <= threshold_tokens:
+        if hard_estimate > hard_watermark and current_tokens <= threshold_tokens:
             logger.warning(
-                "[CompressTrace] HARD GUARD triggered: local estimate %d tokens, scaled x3 = %d > 85%% of max %d. "
+                "[CompressTrace] HARD GUARD triggered: %s estimate %d tokens%s > 85%% of max %d. "
                 "Forcing compression to avoid 400.",
+                "calibrated" if calibrated else "local x3-scaled",
                 current_tokens,
-                scaled_estimate,
+                f" (scale={scale:.2f} of raw {raw_tokens})" if calibrated else "",
                 self.token_max,
             )
             self._emit_with_sid("status", "Context near limit, compacting (hard guard)...")
 
-        if current_tokens <= threshold_tokens and scaled_estimate <= hard_watermark:
+        if current_tokens <= threshold_tokens and hard_estimate <= hard_watermark:
             logger.info("[CompressTrace] below threshold, no compression needed")
             return self.req
 
@@ -704,9 +811,22 @@ class ProviderAPIBase:
         self._emit_with_sid("status", "Context limit reached, compacting...")
 
         if len(self.req) < 5:
-            # Too few messages to compress meaningfully — keep all
-            logger.info("[CompressTrace] too few messages (%d), skipping compression", len(self.req))
-            return self.req
+            # Too few messages to compress meaningfully — keep all, UNLESS a
+            # single message is big enough to blow the window on its own. The
+            # preflight above only covers the system message and the tool
+            # schemas, so a 3-message session holding one 200k-token tool result
+            # used to ship uncompressed and 400.
+            largest = max((self._count_message_tokens(m) for m in self.req[1:]), default=0)
+            if irreducible + largest <= overflow_limit:
+                logger.info("[CompressTrace] too few messages (%d), skipping compression", len(self.req))
+                return self.req
+            logger.warning(
+                "[CompressTrace] only %d messages but one needs %d tokens (floor=%d, limit=%d): compacting anyway",
+                len(self.req),
+                largest,
+                irreducible,
+                overflow_limit,
+            )
 
         system_msg = self.req[0]
         first_user_idx = self._first_real_user_idx()
@@ -720,10 +840,12 @@ class ProviderAPIBase:
 
         msg_tokens = [(i, self._count_message_tokens(m)) for i, m in enumerate(self.req)]
 
-        # 2a. Token-budget retention
+        # 2a. Token-budget retention. Budgeted against `raw_tokens`, the same unit
+        #     as `msg_tokens` below — mixing in the calibrated number here would
+        #     compare two different units and silently widen the retained window.
         keep_frac = syscfg.ctx_keep_recent_fraction()
-        keep_token_budget = int(current_tokens * keep_frac)
-        recent_hard_cap = int(current_tokens * syscfg.ctx_recent_hard_cap_frac())
+        keep_token_budget = int(raw_tokens * keep_frac)
+        recent_hard_cap = int(raw_tokens * syscfg.ctx_recent_hard_cap_frac())
 
         recent_start = len(self.req)  # default: no recent portion
         recent_token_sum = 0
@@ -735,6 +857,10 @@ class ProviderAPIBase:
                 break
 
         if first_user_msg is not None:
+            # Never let the retained window reach back to the session's opening
+            # request: it is summarised instead of carried (see step 5 of the
+            # docstring), and starting the window after it also keeps the window
+            # from duplicating a message.
             recent_start = max(recent_start, first_user_idx + 1)
 
         # 2b. Rounds floor: never retain less than the last N user turns, as
@@ -800,7 +926,15 @@ class ProviderAPIBase:
                     recent_hard_cap,
                 )
 
-        # 3. Never start the retained section on an orphan tool message: the
+        # 3. Always keep a tail. The token budget can refuse even the last
+        #    message (one huge tool result against a 10% keep budget), and then
+        #    the request would shrink to `[system]` alone — no turn for the model
+        #    to answer, and for Anthropic no user message at all. The re-pinned
+        #    first-user message used to mask this.
+        if recent_start >= len(self.req):
+            recent_start = len(self.req) - 1
+
+        # 4. Never start the retained section on an orphan tool message: the
         # provider rejects `role:"tool"` without its preceding `tool_calls`.
         while recent_start > 0 and recent_start < len(self.req) and self.req[recent_start].get("role") == "tool":
             recent_start -= 1
@@ -827,7 +961,10 @@ class ProviderAPIBase:
 
         recent_msgs = self.req[recent_start:]
         end_scan = recent_start
-        start_scan = (first_user_idx + 1) if first_user_msg else 1
+        # The first real user request IS part of the summarise range now that it
+        # is no longer pinned into the request (see the assembly below): the
+        # summariser's "## Original Goal" section has to come from somewhere.
+        start_scan = first_user_idx if first_user_idx != -1 else 1
 
         logger.info(
             "[CompressTrace] retention: keep_frac=%.2f, keep_budget=%d tokens, "
@@ -861,15 +998,18 @@ class ProviderAPIBase:
                     recent_start = idx
                 else:
                     break
-            # Leave at least one message for the summarizer.
-            min_scan = min((first_user_idx + 2) if first_user_idx != -1 else 2, len(self.req))
+            # Leave at least one message for the summarizer — but never past the
+            # last message, or the request keeps no turn at all (see step 3).
+            min_scan = min((first_user_idx + 1) if first_user_idx != -1 else 2, len(self.req))
             if recent_start < min_scan:
                 recent_start = min_scan
+            if recent_start >= len(self.req):
+                recent_start = len(self.req) - 1
             while recent_start > 0 and recent_start < len(self.req) and self.req[recent_start].get("role") == "tool":
                 recent_start -= 1
             recent_msgs = self.req[recent_start:]
             end_scan = recent_start
-            start_scan = (first_user_idx + 1) if first_user_msg else 1
+            start_scan = first_user_idx if first_user_idx != -1 else 1
             logger.warning(
                 "[CompressTrace] forced recent_start=%d, summarize_range=[%d, %d) msgs=%d",
                 recent_start,
@@ -881,22 +1021,21 @@ class ProviderAPIBase:
                 # Degenerate conversation — nothing to summarise, but still
                 # drop the (empty) middle rather than returning it whole.
                 partial = [system_msg]
-                if first_user_msg:
-                    partial.append(first_user_msg)
                 partial.extend(recent_msgs)
                 new_count = self._count_tokens(partial, self._last_tools)
                 logger.info(
                     "[CompressTrace] skip summary: msgs=%d, tokens_before=%d, tokens_after=%d",
                     len(partial),
-                    current_tokens,
+                    raw_tokens,
                     new_count,
                 )
                 self.req = partial
                 self.invalidate_token_cache()
                 self._auto_compressed = True
                 self._auto_compress_stats = {
-                    "tokens_before": current_tokens,
+                    "tokens_before": raw_tokens,
                     "tokens_after": new_count,
+                    "token_scale": scale if calibrated else None,
                     "messages_before": len(partial),
                     "messages_after": len(partial),
                     "dropped_count": 0,
@@ -920,6 +1059,7 @@ class ProviderAPIBase:
             summarize_tokens,
             _time.monotonic() - _t0,
         )
+        # Still the OLD summary at this point (it is overwritten just below).
         summary_content = self._generate_summary(msgs_to_summarize)
         logger.info(
             "[CompressTrace] summarizer returned: summary_len=%d chars, elapsed=%.2fs",
@@ -932,20 +1072,29 @@ class ProviderAPIBase:
         previous_summary_snapshot = (getattr(self, "_latest_summary", "") or "").strip()
         self._latest_summary = f"[Context summary | Compressed {dropped_count} messages]\n{summary_content}"
 
+        # The original request is summarised, never re-pinned. The old
+        # `[system, first_user, *recent]` shape kept the session's very first
+        # user message in the request as if it were live, so the first turn after
+        # a compaction the model read it as the current task and re-ran the whole
+        # thing (session 20260922_113451_zh08). What the model gets instead is
+        # the summary: `{{CONTEXT_SUMMARY}}` in the system prompt
+        # (context_base.inject_standard) and, on disk, the `context_summary`
+        # message the runner stores.
         compacted_req = [system_msg]
-        if first_user_msg:
-            compacted_req.append(first_user_msg)
         compacted_req.extend(recent_msgs)
 
         new_token_count = self._count_tokens(compacted_req, self._last_tools)
         logger.info(
-            "[CompressTrace] compression result: msgs: %d -> %d, tokens: %d -> %d, saved=%d (%.1f%%)",
+            "[CompressTrace] compression result: msgs: %d -> %d, tokens: %d -> %d, saved=%d (%.1f%%), "
+            "scale=%s (calibrated=%d)",
             len(self.req),
             len(compacted_req),
-            current_tokens,
+            raw_tokens,
             new_token_count,
-            current_tokens - new_token_count,
-            (current_tokens - new_token_count) / max(current_tokens, 1) * 100,
+            raw_tokens - new_token_count,
+            (raw_tokens - new_token_count) / max(raw_tokens, 1) * 100,
+            f"{scale:.2f}" if calibrated else "n/a",
+            int(calibrated),
         )
 
         # Preserve reasoning_content from the pre-compression history: the
@@ -991,8 +1140,11 @@ class ProviderAPIBase:
 
         self._auto_compressed = True
         self._auto_compress_stats = {
-            "tokens_before": current_tokens,
+            "tokens_before": raw_tokens,
             "tokens_after": new_token_count,
+            # The divisor the policy actually ran on; None until a response has
+            # reported usage (see record_token_calibration).
+            "token_scale": scale if calibrated else None,
             "messages_before": len(self.req) + dropped_count,
             "messages_after": len(self.req),
             "dropped_count": dropped_count,
@@ -1005,9 +1157,10 @@ class ProviderAPIBase:
             "first_kept_content": first_kept_content,
         }
         logger.info(
-            "[CompressTrace] auto-compression COMPLETE (total_elapsed=%.2fs): %d -> %d tokens, %d messages retained",
+            "[CompressTrace] auto-compression COMPLETE (total_elapsed=%.2fs): %d -> %d tokens (local estimate), "
+            "%d messages retained",
             _time.monotonic() - _t0,
-            current_tokens,
+            raw_tokens,
             new_token_count,
             len(self.req),
         )

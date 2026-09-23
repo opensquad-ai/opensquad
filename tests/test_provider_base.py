@@ -200,22 +200,251 @@ def test_retained_section_never_starts_with_a_tool_message(cls, compression_para
     With this history the raw boundary lands on a ``tool`` message at
     keep_frac 0.15 / 0.31 / 0.47, so the sweep does exercise the guards.
     """
+    history = _tool_pair_history()
+    opening = history[1]
     for step in range(3, 61, 2):
         frac = step / 100
         compression_params(keep_frac=frac, hard_cap=0.001, rounds=0)
 
         api = _bare(cls)
-        api.req = _tool_pair_history()
+        api.req = list(history)
         api._prepare_messages()
 
-        # req[0] is the system message, req[1] the preserved first user message.
-        retained = api.req[2:]
+        # req[0] is the system message; the retained window follows it.
+        assert api.req[0].get("role") == "system"
+        retained = api.req[1:]
         if not retained:
             continue
         assert retained[0].get("role") != "tool", (
             f"{cls.__name__} retained context starting on an orphan tool message (keep_frac={frac})"
         )
-        assert api.req[1].get("role") == "user", "the preserved first message must stay a real user turn"
+        # The session's opening request must not survive as a live message — it
+        # is summarised instead (see test_first_user_request_is_summarised...).
+        assert opening not in retained, f"{cls.__name__} re-pinned the session's first user request (keep_frac={frac})"
+
+
+@pytest.mark.parametrize("cls", ALL_PROVIDERS, ids=lambda c: c.__name__)
+def test_first_user_request_is_summarised_not_pinned(cls, compression_params):
+    """The op's root cause: after compaction the model re-ran the original task.
+
+    ``compacted_req`` used to be ``[system_msg, first_user, *recent]``, so the
+    session's very first user request stayed in the request as if the user had
+    just sent it (session 20260922_113451_zh08). It must instead reach the model
+    through the summary — which means the summariser has to *see* it, or the
+    information is lost rather than moved.
+    """
+    compression_params(keep_frac=0.1, hard_cap=1.0, rounds=0)
+    api = _bare(cls)
+    api.req = _bulky_history()
+    opening = api.req[1]
+    summarised: list[list[dict]] = []
+    api._generate_summary = lambda msgs: summarised.append(list(msgs)) or "SUMMARY"
+
+    result = api._prepare_messages()
+
+    assert result[0] == {"role": "system", "content": "sys"}
+    assert opening not in result[1:], "the opening request was pinned back into the request"
+    assert any(opening in batch for batch in summarised), (
+        "the opening request was neither pinned nor summarised — the task description is simply gone"
+    )
+
+
+@pytest.mark.parametrize("cls", ALL_PROVIDERS, ids=lambda c: c.__name__)
+def test_compaction_never_returns_a_request_without_a_turn(cls, compression_params):
+    """A request of `[system]` alone has nothing to answer.
+
+    The retention budget is a fraction of the current tokens, so a single
+    oversized message (a big tool result, say) can be refused by the budget
+    entirely. The re-pinned first-user message used to cover for that; with it
+    gone the request must still keep a real turn.
+    """
+    compression_params(keep_frac=0.1, hard_cap=0.1, rounds=0)
+    api = _bare(cls)
+    # ≥5 messages or _prepare_messages returns early without compressing.
+    api.req = [
+        {"role": "system", "content": "sys"},
+        {"role": "user", "content": "do the thing"},
+        {"role": "assistant", "content": "working"},
+        {"role": "assistant", "content": "still working"},
+        {"role": "user", "content": "huge payload " + "z" * 4000},
+    ]
+    last = api.req[-1]
+
+    result = api._prepare_messages()
+
+    assert result[0] == {"role": "system", "content": "sys"}
+    assert len(result) > 1, "compaction returned a request with only the system message"
+    assert result[-1] is last, "the live turn was summarised away instead of retained"
+
+
+@pytest.mark.parametrize("cls", ALL_PROVIDERS, ids=lambda c: c.__name__)
+def test_auto_compaction_carries_the_previous_summary_forward(cls, compression_params):
+    """The superseded summary must reach the summariser, not just be replaced.
+
+    Every compaction overwrites ``_latest_summary``, and the messages the old
+    summary described are by then out of context — so a summariser that never
+    sees it drops that knowledge permanently (the manual path has always passed
+    it through ``build_summary_payload``; the automatic path did not).
+    """
+    compression_params(keep_frac=0.1, hard_cap=1.0, rounds=0)
+    prompts: list[str] = []
+    api = object.__new__(cls)
+    api.req = _bulky_history()
+    api.model = "test-model"
+    api.token_max = 100
+    api.encoding = None
+    api._init_provider_base()
+
+    def _transport(system_prompt, user_prompt, max_tokens):
+        prompts.append(user_prompt)
+        return "NEW SUMMARY"
+
+    api._summarizer_request = _transport  # keep the real _generate_summary/prompt assembly
+
+    api._latest_summary = "OLD SUMMARY: port 8080, edited src/a/b.py"
+    api._prepare_messages()
+
+    assert prompts, "the summariser was never called"
+    assert "OLD SUMMARY: port 8080, edited src/a/b.py" in prompts[0], (
+        "the previous summary was dropped — only directly re-read messages reach the summariser"
+    )
+    assert "[Previous Context Summary" in prompts[0]
+
+    # ...and nothing is invented when there is no previous summary.
+    prompts.clear()
+    api2 = object.__new__(cls)
+    api2.req = _bulky_history()
+    api2.model = "test-model"
+    api2.token_max = 100
+    api2.encoding = None
+    api2._init_provider_base()
+    api2._summarizer_request = _transport
+    api2._prepare_messages()
+    assert prompts and "[Previous Context Summary" not in prompts[0]
+
+
+@pytest.mark.parametrize("cls", ALL_PROVIDERS, ids=lambda c: c.__name__)
+def test_short_history_with_one_oversized_message_still_compacts(cls, compression_params):
+    """`len(self.req) < 5` used to return the history whole, whatever its size.
+
+    The irreducible preflight only covers the system message + tool schemas, so
+    a 4-message session carrying one enormous tool result was never compacted and
+    went straight to the provider to 400.
+    """
+    compression_params(keep_frac=0.1, hard_cap=0.1, rounds=0)
+    api = _bare(cls)
+    api.token_max = 100  # overflow_limit = 100 * ctx_overflow_guard_frac()
+    api.req = [
+        {"role": "system", "content": "sys"},
+        {"role": "user", "content": "summarise this dump"},
+        {"role": "assistant", "content": "reading"},
+        {"role": "tool", "tool_call_id": "c1", "name": "read", "content": "x" * 20000},
+    ]
+    before = len(api.req)
+
+    result = api._prepare_messages()
+
+    assert api._auto_compressed is True, "a 4-message history with a huge tool result was not compacted"
+    assert len(result) < before or result is not api.req
+
+
+@pytest.mark.parametrize("cls", ALL_PROVIDERS, ids=lambda c: c.__name__)
+def test_short_small_history_is_still_left_untouched(cls, compression_params):
+    """The guard must not start compacting healthy short sessions."""
+    compression_params(keep_frac=0.1, hard_cap=1.0, rounds=0)
+    api = _bare(cls)
+    api.token_max = 100000
+    api.req = [
+        {"role": "system", "content": "sys"},
+        {"role": "user", "content": "hi"},
+        {"role": "assistant", "content": "hello"},
+    ]
+
+    result = api._prepare_messages()
+
+    assert result is api.req
+    assert api._auto_compressed is False
+
+
+# ── invariant: the trigger runs on measured, not assumed, token sizes ────
+
+
+def test_providers_feed_reported_usage_into_the_calibration():
+    """The base-class maths is useless if no provider ever reports a sample."""
+    root = Path(__file__).resolve().parents[1] / "src" / "opensquad"
+    for name in ("chat_api.py", "claude_api.py"):
+        assert "record_token_calibration(" in (root / name).read_text(encoding="utf-8"), (
+            f"{name} no longer feeds provider-reported usage into the token calibration"
+        )
+
+
+@pytest.mark.parametrize("cls", ALL_PROVIDERS, ids=lambda c: c.__name__)
+def test_calibration_learns_the_real_to_estimate_ratio(cls):
+    api = _bare(cls)
+    sent = [
+        {"role": "system", "content": "sys"},
+        {"role": "user", "content": "word " * 100},
+    ]
+    assert api._calibrated_token_scale() == (1.0, False)
+
+    api.record_token_calibration(400, sent)
+
+    scale, calibrated = api._calibrated_token_scale()
+    assert calibrated is True
+    estimated = api._count_tokens(sent, api._last_tools)
+    assert scale == pytest.approx(400 / estimated, rel=0.01)
+
+
+@pytest.mark.parametrize("cls", ALL_PROVIDERS, ids=lambda c: c.__name__)
+def test_calibration_ignores_unusable_samples(cls):
+    """A wild or missing sample must not become compression policy."""
+    api = _bare(cls)
+    sent = [{"role": "user", "content": "hello"}]
+
+    api.record_token_calibration(0, sent)
+    api.record_token_calibration(None, sent)
+    api.record_token_calibration("nonsense", sent)
+    assert api._calibrated_token_scale() == (1.0, False), "an empty sample calibrated the estimate"
+
+    # Clamped, smoothed, and never zero/negative.
+    for _ in range(20):
+        api.record_token_calibration(10**9, sent)
+    scale, calibrated = api._calibrated_token_scale()
+    assert calibrated and 1.0 < scale <= 5.0
+
+
+@pytest.mark.parametrize("cls", ALL_PROVIDERS, ids=lambda c: c.__name__)
+def test_calibrated_scale_drives_the_compression_trigger(cls, compression_params):
+    """Under-counted tokens (CJK case) must still trigger compaction.
+
+    The trigger compares the local estimate against the window, so a measured
+    scale of 4x (roughly the Chinese `len//4` error) has to be enough on its own:
+    the fixture is sized to pass both uncalibrated checks and fail only once the
+    measured ratio is applied.
+    """
+    compression_params(trigger=0.75, keep_frac=0.1, hard_cap=1.0, rounds=0)
+    api = _bare(cls)
+    api.token_max = 1000
+    api.req = [
+        {"role": "system", "content": "sys"},
+        {"role": "user", "content": "u" * 160},
+        {"role": "assistant", "content": "a" * 160},
+        {"role": "user", "content": "v" * 160},
+        {"role": "assistant", "content": "b" * 160},
+    ]
+    soft = int(api.token_max * 0.75)
+    guard = int(api.token_max * 0.85)
+    raw = api.get_current_token_count(api._last_tools)
+    assert raw <= soft and raw * 3 <= guard, "fixture already compacts while uncalibrated"
+    assert raw * 4 > soft, "fixture does not cross the soft threshold at 4x"
+
+    api._prepare_messages()
+    assert api._auto_compressed is False, "sanity: the uncalibrated estimate looks fine"
+
+    api.record_token_calibration(raw * 4, list(api.req))
+    api._prepare_messages()
+
+    assert api._auto_compressed is True, "a 4x under-count did not trigger compaction"
 
 
 # ── invariant: auto-compress stats are emitted by every provider ─────────

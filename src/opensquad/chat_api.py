@@ -579,7 +579,15 @@ class ChatAPI(ProviderAPIBase):
                 finish_reason,
                 len(parts),
             )
-            return "Summary generation returned empty response. Please rely on the First User Query."
+            # The compressed middle is gone for good, so point the model at what
+            # it *does* still have — the pinned opening request this used to
+            # reference is no longer carried in the request (see
+            # _provider_base._prepare_messages step 5).
+            return (
+                "Summary generation returned an empty response. The older conversation is no longer "
+                "in context — continue from the retained recent messages and the current request, and "
+                "ask the user if a detail you need is missing."
+            )
         return content
 
     def add_user_message(
@@ -1800,6 +1808,10 @@ class ChatAPI(ProviderAPIBase):
             # may return either — one extractor covers all of them.
             self.total_cache_read_tokens += extract_cached_tokens(stream_usage)
             self.usage_reported_turns += 1
+            # `messages` is exactly what was sent, so this is a real measurement
+            # of the provider/local token ratio — the compression trigger uses it
+            # instead of trusting the local estimate blindly.
+            self.record_token_calibration(getattr(stream_usage, "prompt_tokens", 0) or 0, messages, self._last_tools)
         else:
             # Fallback: estimate based on tiktoken. Cache read is unknowable
             # here, so the turn is recorded as estimated and the context panel

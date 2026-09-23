@@ -236,6 +236,29 @@ describe('intermediate assistant output demotion (过程输出)', () => {
     expect(wfBlock.data.events[0].content).toBe('先说一句，随后调用工具');
   });
 
+  it('demoteTrailing only covers the timeline tail, never a finished turn', () => {
+    // 用户发出下一条消息后，实时装帧会带着 demoteTrailing 再跑一次 demote。
+    // 这个标志若对所有 turn 生效，上一轮「已经给用户看完的最终答复」会被折进
+    // 上一轮的工具流变成过程输出——用户看到刚读过的答案被收走。
+    const t = (s: string) => Date.parse(s);
+    const tl: any[] = [
+      msg('user', '第一轮问题', '2026-09-13T02:00:00.000Z'),
+      wf(true, t('2026-09-13T02:01:00.000Z'), 1),
+      msg('assistant', '第一轮的最终答复', '2026-09-13T02:02:00.000Z'),
+      msg('user', '第二轮问题', '2026-09-13T02:03:00.000Z'),
+      wf(false, t('2026-09-13T02:04:00.000Z'), 1),
+    ];
+    const out = demoteIntermediateAssistantMessages(tl as any, { demoteTrailing: true });
+    expect(out.filter((e) => e.kind === 'message').map((e: any) => e.data.content)).toEqual([
+      '第一轮问题',
+      '第一轮的最终答复',
+      '第二轮问题',
+    ]);
+    // 上一轮折叠里不该凭空多出一行过程输出
+    const first = out.find((e) => e.kind === 'workflow') as any;
+    expect(first.data.events.map((e: any) => e.type)).toEqual(['tool_call']);
+  });
+
   it('slots each process_output at its own time, not at the block front', () => {
     // 一个 block 可以横跨好几轮：叙述是「给用户看的过程输出」，工具行才是它那一轮
     // 的动作。旧规则一律插到块首，于是多段叙述挤成一排、它们的工具全沉到下面

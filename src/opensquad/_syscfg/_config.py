@@ -201,7 +201,7 @@ def ctx_overflow_guard_frac() -> float:
     """Fraction of ``token_max`` above which the *irreducible* prompt part
     (system message + tool schemas) is declared unfixable by compression.
 
-    Compression rebuilds the request as ``[system_msg, first_user, *recent]``,
+    Compression rebuilds the request as ``[system_msg, *recent]``,
     so the system message and the tool schemas are a hard floor on the request
     size. When that floor alone exceeds this fraction of the window no amount
     of compacting can help: the turn fails fast with a self-describing error

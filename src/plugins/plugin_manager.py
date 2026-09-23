@@ -564,7 +564,7 @@ class PluginManager:
                 if tool_desc:
                     wrapper.__doc__ = tool_desc
                 for tm in methods:
-                    wrapper.add_method(
+                    wrapper._add_method(
                         method_name=tm["method_name"],
                         bound_method=tm["bound_method"],
                         doc=tm["bound_method"].__doc__ or "",

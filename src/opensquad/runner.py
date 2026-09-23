@@ -952,10 +952,22 @@ class AgentRunner:
         history intact (UI looks truncated until refresh).
         """
         input_hub.clear_stop_request()
+        # Scope the abort to the session being withdrawn. Without the sid it
+        # also closed every sibling pane's shells and killed every child
+        # process of the agent, so withdrawing one pane's turn froze the
+        # others. Resolution mirrors the truncation below plus the
+        # focused/current idiom the other session commands use.
+        try:
+            _sm = _get_session_manager()
+            sid = (getattr(self, "_turn_sid", "") or "").strip()
+            if not sid:
+                sid = (_sm.get_focused_session_id() or _sm.get_current_session_id() or "").strip()
+        except Exception:
+            sid = ""
         try:
             from opensquad.tools.system import abort_all_tool_processes
 
-            abort_all_tool_processes("withdraw_turn")
+            abort_all_tool_processes("withdraw_turn", session_id=sid or None)
         except Exception:
             logger.debug("[Runner] abort_all_tool_processes on withdraw skipped", exc_info=True)
         try:
