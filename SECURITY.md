@@ -38,7 +38,7 @@ We will coordinate a disclosure timeline with you once the fix is ready.
 ## Scope
 
 **In scope** — code in this repository and the artifacts built from it
-(PyPI `opensquad`, npm `@opensquad-ai/opensquad`, `ghcr.io/opensquad-ai/opensquad` images, GitHub Releases), the plugin loading and sandbox boundary, authn/authz in the Gateway / Launcher, and the 20 bundled plugins under `src/plugins/`.
+(PyPI `opensquad`, npm `opensquad-ai`, `ghcr.io/opensquad-ai/opensquad` images, GitHub Releases), the plugin loading and sandbox boundary, authn/authz in the Gateway / Launcher, and the 20 bundled plugins under `src/plugins/`.
 
 **Out of scope** — the separate plugin / skill / role / collab registries
 (`opensquad-ai/opensquad-plugins`, `opensquad-ai/opensquad-skills`,

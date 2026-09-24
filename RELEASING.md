@@ -30,7 +30,8 @@ The whole flow normally takes 30–60 minutes if the gates are green.
   ```
 
   This updates `src/opensquad/__init__.py::__version__` (same PEP 440 string),
-  root `package.json`, and `src/opensquad/gateway/nexuschat-pro/package.json`
+  root `package.json`, root `package-lock.json`, and
+  `src/opensquad/gateway/nexuschat-pro/package.json`
   (Electron `app.getVersion()`, npm semver e.g. `0.4.2.dev0` → `0.4.2-dev.0`).
   Then refresh the lockfile so editable package metadata matches:
 
@@ -49,7 +50,7 @@ The whole flow normally takes 30–60 minutes if the gates are green.
 | Docker image | `ghcr.io/opensquad-ai/opensquad:X.Y.Z` (and `:latest` on final release) |
 | Gateway frontend | Bundled in repo / Docker image (built inside the image, not a separate artifact) |
 | Desktop (Electron) | `.github/workflows/build-desktop.yml` on `v*` tag |
-| npm package `@opensquad-ai/opensquad` | `.github/workflows/release-npm.yml` on `v*` tag (bootstrap wrapper, see below) |
+| npm package `opensquad-ai` | `.github/workflows/release-npm.yml` on `v*` tag (bootstrap wrapper, see below) |
 
 ## Pre-flight checklist (before cutting the release branch)
 
@@ -172,19 +173,21 @@ the Python CLI, it just installs it and forwards commands.
 
 | Field | Value |
 |-------|-------|
-| npm name | `@opensquad-ai/opensquad` |
+| npm name | `opensquad-ai` |
 | bin name | `opensquad` |
 | License | MIT (matches `LICENSE` at the repo root) |
 | Source | `package.json` + `bin/opensquad.js` |
 | Workflow | `.github/workflows/release-npm.yml` |
 | Trigger | push of any `v*` tag |
 
-The package name is **scoped** because the unscoped name `opensquad`
-is already taken on the public registry by an unrelated project.
+The package name is **unscoped** (`opensquad-ai`, not `@opensquad-ai/opensquad`)
+because the npm org `opensquad-ai` does not exist. The unscoped name
+`opensquad` is already taken on the public registry by an unrelated
+project, so the `-ai` suffix is what keeps us distinct.
 
 ### How the bootstrap works
 
-When a user runs `npx @opensquad-ai/opensquad`:
+When a user runs `npx opensquad-ai`:
 
 1. The Node.js script `bin/opensquad.js` runs.
 2. It detects Python 3.11+ on `PATH` (`python3` or `python`).
@@ -197,7 +200,7 @@ So users get a familiar short command (`opensquad`) without
 needing to know they crossed a language boundary:
 
 ```bash
-npm install -g @opensquad-ai/opensquad
+npm install -g opensquad-ai
 opensquad --version
 opensquad run ...
 ```
@@ -213,26 +216,24 @@ Requirements for the workflow to succeed:
 1. The tag matches `package.json` version (the workflow's `validate` job
    enforces this; bump `version` in `package.json` when bumping
    `pyproject.toml`).
-2. The npm account `@opensquad-ai` (https://www.npmjs.com/org/
-   opensquad-ai) is configured for **trusted publishing** with
-   this repository as the OIDC publisher. See the npm docs to set
-   this up once.
+2. The **`NPM_TOKEN` repo secret is set** (`Settings → Secrets and
+   variables → Actions → New repository secret`). Its value must be a
+   **granular access token** minted by the npm account that owns the
+   package (`opensquad`), with *Read and write* package permission for
+   `opensquad-ai`. The publish job reads this secret unconditionally —
+   there is no fallback, and an unset or revoked token fails the job
+   with `ENEEDAUTH`. (This is why every `v0.8.41`–`v0.8.45` tag failed.)
 3. The workflow has `id-token: write` permission (already set in
-   the file).
-
-If trusted publishing isn't set up yet, the workflow falls back to
-`NPM_TOKEN` (a publish token stored in repo secrets). Set it via
-`Settings → Secrets and variables → Actions → New repository secret`,
-name `NPM_TOKEN`, value from `npm token create`.
+   the file), currently unused — npm trusted publishing (OIDC) is
+   **not** configured for this package yet.
 
 ### Manual backfill (one-time, e.g. for v0.1.0)
 
-If a tag was pushed before trusted publishing / `NPM_TOKEN` was
-configured, publish manually:
+If a tag was pushed before `NPM_TOKEN` was configured, publish manually:
 
 ```bash
-npm login --registry=https://registry.npmjs.org/   # as @opensquad-ai
-npm publish --access public
+npm login --registry=https://registry.npmjs.org/   # as the `opensquad` npm account
+npm publish
 ```
 
 ### Why a thin wrapper, not a real npm package?
@@ -250,7 +251,7 @@ code). It also means the npm package and PyPI package are always
 the same version with the same source.
 
 If a real JS SDK is needed later, it should live in a separate
-package (`@opensquad-ai/sdk` or similar), not replace this
+package (`opensquad-ai-sdk` or similar), not replace this
 bootstrap.
 
 ## Pre-release protocol (alpha / beta / rc)
@@ -361,7 +362,7 @@ After the final tag is pushed and `release.yml` completes:
   arm64 DMG (see [desktop_build.md](doc_en/desktop_build.md)).
 - [ ] **Docker image is on `ghcr.io/opensquad-ai/opensquad:0.X.Y` and `:latest`** (final release only).
 - [ ] **PyPI shows the new version** at https://pypi.org/project/opensquad/#history.
-- [ ] **npm package published** (`@opensquad-ai/opensquad` on the public registry).
+- [ ] **npm package published** (`opensquad-ai` on the public registry).
 - [ ] **`dev` is bumped** to the next `.dev0` (per [BRANCHING.md](BRANCHING.md) cheat sheet) and pushed.
 - [ ] **`[Unreleased]` section in `CHANGELOG.md` is open on dev** for the next cycle.
 - [ ] **Release branch deleted** locally and on remote.

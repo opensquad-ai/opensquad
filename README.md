@@ -165,7 +165,22 @@ opensquad init
 opensquad start
 ```
 
-### Option 4: Docker
+### Option 4: npm (Node.js users)
+
+The npm package is a thin bootstrap: on first run it installs the
+matching Python `opensquad` CLI, then forwards every command to it.
+
+```bash
+npm install -g opensquad-ai
+
+opensquad init
+opensquad start
+```
+
+Requires Node.js 18+ and Python 3.11+. `npx opensquad-ai` works too, with
+no global install.
+
+### Option 5: Docker
 
 ```bash
 git clone https://github.com/opensquad-ai/opensquad.git

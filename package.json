@@ -1,5 +1,5 @@
 {
-  "name": "@opensquad-ai/opensquad",
+  "name": "opensquad-ai",
   "version": "0.8.45",
   "description": "OpenSquad — Local-first Multi-Agent Collaboration Framework. npm bootstrap that installs the Python `opensquad` CLI and proxies commands to it.",
   "bin": {
@@ -32,7 +32,6 @@
     "framework"
   ],
   "publishConfig": {
-    "access": "public",
     "registry": "https://registry.npmjs.org/"
   }
 }

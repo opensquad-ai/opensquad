@@ -5,6 +5,7 @@ Sync project version from pyproject.toml (single source of truth).
 Updates:
   - src/opensquad/__init__.py  (__version__, PEP 440 — same as pyproject.toml)
   - package.json               (npm semver — converted for pre-release markers)
+  - package-lock.json          (same npm version, so the lock cannot drift)
   - src/opensquad/gateway/nexuschat-pro/package.json  (Electron app version)
 
 Usage:
@@ -26,6 +27,7 @@ ROOT = Path(__file__).resolve().parent.parent
 PYPROJECT = ROOT / "pyproject.toml"
 INIT_PY = ROOT / "src" / "opensquad" / "__init__.py"
 PACKAGE_JSON = ROOT / "package.json"
+PACKAGE_LOCK = ROOT / "package-lock.json"
 NEXUSCHAT_PACKAGE_JSON = ROOT / "src" / "opensquad" / "gateway" / "nexuschat-pro" / "package.json"
 
 _VERSION_LINE = re.compile(r'^(__version__\s*=\s*)["\'][^"\']+["\']', re.MULTILINE)
@@ -80,7 +82,18 @@ def render_package_json(path: Path, npm_version: str) -> str:
     return json.dumps(data, indent=2, ensure_ascii=False) + "\n"
 
 
-def compute_targets() -> tuple[str, str, str, str, str]:
+def render_package_lock(npm_version: str) -> str:
+    """The lock records the root version twice: top-level and under packages[""]."""
+    data = json.loads(PACKAGE_LOCK.read_text(encoding="utf-8"))
+    data["version"] = npm_version
+    root = data.get("packages", {}).get("")
+    if root is None:
+        raise SystemExit(f"::error::No root entry in {PACKAGE_LOCK}")
+    root["version"] = npm_version
+    return json.dumps(data, indent=2, ensure_ascii=False) + "\n"
+
+
+def compute_targets() -> tuple[str, str, str, str, str, str]:
     pep440 = read_pyproject_version()
     npm = pep440_to_npm(pep440)
     return (
@@ -89,6 +102,7 @@ def compute_targets() -> tuple[str, str, str, str, str]:
         render_init_py(pep440),
         render_package_json(PACKAGE_JSON, npm),
         render_package_json(NEXUSCHAT_PACKAGE_JSON, npm),
+        render_package_lock(npm),
     )
 
 
@@ -101,10 +115,11 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    pep440, npm, init_content, pkg_content, nexus_content = compute_targets()
+    pep440, npm, init_content, pkg_content, nexus_content, lock_content = compute_targets()
     init_current = INIT_PY.read_text(encoding="utf-8")
     pkg_current = PACKAGE_JSON.read_text(encoding="utf-8")
     nexus_current = NEXUSCHAT_PACKAGE_JSON.read_text(encoding="utf-8")
+    lock_current = PACKAGE_LOCK.read_text(encoding="utf-8")
 
     drift: list[str] = []
     if init_current != init_content:
@@ -113,6 +128,8 @@ def main() -> int:
         drift.append(f"{PACKAGE_JSON.relative_to(ROOT)} (version should be {npm!r})")
     if nexus_current != nexus_content:
         drift.append(f"{NEXUSCHAT_PACKAGE_JSON.relative_to(ROOT)} (version should be {npm!r})")
+    if lock_current != lock_content:
+        drift.append(f"{PACKAGE_LOCK.relative_to(ROOT)} (version should be {npm!r})")
 
     if args.check:
         if drift:
@@ -120,7 +137,10 @@ def main() -> int:
             for item in drift:
                 print(f"  - {item}", file=sys.stderr)
             return 1
-        print(f"Version sync OK: pyproject.toml={pep440!r}, package.json={npm!r}, nexuschat-pro/package.json={npm!r}")
+        print(
+            f"Version sync OK: pyproject.toml={pep440!r}, package.json={npm!r}, "
+            f"package-lock.json={npm!r}, nexuschat-pro/package.json={npm!r}"
+        )
         return 0
 
     if not drift:
@@ -130,8 +150,10 @@ def main() -> int:
     INIT_PY.write_text(init_content, encoding="utf-8", newline="\n")
     PACKAGE_JSON.write_text(pkg_content, encoding="utf-8", newline="\n")
     NEXUSCHAT_PACKAGE_JSON.write_text(nexus_content, encoding="utf-8", newline="\n")
+    PACKAGE_LOCK.write_text(lock_content, encoding="utf-8", newline="\n")
     print(f"Synced version {pep440!r} -> {INIT_PY.relative_to(ROOT)}")
     print(f"Synced npm version {npm!r} -> {PACKAGE_JSON.relative_to(ROOT)}")
+    print(f"Synced npm version {npm!r} -> {PACKAGE_LOCK.relative_to(ROOT)}")
     print(f"Synced npm version {npm!r} -> {NEXUSCHAT_PACKAGE_JSON.relative_to(ROOT)}")
     return 0
 

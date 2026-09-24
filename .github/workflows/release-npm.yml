@@ -1,6 +1,6 @@
 name: Release (npm)
 
-# Publishes the @opensquad-ai/opensquad npm package on every `v*` tag.
+# Publishes the opensquad-ai npm package on every `v*` tag.
 # The package is a thin Node.js wrapper that installs the Python
 # `opensquad` CLI and proxies commands to it. See bin/opensquad.js.
 
@@ -67,6 +67,6 @@ jobs:
 
       - name: Summary
         run: |
-          echo "Published @opensquad-ai/opensquad@${{ needs.validate.outputs.npm_version }}"
-          echo "Install with:  npm install -g @opensquad-ai/opensquad"
-          echo "Try with:      npx -p @opensquad-ai/opensquad opensquad --version"
+          echo "Published opensquad-ai@${{ needs.validate.outputs.npm_version }}"
+          echo "Install with:  npm install -g opensquad-ai"
+          echo "Try with:      npx -p opensquad-ai opensquad --version"

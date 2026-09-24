@@ -166,7 +166,21 @@ opensquad init
 opensquad start
 ```
 
-### 方式四：Docker 部署
+### 方式四：npm 安装（Node.js 用户）
+
+npm 包只是一个引导层：首次运行时自动安装对应版本的 Python `opensquad`
+CLI，之后把所有命令转发给它。
+
+```bash
+npm install -g opensquad-ai
+
+opensquad init
+opensquad start
+```
+
+需要 Node.js 18+ 和 Python 3.11+。不装全局也可以直接 `npx opensquad-ai`。
+
+### 方式五：Docker 部署
 
 ```bash
 git clone https://github.com/opensquad-ai/opensquad.git
