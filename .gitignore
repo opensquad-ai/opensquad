@@ -366,6 +366,13 @@ src/plugins/news2theme/
 src/skills/news2theme/
 src/skills/news2theme-ops/
 src/skills/zt2theme/
+# Authored skills kept local: their sources stay on disk for local builds, but
+# must not be published. Already-tracked dirs need `git rm -r --cached` too —
+# an ignore rule alone does not untrack them.
+src/skills/j-space/
+src/skills/cursor-api/
+src/skills/playwright/
+src/skills/vcs_collaboration/
 docs/new2theme_agent_role.md
 docs/new2theme_plugin_design.md
 scripts/cfg_news2theme_agent.py
