@@ -905,6 +905,27 @@ function messageHasVisibleChat(m: any): boolean {
   return cleaned.length > 0;
 }
 
+/**
+ * Kind of the closest entry above `i` that actually paints something.
+ *
+ * 'prompt' entries render as null in the chat body (their content lives in the
+ * ContextViewer), so "what is the row above me?" has to look through them. A
+ * `prompt_update` landing between a workflow group and its reply otherwise made
+ * the reply paint its own agent-name line although the group above already
+ * showed the same name — the reply's gate saw `prompt` where it wanted
+ * `workflow` (see the sender-label dedup rule).
+ */
+export function previousRenderedEntryKind(
+  timeline: TimelineEntry[],
+  i: number,
+): TimelineEntry['kind'] | null {
+  for (let j = Math.min(i, timeline.length) - 1; j >= 0; j -= 1) {
+    if (timeline[j].kind === 'prompt') continue;
+    return timeline[j].kind;
+  }
+  return null;
+}
+
 /** Collapse refresh-split activity chunks so one turn stays one fold (scroll box).
  *  'prompt' entries render as null at top level, so they must NOT split two
  *  workflow blocks apart (otherwise each round renders as its own fold row). */
@@ -1741,6 +1762,43 @@ export function timelineHasVisibleChatContent(timeline: TimelineEntry[]): boolea
     // status_hint / prompt — keep landing until real chat appears
   }
   return false;
+}
+
+/**
+ * Decide whether a session is still an untouched draft — the only case where
+ * 「新会话」 may reuse the existing sid instead of minting a new one.
+ *
+ * Absence of in-memory evidence is NOT evidence of emptiness. The per-session
+ * bucket is an empty array after any "clear the view" write, and is missing
+ * entirely for a tab restored by another surface, while the transcript sits on
+ * disk. Reading that as "empty draft" kept the old sid as the send target, so
+ * the next message was appended to the conversation the user just left.
+ *
+ * Every source we have must agree that there is nothing there. This mirrors the
+ * agent's own `_is_reusable_draft` (reuse only a session with no user input)
+ * from the client side, and errs toward "not a draft": a needless mint is a
+ * no-op the agent answers by reusing the draft itself, while a wrong reuse
+ * appends the user's message to the conversation they just left.
+ */
+export function isEmptySessionDraft(input: {
+  /** Live per-session bucket (or the focused timeline as fallback). */
+  liveEntries?: TimelineEntry[] | null;
+  /** Cached timeline for the sid, when the session was loaded in this page. */
+  cachedEntries?: TimelineEntry[] | null;
+  /** Cached live-message count for the sid. */
+  cachedMessageCount?: number | null;
+  /** Server-reported total for the sid, when known. */
+  cachedTotalMessages?: number | null;
+}): boolean {
+  const hasVisible = (entries?: TimelineEntry[] | null): boolean =>
+    Array.isArray(entries)
+    && entries.length > 0
+    && timelineHasVisibleChatContent(entries);
+  if (hasVisible(input.liveEntries)) return false;
+  if (hasVisible(input.cachedEntries)) return false;
+  if ((input.cachedMessageCount ?? 0) > 0) return false;
+  if ((input.cachedTotalMessages ?? 0) > 0) return false;
+  return true;
 }
 
 /** Fold agent-side process between the latest user message and an end-task report. */

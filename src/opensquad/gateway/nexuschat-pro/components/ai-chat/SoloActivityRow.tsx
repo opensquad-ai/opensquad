@@ -34,6 +34,8 @@ import {
 import type { WorkflowBlock, WorkflowEvent } from '../../utils/aiChatTimeline';
 import { formatUserSkillDisplayContent, isFinalFlag, isToolResultFailure } from '../../utils/aiChatTimeline';
 import { hasOpenAsyncDelegate, isUiOnlyToolName } from '../../utils/aiChatTimeline';
+import { parseMachineUserMessage, type MachineNotice } from '../../utils/machineUserMessage';
+import { MachineUserNotice } from './MachineUserNotice';
 import { FileDiffBlock, extractFileEditInfo, parsePartialFileToolArgs, applyEditDiffContext, type FileEditInfo } from './FileDiffBlock';
 import { formatElapsedAtLeastOneSecond } from '../../utils/formatElapsed';
 import { buildDisplayWorkflowItems, type DelegateBundle } from '../../utils/delegateGrouping';
@@ -202,6 +204,8 @@ interface ActivityLine {
   /** Context-compression summary flags */
   summaryDone?: boolean;
   summaryPending?: boolean;
+  /** Machine-generated steer (form submission / reminder / group message) — rendered as a notice. */
+  machineNotice?: MachineNotice;
   /** Cursor-style delegate bundle (opens SubAgentPanel) */
   delegation?: DelegateBundle;
   /** system.start_job / run_session_job live CMD panel */
@@ -419,7 +423,17 @@ function eventToLines(evt: WorkflowEvent, key: string, blockCompleted: boolean, 
         : (evt.content?.text || evt.content?.content || '');
     const text = formatUserSkillDisplayContent(String(raw)).trim();
     if (!text) return lines;
-    lines.push({ key, kind: 'steer', primary: '', secondary: '', detail: text });
+    // A form submission / reminder / group message that arrived mid-turn lives
+    // here (inside the running tool fold) — same notice as its top-level twin.
+    const parsed = parseMachineUserMessage(text);
+    lines.push({
+      key,
+      kind: 'steer',
+      primary: '',
+      secondary: '',
+      detail: parsed.text,
+      machineNotice: parsed.notice || undefined,
+    });
     return lines;
   }
 
@@ -1179,6 +1193,18 @@ const SoloEventLine = React.memo(function SoloEventLine({
   // 插话（steer）：一行紧凑的用户插入语，不参与工具计数。正文按引用行（"> "）
   // 分段，长文本在行内滚动，避免把虚拟化的步长估算撑歪。
   if (line.kind === 'steer') {
+    // Machine-generated steer (form / reminder / group): a notice row instead of
+    // raw marker text, and nothing at all when the notice is the whole line.
+    if (line.machineNotice) {
+      return (
+        <div className="w-full py-0.5 text-[12px] leading-relaxed flex items-start gap-1.5">
+          <Reply size={12} className="mt-[3px] flex-shrink-0 text-primary/70" />
+          <div className="min-w-0 flex-1">
+            <MachineUserNotice notice={line.machineNotice} variant="inline" />
+          </div>
+        </div>
+      );
+    }
     return (
       <div className="w-full py-0.5 text-[12px] leading-relaxed flex items-start gap-1.5">
         <Reply size={12} className="mt-[3px] flex-shrink-0 text-primary/70" />

@@ -238,6 +238,86 @@ function clampHeight(h?: number): number {
   return Math.max(MIN_HEIGHT, Math.min(MAX_HEIGHT, Math.round(h)));
 }
 
+/**
+ * Live `html.dark` flag — the marker every theme path toggles
+ * (themeEngine.applyThemePrefs). Observed rather than read from the theme
+ * module so a preset switch, a system-appearance switch and a manual class flip
+ * all reach the embedded pages without a reload.
+ */
+function useHostDarkAppearance(): boolean {
+  const [dark, setDark] = useState(
+    () => typeof document !== 'undefined' && document.documentElement.classList.contains('dark'),
+  );
+  useEffect(() => {
+    const root = document.documentElement;
+    const sync = () => setDark(root.classList.contains('dark'));
+    sync();
+    const observer = new MutationObserver(sync);
+    observer.observe(root, { attributes: true, attributeFilter: ['class'] });
+    return () => observer.disconnect();
+  }, []);
+  return dark;
+}
+
+/**
+ * Injected into a seamless embed: drop the page's own canvas background so the
+ * visualization sits on the chat surface instead of on a slab of its own colour
+ * (agent pages routinely ship `body{background:#f0f4f8}`, which reads as a
+ * grey panel bolted into the conversation).
+ *
+ * Only the *canvas* is touched, and only when it would not fight the text: the
+ * page's inner cards keep their colours, and a dark-canvas page on a light chat
+ * (or a light-canvas page on a dark chat) keeps its own background, because that
+ * backdrop is what its text was designed against. The host appearance arrives
+ * as a built-in default plus live `os_host_appearance` messages.
+ */
+export function blendCanvasScript(hostDarkInitial: boolean): string {
+  return `<script data-opensquad-blend-script="1">
+(function () {
+  var hostDark = ${hostDarkInitial ? 'true' : 'false'};
+  var style = document.createElement('style');
+  style.setAttribute('data-opensquad-blend', '1');
+  style.textContent = 'html,body{background:transparent !important;background-image:none !important;}';
+  function level(color) {
+    var m = /rgba?\\(\\s*(\\d+)[,\\s]+(\\d+)[,\\s]+(\\d+)(?:[,\\s/]+([\\d.]+))?\\s*\\)/.exec(color || '');
+    if (!m) return null;
+    var alpha = m[4] === undefined ? 1 : parseFloat(m[4]);
+    if (!(alpha > 0.05)) return null;
+    return (0.299 * +m[1] + 0.587 * +m[2] + 0.114 * +m[3]) / 255;
+  }
+  function canvasIsLight() {
+    var body = level(getComputedStyle(document.body).backgroundColor);
+    if (body !== null) return body > 0.5;
+    var root = level(getComputedStyle(document.documentElement).backgroundColor);
+    return root === null || root > 0.5;
+  }
+  function canvasIsDesigned() {
+    var images = [getComputedStyle(document.body).backgroundImage,
+                  getComputedStyle(document.documentElement).backgroundImage];
+    return images.some(function (v) { return v && v !== 'none'; });
+  }
+  function apply() {
+    if (!document.body || !document.head) return;
+    var blend = !canvasIsDesigned() && canvasIsLight() !== hostDark;
+    if (blend) {
+      if (!style.parentNode) document.head.appendChild(style);
+    } else if (style.parentNode) {
+      style.parentNode.removeChild(style);
+    }
+  }
+  window.addEventListener('message', function (event) {
+    var data = event && event.data;
+    if (!data || data.type !== 'os_host_appearance') return;
+    hostDark = !!data.dark;
+    apply();
+  });
+  if (document.body) apply();
+  else document.addEventListener('DOMContentLoaded', apply);
+  window.addEventListener('load', apply);
+})();
+</script>`;
+}
+
 interface HtmlEmbedBlockProps {
   payload: HtmlEmbedPayload;
   /**
@@ -271,6 +351,11 @@ export const HtmlEmbedBlock: React.FC<HtmlEmbedBlockProps> = ({
     ? Math.min(MAX_HEIGHT, Math.max(height, seamless ? 900 : 720))
     : height;
   const title = payload.title || payload.filename || 'Visualization';
+  const hostDark = useHostDarkAppearance();
+  // Snapshot for the first paint: the srcDoc must NOT depend on the live value,
+  // or every theme switch would reload the iframe and lose in-page form state.
+  const hostDarkRef = useRef(hostDark);
+  hostDarkRef.current = hostDark;
 
   const srcDoc = useMemo(() => {
     const html = payload.html || '';
@@ -280,12 +365,13 @@ export const HtmlEmbedBlock: React.FC<HtmlEmbedBlockProps> = ({
         ? html
         : `<!DOCTYPE html><html><head><meta charset="utf-8"></head><body>${html}</body></html>`;
     if (seamless) {
-      // Only collapse host margins — do NOT force transparent backgrounds.
-      // Viz pages often use dark themes + white text; wiping body bg makes them unreadable.
+      // Collapse host margins, then let the page blend into the chat surface
+      // (see blendCanvasScript — it re-decides on a live theme switch).
       const seamlessCss =
         '<style data-opensquad-seamless="1">' +
         'html,body{margin:0;padding:0;}' +
-        '</style>';
+        '</style>'
+        + blendCanvasScript(hostDarkRef.current);
       if (/<\/head>/i.test(doc)) {
         doc = doc.replace(/<\/head>/i, `${seamlessCss}</head>`);
       } else if (/<body[^>]*>/i.test(doc)) {
@@ -296,6 +382,12 @@ export const HtmlEmbedBlock: React.FC<HtmlEmbedBlockProps> = ({
     }
     return doc;
   }, [payload.html, seamless]);
+
+  // Theme switched while the page is on screen: tell it, do not reload it.
+  useEffect(() => {
+    if (!seamless) return;
+    iframeRef.current?.contentWindow?.postMessage({ type: 'os_host_appearance', dark: hostDark }, '*');
+  }, [hostDark, seamless, srcDoc]);
 
   // Form bridge: the sandboxed iframe (opaque origin) posts
   // `{ type: 'os_form_submit', payload }` to window.parent; only accept events

@@ -13,6 +13,8 @@ import { useTranslation } from 'react-i18next';
 import { AI_MARKDOWN_CLASS, renderFencedMarkdown } from '../../utils/fencedMarkdown';
 import { useMermaidHydration } from '../../hooks/useMermaidHydration';
 import { VoicePlayer } from './VoicePlayer';
+import { MachineUserNotice } from './MachineUserNotice';
+import { parseMachineUserMessage } from '../../utils/machineUserMessage';
 import { OpenSquadLoader } from '../OpenSquadLoader';
 import { HoverTooltip } from '../HoverTooltip';
 import { formatDuration, formatFullTimestamp, formatTokenCount, formatTokenExact } from '../../utils/usageFormat';
@@ -593,6 +595,17 @@ const MessageBubbleInner: React.FC<MessageBubbleProps> = ({
     </HoverTooltip>
   ) : null;
 
+  // Machine-generated user turn (form submission / reminder / inbound group
+  // message): the wire text is what the model reads, but painting it verbatim
+  // filled the bubble with marker + JSON. Split it at render time so a refresh
+  // shows the same notice with no extra state.
+  const machine = useMemo(
+    () => (isUser ? parseMachineUserMessage(displayContent) : null),
+    [isUser, displayContent],
+  );
+  const userText = machine ? machine.text : displayContent;
+  const machineOnly = !!machine?.notice && !userText.trim();
+
   const mediaAndBody = (
     <>
       {message.images && message.images.length > 0 && (
@@ -618,11 +631,17 @@ const MessageBubbleInner: React.FC<MessageBubbleProps> = ({
 
       {isUser ? (
         <>
-          {displayContent && (
-            <div className="whitespace-pre-wrap break-words">{displayContent}</div>
+          {userText && (
+            <div className="whitespace-pre-wrap break-words">{userText}</div>
+          )}
+          {machine?.notice && (
+            <MachineUserNotice
+              notice={machine.notice}
+              className={userText ? 'mt-2' : ''}
+            />
           )}
           {fileAttachments.length > 0 && (
-            <div className={`flex flex-wrap gap-2 ${displayContent ? 'mt-2' : ''}`}>
+            <div className={`flex flex-wrap gap-2 ${userText || machine?.notice ? 'mt-2' : ''}`}>
               {fileAttachments.map((att, i) => renderAttachment(att, `u-att-${i}`))}
             </div>
           )}
@@ -689,9 +708,11 @@ const MessageBubbleInner: React.FC<MessageBubbleProps> = ({
         className={`mb-5 w-full group relative scroll-mt-4 ${isStreaming ? 'ai-streaming' : ''}`}
       >
         <div className="flex items-center gap-2 mb-1.5">
-          <span className={`text-[11px] font-medium ${isUser ? 'text-primary' : 'text-textMuted'}`}>
-            {label}
-          </span>
+          {!machineOnly && (
+            <span className={`text-[11px] font-medium ${isUser ? 'text-primary' : 'text-textMuted'}`}>
+              {label}
+            </span>
+          )}
           {!isStreaming && (bodyContent || (isUser && canWithdraw && onWithdraw)) && (
             <div className="flex items-center gap-0.5">
               {bodyContent ? (
@@ -736,7 +757,7 @@ const MessageBubbleInner: React.FC<MessageBubbleProps> = ({
             </div>
           )}
         </div>
-        {isUser ? (
+        {isUser && !machineOnly ? (
           <div
             className="w-full rounded-2xl bg-chatBubbleSelf border border-border/40 shadow-[0_1px_2px_rgba(0,0,0,0.04)] px-4 py-3 text-sm leading-relaxed text-textMain"
           >
@@ -815,7 +836,7 @@ const MessageBubbleInner: React.FC<MessageBubbleProps> = ({
     </div>
   ) : null;
 
-  if (isUser) {
+  if (isUser && !machineOnly) {
     const domId = anchorId ? `solo-msg-${anchorId}` : undefined;
     return (
       <div
@@ -835,7 +856,7 @@ const MessageBubbleInner: React.FC<MessageBubbleProps> = ({
 
   return (
     <div className={`mb-6 w-full group ${isStreaming ? 'ai-streaming' : ''}`}>
-      {!hideSenderLabel && (
+      {!hideSenderLabel && !machineOnly && (
         <div className="text-[11px] font-medium text-textMuted/70 mb-2">
           {senderName || label}
         </div>

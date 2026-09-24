@@ -1049,6 +1049,14 @@
     "deletePending": "Delete",
     "turnCancelled": "Task cancelled",
     "formSubmission": "Form submission",
+    "machineNotice": {
+      "submitted": "Submitted",
+      "reminder": "Reminder",
+      "group": "Group message",
+      "dm": "Direct message",
+      "details": "Details",
+      "hide": "Hide"
+    },
     "pendingCollapse": "Collapse",
     "pendingExpand": "Expand",
     "pendingClearAll": "Clear all",

@@ -1047,6 +1047,14 @@
     "deletePending": "删除",
     "turnCancelled": "任务已取消",
     "formSubmission": "表单提交",
+    "machineNotice": {
+      "submitted": "已提交",
+      "reminder": "提醒",
+      "group": "群消息",
+      "dm": "私聊消息",
+      "details": "详情",
+      "hide": "收起"
+    },
     "pendingCollapse": "收起",
     "pendingExpand": "展开",
     "pendingClearAll": "全部清空",

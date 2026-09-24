@@ -9,6 +9,7 @@ import { agentSessionAPI } from '../../services/api';
 import { OpenSquadLoader } from '../OpenSquadLoader';
 import {
   buildTimelineFromSession,
+  previousRenderedEntryKind,
   rebaseTimelineUids,
   timelineRichness,
   type TimelineEntry,
@@ -388,11 +389,11 @@ export const SessionChatPane: React.FC<SessionChatPaneProps> = ({
                         : agentName,
                     // 助手回复紧跟工作流组时，名字已在工作流上方显示 —— 整行隐藏。
                     // 只传 undefined 不够：MessageBubble 会退化成兜底文案「Agent」，
-                    // 统计行和正文之间就多出一行幽灵签名。
+                    // 统计行和正文之间就多出一行幽灵签名。中间渲染为 null 的
+                    // `prompt` 条目要跨过，否则刷新后同一条回复上会出现第二个名字。
                     hideSenderLabel:
                       entry.data.role === 'assistant'
-                      && i > 0
-                      && timeline[i - 1].kind === 'workflow',
+                      && previousRenderedEntryKind(timeline, i) === 'workflow',
                     agentId,
                     canWithdraw:
                       canWithdraw &&

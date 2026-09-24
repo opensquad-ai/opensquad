@@ -40,7 +40,9 @@ import {
   dropEntriesAlreadyPresent,
   formatUserSkillDisplayContent,
   genTimelineUID,
+  isEmptySessionDraft,
   mergeAdjacentWorkflowEntries,
+  previousRenderedEntryKind,
   sessionMessageIdentity,
   timelineHasVisibleChatContent,
   sealIncompleteWorkflows,
@@ -64,6 +66,11 @@ import {
   getCachedSessionTimelineMeta,
   SESSION_HISTORY_PAGE_SIZE,
 } from '../utils/sessionTimelineCache';
+import {
+  parseMachineUserMessage,
+  machineNoticeLabelKey,
+  machineNoticeSummary,
+} from '../utils/machineUserMessage';
 import { pickSessionLiveTimeline } from '../utils/sessionLiveTimeline';
 import {
   mergeSessionTokenStats,
@@ -792,6 +799,8 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
   /** False until first hydrate (or intentional New Chat) — blocks fake New Chat landing on refresh. */
   const [sessionBootstrapped, setSessionBootstrapped] = useState(false);
   const newSessionPendingRef = useRef(false); // true after handleNewSession fires, cleared on next connected
+  /** One "new session is not ready yet" bubble per rotation attempt (see deliverMessage). */
+  const newSessionHoldWarnedRef = useRef(false);
   /** After New Chat succeeds, ignore hydrates that would snap back to an older sid. */
   const newSessionGuardRef = useRef<{ sid: string; until: number } | null>(null);
   /**
@@ -1957,6 +1966,35 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
 
     if (!text && imgState.length === 0 && attState.length === 0 && !skillId) return;
 
+    // 「新会话」 dropped the target sid and the agent has not confirmed the new
+    // one yet. A chat frame with no session_id is addressed to whichever session
+    // the agent still considers current — the one the user just left — so the
+    // message silently continued the old conversation instead of starting a new
+    // one. Refuse, and leave the text in the composer for a retry.
+    if (!targetSessionId && newSessionPendingRef.current) {
+      if (!newSessionHoldWarnedRef.current) {
+        newSessionHoldWarnedRef.current = true;
+        // The caller armed the gate for the (empty) sid under its default key;
+        // leaving it armed would park the retry as 待发送 instead of sending it.
+        clearOutboundTurnPending('__default__');
+        setTimeline((prev) => [
+          ...prev,
+          {
+            kind: 'message',
+            data: {
+              role: 'assistant',
+              content: t('aiChat.newSessionNotReady', {
+                defaultValue: '新会话还没创建完成，这条消息没有发送。请稍等片刻后再发送一次。',
+              }),
+              timestamp: new Date().toISOString(),
+            },
+            _uid: genUID(),
+          },
+        ]);
+      }
+      return;
+    }
+
     // Build attachment description to include in WS message text (for Agent)
     const nonImageAttachments = attState.filter(a => !a.is_image);
 
@@ -2900,15 +2938,21 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
 
     // Reuse empty draft: jump back to the cached New Session shell without
     // minting another sid (backend also no-ops, but skip the round-trip).
+    // The emptiness test must consult every evidence source — an empty live
+    // bucket is a "cleared view", not proof the transcript is empty, and
+    // trusting it reused a real conversation's sid as the send target.
     const draftSid = String(previousSid || '').trim();
     if (draftSid) {
       const draftEntries =
         liveTimelinesBySessionRef.current[draftSid]
-        ?? (draftSid === (currentSessionIdRef.current || '') ? timelineRef.current : null)
-        ?? [];
-      const draftEmpty = !timelineHasVisibleChatContent(
-        flattenArchivedSections(Array.isArray(draftEntries) ? draftEntries : []),
-      );
+        ?? (draftSid === (currentSessionIdRef.current || '') ? timelineRef.current : null);
+      const draftCacheMeta = getCachedSessionTimelineMeta(agentId, draftSid);
+      const draftEmpty = isEmptySessionDraft({
+        liveEntries: draftEntries,
+        cachedEntries: getCachedSessionTimeline(agentId, draftSid),
+        cachedMessageCount: draftCacheMeta?.messageCount,
+        cachedTotalMessages: draftCacheMeta?.totalMessages,
+      });
       if (draftEmpty) {
         pendingOpenSessionTabRef.current = true;
         if (!pendingTargetPaneIdRef.current && focusedPaneId) {
@@ -2998,6 +3042,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     if (previousSid) delete finalizingBySidRef.current[previousSid];
     clearSessionRunState(previousSid);
     newSessionPendingRef.current = true;
+    newSessionHoldWarnedRef.current = false;
     setIsLoadingSession(false);
     setSessionBootstrapped(true);
     // Optimistic clear so we never treat the pre-rotation empty sid as "new".
@@ -4258,7 +4303,14 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
               {queue.map((pm, idx) => {
                 const imgCount = pm.images.length;
                 const fileCount = pm.fileAtts.length;
-                const preview = (pm.text || '').replace(/\s+/g, ' ').trim();
+                // A queued machine message (form submission / reminder / group)
+                // reads as its notice label, not as raw marker + JSON.
+                const pmNotice = parseMachineUserMessage(pm.text).notice;
+                const preview = pmNotice
+                  ? [t(`aiChat.machineNotice.${machineNoticeLabelKey(pmNotice)}`, {
+                    defaultValue: machineNoticeLabelKey(pmNotice),
+                  }), machineNoticeSummary(pmNotice)].filter(Boolean).join(' · ')
+                  : (pm.text || '').replace(/\s+/g, ' ').trim();
                 return (
                   <div
                     key={pm.id}
@@ -5371,17 +5423,16 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
               isComplete={!isStreaming}
               avatarSrc={resolveChatAvatar(agentProfile?.chat_profile) ?? undefined}
               variant={isSolo ? 'solo' : 'classic'}
-              // 流式文本前若是工作流组，名字已在工作流上方显示，避免重复
+              // 流式文本前若是工作流组，名字已在工作流上方显示，避免重复。
+              // 中间渲染为 null 的 `prompt` 条目要跨过（见 previousRenderedEntryKind）。
               senderName={
-                displayTimeline.length > 0
-                && displayTimeline[displayTimeline.length - 1].kind === 'workflow'
+                previousRenderedEntryKind(displayTimeline, displayTimeline.length) === 'workflow'
                   ? undefined
                   : agentProfile?.agent_name
               }
               // 只传 undefined 不够 —— 组件会退化成兜底文案「Agent」。
               hideSenderLabel={
-                displayTimeline.length > 0
-                && displayTimeline[displayTimeline.length - 1].kind === 'workflow'
+                previousRenderedEntryKind(displayTimeline, displayTimeline.length) === 'workflow'
               }
             />
           )}
@@ -5426,10 +5477,11 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
                 // 助手回复紧跟工作流组时，名字已在工作流上方显示 —— 整行隐藏。
                 // 只把 senderName 传 undefined 是不够的：MessageBubble 会退化成
                 // 兜底文案「Agent」，于是统计行和正文之间夹出一行幽灵签名。
+                // 中间的 `prompt` 条目渲染为 null，判定要跨过它们，否则刷新后
+                // [workflow][prompt][message] 会在同一条回复上方出现第二个名字。
                 hideSenderLabel:
                   entry.data.role === 'assistant'
-                  && i > 0
-                  && displayTimeline[i - 1].kind === 'workflow',
+                  && previousRenderedEntryKind(displayTimeline, i) === 'workflow',
                 senderAvatar:
                   entry.data.role === 'user'
                     ? (currentUser?.avatar || null)
@@ -5515,9 +5567,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
               const curBlock = (entry as { kind: 'workflow'; data: WorkflowBlock }).data;
               // 'prompt' entries render as null — they must not split the
               // workflow group into separate fold rows.
-              let prevIdx = i - 1;
-              while (prevIdx >= 0 && displayTimeline[prevIdx].kind === 'prompt') prevIdx -= 1;
-              if (prevIdx >= 0 && displayTimeline[prevIdx].kind === 'workflow') {
+              if (previousRenderedEntryKind(displayTimeline, i) === 'workflow') {
                 return null;
               }
               const blocks: WorkflowBlock[] = [curBlock];
