@@ -24,10 +24,12 @@ import {
 import {
   cleanDisplayContent,
   extractWsContent,
+  isAgentIdleStatus,
   logMediaDebug,
   mergeChatMessage,
   mergeCompressionHydration,
   messageIdentityKey,
+  settleAgentStatusOnBusySnapshot,
   stabilizeHydratedTimeline,
 } from '../utils/agentWebChatHelpers';
 import { saveLastModelPick } from '../utils/agentWebModelPick';
@@ -106,6 +108,7 @@ export function useAgentWebSocket(agentId: string, ctx: AgentWebWsCtx) {
       filePushDedupRef,
       finalizeWorkflowAndAddMessage,
       finalizingBySidRef,
+      getBootRestoreSessionId,
       historyOffsetRef,
       hydrateCurrentSessionRef,
       isHydratingSessionRef,
@@ -669,10 +672,15 @@ export function useAgentWebSocket(agentId: string, ctx: AgentWebWsCtx) {
         if (!pageActiveRef.current) playGentleNotificationSound();
       }
 
-      streamingTextRef.current = '';
-      setStreamingText('');
-      setIsStreaming(false);
-      setAgentStatus('connected');
+      // A complex task ends on `to_user_end_task` INSTEAD of `to_user_final`
+      // (runner emits it as the only terminal frame), so `handleFinal` — the
+      // place that releases the turn — never runs for these turns. Clearing
+      // only the global stream state left the per-session flag that `stream`
+      // sets (`isStreamingBySessionRef[endSid]`) true forever: the composer
+      // kept the red Stop and the follow-up chips stayed hidden although the
+      // reply had rendered, until the user pressed Stop. Release the whole
+      // per-session run state for this pane, exactly like a final message.
+      clearSessionRunState(endSid);
 
       if (newSessionPendingRef.current) {
         newSessionPendingRef.current = false;
@@ -1059,6 +1067,13 @@ export function useAgentWebSocket(agentId: string, ctx: AgentWebWsCtx) {
       if (typeof data === 'string') {
         const lower = data.toLowerCase();
         const statusSid = String((msg as any).sid || '').trim();
+        // Agent-wide idle ("online"): release this pane outright. Waiting for the
+        // terminal frame of the right sid is what left the Stop red — see
+        // isAgentIdleStatus.
+        if (isAgentIdleStatus(data)) {
+          clearSessionRunState(currentSessionIdRef.current || '');
+          return;
+        }
         const otherBusy = busySessionsRef.current.some(
           (id) => id && id !== statusSid,
         );
@@ -1887,7 +1902,8 @@ export function useAgentWebSocket(agentId: string, ctx: AgentWebWsCtx) {
             return;
           }
           const currentSid = resp.current_session_id;
-          const session = resp.session;
+          let session = resp.session;
+          let viewedSid = currentSid;
           if (currentSid) {
             agentCurrentSessionIdRef.current = currentSid;
           }
@@ -1905,8 +1921,50 @@ export function useAgentWebSocket(agentId: string, ctx: AgentWebWsCtx) {
             );
             return;
           }
+          // Refresh must come back to the conversation this browser was showing,
+          // not to `current_session.json`: that pointer only follows agent-side
+          // rotations, so it answers with an empty draft (or an unrelated
+          // session) whenever the user has been working in a parallel session
+          // tab — and the pane then paints blank with no error. The tab the
+          // focused pane was on is the client's own record of what was on
+          // screen; `/current` stays the fallback when there is nothing to
+          // restore (fresh browser, no chrome, deleted session).
+          const restoreSid = String(
+            typeof getBootRestoreSessionId === 'function' ? getBootRestoreSessionId() || '' : '',
+          ).trim();
+          if (restoreSid && restoreSid !== currentSid) {
+            try {
+              const restored = await agentSessionAPI.getSessionHistoryPaged(
+                agentId,
+                restoreSid,
+                0,
+                SESSION_HISTORY_PAGE_SIZE,
+              );
+              if (seq !== sessionReloadSeqRef.current) return;
+              if (restored?.session) {
+                viewedSid = restoreSid;
+                session = restored.session;
+                console.info(
+                  '[AIChatPage] restored last viewed session:',
+                  restoreSid,
+                  '(agent current: %s)',
+                  currentSid || '-',
+                );
+                logMediaDebug('restore-last-viewed-session', {
+                  restoreSid,
+                  agentCurrentSid: currentSid,
+                  messageCount: restored.session.messages?.length || 0,
+                });
+              }
+            } catch (err: any) {
+              console.warn(
+                '[AIChatPage] restore of last viewed session failed, keeping agent current:',
+                err?.message || err,
+              );
+            }
+          }
           logMediaDebug('current-session-response', {
-            currentSid,
+            currentSid: viewedSid,
             messageCount: session?.messages?.length || 0,
             sample: (session?.messages || []).slice(-5).map((m: any) => ({
               mid: m?.message_id || m?.id,
@@ -1918,7 +1976,7 @@ export function useAgentWebSocket(agentId: string, ctx: AgentWebWsCtx) {
               contentHead: typeof m?.content === 'string' ? m.content.slice(0, 80) : '',
             })),
           });
-          if (currentSid && session) {
+          if (viewedSid && session) {
             // Pre-deduplicate disk session messages by (role + normalized content).
             // In some refresh scenarios the runner snapshot can contain the same
             // user message twice (e.g. input-hub/Gateway racing). Removing exact
@@ -1954,8 +2012,8 @@ export function useAgentWebSocket(agentId: string, ctx: AgentWebWsCtx) {
               session.archived_messages,
               session.archived_events,
             );
-            if (currentSid) {
-              putCachedSessionTimeline(agentId, currentSid, entries, {
+            if (viewedSid) {
+              putCachedSessionTimeline(agentId, viewedSid, entries, {
                 complete: !(session.has_more ?? false),
                 messageCount: dedupedMessages.length,
                 totalMessages: session.total_messages,
@@ -2196,15 +2254,15 @@ export function useAgentWebSocket(agentId: string, ctx: AgentWebWsCtx) {
               // are not yet on disk (first send on a brand-new session).
               // Write into the disk response's sid — not whatever UI focus was
               // (parallel/scheduled current_session must not redirect hydrate).
-              // IMPORTANT: mirror currentSid into currentSessionIdRef BEFORE
+              // IMPORTANT: mirror viewedSid into currentSessionIdRef BEFORE
               // setTimeline. When the agent never announced current_session
               // (startup load) the `connected` event carries only the gateway
               // session key and currentSessionIdRef stays null; setTimeline's
               // solo-mirror condition (eventSidRef === currentSessionIdRef)
               // then fails and the hydrated timeline never reaches the chat
               // pane -> blank chat after service restart.
-              currentSessionIdRef.current = currentSid || currentSessionIdRef.current;
-              eventSidRef.current = currentSid || '';
+              currentSessionIdRef.current = viewedSid || currentSessionIdRef.current;
+              eventSidRef.current = viewedSid || '';
               setTimeline((prev) => {
                 let merged = withBuffered;
                 // Preserve optimistic user messages missing from disk.
@@ -2289,13 +2347,13 @@ export function useAgentWebSocket(agentId: string, ctx: AgentWebWsCtx) {
               setTurnStartedMs(restoredStart);
             }
             sessionBootstrapDoneRef.current = true;
-            currentSessionIdRef.current = currentSid;
-            wsServiceRef.current?.setActiveSession(currentSid);
-            setCurrentSessionId(currentSid);
+            currentSessionIdRef.current = viewedSid;
+            wsServiceRef.current?.setActiveSession(viewedSid);
+            setCurrentSessionId(viewedSid);
             // Hydration complete — ask agent for this session's context % now
             // (do not wait for the next user send).
             try {
-              wsServiceRef.current?.requestTokenStats(currentSid);
+              wsServiceRef.current?.requestTokenStats(viewedSid);
             } catch {
               /* ignore */
             }
@@ -2303,7 +2361,7 @@ export function useAgentWebSocket(agentId: string, ctx: AgentWebWsCtx) {
             // reasoningEffort), not a stale per-session card from disk.
             viewingHistorySessionRef.current = false;
             setViewingHistorySession(false);
-            loadingSessionIdRef.current = currentSid;
+            loadingSessionIdRef.current = viewedSid;
             historyOffsetRef.current = session.messages?.length || 0;
             setHasMoreHistory(session.has_more ?? false);
             diskSessionLoadedRef.current = true;
@@ -2876,6 +2934,10 @@ export function useAgentWebSocket(agentId: string, ctx: AgentWebWsCtx) {
         }
         return filtered;
       });
+      // The snapshot is authoritative about the agent being idle — settle the
+      // agent-wide flags with it, or `isSessionBusy()`'s fallback branch keeps
+      // returning true off a stale `working` and the Stop never clears.
+      setAgentStatus((prev) => settleAgentStatusOnBusySnapshot(sessions, prev));
     });
 
     // Error frame → release busy state immediately. Backend has just emitted

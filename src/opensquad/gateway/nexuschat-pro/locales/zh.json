@@ -943,7 +943,8 @@
         "running": "运行中…",
         "waitingSubAgent": "等待子 Agent 活动…",
         "noSubAgentActivity": "暂无子 Agent 活动记录。",
-        "delegateComplete": "子任务已完成"
+        "delegateComplete": "子任务已完成",
+        "steer": "插话"
       },
       "shell": {
         "running": "正在执行命令",
@@ -997,6 +998,11 @@
     "expand": "展开",
     "copyCode": "复制代码",
     "codeCopied": "已复制",
+    "copyText": "复制文本",
+    "addToChat": "添加到会话",
+    "selectedText": "选中的文本",
+    "selectionCopied": "已复制",
+    "addToContext": "添加到上下文",
     "expandFoldedLines": "展开折叠行",
     "unchangedLines": "行未变化 (点击展开)",
     "readFile": "读取文件",

@@ -24,6 +24,7 @@ import {
   type TaskFormValue,
 } from './ScheduledTaskForm';
 import { ExecWorkflowView } from './ExecWorkflowView';
+import { formatDayLabel, groupByLocalDay } from '../../utils/time';
 import type { PaneSessionBridge } from './WorkspacePaneShell';
 
 type SubTab = 'new' | 'execution' | 'task';
@@ -35,7 +36,7 @@ interface Props {
 }
 
 export const ScheduledTasksPage: React.FC<Props> = ({ agentName, rootPath, sessionBridge }) => {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
   const isMobile = useIsMobileViewport();
   const [tasks, setTasks] = useState<ScheduledTask[]>([]);
   const [executions, setExecutions] = useState<ScheduledExecution[]>([]);
@@ -119,6 +120,13 @@ export const ScheduledTasksPage: React.FC<Props> = ({ agentName, rootPath, sessi
     () => executions.find(e => e.id === selExecId) || null,
     [executions, selExecId],
   );
+
+  // 执行列表按本地自然日分组：今天 / 昨天 / M/D（跨年 YYYY/M/D），最新一天在最上面。
+  const execDayGroups = useMemo(
+    () => groupByLocalDay(executions, (e) => e.started_at),
+    [executions],
+  );
+  const dayLabelLocale: 'zh' | 'en' = String(i18n.language || '').startsWith('en') ? 'en' : 'zh';
 
   // Quiet poll — slow fallback; WS scheduled_execution is the primary path.
   const watchingRunning = sub === 'execution' && !!selectedExec && selectedExec.status === 'running';
@@ -271,14 +279,23 @@ export const ScheduledTasksPage: React.FC<Props> = ({ agentName, rootPath, sessi
             executions.length === 0 ? (
               <EmptyHint text={t('scheduledTasks.emptyExecution')} />
             ) : (
-              executions.map(e => (
-                <ExecRow
-                  key={e.id}
-                  exec={e}
-                  active={e.id === selExecId}
-                  onClick={() => { setSelExecId(e.id); setEditing(null); setMobileDetail(true); }}
-                  onDelete={() => handleDeleteExec(e)}
-                />
+              execDayGroups.map(group => (
+                <React.Fragment key={group.key || 'unknown-day'}>
+                  {group.key ? (
+                    <div className="px-2 pt-2.5 pb-1 text-[10px] font-medium text-textMuted/80">
+                      {formatDayLabel(group.items[0]?.started_at, { locale: dayLabelLocale })}
+                    </div>
+                  ) : null}
+                  {group.items.map(e => (
+                    <ExecRow
+                      key={e.id}
+                      exec={e}
+                      active={e.id === selExecId}
+                      onClick={() => { setSelExecId(e.id); setEditing(null); setMobileDetail(true); }}
+                      onDelete={() => handleDeleteExec(e)}
+                    />
+                  ))}
+                </React.Fragment>
               ))
             )
           ) : tasks.length === 0 ? (

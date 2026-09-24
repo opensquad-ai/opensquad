@@ -536,10 +536,13 @@ export const SoloContextFooter: React.FC<SoloContextFooterProps> = ({
             )}
           </button>
 
-          {/* 复制成功提示：短暂显示后自动消失 */}
+          {/* 复制成功提示：短暂显示后自动消失。
+              w-max + whitespace-nowrap 是必需的：父级被 max-w 限宽（chip 只有几十 px），
+              而这个浮层没写宽度，absolute 的 shrink-to-fit 会取 min-content ——
+              中文于是被压成一字一行，变成竖排。 */}
           {copied && (
             <div
-              className="absolute bottom-[calc(100%+6px)] left-0 z-50 flex items-center gap-1 rounded-md px-2 py-1 text-[11px] font-medium
+              className="absolute bottom-[calc(100%+6px)] left-0 z-50 flex w-max items-center gap-1 whitespace-nowrap rounded-md px-2 py-1 text-[11px] font-medium
                 bg-black/80 text-white dark:bg-white/90 dark:text-black shadow-lg pointer-events-none"
             >
               <Check size={11} />

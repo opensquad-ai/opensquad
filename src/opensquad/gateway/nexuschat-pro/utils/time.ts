@@ -113,3 +113,61 @@ export function formatRelativeAge(
   if (days < 30) return `${days}天`;
   return `${Math.max(1, months)}个月`;
 }
+
+/** Local wall-clock day key `YYYY-MM-DD` ('' when the timestamp is unparseable). */
+export function localDayKey(
+  input: string | number | Date | null | undefined,
+  opts?: { now?: number },
+): string {
+  const ts = parseTimestampMs(input, opts);
+  if (!Number.isFinite(ts)) return '';
+  const d = new Date(ts);
+  const p = (n: number) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+}
+
+/**
+ * Header label for one calendar day: 今天 / 昨天 / M/D, and YYYY/M/D once the
+ * year differs. Distinct from `formatTime`, which names the *moment* for
+ * today's rows — a group header has to name the day.
+ */
+export function formatDayLabel(
+  input: string | number | Date | null | undefined,
+  opts?: { locale?: 'zh' | 'en'; now?: number },
+): string {
+  const ts = parseTimestampMs(input, opts);
+  if (!Number.isFinite(ts)) return '';
+  const locale = opts?.locale ?? 'zh';
+  const now = opts?.now ?? Date.now();
+  const key = localDayKey(ts);
+  if (key === localDayKey(now)) return locale === 'en' ? 'Today' : '今天';
+  if (key === localDayKey(now - 86400000)) return locale === 'en' ? 'Yesterday' : '昨天';
+  const d = new Date(ts);
+  const month = d.getMonth() + 1;
+  const day = d.getDate();
+  if (d.getFullYear() === new Date(now).getFullYear()) return `${month}/${day}`;
+  return `${d.getFullYear()}/${month}/${day}`;
+}
+
+/**
+ * Group a list into local-calendar-day buckets, in the order the days first
+ * appear in `items` (callers pass newest-first, so today lands on top).
+ *
+ * The day key doubles as group identity, so a day whose items are not
+ * contiguous still forms one group. Items with an unparseable timestamp share
+ * a trailing '' group — they must never vanish from the list.
+ */
+export function groupByLocalDay<T>(
+  items: readonly T[],
+  getTimestamp: (item: T) => string | number | Date | null | undefined,
+  opts?: { now?: number },
+): Array<{ key: string; items: T[] }> {
+  const groups = new Map<string, T[]>();
+  for (const item of items) {
+    const key = localDayKey(getTimestamp(item), opts);
+    const bucket = groups.get(key);
+    if (bucket) bucket.push(item);
+    else groups.set(key, [item]);
+  }
+  return [...groups.entries()].map(([key, grouped]) => ({ key, items: grouped }));
+}

@@ -32,6 +32,7 @@ import type { AgentSession } from '../services/api';
 import { resolveChatAvatar, toAbsoluteMediaUrl } from '../utils/image';
 import { OpenSquadLoader } from './OpenSquadLoader';
 import {
+  appendUserSteerToTimeline,
   appendWorkflowEvent,
   composeAssistantDisplayContent,
   buildTimelineFromSession,
@@ -45,6 +46,7 @@ import {
   sealIncompleteWorkflows,
   sealPendingCompression,
   sealWorkflowAndAppendAssistantMessage,
+  serializeUserQuote,
   toWebMediaUrl,
   type TimelineEntry,
   type WorkflowBlock,
@@ -117,6 +119,7 @@ import {
   collectLeaves,
   findLeaf,
   getFocusedPaneTabs,
+  getRestorableSessionId,
   parseContentTabKey,
   type WorkspaceStoreSnapshot,
   type ContentTab,
@@ -148,9 +151,11 @@ import { confirmDiscardFileDirty, prefetchWorkspaceFile, getWorkspaceFileCache }
 import { PaneSplitLayout } from './ai-chat/PaneSplitLayout';
 import type { PaneShellHandlers } from './ai-chat/WorkspacePaneShell';
 import { SessionChatPane } from './ai-chat/SessionChatPane';
+import { SelectionQuoteMenu } from './ai-chat/SelectionQuoteMenu';
 import {
   AgentWebComposer,
   type AgentWebComposerHandle,
+  type ComposerQuote,
   type ComposerSendPayload,
 } from './ai-chat/AgentWebComposer';
 import { ShellTerminalsBar } from './ai-chat/ShellTerminalsBar';
@@ -823,6 +828,8 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     fileAtts: FileAttachment[];
     skillDir?: string;
     skillName?: string;
+    /** Selections (chat / workspace file) carried by this parked message. */
+    quotes?: ComposerQuote[];
     /** Target session for multi-pane / multi-tab sends */
     sessionId?: string;
     paneId?: string;
@@ -1489,6 +1496,12 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     return sealWorkflowAndAppendAssistantMessage(prev, msg);
   }
 
+  // Aliases the boot restore resolves the workspace store under (agent_id vs
+  // dir_name). Assigned every render so the hook's mount-time ctx snapshot
+  // still reads the profile once it lands.
+  const bootRestoreAliasRef = useRef<Array<string | null | undefined>>([]);
+  bootRestoreAliasRef.current = [agentProfile?.dir_name, agentProfile?.agent_id];
+
   useAgentWebSocket(agentId, {
     SUMMARY_STREAM_DEBUG,
     agentCurrentSessionIdRef,
@@ -1508,6 +1521,12 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     filePushDedupRef,
     finalizeWorkflowAndAddMessage,
     finalizingBySidRef,
+    // Refresh restores the session tab the focused pane was on; the backend's
+    // current_session.json is only the fallback (see the resolver). Aliases are
+    // read at call time — the profile that carries them loads after this ctx
+    // snapshot was captured.
+    getBootRestoreSessionId: () =>
+      getRestorableSessionId(agentId, bootRestoreAliasRef.current),
     historyOffsetRef,
     hydrateCurrentSessionRef,
     isHydratingSessionRef,
@@ -1921,6 +1940,8 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
       attachments: UploadedFile[];
       skillDir?: string;
       skillName?: string;
+      /** Selections (chat / workspace file) attached to this message. */
+      quotes?: ComposerQuote[];
       /** Target session for parallel multi-session sends */
       sessionId?: string;
       /** steer 消费回执对账 id（= PendingMessage.id），普通发送不用 */
@@ -1928,7 +1949,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     },
     opts?: { clearInputState?: boolean; salvageStream?: boolean; steer?: boolean },
   ) => {
-    const { text, images: imgState, attachments: attState, skillDir, skillName } = payload;
+    const { text, images: imgState, attachments: attState, skillDir, skillName, quotes } = payload;
     const targetSessionId = (payload.sessionId || currentSessionIdRef.current || '').trim();
     const clearInputState = opts?.clearInputState ?? true;
     const salvageStream = opts?.salvageStream ?? true;
@@ -1945,7 +1966,18 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
       ...attState.filter(a => a.is_image).map(a => a.path),
     ];
 
+    // Quoted selections (chat 添加到会话 / file 添加到上下文) sit in front of the
+    // user's own words: the tag is the context, the text is the ask. Sent as a tag
+    // rather than pasted text so the bubble can render it as a quote.
+    const quoteBlock = (quotes || [])
+      .map((q) => serializeUserQuote(q.text, q.label))
+      .filter(Boolean)
+      .join('\n\n');
+
     let wsText = text;
+    if (quoteBlock) {
+      wsText = wsText ? `${quoteBlock}\n\n${wsText}` : quoteBlock;
+    }
     if (skillId) {
       const tag = `<user_send_skill>${skillId}</user_send_skill>`;
       wsText = wsText ? `${tag}\n\n${wsText}` : tag;
@@ -2024,10 +2056,12 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
       };
     });
 
-    // Display: show /skill or /goal chip text (not XML tags)
+    // Display: show /skill or /goal chip text (not XML tags). A quoted
+    // selection is part of what the agent reads, so the bubble shows it too —
+    // `formatUserSkillDisplayContent` turns the tag into a blockquote.
     const displayText = skillId
       ? (text ? `/${skillId} ${text}` : `/${skillId}`)
-      : formatUserSkillDisplayContent(text);
+      : formatUserSkillDisplayContent(quoteBlock ? `${quoteBlock}\n\n${text}` : text);
 
     // Add user message to timeline (display text without [File: ...],
     // attachments stored separately for card rendering)
@@ -2235,7 +2269,14 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
   // 由 runner 在当前工具轮/普通输出结束后的下一轮塞进模型上下文——不打断
   // 连续工具流，但模型能看见这条消息。本地队列条目仅作展示（steered=true），
   // 消费回执（steer_consumed）到达后挪进时间线。
+  //
+  // 只有这一轮**真的在跑**才谈得上插话：runner 是在当前工具的边界把消息塞进上下
+  // 文的，任务已经结束时它只会把这批残留兜底重排成一个新回合，而前端那时等的是
+  // steer_consumed —— 用户气泡不会出现，消息在界面上等于消失。已结束的任务按普通
+  // 消息发：这里不标 steered，交给下面的 auto-drain 用 flushPendingMessage 正常
+  // 投递（它本来就只挑非 steered 的条目）。
   const steerPendingSnapshot = useCallback((snapshot: PendingMessage) => {
+    if (!isSessionBusy((snapshot.sessionId || '').trim())) return;
     setPendingMessages((prev) => prev.map((m) => (m.id === snapshot.id ? { ...m, steered: true } : m)));
     deliverMessage(
       {
@@ -2244,12 +2285,13 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
         attachments: snapshot.attachments,
         skillDir: snapshot.skillDir,
         skillName: snapshot.skillName,
+        quotes: snapshot.quotes,
         sessionId: snapshot.sessionId,
         clientId: snapshot.id,
       },
       { clearInputState: false, salvageStream: false, steer: true },
     );
-  }, [deliverMessage]);
+  }, [deliverMessage, isSessionBusy]);
 
   const handleSend = () => {
     // A user send consumes the agent's follow-up offer (see
@@ -2517,6 +2559,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
         attachments: target.attachments,
         skillDir: target.skillDir,
         skillName: target.skillName,
+        quotes: target.quotes,
         sessionId: flushSid || undefined,
       },
       { clearInputState: false, salvageStream: false },
@@ -2576,8 +2619,9 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     clearOutboundTurnPending();
   }, [clearOutboundTurnPending]);
 
-  // 引导消息被模型消费（随本轮工具结果进入上下文）：把用户气泡插入时间线，
-  // 并从引导队列移除对应条目（按入队时的 client_id 对账）。
+  // 引导消息被模型消费（随本轮工具结果进入上下文）：把它作为一行插话嵌进当前
+  // 正在跑的工具流（不封口、不切段），并从引导队列移除对应条目（按 client_id
+  // 对账）。没有在跑的流时退回普通用户气泡（见 appendUserSteerToTimeline）。
   useEffect(() => {
     const svc = wsServiceRef.current;
     if (!svc) return;
@@ -2601,7 +2645,10 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
       const prevBucket = sid
         ? (liveTimelinesBySessionRef.current[sid] ?? [])
         : (timelineRef.current ?? []);
-      const nextEntries: TimelineEntry[] = [
+      // 插话嵌进正在跑的工具流里，不 seal、不插独立气泡 —— 否则工具流会被切成
+      // 两段。只有在没有可挂载的流时（回合已收尾）才退回「封口 + 气泡」。
+      const steered = appendUserSteerToTimeline(prevBucket, text);
+      const nextEntries: TimelineEntry[] = steered ?? [
         ...sealIncompleteWorkflows(prevBucket, { fallbackStartedMs: turnStartedMsRef.current }),
         { kind: 'message', data: userMsg, _uid: uid },
       ];
@@ -4090,6 +4137,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
           }) as FileAttachment[],
         skillDir: payload.skillDir,
         skillName: payload.skillName,
+        quotes: payload.quotes,
         sessionId,
         paneId,
       };
@@ -4111,6 +4159,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
         attachments: payload.attachments as UploadedFile[],
         skillDir: payload.skillDir,
         skillName: payload.skillName,
+        quotes: payload.quotes,
         sessionId,
       },
       { clearInputState: false, salvageStream: sameFocused && !opts?.stay },
@@ -5845,6 +5894,21 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
         open={createWorkspaceOpen}
         onCancel={() => setCreateWorkspaceOpen(false)}
         onCreate={handleCreateWorkspace}
+      />
+
+      {/* Left-button selection → 复制文本 / 添加到会话, in the chat timeline and in
+          a workspace file tab (添加到上下文). See the component. */}
+      <SelectionQuoteMenu
+        onAddQuote={(paneId, text, label) => {
+          // The pane the selection was made in owns the composer when it has one.
+          // A file tab's pane has none (its tab is a file, not a session), so fall
+          // back to the composer of the session being chatted in — that is the
+          // context the reader means.
+          const target =
+            (paneId ? composerApiByPaneRef.current.get(paneId) : undefined) ||
+            resolveComposerApi(currentSessionIdRef.current);
+          target?.addQuote(text, label);
+        }}
       />
     </div>
   );

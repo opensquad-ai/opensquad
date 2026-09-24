@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { formatRelativeAge, parseTimestampMs } from './time';
+import {
+  formatDayLabel,
+  formatRelativeAge,
+  groupByLocalDay,
+  parseTimestampMs,
+} from './time';
 
 describe('parseTimestampMs', () => {
   const now = Date.parse('2026-07-11T12:00:00Z'); // 20:00 Beijing
@@ -53,5 +58,66 @@ describe('formatRelativeAge', () => {
     // Regression: Date.parse(naive) as local made UTC wall clocks look ~8h older.
     const ts = '2026-07-11T15:30:00.000000'; // meant to be UTC (30m before `now`)
     expect(formatRelativeAge(ts, { locale: 'zh', now })).toBe('30分钟');
+  });
+});
+
+describe('formatDayLabel', () => {
+  // Local wall clock — the day buckets are local by definition.
+  const now = new Date(2026, 8, 23, 12, 0, 0).getTime(); // 2026-09-23 12:00
+  const at = (y: number, m: number, d: number, hh = 9) =>
+    new Date(y, m - 1, d, hh, 0, 0).getTime();
+
+  it('names today and yesterday, then the date', () => {
+    expect(formatDayLabel(at(2026, 9, 23), { now })).toBe('今天');
+    expect(formatDayLabel(at(2026, 9, 22), { now })).toBe('昨天');
+    expect(formatDayLabel(at(2026, 9, 21), { now })).toBe('9/21');
+    // Across a year boundary the year has to be spelled out, or 12/31 sorts
+    // next to 01/01 as if it were the same day.
+    expect(formatDayLabel(at(2025, 12, 31), { now })).toBe('2025/12/31');
+    expect(formatDayLabel(null, { now })).toBe('');
+  });
+
+  it('formats english labels', () => {
+    expect(formatDayLabel(at(2026, 9, 23), { locale: 'en', now })).toBe('Today');
+    expect(formatDayLabel(at(2026, 9, 22), { locale: 'en', now })).toBe('Yesterday');
+    expect(formatDayLabel(at(2026, 9, 21), { locale: 'en', now })).toBe('9/21');
+  });
+
+  it('accepts the epoch-seconds shape scheduled executions carry', () => {
+    // ScheduledExecution.started_at is seconds, unlike session JSON (ms).
+    expect(formatDayLabel(Math.floor(at(2026, 9, 23) / 1000), { now })).toBe('今天');
+  });
+});
+
+describe('groupByLocalDay', () => {
+  const now = new Date(2026, 8, 23, 12, 0, 0).getTime();
+  const at = (y: number, m: number, d: number, hh = 9) =>
+    new Date(y, m - 1, d, hh, 0, 0).getTime();
+
+  it('groups newest-first and merges a day whose items are not contiguous', () => {
+    const items = [
+      { id: 'a', started_at: at(2026, 9, 23, 9) },
+      { id: 'b', started_at: at(2026, 9, 23, 8) },
+      { id: 'c', started_at: at(2026, 9, 22, 9) },
+      { id: 'd', started_at: at(2026, 9, 23, 7) },
+    ];
+    const groups = groupByLocalDay(items, (i) => i.started_at, { now });
+    expect(groups.map((g) => g.key)).toEqual(['2026-09-23', '2026-09-22']);
+    expect(groups[0].items.map((i) => i.id)).toEqual(['a', 'b', 'd']);
+    expect(groups[1].items.map((i) => i.id)).toEqual(['c']);
+  });
+
+  it('keeps items with an unusable timestamp instead of dropping them', () => {
+    const groups = groupByLocalDay(
+      [{ id: 'x', started_at: null }, { id: 'y', started_at: at(2026, 9, 22) }],
+      (i) => i.started_at,
+      { now },
+    );
+    expect(groups.map((g) => g.key)).toEqual(['', '2026-09-22']);
+    expect(groups.flatMap((g) => g.items).map((i) => i.id)).toEqual(['x', 'y']);
+  });
+
+  it('returns nothing for an empty list', () => {
+    expect(groupByLocalDay([], (i: { started_at: number }) => i.started_at)).toEqual([]);
   });
 });

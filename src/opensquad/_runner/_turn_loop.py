@@ -795,16 +795,21 @@ class TurnLoop:
 
                 for evt in _raw_events:
                     if evt.source in ("web", "gateway", "group", "dm") and evt.content and evt.content.strip():
+                        # 这条消息是工具执行中途被 drain 进来的插话，不是新一轮的开头。
+                        # 打上 steer 标记：前端据此把它嵌进正在跑的工具流，而不是
+                        # 封口切段（见 buildTimelineFromSession 的 steer 分支）。
+                        _steer_cid = str(evt.metadata.get("client_id") or "")
                         _get_session_manager().add_message(
                             "user",
                             evt.content,
                             sid=_tool_sid or None,
+                            steer=True,
+                            client_id=_steer_cid or None,
                         )
                         await self.runner._emit("user_msg", evt.content)
                         # Steer（引导注入）消费回执：该用户插话已随本轮工具结果
-                        # 进入模型上下文。携带 client_id 供前端把引导气泡挪进
+                        # 进入模型上下文。携带 client_id 供前端把引导条目挪进
                         # 时间线（steer_consumed 在 protocol_version 注册）。
-                        _steer_cid = str(evt.metadata.get("client_id") or "")
                         if _steer_cid:
                             await self.runner._emit(
                                 "steer_consumed",

@@ -1102,6 +1102,37 @@ export function workspaceDisplayName(ws: Workspace): string {
   return ws.name || folderLabel(ws.rootPath) || ws.rootPath;
 }
 
+/**
+ * Session the focused pane was last showing — the conversation a page reload
+ * has to come back to.
+ *
+ * The backend's `current_session.json` only follows agent-side rotations, and a
+ * parallel session (what a session tab holds) is persisted to
+ * `history/{sid}.json` only, so `/agent-sessions/{agent}/current` answers with
+ * an empty draft or an unrelated session whenever the user has been working in
+ * a tab. The tab store is the client's own record of what is on screen, so it
+ * is the one to restore; the caller keeps the backend current as the fallback
+ * when this returns ''.
+ */
+export function getRestorableSessionId(
+  agentId: string,
+  aliases: Array<string | null | undefined> = [],
+): string {
+  if (!agentId) return '';
+  const snap = loadWorkspaceStoreResolved(agentId, aliases);
+  const chrome = snap.chrome;
+  const wsId = chrome.activeWorkspaceId || snap.workspaces[0]?.id || '';
+  if (!wsId) return '';
+  const layout = chrome.layoutByWorkspace?.[wsId];
+  if (!layout) return '';
+  const pid = resolvePaneId(chrome, wsId, chrome.focusedPaneId);
+  if (!pid) return '';
+  const leaf = findLeaf(layout, pid);
+  if (!leaf || leaf.type !== 'leaf') return '';
+  const tab = parseContentTabKey(leaf.tabs.activeKey);
+  return tab?.kind === 'session' ? String(tab.id || '').trim() : '';
+}
+
 /** Sync focused pane tabs into legacy-shaped object for simple readers. */
 export function getFocusedPaneTabs(agentId: string, workspaceId: string): PaneTabs {
   const chrome = loadWorkspaceStore(agentId).chrome;

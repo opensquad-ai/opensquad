@@ -12,7 +12,8 @@ import React, {
   useRef,
   useState,
 } from 'react';
-import { FileIcon, FileText, Mic, Send, Square, X } from 'lucide-react';
+import { useTranslation } from 'react-i18next';
+import { FileIcon, FileText, Mic, Send, Square, TextQuote, X } from 'lucide-react';
 import { agentSessionAPI, type ModelCardInfo, type SkillInfo } from '../../services/api';
 import { blobToWavFile } from '../../utils/mediaDevices';
 import { CHAT_DOCUMENT_COLUMN_CLASS } from '../../utils/chatLayout';
@@ -38,6 +39,9 @@ import {
   type SlashCommandDef,
 } from './slashCommands';
 
+/** Chip subtitle for an attached selection: a whole paragraph on one line. */
+const quotePreview = (text: string) => text.replace(/\s+/g, ' ').trim();
+
 export type ComposerUploadedFile = {
   path: string;
   filename: string;
@@ -52,12 +56,24 @@ export type ComposerUploadedFile = {
   duration?: number;
 };
 
+/**
+ * A chat/file selection attached to the message. `label` names the source when
+ * it has one (a workspace file: `bin/opensquad.js:12-25`) and is sent as the
+ * quote's first line, so the agent knows where the passage came from.
+ */
+export type ComposerQuote = {
+  text: string;
+  label?: string;
+};
+
 export type ComposerSendPayload = {
   text: string;
   images: string[];
   attachments: ComposerUploadedFile[];
   skillDir?: string;
   skillName?: string;
+  /** Selections attached to this message (see `addQuote`). */
+  quotes?: ComposerQuote[];
 };
 
 /** Parent (AIChatPage) uses this for withdraw refill + window file drops. */
@@ -65,6 +81,8 @@ export type AgentWebComposerHandle = {
   setText: (text: string) => void;
   focus: () => void;
   uploadFiles: (files: File[]) => Promise<void>;
+  /** Attach a selection from the chat or a workspace file as a removable chip. */
+  addQuote: (text: string, label?: string) => void;
 };
 
 function formatFileSize(bytes: number): string {
@@ -209,6 +227,7 @@ export const AgentWebComposer = forwardRef<AgentWebComposerHandle, AgentWebCompo
   },
   ref,
 ) {
+  const { t } = useTranslation();
   const [inputText, setInputText] = useState<string>(() => draftText ?? '');
   // 草稿双向同步：内部输入 → onDraftChange 写回外部（按 session 隔离）；
   // 外部 draftText 变化（如切回会话后的恢复/外部 refill）→ 同步回内部。
@@ -230,6 +249,10 @@ export const AgentWebComposer = forwardRef<AgentWebComposerHandle, AgentWebCompo
   }, [inputText, onDraftChange]);
   const [images, setImages] = useState<string[]>([]);
   const [attachments, setAttachments] = useState<ComposerUploadedFile[]>([]);
+  // Selections the user attached from the chat or a workspace file. They ride
+  // the send as `<user_quote>` context (see `serializeUserQuote`) rather than
+  // being pasted into the textarea, so the user's own words stay the message.
+  const [quotes, setQuotes] = useState<ComposerQuote[]>([]);
   const [pendingSkill, setPendingSkill] = useState<{ dir: string; name: string } | null>(null);
   const [isUploading, setIsUploading] = useState(false);
   const [sending, setSending] = useState(false);
@@ -340,6 +363,7 @@ export const AgentWebComposer = forwardRef<AgentWebComposerHandle, AgentWebCompo
     setInputText('');
     setImages([]);
     setAttachments([]);
+    setQuotes([]);
     setPendingSkill(null);
     if (inputRef.current) inputRef.current.style.height = 'auto';
   }, []);
@@ -353,6 +377,26 @@ export const AgentWebComposer = forwardRef<AgentWebComposerHandle, AgentWebCompo
       el.setSelectionRange(len, len);
     });
   }, []);
+
+  /**
+   * Attach a selection (chat timeline, or a workspace file's 添加到上下文).
+   * Repeated attaches of the same passage are ignored so a double-click on the
+   * menu cannot stack identical chips; removing one is the × on the chip.
+   */
+  const addQuote = useCallback(
+    (text: string, label?: string) => {
+      const body = (text || '').trim();
+      if (!body) return;
+      const source = (label || '').trim() || undefined;
+      setQuotes((prev) =>
+        prev.some((q) => q.text === body && q.label === source)
+          ? prev
+          : [...prev, { text: body, label: source }],
+      );
+      focusInputEnd();
+    },
+    [focusInputEnd],
+  );
 
   const selectSlashCommand = useCallback(
     (cmd: SlashCommandDef) => {
@@ -435,6 +479,7 @@ export const AgentWebComposer = forwardRef<AgentWebComposerHandle, AgentWebCompo
       setText: setTextAndFocus,
       focus: focusInputEnd,
       uploadFiles,
+      addQuote,
     }),
     [setTextAndFocus, focusInputEnd, uploadFiles],
   );
@@ -453,6 +498,7 @@ export const AgentWebComposer = forwardRef<AgentWebComposerHandle, AgentWebCompo
           text: `<user_plan>${topic}</user_plan>`,
           images: [...images],
           attachments: attachments.map((a) => ({ ...a })),
+          quotes: [...quotes],
           skillDir: pendingSkill?.dir,
           skillName: pendingSkill?.name,
         });
@@ -488,6 +534,7 @@ export const AgentWebComposer = forwardRef<AgentWebComposerHandle, AgentWebCompo
           text: `<user_goal>${objective}</user_goal>`,
           images: [...images],
           attachments: attachments.map((a) => ({ ...a })),
+          quotes: [...quotes],
           skillDir: pendingSkill?.dir,
           skillName: pendingSkill?.name,
         });
@@ -499,7 +546,10 @@ export const AgentWebComposer = forwardRef<AgentWebComposerHandle, AgentWebCompo
     }
 
     const text = inputText.trim();
-    if (!text && images.length === 0 && attachments.length === 0 && !pendingSkill) return;
+    // A selection alone is a valid send — the quote IS the message body.
+    if (!text && images.length === 0 && attachments.length === 0 && quotes.length === 0 && !pendingSkill) {
+      return;
+    }
     onActivate?.();
     setSending(true);
     try {
@@ -507,6 +557,7 @@ export const AgentWebComposer = forwardRef<AgentWebComposerHandle, AgentWebCompo
         text,
         images: [...images],
         attachments: attachments.map((a) => ({ ...a })),
+        quotes: [...quotes],
         skillDir: pendingSkill?.dir,
         skillName: pendingSkill?.name,
       });
@@ -520,6 +571,7 @@ export const AgentWebComposer = forwardRef<AgentWebComposerHandle, AgentWebCompo
     inputText,
     images,
     attachments,
+    quotes,
     pendingSkill,
     onSend,
     onActivate,
@@ -698,9 +750,36 @@ export const AgentWebComposer = forwardRef<AgentWebComposerHandle, AgentWebCompo
         </div>
       ) : null}
 
-      {(images.length > 0 || attachments.length > 0 || isUploading) && (
+      {(images.length > 0 || attachments.length > 0 || quotes.length > 0 || isUploading) && (
         <div className="px-2 sm:px-4 py-2 flex gap-2 flex-wrap items-center flex-shrink-0">
           <div className={`${columnClass} flex gap-2 flex-wrap items-center`}>
+            {quotes.map((quote, i) => (
+              <div
+                key={`quote-${i}`}
+                className="relative group flex items-center gap-2 px-3 py-2 rounded-lg border border-border bg-bgLight max-w-[260px]"
+                title={quote.label ? `${quote.label}\n${quote.text}` : quote.text}
+              >
+                <TextQuote size={16} className="text-textMuted flex-shrink-0" />
+                <div className="min-w-0 flex-1">
+                  {/* A file quote names its source (path, and the line range in
+                      source mode) above the passage itself. */}
+                  <p
+                    className={`truncate ${quote.label ? 'text-[10px] font-mono text-textMuted' : 'text-xs text-textMain'}`}
+                  >
+                    {quote.label || t('aiChat.selectedText', { defaultValue: '选中的文本' })}
+                  </p>
+                  <p className="text-[10px] text-textMuted truncate">{quotePreview(quote.text)}</p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setQuotes((prev) => prev.filter((_, idx) => idx !== i))}
+                  className="w-4 h-4 bg-red-500 rounded-full flex items-center justify-center opacity-0 group-hover:opacity-100 flex-shrink-0"
+                  title={t('common.remove', { defaultValue: 'Remove' })}
+                >
+                  <X size={10} className="text-white" />
+                </button>
+              </div>
+            ))}
             {images.map((img, i) => (
               <div key={`img-${i}`} className="relative group">
                 <img

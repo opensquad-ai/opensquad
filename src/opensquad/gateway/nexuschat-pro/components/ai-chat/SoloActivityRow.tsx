@@ -24,6 +24,7 @@ import {
   Lightbulb,
   Server,
   MessageCircleQuestion,
+  Reply,
   Users,
   Database,
   Target,
@@ -31,7 +32,7 @@ import {
   Clock,
 } from 'lucide-react';
 import type { WorkflowBlock, WorkflowEvent } from '../../utils/aiChatTimeline';
-import { isFinalFlag, isToolResultFailure } from '../../utils/aiChatTimeline';
+import { formatUserSkillDisplayContent, isFinalFlag, isToolResultFailure } from '../../utils/aiChatTimeline';
 import { hasOpenAsyncDelegate, isUiOnlyToolName } from '../../utils/aiChatTimeline';
 import { FileDiffBlock, extractFileEditInfo, parsePartialFileToolArgs, applyEditDiffContext, type FileEditInfo } from './FileDiffBlock';
 import { formatElapsedAtLeastOneSecond } from '../../utils/formatElapsed';
@@ -181,7 +182,7 @@ function thoughtLabel(t: TFunction): { primary: string; secondary: string } {
   return { primary: t('aiChat.toolFlow.line.thoughtDeep'), secondary: '' };
 }
 
-type LineKind = 'thought' | 'tool' | 'info' | 'summary' | 'progress' | 'delegation' | 'plan' | 'shell_job' | 'process';
+type LineKind = 'thought' | 'tool' | 'info' | 'summary' | 'progress' | 'delegation' | 'plan' | 'shell_job' | 'process' | 'steer';
 
 interface ActivityLine {
   key: string;
@@ -405,6 +406,20 @@ function eventToLines(evt: WorkflowEvent, key: string, blockCompleted: boolean, 
       fileEdit: null,
       toolStatus: failed ? 'error' : 'success',
     });
+    return lines;
+  }
+
+  // 插话（steer）：模型在工具轮中收到的一句用户插入语。它留在块内、按时间排在
+  // 它打断的那两次工具调用之间，所以工具流不会被切成两段。文案与用户气泡一致
+  // （引用标签转成引用行），实时和刷新共用这一条渲染路径。
+  if (evt.type === 'user_steer') {
+    const raw =
+      typeof evt.content === 'string'
+        ? evt.content
+        : (evt.content?.text || evt.content?.content || '');
+    const text = formatUserSkillDisplayContent(String(raw)).trim();
+    if (!text) return lines;
+    lines.push({ key, kind: 'steer', primary: '', secondary: '', detail: text });
     return lines;
   }
 
@@ -1161,6 +1176,38 @@ const SoloEventLine = React.memo(function SoloEventLine({
   const added = line.fileEdit?.addedLines;
   const removed = line.fileEdit?.removedLines;
 
+  // 插话（steer）：一行紧凑的用户插入语，不参与工具计数。正文按引用行（"> "）
+  // 分段，长文本在行内滚动，避免把虚拟化的步长估算撑歪。
+  if (line.kind === 'steer') {
+    return (
+      <div className="w-full py-0.5 text-[12px] leading-relaxed flex items-start gap-1.5">
+        <Reply size={12} className="mt-[3px] flex-shrink-0 text-primary/70" />
+        <span className="flex-shrink-0 text-[11px] text-primary/70">
+          {t('aiChat.toolFlow.line.steer')}
+        </span>
+        <span className="min-w-0 flex-1 max-h-24 overflow-y-auto whitespace-pre-wrap break-words text-textMain/85">
+          {line.detail.split('\n').map((row, i) => {
+            // 引用行：`> 文本`，引用里的空行是裸 `>`（formatUserSkillDisplayContent），
+            // 少了这一支那个 '>' 会当成正文原样显示出来。
+            const quoted = row === '>' || row.startsWith('> ');
+            return (
+              <span
+                key={i}
+                className={
+                  quoted
+                    ? 'block min-h-[1em] border-l-2 border-border/70 pl-1.5 text-textMuted'
+                    : 'block min-h-[1em]'
+                }
+              >
+                {quoted ? (row === '>' ? '' : row.slice(2)) : row}
+              </span>
+            );
+          })}
+        </span>
+      </div>
+    );
+  }
+
   // Delegate: open Cursor-style sub-agent window (not an inline expand).
   if (line.kind === 'delegation' && line.delegation) {
     return <DelegateFold bundle={line.delegation} variant="solo" />;
@@ -1532,6 +1579,13 @@ export const SoloActivityRow = React.memo(function SoloActivityRow({
   const useStepsScrollBox = displayLines.length > SOLO_STEPS_SCROLL_THRESHOLD;
   const virtSteps = useStepsScrollBox && displayLines.length > STEP_VIRT_AFTER;
 
+  // 插话始终可见：折叠时把这几行挪到外面单独渲染（展开时它们在流内的原位，
+  // 见下面的 Collapse 主体），否则一句插话会被"Worked for 8s"整行吞掉。
+  const steerLines = useMemo(
+    () => displayLines.filter((l) => l.kind === 'steer'),
+    [displayLines],
+  );
+
   const shellStreamsRef = useRef(shellStreams);
   shellStreamsRef.current = shellStreams;
   const shellStreamFor = useCallback(
@@ -1634,9 +1688,11 @@ export const SoloActivityRow = React.memo(function SoloActivityRow({
   }
 
   // Thought-only (no tools / compression / delegate / plan): single fold → body text.
+  // 插话也算一条要显示的行：混在思考里时不能走这条分支，否则那行会消失。
   const isThoughtOnly = !displayLines.some(
     (l) =>
       l.kind === 'tool' ||
+      l.kind === 'steer' ||
       l.kind === 'summary' ||
       l.kind === 'progress' ||
       l.kind === 'delegation' ||
@@ -1809,6 +1865,15 @@ export const SoloActivityRow = React.memo(function SoloActivityRow({
         running: isLiveTurn,
         shimmer: thinkingActive || isLiveTurn,
       })}
+      {/* 折叠态下的插话：展开时下面 Collapse 里的同一行会按原位显示，所以这里
+          只补折叠态，避免同一行出现两次。 */}
+      {!outerOpen && steerLines.length > 0 ? (
+        <div className="mt-0.5 space-y-0.5 pl-4">
+          {steerLines.map((line) => (
+            <SoloEventLine key={`closed-${line.key}`} line={line} />
+          ))}
+        </div>
+      ) : null}
       {/* Depth 1: event lines indented under the outer fold.
           >10 steps → fixed-height scroll box so the page doesn't grow forever.
           Delegate folds stay mounted (hidden when collapsed) so an open

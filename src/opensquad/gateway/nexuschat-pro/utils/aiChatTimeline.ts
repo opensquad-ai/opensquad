@@ -491,9 +491,28 @@ function stripLeakedToolCallSkeleton(text: string): string {
 }
 
 /**
+ * Tag an attached selection for the agent — a chat passage, or a snippet taken
+ * from a workspace file. Paired with the `<user_quote>` branch of
+ * {@link formatUserSkillDisplayContent}: the agent reads the tag, the bubble
+ * shows a blockquote.
+ *
+ * Kept as a tag (not raw pasted text) so a selection stays visibly *quoted*
+ * context instead of being indistinguishable from something the user typed.
+ * `label` names the source (`bin/opensquad.js:12-25`) and rides as the quote's
+ * first line, so a snippet from a file is not an anonymous blob.
+ */
+export function serializeUserQuote(text: string, label?: string): string {
+  const body = (text || '').trim();
+  if (!body) return '';
+  const source = (label || '').trim();
+  return `<user_quote>\n${source ? `${source}\n` : ''}${body}\n</user_quote>`;
+}
+
+/**
  * Collapse skill / goal payloads for chat display.
  * - `<user_send_skill>name</user_send_skill>` → `/name …`
  * - `<user_goal>…</user_goal>` → `/goal …`
+ * - `<user_quote>…</user_quote>` → markdown blockquote
  * - Expanded SKILL.md bodies (BEGIN/END SKILL) → `/name` + user request only
  */
 export function formatUserSkillDisplayContent(content: string): string {
@@ -511,6 +530,19 @@ export function formatUserSkillDisplayContent(content: string): string {
   );
   if (legacyAsk) {
     content = (legacyAsk[1] || '').trim() || content;
+  }
+
+  // Quoted chat selections (see `serializeUserQuote`). Unwrapped before the
+  // skill/goal branches so the tags below still see the message body.
+  if (/<user_quote>/i.test(content)) {
+    content = content
+      .replace(/<user_quote>\s*([\s\S]*?)\s*<\/user_quote>/gi, (_m, body: string) =>
+        String(body)
+          .split('\n')
+          .map((line) => (line.trim() ? `> ${line}` : '>'))
+          .join('\n'),
+      )
+      .trim();
   }
 
   const goalRe = /<user_goal>\s*([\s\S]*?)\s*<\/user_goal>/i;
@@ -576,7 +608,7 @@ export function formatUserSkillDisplayContent(content: string): string {
 
 export interface WorkflowEvent {
   _uid?: string;
-  type: 'thought' | 'tool_call' | 'tool_result' | 'info' | 'plan' | 'summary_stream' | 'compression_progress' | 'process_output';
+  type: 'thought' | 'tool_call' | 'tool_result' | 'info' | 'plan' | 'summary_stream' | 'compression_progress' | 'process_output' | 'user_steer';
   content: any;
   timestamp: number;
   result?: any;
@@ -1233,6 +1265,48 @@ function sealWorkflowAfterUserStop(
       elapsed_ms: elapsed,
     },
   };
+}
+
+/**
+ * A 插话 (steer): the user's words, injected by the runner at the next tool
+ * boundary without ending the turn. It is a workflow EVENT, not a message, so
+ * the fold it interrupted stays one block and the row keeps its place among the
+ * tools around it — a top-level bubble would seal the fold and cut the tool
+ * stream in two (`sealIncompleteWorkflows` + message).
+ */
+export function makeUserSteerEvent(text: string): WorkflowEvent {
+  return {
+    _uid: genTimelineUID(),
+    type: 'user_steer',
+    content: { text },
+    timestamp: Date.now(),
+  };
+}
+
+/**
+ * Attach a consumed steer to the turn's running fold.
+ *
+ * Returns null when there is no live fold to attach to — the turn already
+ * sealed (a steer consumed after the reply) — so the caller can fall back to a
+ * normal user bubble. Never seals: sealing is what an interruption does.
+ */
+export function appendUserSteerToTimeline(
+  timeline: TimelineEntry[],
+  text: string,
+): TimelineEntry[] | null {
+  if (!formatUserSkillDisplayContent(text).trim()) return null;
+  for (let i = timeline.length - 1; i >= 0; i--) {
+    const entry = timeline[i];
+    if (entry.kind !== 'workflow') continue;
+    if (entry.data.completed) return null;
+    const evt = makeUserSteerEvent(text);
+    return timeline.map((e, idx) =>
+      idx === i
+        ? { ...entry, data: { ...entry.data, events: [...entry.data.events, evt] } }
+        : e,
+    );
+  }
+  return null;
 }
 
 /**
@@ -2821,6 +2895,21 @@ export function buildTimelineFromSession(
       continue;
     }
 
+    // A 插话 (steer) is a mid-turn injection, not a turn boundary: it belongs
+    // INSIDE the running fold, between the tools it interrupted. Pulling the
+    // earlier events first is what keeps that order — otherwise the tools that
+    // ran before the interjection are still in sortedEvents and land after it.
+    // Marked `steer` by the runner at the drain (see _turn_loop.py).
+    if (m.role === 'user' && m.steer === true) {
+      pullEventsBefore(mTs);
+      pendingRaw.push({
+        type: 'user_steer',
+        data: { text: typeof m.content === 'string' ? m.content : '' },
+        timestamp: m.timestamp,
+      });
+      continue;
+    }
+
     // Do NOT pull/flush workflow events before a user bubble.
     // After compression (and with sub-agent / clock skew), same-turn
     // thought/tool events can have timestamps <= the user message. Pulling
@@ -3667,6 +3756,18 @@ export function convertSessionEventsToWorkflow(rawEvents: any[]): WorkflowEvent[
           subAgent: isSub || undefined,
           subTaskLabel: data.sub_task_label || undefined,
           jobId,
+        });
+      }
+    } else if (type === 'user_steer') {
+      // 插话（引导注入）重建：文本保持原样，渲染时才过
+      // formatUserSkillDisplayContent —— 实时与刷新走同一条路径。
+      const steerText = typeof data === 'string' ? data : (data?.text || '');
+      if (String(steerText).trim()) {
+        result.push({
+          _uid: genTimelineUID(),
+          type: 'user_steer',
+          content: { text: String(steerText) },
+          timestamp: eventTimestamp,
         });
       }
     } else if (type === 'plan') {

@@ -197,6 +197,9 @@ export function ChatTimeline<T extends TimelineKeyed>({
     <div
       ref={scrollRef}
       className={['os-chat-scroll', className].filter(Boolean).join(' ')}
+      // Marks this as a quotable surface: right-clicking a selection inside it
+      // gets the 复制文本 / 添加到会话 menu (see SelectionQuoteMenu).
+      data-quote-source="chat"
       style={{ overflowAnchor: 'none', scrollBehavior: 'auto', ...style }}
       onPointerDown={(e) => {
         userScrollingRef.current = true;

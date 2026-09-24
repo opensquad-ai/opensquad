@@ -31,6 +31,7 @@
  *   MU12 chips move back into the composer approvalPanel             → R7
  *   MU13 the settle gate is dropped (chips flash over a live turn)   → R7
  *   MU14 the tool_call branch stops retiring an armed offer          → R11
+ *   MU15 the end_task turn stops releasing its session run state     → R12
  */
 import fs from 'node:fs';
 import path from 'node:path';
@@ -474,5 +475,41 @@ describe('R11 — a later tool flow retires the offer', () => {
     expect(at).toBeGreaterThan(-1);
     const body = HOOK.slice(at, at + 5000);
     expect(body).toMatch(/followupOfferArmedRef\.current = false/);
+  });
+});
+
+describe('R12 — an end-task turn releases the pane it belongs to', () => {
+  /**
+   * A complex task ends on `to_user_end_task` INSTEAD of `to_user_final`, and
+   * that is the turn's only terminal frame — so `handleFinal`, the place that
+   * releases a turn, never runs for it. The handler used to clear only the
+   * global stream state, leaving the per-session flag that `stream` sets
+   * (`isStreamingBySessionRef[sid]`) true forever: `isSessionBusy(sid)` stayed
+   * true, so the composer kept the red Stop and the follow-up chips — already
+   * in state, the offer lands a blink *before* the final text — stayed hidden
+   * behind the R7 settle gate. Pressing Stop was the only way out, because the
+   * stop path clears the per-session flag.
+   *
+   * Both halves are asserted: the handler must ask for the per-session release,
+   * and that release must really clear the flag + busy marker it is asked for.
+   */
+  const endTaskBody = () => {
+    const at = HOOK.indexOf("onWs('to_user_end_task'");
+    expect(at).toBeGreaterThan(-1);
+    return HOOK.slice(at, at + 7000);
+  };
+
+  it('the handler releases the session run state, not just the global stream', () => {
+    // `endSid` is this frame's own sid (onWs drops sid-less live-turn frames),
+    // so a sibling pane's running turn is untouched.
+    expect(endTaskBody()).toMatch(/clearSessionRunState\(endSid\)/);
+  });
+
+  it('that release clears the per-session flag and the busy marker', () => {
+    const at = PAGE.indexOf('const clearSessionRunState');
+    expect(at).toBeGreaterThan(-1);
+    const body = PAGE.slice(at, at + 1400);
+    expect(body).toMatch(/isStreamingBySessionRef\.current\[key\]/);
+    expect(body).toMatch(/busySessionsRef\.current\.filter/);
   });
 });

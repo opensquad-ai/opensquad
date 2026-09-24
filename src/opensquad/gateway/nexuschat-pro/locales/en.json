@@ -943,7 +943,8 @@
         "running": "Running…",
         "waitingSubAgent": "Waiting for sub-agent activity…",
         "noSubAgentActivity": "No nested activity recorded.",
-        "delegateComplete": "Delegate complete"
+        "delegateComplete": "Delegate complete",
+        "steer": "Interjected"
       },
       "shell": {
         "running": "Running command",
@@ -997,6 +998,11 @@
     "expand": "Expand",
     "copyCode": "Copy Code",
     "codeCopied": "Copied",
+    "copyText": "Copy text",
+    "addToChat": "Add to chat",
+    "selectedText": "Selected text",
+    "selectionCopied": "Copied",
+    "addToContext": "Add to context",
     "expandFoldedLines": "Expand folded lines",
     "unchangedLines": "lines unchanged (click to expand)",
     "readFile": "Read file",

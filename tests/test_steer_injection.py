@@ -5,7 +5,7 @@
    → input_hub 会话队列（不打断、不开新回合）。
 2. runner turn 边界 ``_drain_parallel_session_supplements`` → event_pipeline
    （metadata 带 client_id）→ per-tool drain 随工具结果进模型上下文，同时
-   回发 ``steer_consumed``（前端把引导气泡挪进时间线）。
+   回发 ``steer_consumed``（前端把插话嵌进正在跑的工具流，不切段）。
 3. 撤回/删除 → ``cancel_steer`` 命令 → 从 input_hub 会话队列或 event_pipeline
    桶移除（两段都可能持有，取决于消息走到哪一步）。
 4. 兜底：模型直接输出正文收尾时（无工具调用、per-tool drain 不执行），
@@ -196,6 +196,17 @@ def test_turn_loop_emits_steer_consumed_with_client_id():
     assert '"steer_consumed"' in block
     assert 'evt.metadata.get("client_id")' in block
     assert '"message_id"' in block
+
+
+def test_mid_turn_insert_is_stamped_steer_for_the_fold():
+    # 写进 history 的插话必须带 steer 标记：前端据此把它嵌进正在跑的工具流
+    # （而不是封口切段），刷新重建也走同一条路径。标记写在 add_message 上。
+    block = TURN_LOOP_SRC[TURN_LOOP_SRC.index("for evt in _raw_events") :]
+    block = block[: block.index('if evt.source == "vision_tool"')]
+    assert "steer=True" in block
+    assert "client_id=_steer_cid or None" in block
+    # client_id 要在写消息之前取到（原来是写在 add_message 之后的）
+    assert block.index("_steer_cid =") < block.index("add_message(")
 
 
 def test_turn_end_safety_net_requeues_leftover_user_events():

@@ -289,7 +289,17 @@ export const WorkspaceFileEditor: React.FC<WorkspaceFileEditorProps> = ({
   }, [dirty]);
 
   return (
-    <div className="flex-1 min-w-0 min-h-0 flex flex-col bg-bgLight" data-dirty={dirty ? '1' : '0'}>
+    <div
+      className="flex-1 min-w-0 min-h-0 flex flex-col bg-bgLight"
+      data-dirty={dirty ? '1' : '0'}
+      // Quotable surface: right-clicking a selection anywhere in the file gets
+      // the 复制文本 / 添加到上下文 menu, which stamps `data-quote-path` onto the
+      // quote so the agent knows which file (and which lines, in source mode) it
+      // came from. The browser's own menu still opens when nothing is selected,
+      // and Ctrl+C/X/V keep working over a selection.
+      data-quote-source="file"
+      data-quote-path={relPath}
+    >
       <div className="px-3 py-2 border-b border-border flex-shrink-0 flex items-start gap-2">
         <div className="min-w-0 flex-1">
           <div className="text-[12px] font-medium text-textMain font-mono truncate flex items-center gap-1.5">

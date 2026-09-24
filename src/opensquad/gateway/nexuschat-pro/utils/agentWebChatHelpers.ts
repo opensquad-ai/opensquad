@@ -258,3 +258,28 @@ export function mergeCompressionHydration(
 
   return next;
 }
+
+/**
+ * The runner repeats `status {data: "busy" | "online"}` from
+ * `Runner._emit_busy_sessions` every few seconds, and `online` is sent only when
+ * the agent's busy set is EMPTY — it is the agent-wide "nothing is running"
+ * report. Neither value matched a branch in `handleStatus` (which knows
+ * idle/ready/complete/working/thinking), so `agentStatus` stayed `working` after
+ * a turn; `isSessionBusy()` falls back to that flag once the busy list is empty,
+ * which left the composer showing the red Stop long after the reply rendered.
+ */
+export function isAgentIdleStatus(raw: unknown): boolean {
+  return String(raw ?? '').trim().toLowerCase() === 'online';
+}
+
+/**
+ * Agent-level status implied by a `busy_sessions` snapshot. An empty snapshot
+ * means no session is running, so the agent-wide flags must settle with it:
+ * `isSessionBusy()` reads them whenever the list is empty, and a terminal frame
+ * carrying a sid the pane does not recognise would otherwise leave it stuck on
+ * "executing" forever.
+ */
+export function settleAgentStatusOnBusySnapshot(snapshot: string[], prev: string): string {
+  if (snapshot.length > 0) return prev;
+  return prev === 'working' || prev === 'thinking' ? 'connected' : prev;
+}
