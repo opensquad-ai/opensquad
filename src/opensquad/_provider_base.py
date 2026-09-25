@@ -61,11 +61,13 @@ except ImportError:  # pragma: no cover
 
 
 __all__ = [
+    "USAGE_COUNTER_FIELDS",
     "ContextOverflowError",
     "ProviderAPIBase",
     "cache_miss_tokens",
     "extract_cached_tokens",
     "has_estimated_usage",
+    "transfer_usage_counters",
 ]
 
 
@@ -180,6 +182,65 @@ def has_estimated_usage(estimated_turns: object) -> bool:
         return int(estimated_turns or 0) > 0
     except (TypeError, ValueError):
         return False
+
+
+#: Counters that describe how much a client has been **billed**, plus where
+#: those numbers came from.  They are stored on the client instance, but they
+#: account for a *session* — and a session can be re-homed onto a different
+#: client: a pane gets its own client when it first carries a model card of its
+#: own (``session_dispatcher.make_session_chat_api``), or the running client is
+#: replaced when the card changes provider
+#: (``model_switch.apply_model_reload``).  Every re-homing path must carry them
+#: across, see :func:`transfer_usage_counters`.
+USAGE_COUNTER_FIELDS: tuple[str, ...] = (
+    "total_input_tokens",
+    "total_output_tokens",
+    "total_requests",
+    "total_cache_read_tokens",
+    "total_cache_creation_tokens",
+    "usage_reported_turns",
+    "usage_estimated_turns",
+)
+
+
+def transfer_usage_counters(src: object, dst: object, *, clear_source: bool = False) -> list[str]:
+    """Carry billed-usage counters from *src* to *dst*; return the fields moved.
+
+    *dst* is typically a brand-new client whose counters all start at 0.  The
+    context panel reads its prompt-cache split off whichever client is bound to
+    the session, so dropping these numbers on the way across makes a session
+    that has been running for an hour look like it never sent a prompt: the
+    panel computes ``hit + miss == 0`` and renders no cache block at all, i.e.
+    the hit rate "becomes unmeasurable" right after a mid-task model switch.
+
+    ``clear_source`` distinguishes the two re-homing shapes:
+
+    * ``False`` — *src* is discarded (a cross-provider reload replaced it), so
+      copying is enough.
+    * ``True`` — *src* outlives *dst* (the root client stays the fallback for
+      every other session), so the value must **move**: leaving a copy behind
+      would bill the same tokens twice as soon as the root counters are rolled
+      into the runner's ``_hist_*`` totals on the next New Session.
+
+    Fields missing on *src* are skipped rather than written as 0, so a
+    duck-typed client used by a test or plugin is never zeroed by accident.
+    """
+    moved: list[str] = []
+    for field in USAGE_COUNTER_FIELDS:
+        value = getattr(src, field, None)
+        if value is None:
+            continue
+        try:
+            setattr(dst, field, value)
+        except Exception:
+            continue
+        if clear_source:
+            try:
+                setattr(src, field, 0)
+            except Exception:
+                pass
+        moved.append(field)
+    return moved
 
 
 class ProviderAPIBase:

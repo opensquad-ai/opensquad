@@ -169,7 +169,7 @@ async def bind_for_turn(
     **not** persist over the pane's ``model_card`` (external / group ingress).
     """
     from opensquad.model_switch import apply_model_reload, resolve_card
-    from opensquad.session_dispatcher import _clone_chat_api
+    from opensquad.session_dispatcher import make_session_chat_api
 
     sid = (sid or "").strip()
     if not sid:
@@ -189,10 +189,11 @@ async def bind_for_turn(
     apis = session_api_map(runner)
     api = apis.get(sid)
     if api is None:
-        root = getattr(runner, "_root_chat_api", None) or getattr(runner, "chat_api", None)
-        api = _clone_chat_api(root)
-        api._sid_provider = lambda s=sid: s
-        api._user_id_provider = lambda: getattr(runner, "_current_user_id", "")
+        # Single place that mints a session client.  Besides the sid/user
+        # providers it moves this session's billed-usage baseline off the root
+        # client, so a pane that has been running on the root keeps its cache
+        # hit rate the moment it is given a model of its own.
+        api = make_session_chat_api(runner, sid)
         apis[sid] = api
 
     if use_agent_default:

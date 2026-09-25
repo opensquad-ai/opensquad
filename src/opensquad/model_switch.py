@@ -259,6 +259,7 @@ async def apply_model_reload(runner, new_model: dict, *, chat_api=None) -> None:
     When *chat_api* is provided (session-scoped switch), only that instance is
     reloaded and runner-level defaults are left unchanged.
     """
+    from ._provider_base import transfer_usage_counters
     from .agents_boot import create_chat_api_from_config, resolve_provider
 
     session_scoped = chat_api is not None
@@ -303,16 +304,12 @@ async def apply_model_reload(runner, new_model: dict, *, chat_api=None) -> None:
         new_api.history_file = getattr(chat_api, "history_file", "")
         new_api.output_media_dir = getattr(chat_api, "output_media_dir", "")
         new_api._prev_reasoning_content = getattr(chat_api, "_prev_reasoning_content", None)
-        new_api.total_input_tokens = getattr(chat_api, "total_input_tokens", 0)
-        new_api.total_output_tokens = getattr(chat_api, "total_output_tokens", 0)
-        new_api.total_requests = getattr(chat_api, "total_requests", 0)
-        new_api.total_cache_read_tokens = getattr(chat_api, "total_cache_read_tokens", 0)
-        new_api.total_cache_creation_tokens = getattr(chat_api, "total_cache_creation_tokens", 0)
-        # Usage provenance travels with the counters: a session that already
-        # contains estimated turns must keep reporting the hit rate as
-        # unavailable after a switch, not silently start printing one.
-        new_api.usage_reported_turns = getattr(chat_api, "usage_reported_turns", 0)
-        new_api.usage_estimated_turns = getattr(chat_api, "usage_estimated_turns", 0)
+        # Billed usage travels with the session, provenance included: a session
+        # that already contains estimated turns must keep reporting the hit rate
+        # as unavailable after a switch, not silently start printing one.
+        # Copied rather than moved — this branch replaces the client, so nothing
+        # ever reads the old instance again.
+        transfer_usage_counters(chat_api, new_api)
         chat_api = new_api
         if session_scoped:
             # Caller must reassign into _session_chat_apis[sid]
@@ -397,7 +394,7 @@ async def switch_to_card(card_name: str, session_id: str | None = None) -> dict:
     ``{"ok": False, "error"}`` on failure.  Safe to call directly from Python
     (e.g. for testing) or via the event-bus handler.
     """
-    from opensquad.session_dispatcher import _clone_chat_api
+    from opensquad.session_dispatcher import make_session_chat_api
     from opensquad.session_model import (
         get as session_get,
     )
@@ -440,10 +437,10 @@ async def switch_to_card(card_name: str, session_id: str | None = None) -> dict:
             apis = session_api_map(_runner)
             api = apis.get(sid)
             if api is None:
-                root = getattr(_runner, "_root_chat_api", None) or getattr(_runner, "chat_api", None)
-                api = _clone_chat_api(root)
-                api._sid_provider = lambda s=sid: s
-                api._user_id_provider = lambda: getattr(_runner, "_current_user_id", "")
+                # Mints the pane's client and carries the session's billed-usage
+                # baseline across; otherwise the context panel's cache hit rate
+                # resets to "unmeasurable" on this very switch.
+                api = make_session_chat_api(_runner, sid)
                 apis[sid] = api
             refreshed = await apply_model_reload(_runner, new_cfg, chat_api=api)
             if refreshed is not None:

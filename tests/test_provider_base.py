@@ -783,10 +783,18 @@ def test_endpoints_that_reject_stream_options_still_complete_the_turn():
 
 
 def test_model_switch_keeps_the_usage_provenance():
-    """Swapping the model mid-session must not launder estimated turns."""
+    """Swapping the model mid-session must not launder estimated turns.
+
+    Fence on the intent, not on the wording: the reload has to carry the
+    counters through the one shared transfer (a hand-rolled field list is what
+    drifts), and the provenance fields have to be **on** that list — a session
+    that already contains estimated turns must keep reporting the hit rate as
+    unavailable instead of silently starting to print one.
+    """
     src = _code_without_comments(Path(pb.__file__).resolve().parent / "model_switch.py").replace(" ", "")
-    assert "new_api.usage_reported_turns=getattr(chat_api," in src
-    assert "new_api.usage_estimated_turns=getattr(chat_api," in src
+    assert "transfer_usage_counters(chat_api,new_api)" in src
+    assert "usage_reported_turns" in pb.USAGE_COUNTER_FIELDS
+    assert "usage_estimated_turns" in pb.USAGE_COUNTER_FIELDS
 
 
 def test_a_session_with_an_estimated_turn_cannot_claim_a_hit_rate():

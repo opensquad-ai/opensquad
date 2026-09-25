@@ -117,6 +117,53 @@ def _clone_chat_api(base) -> Any:
     return api
 
 
+def make_session_chat_api(runner, sid: str) -> Any:
+    """Mint the per-session ChatAPI for *sid*, taking over its usage baseline.
+
+    This is the **only** place that may build a session client.  Callers used to
+    open-code it (``_clone_chat_api(root)`` plus the two provider lambdas) in
+    more than one module, and none of them carried the billed-usage counters
+    across.  A session running on the root client — which is every serial
+    session, since only ``_runner._parallel_session_turn`` calls
+    ``session_model.bind_for_turn`` — therefore restarted its counters at 0 the
+    instant it was given a client of its own, and the context panel's cache hit
+    rate disappeared (``hit + miss == 0`` renders no cache block at all).
+
+    The root counters are the *current session's* baseline: New Session rolls
+    them into ``runner._hist_*`` and zeroes them.  So they are **moved**, not
+    copied — a copy left on the root would be billed twice once the root is
+    rolled into history.  ``_sid_provider`` is the root's own record of which
+    session it has been billing (``runner.__init__`` points it at
+    ``_turn_sid``); when it names a *different* session the root is still in use
+    elsewhere and its counters are left alone.
+    """
+    from opensquad._provider_base import transfer_usage_counters
+
+    sid = (sid or "").strip()
+    root = getattr(runner, "_root_chat_api", None) or getattr(runner, "chat_api", None)
+    api = _clone_chat_api(root)
+
+    owner = ""
+    owner_provider = getattr(root, "_sid_provider", None)
+    if callable(owner_provider):
+        try:
+            owner = str(owner_provider() or "").strip()
+        except Exception:
+            owner = ""
+    if not owner or owner == sid:
+        moved = transfer_usage_counters(root, api, clear_source=True)
+        if moved:
+            logger.info(
+                "[Dispatcher] session client sid=%s inherited usage baseline %s",
+                sid or "-",
+                ",".join(moved),
+            )
+
+    api._sid_provider = lambda s=sid: s
+    api._user_id_provider = lambda: getattr(runner, "_current_user_id", "")
+    return api
+
+
 async def run_parallel_dispatcher(runner: AgentRunner, initial_query: str | None = None, **kwargs):
     """Replace AgentRunner.run()'s outer idle loop with a multi-session dispatcher."""
     from opensquad.session_manager import get_session_manager
