@@ -421,6 +421,7 @@ from opensquad.launcher.process_manager import (
     _cleanup_runtime_registry,
     _install_builtin_plugin_deps,
     _kill_port_owner,
+    resolve_auto_start,
     set_process_tables,
 )
 
@@ -1082,7 +1083,9 @@ def _init_and_start_plugin_services():
     else:
         _log.info(f"[Launcher] Found {len(plugin_svc_infos)} plugin service(s):")
         for info in plugin_svc_infos:
-            auto = info["service_cfg"].get("auto_start", False)
+            # Log the value that actually decides boot, not the manifest default:
+            # those differ whenever the user's toggle overrides it.
+            auto = resolve_auto_start(info["plugin_id"], info["service_cfg"])
             _log.info(f"  - {info['plugin_id']} (auto_start={auto})")
 
     _plugin_deps_thread = threading.Thread(
@@ -1114,14 +1117,18 @@ def _init_and_start_plugin_services():
     for info in plugin_svc_infos:
         pid = info["plugin_id"]
         psp = _plugin_services[pid]
-        if not syscfg.is_service_enabled(pid):
-            _log.info(f"[Launcher] Plugin service {pid} disabled via config (services.{pid}.enabled=false), skipping.")
-            continue
         if skip_auto_start:
             _log.info(f"[Launcher] Plugin service {pid} discovered but not auto-started (--no-services).")
             continue
-        if psp.auto_start:
+        # Resolved, not `psp.auto_start`: an explicit services.{pid}.enabled
+        # (the Auto toggle) has to win over the plugin manifest's default, or
+        # the UI promises a start that never happens.
+        if psp._resolve_auto_start():
             to_start.append(pid)
+        else:
+            _log.info(
+                f"[Launcher] Plugin service {pid} not auto-started (services.{pid}.enabled=false, or plugin default)."
+            )
     return to_start
 
 

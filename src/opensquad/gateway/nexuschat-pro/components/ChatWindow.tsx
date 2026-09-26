@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState, useLayoutEffect, useCallback, useMemo, useImperativeHandle } from 'react';
 import { createPortal } from 'react-dom';
 import { useTranslation } from 'react-i18next';
-import { MoreHorizontal, Paperclip, Pin, Reply, Trash2, Copy, MessageSquare, Download, Folder, File as FileIcon, X, AtSign, ArrowLeft, Edit2, Check, ChevronLeft, ChevronRight, ChevronUp, ChevronDown, ZoomIn, Image as ImageIcon, RotateCcw, Play, Pause, Film, Mic } from 'lucide-react';
+import { MoreHorizontal, Paperclip, Pin, Reply, Trash2, Copy, MessageSquare, Download, Folder, File as FileIcon, X, AtSign, ArrowLeft, Edit2, Check, ChevronLeft, ChevronRight, ChevronUp, ChevronDown, Image as ImageIcon, RotateCcw, Play, Pause, Film, Mic } from 'lucide-react';
 import { Message, User, Group, MessageType, Attachment } from '../types';
 import { MessageInput } from './MessageInput';
 import { uploadAPI, SERVER_BASE_URL, messageAPI, agentSessionAPI } from '../services/api';
@@ -569,8 +569,13 @@ const MessageRowImpl: React.FC<MessageRowProps> = ({
                 return (
                   <div key={att.id} className="mt-1">
                     {att.type === 'image' ? (
+                      // No hover chrome of its own: the row's `group` is an
+                      // ancestor, so a `group-hover:` overlay here would light
+                      // up whenever the pointer is anywhere on the row — the
+                      // image greyed out (and showed a zoom badge) with the
+                      // mouse nowhere near it. Click still opens the lightbox.
                       <div
-                        className="relative group cursor-pointer"
+                        className="relative cursor-pointer"
                         onClick={() => {
                           // 收集该消息中的所有图片
                           const images =
@@ -602,11 +607,8 @@ const MessageRowImpl: React.FC<MessageRowProps> = ({
                           // that is pure downside. `async` decodes off-thread and
                           // costs at most one frame of paint delay.
                           decoding="async"
-                          className="max-w-full rounded-lg max-h-80 object-cover hover:opacity-95 transition-opacity"
+                          className="max-w-full rounded-lg max-h-80 object-cover"
                         />
-                        <div className="absolute inset-0 bg-black/0 group-hover:bg-black/20 transition-colors rounded-lg flex items-center justify-center opacity-0 group-hover:opacity-100">
-                          <ZoomIn size={24} className="text-white" />
-                        </div>
                       </div>
                     ) : att.type === 'voice' ? (
                       <VoicePlayer url={fullUrl} duration={att.duration || 0} />

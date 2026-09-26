@@ -164,6 +164,11 @@ config_schema={
 - **`port`（必需）**：服务监听端口
 - **`auto_start`（可选）**：是否自动启动服务，默认 `True`
 
+开机自启的判定顺序（`launcher.resolve_auto_start`）：
+`system_config.json` 里显式的 `services.<plugin>.enabled`（服务管理页的 Auto 开关、以及
+Start/Stop 会写这个键）> 本插件 `plugin.json` 的 `service.auto_start` > 默认 `True`。
+即：用户在服务管理页改过的结果永远优先于插件作者写的默认值。
+
 ## 健康检查端点要求
 
 服务必须实现一个健康检查端点（默认 `/health`），返回 HTTP 200 状态码：

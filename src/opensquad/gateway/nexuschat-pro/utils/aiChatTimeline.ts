@@ -621,11 +621,66 @@ export interface WorkflowEvent {
   subTaskLabel?: string;
   /** Async delegate_task_submit job id (nests parallel sub-agents). */
   jobId?: string;
+  /**
+   * Thinking-phase duration in ms, AS REPORTED BY THE AGENT (``thought_ms`` on
+   * the wire / in the persisted event).  Preferred over inferring it from
+   * neighbouring timestamps: the guess drifts (live uses ms deltas, the disk
+   * only keeps ISO seconds) and every new event ordering used to break it.
+   */
+  thoughtMs?: number;
 }
 
 /** Scope key so parent / sub-agent / job thoughts do not merge across each other. */
 export function thoughtScopeKey(e: Pick<WorkflowEvent, 'subAgent' | 'subTaskLabel' | 'jobId'>): string {
   return `${e.subAgent ? 1 : 0}\0${e.subTaskLabel || ''}\0${e.jobId || ''}`;
+}
+
+/**
+ * Thinking-phase duration (ms) as recorded by the agent.
+ *
+ * The agent stamps ``thought_ms`` on every thought frame (elapsed so far, so a
+ * live row can show a real number instead of a wall-clock guess) and on the
+ * frame that ends the phase — the tool_call that follows the reasoning — which
+ * carries the exact total.  Accepts the field wherever it appears: top-level
+ * frame meta, the payload object, or the data envelope the gateway forwards.
+ */
+export function readThoughtMs(source: unknown): number | undefined {
+  if (source == null || typeof source !== 'object') return undefined;
+  const rec = source as Record<string, any>;
+  const raw =
+    rec.thought_ms ?? rec.thoughtMs ?? rec.data?.thought_ms ?? rec.content?.thought_ms;
+  const n = Number(raw);
+  return Number.isFinite(n) && n >= 0 ? n : undefined;
+}
+
+/**
+ * Stamp the agent-recorded thinking duration onto the row it belongs to.
+ *
+ * Called for the frame that ENDS a thinking phase (e.g. the tool_call): its
+ * value is the exact phase total, later and more accurate than the last
+ * streamed chunk's running figure.  Only the trailing thought of the last
+ * incomplete block is touched — that is the phase that just ended.
+ */
+export function stampThoughtDuration(
+  timeline: TimelineEntry[],
+  thoughtMs: number,
+): TimelineEntry[] {
+  if (!Number.isFinite(thoughtMs) || thoughtMs < 0) return timeline;
+  const idx = findLastIncompleteWorkflowIdx(timeline);
+  if (idx < 0) return timeline;
+  const entry = timeline[idx];
+  if (entry.kind !== 'workflow') return timeline;
+  const events = entry.data.events;
+  for (let i = events.length - 1; i >= 0; i--) {
+    if (events[i].type !== 'thought') continue;
+    if (events[i].thoughtMs === thoughtMs) return timeline;
+    const nextEvents = [...events];
+    nextEvents[i] = { ...events[i], thoughtMs };
+    const out = [...timeline];
+    out[idx] = { ...entry, data: { ...entry.data, events: nextEvents } };
+    return out;
+  }
+  return timeline;
 }
 
 export interface WorkflowBlock {
@@ -773,6 +828,9 @@ function appendEventIntoWorkflowBlock(
       newEvents[mergeIdx] = {
         ...prev,
         content: String(prev.content ?? '') + String(event.content ?? ''),
+        // The agent reports the phase duration on every chunk, growing as it
+        // streams: keep the newest so the last (largest) value survives.
+        ...(typeof event.thoughtMs === 'number' ? { thoughtMs: event.thoughtMs } : {}),
       };
       return newEvents;
     }
@@ -1931,6 +1989,52 @@ export function timelineHasToolEvent(timeline: TimelineEntry[], event: WorkflowE
     if (entry.kind !== 'workflow') continue;
     for (const evt of entry.data.events) {
       if (workflowToolEventKey(evt) === key) return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Identity for "is this exact event already on the timeline?", for **every**
+ * event type — not just tool calls.
+ *
+ * Carrying a live workflow block into a freshly hydrated timeline used to
+ * dedup tool events only (see {@link timelineHasToolEvent}) and keep every
+ * narration/thinking row unconditionally. A block that was already on disk
+ * therefore re-contributed its `process_output` / `thought` / `info` rows into
+ * the newest block — which sits under the *current* turn's fold, so the user's
+ * previous 过程输出 rows reappeared (timestamp-sorted above the new thinking)
+ * while the tool rows, being deduped, did not.
+ *
+ * `process_output` is keyed by its text alone: the text is the narration and is
+ * unique, and it survives the disk round-trip unchanged, whereas timestamps
+ * have to agree between the live frame and its persisted copy.
+ */
+export function workflowCarryOverKey(evt: WorkflowEvent): string {
+  const tool = workflowToolEventKey(evt);
+  if (tool) return tool;
+  const text = typeof evt.content === 'string' ? evt.content.trim().slice(0, 64) : '';
+  if (evt.type === 'process_output') return `process_output:${text}`;
+  const sub = evt.subAgent ? `:sub:${evt.subTaskLabel || ''}` : '';
+  const job = evt.jobId ? `:job:${evt.jobId}` : '';
+  return `${evt.type}:${evt.timestamp}${sub}${job}:${text}`;
+}
+
+/** Same walk as {@link timelineHasToolEvent}, for non-tool events (see above). */
+export function timelineHasWorkflowEvent(timeline: TimelineEntry[], event: WorkflowEvent): boolean {
+  const key = workflowCarryOverKey(event);
+  for (const entry of timeline) {
+    if (entry.kind === 'archived_section') {
+      if (timelineHasWorkflowEvent(entry.data.entries, event)) return true;
+      continue;
+    }
+    if (entry.kind === 'task_fold') {
+      if (timelineHasWorkflowEvent(entry.data.entries, event)) return true;
+      continue;
+    }
+    if (entry.kind !== 'workflow') continue;
+    for (const evt of entry.data.events) {
+      if (workflowCarryOverKey(evt) === key) return true;
     }
   }
   return false;
@@ -3651,6 +3755,7 @@ export function convertSessionEventsToWorkflow(rawEvents: any[]): WorkflowEvent[
         subAgent: isSub || undefined,
         subTaskLabel: subLabel || undefined,
         jobId,
+        thoughtMs: readThoughtMs(data),
       };
       const key = thoughtScopeKey(incoming);
       let mergeIdx = -1;

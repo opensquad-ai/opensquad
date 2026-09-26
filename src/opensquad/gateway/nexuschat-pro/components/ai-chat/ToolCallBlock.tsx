@@ -12,7 +12,7 @@
  * tool_call and tool_result are MERGED into one block by AIChatPage,
  * so this component always shows a single unified entry.
  */
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useRef } from 'react';
 import {
   CheckCircle, XCircle,
   Code2, AlignLeft, List,
@@ -21,6 +21,7 @@ import { useTranslation } from 'react-i18next';
 import { marked } from 'marked';
 import { sanitizeHtml, escapeHtml } from '../../utils/safeHtml';
 import { OpenSquadLoader } from '../OpenSquadLoader';
+import { useTableCopyButtons } from '../../hooks/useTableCopyButtons';
 import { Collapse, FoldChevron, useFold } from '../Collapse';
 import { FileDiffBlock, extractFileEditInfo, parsePartialFileToolArgs, applyEditDiffContext } from './FileDiffBlock';
 
@@ -66,6 +67,8 @@ const ResultPane: React.FC<ResultPaneProps> = ({ result }) => {
     if (viewMode !== 'md') return '';
     return renderMarkdown(result);
   }, [result, viewMode]);
+  const mdRef = useRef<HTMLDivElement>(null);
+  useTableCopyButtons(mdRef, renderedHtml);
 
   const btnCls = (active: boolean) =>
     `flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[10px] transition-colors ${
@@ -112,6 +115,7 @@ const ResultPane: React.FC<ResultPaneProps> = ({ result }) => {
         </div>
       ) : viewMode === 'md' ? (
         <div
+          ref={mdRef}
           className="prose prose-sm prose-invert max-w-none break-words overflow-x-auto ai-markdown
                      text-[12px] leading-relaxed
                      max-h-[400px] overflow-y-auto

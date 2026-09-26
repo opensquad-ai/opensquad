@@ -264,7 +264,7 @@ class AIWebSocketService {
   }
 
   /** Withdraw a user turn (truncate session from timestamp) after file revert. */
-  withdrawTurn(data: { message_id?: string; timestamp?: string }) {
+  withdrawTurn(data: { message_id?: string; timestamp?: string; session_id?: string }) {
     this._sendCommand('withdraw_turn', data || {});
   }
 

@@ -42,9 +42,19 @@ class TurnResultHandler:
             or ""
         )
         if thought_text:
+            # Record the thinking duration alongside the text: the UI used to
+            # infer it from neighbouring event timestamps, which cannot survive
+            # the round trip (persisted events only carry ISO seconds, so every
+            # row lost its time after a refresh).
+            from opensquad.thought_clock import last_ms as _last_thought_ms
+
+            _thought_data: dict = {"text": thought_text}
+            _thought_ms = _last_thought_ms(self.runner._turn_sid or "")
+            if _thought_ms is not None:
+                _thought_data["thought_ms"] = _thought_ms
             self.runner._session_manager.add_event(
                 "thought",
-                {"text": thought_text},
+                _thought_data,
                 turn_id=self.runner._current_turn,
                 round_id=self.runner._current_round,
             )

@@ -320,6 +320,81 @@ def default_agent_id() -> str:
     return os.environ.get("DEFAULT_AGENT_ID") or get("defaults", "agent_id", "pm-001")
 
 
+# ── ffmpeg discovery (ASR services convert browser recordings with it) ──
+# Browsers record webm/opus; every ASR engine here (SenseVoice, Whisper) wants
+# 16 kHz PCM. That conversion needs an ffmpeg binary, and the Agent Python has
+# none on PATH — so resolving it is a hard requirement, not a nicety. The
+# ``imageio-ffmpeg`` wheel ships a static build and is declared in the ASR
+# plugins' ``dependencies.pip``, which the launcher installs into the Agent
+# Python on service start (see process_manager._install_dependencies). That is
+# what keeps this working on a machine with no system ffmpeg.
+
+_FFMPEG_ENV = "OPENSQUAD_FFMPEG"
+
+
+def ffmpeg_candidates() -> list[str]:
+    """Candidate ffmpeg paths, most-preferred first.
+
+    ``OPENSQUAD_FFMPEG`` (explicit override, also how an operator points at a
+    hand-placed binary) > system PATH > the ``imageio-ffmpeg`` bundled binary.
+    """
+    found: list[str] = []
+
+    override = (os.environ.get(_FFMPEG_ENV) or "").strip()
+    if override:
+        found.append(override)
+
+    try:
+        import shutil
+
+        system = shutil.which("ffmpeg")
+        if system:
+            found.append(system)
+    except Exception:
+        pass
+
+    try:
+        import imageio_ffmpeg
+
+        found.append(imageio_ffmpeg.get_ffmpeg_exe())
+    except Exception:
+        pass
+
+    return found
+
+
+def ffmpeg_executable() -> str:
+    """Return a usable ffmpeg path, or raise RuntimeError listing what was tried."""
+    for candidate in ffmpeg_candidates():
+        if candidate and os.path.isfile(candidate):
+            return candidate
+    raise RuntimeError(
+        "ffmpeg not found: no usable binary at "
+        + (", ".join(ffmpeg_candidates()) or "(no candidate locations)")
+        + f". Install the plugin's pip dependencies (imageio-ffmpeg), put ffmpeg on PATH, "
+        f"or point {_FFMPEG_ENV} at an ffmpeg binary."
+    )
+
+
+def expose_ffmpeg_on_path() -> str | None:
+    """Prepend the resolved ffmpeg's directory to PATH, returning the binary.
+
+    openai-whisper shells out to a bare ``ffmpeg`` (the name, not a path), so
+    the only way to make it use the bundled build is to make it resolvable on
+    PATH. Returns None when no ffmpeg is available — callers stay degraded
+    instead of failing to boot.
+    """
+    try:
+        exe = ffmpeg_executable()
+    except RuntimeError:
+        return None
+    directory = os.path.dirname(exe)
+    parts = os.environ.get("PATH", "").split(os.pathsep) if os.environ.get("PATH") else []
+    if directory and directory not in parts:
+        os.environ["PATH"] = os.pathsep.join([directory, *parts])
+    return exe
+
+
 # ── Loopback HTTP (mirror opensquad.utils.local_http.open_local) ────────
 # Service processes must not ``import opensquad``: Agent Python does not have
 # the package. Keep this opener in sync with ``opensquad.utils.local_http``.

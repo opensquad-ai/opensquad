@@ -16,6 +16,12 @@ export interface ShellJobBundle {
   shellType?: string;
   running: boolean;
   errored: boolean;
+  /**
+   * The turn that owned this call is over and no `tool_result` ever arrived
+   * (aborted / re-sent turn, or the process died mid-call). Distinct from
+   * `errored`: nothing failed, the result simply never came back.
+   */
+  interrupted?: boolean;
   /** Cumulative stdout from live job_stdout + sealed tool_result */
   output: string;
 }
@@ -54,8 +60,29 @@ export function toolNameOfEvent(evt: WorkflowEvent): string {
   return String(data.name || data.tool || '');
 }
 
+/**
+ * A `tool_call_delta` argument-streaming preview, NOT a real invocation.
+ *
+ * These frames carry `partial: true` and their `id` is either a synthetic
+ * `partial_tc_<index>` (native FC before the provider reveals the call id) or
+ * the constant `xml_preview_open` (XML preview). A preview must never be
+ * treated as a CMD fold: the real `tool_call` renders its own fold a moment
+ * later, so the preview would appear as a SECOND terminal — and because no
+ * `tool_result` can ever carry a preview's id, that phantom stays "running"
+ * forever and inflates the running-terminals bar.
+ */
+export function isPartialToolCallEvent(evt: WorkflowEvent): boolean {
+  const c = typeof evt.content === 'object' && evt.content ? evt.content : {};
+  return (c as { partial?: unknown }).partial === true;
+}
+
 export function isShellJobToolCall(evt: WorkflowEvent): boolean {
-  return evt.type === 'tool_call' && !evt.subAgent && isShellJobToolName(toolNameOfEvent(evt));
+  return (
+    evt.type === 'tool_call' &&
+    !evt.subAgent &&
+    !isPartialToolCallEvent(evt) &&
+    isShellJobToolName(toolNameOfEvent(evt))
+  );
 }
 
 export function isShellPollToolCall(evt: WorkflowEvent): boolean {
@@ -226,16 +253,21 @@ function collectRunningShellJobsFromEntries(
     if (kind !== 'workflow') continue;
     const block = (entry as { data?: WorkflowBlock }).data;
     if (!block || !Array.isArray(block.events)) continue;
-    const items = attachShellJobsToDisplayItems(buildDisplayWorkflowItems(block.events), shellStreams);
+    const items = attachShellJobsToDisplayItems(
+      buildDisplayWorkflowItems(block.events),
+      shellStreams,
+      !!block.completed,
+    );
     for (const item of items) {
       if (item.kind !== 'shell_job') continue;
       const b = item.bundle as ShellJobBundle;
       if (seen.has(b.id)) continue;
       const stream = shellStreams[b.id] || null;
-      const streamDone = !!stream
-        && (stream.state === 'done' || stream.state === 'error' || stream.state === 'aborted');
-      const running = !streamDone && (!!b.running || stream?.state === 'running');
-      if (!running) continue;
+      // Liveness is decided ONCE, inside refreshShellBundle (sealed result,
+      // stream state, turn over). Re-deriving it here used to be a second,
+      // looser formula — and the looser one won, which is how an interrupted
+      // call stayed in this bar forever.
+      if (!b.running) continue;
       seen.add(b.id);
       out.push({
         id: b.id,
@@ -244,9 +276,8 @@ function collectRunningShellJobsFromEntries(
         sessionId: stream?.sessionId || b.sessionId,
         shellType: stream?.shellType || b.shellType,
         startedMs: typeof b.parent?.timestamp === 'number' ? b.parent.timestamp : undefined,
-        running,
-        errored:
-          stream?.state === 'error' || stream?.state === 'aborted' || (!streamDone && b.errored),
+        running: true,
+        errored: b.errored,
         output: stream?.output && stream.output.length > 0 ? stream.output : b.output,
         stream,
       });
@@ -366,6 +397,7 @@ export function applyJobStatus(
 function refreshShellBundle(
   bundle: ShellJobBundle,
   stream?: ShellStreamState | null,
+  turnCompleted = false,
 ): ShellJobBundle {
   const result = bundle.parent.result;
   const stillAck = !!(result && isShellJobStillRunningAck(result));
@@ -373,7 +405,18 @@ function refreshShellBundle(
   const streamDone =
     stream?.state === 'done' || stream?.state === 'error' || stream?.state === 'aborted';
   const sealedByResult = !!(result && !stillAck);
-  const running = !sealedByResult && !streamDone && (stillAck || streamRunning || !result);
+  // `stillAck` (a start_job `completed:false` ack) is an EXPLICIT "still
+  // running" statement and legitimately outlives the turn — that is the whole
+  // point of the running-terminals bar. Every other "still running" below is
+  // an INFERENCE from absence ("no result yet" / "the stream says running"),
+  // and it only holds while the turn that issued the call is alive. Once the
+  // owning workflow block is completed nothing can deliver a result any more,
+  // so an unsealed call must stop being "running" — otherwise one interrupted
+  // call (user re-sent, turn aborted, process died) leaks a permanent phantom
+  // terminal whose elapsed time grows without bound.
+  const running =
+    !sealedByResult && !streamDone && (stillAck || (!turnCompleted && (streamRunning || !result)));
+  const interrupted = turnCompleted && !result && !streamDone;
 
   const fromResult = sealedByResult ? extractShellOutputFromResult(result) : '';
   const output =
@@ -396,6 +439,7 @@ function refreshShellBundle(
     command: stream?.command || bundle.command || extractShellCommand(bundle.parent),
     output,
     running,
+    interrupted,
     errored: !!errored && !running,
   };
 }
@@ -403,10 +447,16 @@ function refreshShellBundle(
 /**
  * Merge shell_job items into an existing display list from buildDisplayWorkflowItems.
  * Hides check_job tool cards; wraps start_job / run_session_job as shell_job.
+ *
+ * `turnCompleted` is the owning workflow block's `completed` flag. Callers that
+ * render a still-running turn pass false; callers that walk a finished/archived
+ * block must pass its real value, otherwise an unsealed call keeps claiming to
+ * be running (see refreshShellBundle).
  */
 export function attachShellJobsToDisplayItems(
   items: Array<{ kind: string; event?: WorkflowEvent; bundle?: any; key: string }>,
   streams: Record<string, ShellStreamState> = {},
+  turnCompleted = false,
 ): DisplayWorkflowItemWithShell[] {
   const out: DisplayWorkflowItemWithShell[] = [];
 
@@ -443,6 +493,7 @@ export function attachShellJobsToDisplayItems(
           output: '',
         },
         stream,
+        turnCompleted,
       );
       out.push({ kind: 'shell_job', key: `shell-${bundle.id}`, bundle });
       continue;

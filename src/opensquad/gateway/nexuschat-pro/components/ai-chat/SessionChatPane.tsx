@@ -33,7 +33,7 @@ import { TimelineRow } from './TimelineRow';
 import {
   SoloUserNavRail,
   buildUserNavNodesFromTimeline,
-  userNavAnchorDomId,
+  jumpToNavNode,
 } from './SoloUserNavRail';
 
 /** 稳定的空 shell 流引用：SoloActivityRow 无实时 shell 流时传入，
@@ -324,13 +324,7 @@ export const SessionChatPane: React.FC<SessionChatPaneProps> = ({
   );
 
   const jumpToUserMessage = useCallback((id: string) => {
-    const container = listRef.current;
-    const el = document.getElementById(userNavAnchorDomId(id));
-    if (!container || !el) return;
-    const cRect = container.getBoundingClientRect();
-    const eRect = el.getBoundingClientRect();
-    const top = eRect.top - cRect.top + container.scrollTop - 12;
-    container.scrollTo({ top: Math.max(0, top), behavior: 'smooth' });
+    jumpToNavNode(listRef.current, id);
   }, []);
 
   return (

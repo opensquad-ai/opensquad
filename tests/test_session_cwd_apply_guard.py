@@ -16,7 +16,9 @@ Three independent defects are locked here:
 3. A session-scoped ``abort_all_tool_processes`` filtered Jobs but kept every
    shell, so a hung synchronous ``run_session_job`` (no job_id to match on)
    could never be unblocked; ``runner._withdraw_turn`` passed no sid at all,
-   so withdrawing one pane froze the others.
+   so withdrawing one pane froze the others. The gateway's ``withdraw_turn``
+   branch had the same hole one layer up: it always called the agent-wide
+   ``input_hub.request_stop()``, so the sid the frontend now sends was ignored.
 """
 
 from __future__ import annotations
@@ -299,3 +301,68 @@ async def test_withdraw_turn_falls_back_to_focused_then_global(withdraw_runner, 
     # Focused pane wins; with no focus the current session is used rather than
     # reverting to an agent-wide kill.
     assert seen == ["pane-b", "pane-current"]
+
+
+class _RecordingHub:
+    def __init__(self):
+        self.calls: list[tuple] = []
+
+    def request_stop(self, **kwargs):
+        self.calls.append(("global",))
+
+    def request_stop_session(self, sid):
+        self.calls.append(("session", sid))
+
+    def push_urgent(self, cmd, **kwargs):
+        self.calls.append(("urgent", cmd))
+
+
+class _AdapterStub:
+    """Just enough GatewayAdapter surface for the withdraw_turn branch."""
+
+    def __init__(self):
+        self.current_user_id = ""
+        self._user_id_by_sid: dict[str, str] = {}
+
+    async def _try_wake_agent(self, *args, **kwargs):
+        return None
+
+
+async def _run_withdraw(data: dict, monkeypatch):
+    from opensquad import gateway_adapter as adapter_mod
+
+    hub = _RecordingHub()
+    monkeypatch.setattr(adapter_mod, "input_hub", hub)
+    await adapter_mod.GatewayAdapter._handle_command(_AdapterStub(), data)
+    return hub.calls
+
+
+@pytest.mark.asyncio
+async def test_adapter_withdraw_stops_only_the_named_pane(monkeypatch):
+    """The sid the frontend now sends must reach request_stop_session."""
+    calls = await _run_withdraw(
+        {
+            "command": "withdraw_turn",
+            "data": {"session_id": "pane-a", "timestamp": "2026-09-23T00:00:00Z", "message_id": "m1"},
+        },
+        monkeypatch,
+    )
+
+    assert ("session", "pane-a") in calls
+    assert ("global",) not in calls, "withdrawing one pane still stopped every parallel turn"
+    assert any(c[0] == "urgent" and c[1].startswith("__WITHDRAW_TURN__:") for c in calls)
+
+
+@pytest.mark.asyncio
+async def test_adapter_withdraw_without_a_sid_keeps_the_global_stop(monkeypatch):
+    """Legacy / sid-less clients must keep the old stop-everything behaviour."""
+    calls = await _run_withdraw(
+        {
+            "command": "withdraw_turn",
+            "data": {"timestamp": "2026-09-23T00:00:00Z", "message_id": "m1"},
+        },
+        monkeypatch,
+    )
+
+    assert ("global",) in calls
+    assert not [c for c in calls if c[0] == "session"]

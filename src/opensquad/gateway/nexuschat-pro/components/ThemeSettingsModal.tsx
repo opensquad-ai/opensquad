@@ -5,8 +5,8 @@ import {
   AppearanceMode,
   CONTRAST_MAX,
   CONTRAST_MIN,
-  FONT_SIZE_MAX,
-  FONT_SIZE_MIN,
+  ContentWidth,
+  FONT_SIZE_STOPS,
   PRESET_METAS,
   PURITY_MAX,
   PURITY_MIN,
@@ -33,6 +33,63 @@ const MODE_OPTIONS: { id: AppearanceMode; icon: React.ReactNode; labelKey: strin
   { id: 'dark', icon: <Moon size={15} strokeWidth={1.75} />, labelKey: 'themeSettings.mode.dark' },
   { id: 'system', icon: <Monitor size={15} strokeWidth={1.75} />, labelKey: 'themeSettings.mode.system' },
 ];
+
+const TEXT_SIZE_OPTIONS = [
+  { value: FONT_SIZE_STOPS[0], labelKey: 'themeSettings.textSize.small' },
+  { value: FONT_SIZE_STOPS[1], labelKey: 'themeSettings.textSize.medium' },
+  { value: FONT_SIZE_STOPS[2], labelKey: 'themeSettings.textSize.large' },
+];
+
+const UI_SCALE_OPTIONS = [
+  { value: 0.9, labelKey: 'themeSettings.uiScale.small' },
+  { value: 1, labelKey: 'themeSettings.uiScale.standard' },
+  { value: 1.1, labelKey: 'themeSettings.uiScale.large' },
+];
+
+const CONTENT_WIDTH_OPTIONS: { value: ContentWidth; labelKey: string }[] = [
+  { value: 'standard', labelKey: 'themeSettings.contentWidth.standard' },
+  { value: 'wide', labelKey: 'themeSettings.contentWidth.wide' },
+  { value: 'full', labelKey: 'themeSettings.contentWidth.full' },
+];
+
+/** One appearance row: label on the left, a pill segmented control on the right. */
+function SegmentedRow<T extends string | number>({
+  label,
+  value,
+  options,
+  onChange,
+}: {
+  label: string;
+  value: T;
+  options: { value: T; labelKey: string }[];
+  onChange: (v: T) => void;
+}) {
+  const { t } = useTranslation();
+  return (
+    <div className="flex items-center gap-3">
+      <span className="w-14 shrink-0 text-xs text-textMuted">{label}</span>
+      <div className="flex flex-1 gap-1 rounded-xl bg-panel p-1">
+        {options.map((opt) => {
+          const active = value === opt.value;
+          return (
+            <button
+              key={String(opt.value)}
+              type="button"
+              onClick={() => onChange(opt.value)}
+              className={`flex flex-1 items-center justify-center rounded-lg px-2 py-1.5 text-xs font-medium transition-all duration-soft ease-soft ${
+                active
+                  ? 'bg-primary/10 text-primary'
+                  : 'text-textMuted hover:text-textMain'
+              }`}
+            >
+              {t(opt.labelKey)}
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
 
 /** Compact color trigger + popover (reference: small circle swatch + hue field). */
 function ColorPickerPopover({
@@ -180,7 +237,6 @@ export const ThemeSettingsPanel: React.FC = () => {
 
   const purityPct = ((prefs.purity - PURITY_MIN) / (PURITY_MAX - PURITY_MIN)) * 100;
   const contrastPct = ((prefs.contrast - CONTRAST_MIN) / (CONTRAST_MAX - CONTRAST_MIN)) * 100;
-  const fontPct = ((prefs.fontSize - FONT_SIZE_MIN) / (FONT_SIZE_MAX - FONT_SIZE_MIN)) * 100;
 
   // Read the palette `patch()` just applied so the ratio below is a *measured*
   // value rather than an echo of the requested target. `updateThemePrefs`
@@ -366,24 +422,25 @@ export const ThemeSettingsPanel: React.FC = () => {
             </button>
           </label>
         </div>
-        <div className="mb-3 flex items-center gap-3">
-          <span className="text-[11px] text-textMuted">{t('themeSettings.fontSmall')}</span>
-          <input
-            type="range"
-            min={FONT_SIZE_MIN}
-            max={FONT_SIZE_MAX}
-            step={0.01}
+        <div className="mb-3 space-y-3">
+          <SegmentedRow
+            label={t('themeSettings.textSize.label')}
             value={prefs.fontSize}
-            onChange={(e) => patch(appearanceSliderPatch('fontSize', Number(e.target.value)))}
-            className="theme-slider flex-1"
-            style={
-              {
-                '--slider-pct': `${fontPct}%`,
-                '--slider-fill': 'rgb(var(--color-primary))',
-              } as React.CSSProperties
-            }
+            options={TEXT_SIZE_OPTIONS}
+            onChange={(v) => patch(appearanceSliderPatch('fontSize', v))}
           />
-          <span className="text-[11px] text-textMuted">{t('themeSettings.fontLarge')}</span>
+          <SegmentedRow
+            label={t('themeSettings.uiScale.label')}
+            value={prefs.uiScale}
+            options={UI_SCALE_OPTIONS}
+            onChange={(v) => patch(appearanceSliderPatch('uiScale', v))}
+          />
+          <SegmentedRow
+            label={t('themeSettings.contentWidth.label')}
+            value={prefs.contentWidth}
+            options={CONTENT_WIDTH_OPTIONS}
+            onChange={(v) => patch({ contentWidth: v })}
+          />
         </div>
         <div
           className="chat-font-surface rounded-xl border border-border bg-bgLight px-3.5 py-3 text-textMain"

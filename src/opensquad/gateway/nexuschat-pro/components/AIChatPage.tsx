@@ -55,6 +55,7 @@ import {
   type WorkflowEvent,
 } from '../utils/aiChatTimeline';
 import { pushCwdRecent } from '../utils/cwdRecents';
+import { exportSessionToMarkdown, type SessionExportResult } from '../utils/sessionExport';
 import {
   clearComposerDraft,
   getComposerDraft,
@@ -171,7 +172,7 @@ import { CHAT_DOCUMENT_COLUMN_CLASS } from '../utils/chatLayout';
 import {
   SoloUserNavRail,
   buildUserNavNodesFromTimeline,
-  userNavAnchorDomId,
+  jumpToNavNode,
 } from './ai-chat/SoloUserNavRail';
 import { TaskFoldBlock } from './ai-chat/TaskFoldBlock';
 import { TimelineRow } from './ai-chat/TimelineRow';
@@ -605,6 +606,13 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
   const fileInputRef = useRef<HTMLInputElement>(null);
   const streamingTextRef = useRef('');   // mirror of streamingText for WS callbacks
   const finalizingBySidRef = useRef<Record<string, boolean>>({});
+  /**
+   * Did this turn put a reply on screen? A long turn emits one `message` per LLM
+   * round that speaks (each is a `to_user_final`), so the frame itself cannot say
+   * whether the turn is over — `turn_elapsed` can, and that is where the chime
+   * rings. This flag keeps it to turns that actually had something to say.
+   */
+  const repliedBySidRef = useRef<Record<string, boolean>>({});
   /** After user hits Stop on a pane, ignore late stream/tool/thought for THAT sid. */
   const userStoppedBySidRef = useRef<Record<string, boolean>>({});
   const eventSidKey = (explicit?: string | null) =>
@@ -983,7 +991,11 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
       if (raw) {
         const parsed = JSON.parse(raw);
         if (Array.isArray(parsed)) {
-          merged = parsed.filter((m) => m && typeof m.id === 'string');
+          // `steered` items are already inside the agent's turn: the runner
+          // persists them as messages with `steer: true`, and the rebuild renders
+          // them as rows in the tool fold. Restoring them here would show the same
+          // interjection a second time as an ordinary outgoing bubble.
+          merged = parsed.filter((m) => m && typeof m.id === 'string' && !m.steered);
         }
       }
       // Migrate legacy per-session queues into the agent-level key
@@ -996,7 +1008,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
           if (Array.isArray(legacy)) {
             const sid = k.slice(prefix.length);
             for (const m of legacy) {
-              if (m && typeof m.id === 'string') {
+              if (m && typeof m.id === 'string' && !m.steered) {
                 merged.push({
                   ...m,
                   sessionId: m.sessionId || (sid !== 'nosession' ? sid : undefined),
@@ -1027,8 +1039,11 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     if (pendingQueueHydratedKeyRef.current == null) return;
     const key = pendingQueueStorageKey();
     try {
-      if (pendingMessages.length === 0) localStorage.removeItem(key);
-      else localStorage.setItem(key, JSON.stringify(pendingMessages));
+      // A consumed steer belongs to the tool fold, never to the queue: keep it out
+      // of storage so a refresh cannot resurrect it as an outgoing bubble.
+      const persistable = pendingMessages.filter((m) => !m.steered);
+      if (persistable.length === 0) localStorage.removeItem(key);
+      else localStorage.setItem(key, JSON.stringify(persistable));
     } catch { /* ignore quota */ }
   }, [pendingMessages, agentId, pendingQueueStorageKey]);
 
@@ -1075,13 +1090,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
   );
 
   const jumpToSoloUserMessage = useCallback((id: string) => {
-    const container = messagesContainerRef.current;
-    const el = document.getElementById(userNavAnchorDomId(id));
-    if (!container || !el) return;
-    const cRect = container.getBoundingClientRect();
-    const eRect = el.getBoundingClientRect();
-    const top = eRect.top - cRect.top + container.scrollTop - 12;
-    container.scrollTo({ top: Math.max(0, top), behavior: 'smooth' });
+    jumpToNavNode(messagesContainerRef.current, id);
   }, []);
 
   const latestPlanStepsFromTimeline = useMemo<PlanStep[]>(() => {
@@ -1557,6 +1566,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     pinComposerLanding,
     reasoningEffort,
     refreshSessionChangesRef,
+    repliedBySidRef,
     scheduleRefreshSessionChanges,
     scheduleStreamFlush,
     sessionBootstrapDoneRef,
@@ -1857,6 +1867,9 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
         wsServiceRef.current?.withdrawTurn({
           message_id: checkpointId,
           timestamp: cutTs,
+          // Scope the backend abort to this pane: a sibling pane's in-flight
+          // shell must survive another pane's withdraw.
+          session_id: targetSid || undefined,
         });
         const truncate = (prev: TimelineEntry[]) => {
           const idx = prev.findIndex((e) => e._uid === entryUid);
@@ -2718,10 +2731,17 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
       if (!body.trim()) body = '(empty submission)';
       const text = `[${t('aiChat.formSubmission')}] ${embedTitle}\n\n\`\`\`json\n${body}\n\`\`\``;
       const sid = (currentSessionIdRef.current || '').trim();
+      // A long turn repaints the embed card, and the page can post the same payload
+      // again. One identical submission already waiting its turn IS that same
+      // action — queueing it twice shows two "已提交" rows for one click.
+      const alreadyQueued = pendingMessagesRef.current.some(
+        (m) => m.text === text && (m.sessionId || '') === sid,
+      );
       const shouldQueue =
-        isSessionBusy(sid) ||
-        isOutboundPending(sid) ||
-        pendingMessagesRef.current.some((m) => (m.sessionId || '') === sid);
+        !alreadyQueued &&
+        (isSessionBusy(sid) ||
+          isOutboundPending(sid) ||
+          pendingMessagesRef.current.some((m) => (m.sessionId || '') === sid));
       if (shouldQueue) {
         const snapshot: PendingMessage = {
           id: genUID(),
@@ -2927,6 +2947,23 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
         eventSidRef.current = prevSidTo;
       }
     }, 120000);
+  };
+
+  /**
+   * Export the context panel's session as Markdown.
+   *
+   * Follows the same "pane owns the session" rule as onViewReport /
+   * handleCompressContext: in tab mode the composer's session is often not the
+   * focused one, so the sid is passed in rather than read from the focus ref.
+   */
+  const handleExportContext = async (
+    paneSessionId?: string,
+  ): Promise<SessionExportResult> => {
+    const sid = (paneSessionId || currentSessionIdRef.current || '').trim();
+    if (!agentId || !sid) return { ok: false, reason: 'empty' };
+    // The session API carries no title, so the filename comes from the tab
+    // label map (same source the tab strip shows). Absent → falls back to the sid.
+    return exportSessionToMarkdown(agentId, sid, tabSessionTitles[sid]);
   };
 
   const handleNewSession = (projectPath?: string) => {
@@ -4689,6 +4726,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
           }
         }}
         onCompressContext={() => handleCompressContext(sessionId)}
+        onExportContext={() => handleExportContext(sessionId)}
         compressing={isCompressingContext}
         compressDisabled={isLoadingSession || isCompressingContext}
         sessionChanges={

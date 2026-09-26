@@ -76,6 +76,7 @@ class DummyRunner:
     def __init__(self):
         self._current_turn = "turn-1"
         self._current_round = "round-1"
+        self._turn_sid = "sid-1"
         self._current_input_source = "web"
         self._agent_id = "agent-1"
         self._workflow_started_ms = 0
@@ -249,3 +250,27 @@ def test_finalize_without_tools_auto_continue_on_trailing_colon():
         False,
     )
     assert runner._auto_continue_retries == 1
+
+
+def test_persisted_thought_event_carries_the_recorded_duration():
+    """刷新后必须还是同一个数字 —— 落盘的思考事件要带 thought_ms。
+
+    历史缺陷：耗时是 UI 从相邻事件时间戳推断的，而落盘事件只有 ISO 秒，
+    于是刷新后每一行深度思考的耗时都没了。现在由 thought_clock 记录。
+    """
+    from opensquad import thought_clock
+
+    thought_clock.reset()
+    try:
+        thought_clock.stamp("thought", "sid-1", {}, now=100.0)
+        thought_clock.stamp("tool_call", "sid-1", {}, now=104.5)
+
+        runner = DummyRunner()
+        handler = TurnResultHandler(runner)
+        asyncio.run(handler.parse_and_persist_tags("<thought>why</thought>"))
+
+        thought_events = [e for e in runner._session_manager.events if e[0] == "thought"]
+        assert thought_events, "expected a persisted thought event"
+        assert thought_events[-1][1] == {"text": "why", "thought_ms": 4500}
+    finally:
+        thought_clock.reset()

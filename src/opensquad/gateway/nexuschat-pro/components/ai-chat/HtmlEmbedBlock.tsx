@@ -34,6 +34,27 @@ const SUBMIT_FEEDBACK_MS = 2200;
  * latch: the user may fix a field and submit the same embedded form again.
  */
 const DUPLICATE_SUBMIT_MS = 1000;
+/** Same payload re-posted by the page itself (repaint / remount), not a new click. */
+const IDENTICAL_SUBMIT_MS = 15000;
+
+/**
+ * Accept-or-drop for one `os_form_submit`.
+ *
+ * Two distinct repeats have to be caught: a burst double-fire (double-click) inside
+ * `DUPLICATE_SUBMIT_MS`, and the page posting the *same payload* again later while
+ * its host repaints mid-turn — that one is not a new submission, and each repeat
+ * used to queue another "已提交" notice.
+ */
+export function acceptFormSubmit(
+  prev: { key: string; at: number } | null,
+  lastAt: number,
+  key: string,
+  now: number,
+): boolean {
+  if (now - lastAt < DUPLICATE_SUBMIT_MS) return false;
+  if (prev && prev.key === key && now - prev.at < IDENTICAL_SUBMIT_MS) return false;
+  return true;
+}
 
 /** Detect visualization tool names: visualization / visualization.create / … */
 export function isVisualizationToolName(name: string | null | undefined): boolean {
@@ -344,6 +365,8 @@ export const HtmlEmbedBlock: React.FC<HtmlEmbedBlockProps> = ({
   const [submitFlashAt, setSubmitFlashAt] = useState(0);
   const iframeRef = useRef<HTMLIFrameElement | null>(null);
   const lastSubmitAtRef = useRef(0);
+  /** Last accepted payload + when: the page re-posting it is not a new submission. */
+  const lastSubmitKeyRef = useRef<{ key: string; at: number } | null>(null);
   const seamless = variant === 'seamless';
   const showSubmitted = submitFlashAt > 0;
   const height = clampHeight(payload.height);
@@ -401,9 +424,12 @@ export const HtmlEmbedBlock: React.FC<HtmlEmbedBlockProps> = ({
       const data = event.data as { type?: string; payload?: unknown } | string | null;
       if (!data || typeof data !== 'object' || data.type !== 'os_form_submit') return;
       const now = Date.now();
-      if (now - lastSubmitAtRef.current < DUPLICATE_SUBMIT_MS) return;
-      lastSubmitAtRef.current = now;
       const formPayload = data.payload !== undefined ? data.payload : '';
+      const submitKey =
+        typeof formPayload === 'string' ? formPayload : JSON.stringify(formPayload ?? null);
+      if (!acceptFormSubmit(lastSubmitKeyRef.current, lastSubmitAtRef.current, submitKey, now)) return;
+      lastSubmitAtRef.current = now;
+      lastSubmitKeyRef.current = { key: submitKey, at: now };
       onFormSubmit(formPayload, payload.title || payload.filename || 'Visualization');
       setSubmitFlashAt(now);
     };

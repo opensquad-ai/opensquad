@@ -177,6 +177,17 @@ def is_service_enabled(plugin_name: str) -> bool:
     return _impl(plugin_name)
 
 
+def service_enabled_or_none(plugin_name: str) -> bool | None:
+    """``services.{plugin_name}.enabled`` if the user has set it, else None.
+
+    None means "no preference recorded" — callers fall back to the plugin
+    manifest's own default (see ``launcher.process_manager.resolve_auto_start``).
+    """
+    from opensquad._syscfg._config import service_enabled_explicit as _impl
+
+    return _impl(plugin_name)
+
+
 # ---------------------------------------------------------------------------
 # Node identity (from _network.py)
 # ---------------------------------------------------------------------------
@@ -244,6 +255,7 @@ class _SysCfg:
     ensure_workspace_structure = staticmethod(ensure_workspace_structure)
     init_workspace = staticmethod(init_workspace)
     is_service_enabled = staticmethod(is_service_enabled)
+    service_enabled_or_none = staticmethod(service_enabled_or_none)
 
     port = staticmethod(port)
     host = staticmethod(host)

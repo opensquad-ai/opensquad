@@ -28,7 +28,12 @@ function mergeBundle(bundle: ShellJobBundle, stream?: ShellStreamState | null): 
   if (!stream) return bundle;
   const streamDone =
     stream.state === 'done' || stream.state === 'error' || stream.state === 'aborted';
-  const running = streamDone ? false : stream.state === 'running' || bundle.running;
+  // Do NOT resurrect "running" from a stream that merely says so: the stream map
+  // is never pruned, so an aborted call keeps a stale 'running' entry forever.
+  // `bundle.interrupted` (turn over, no result) is the veto — otherwise this
+  // re-opened the phantom the bundle had just retired.
+  const interrupted = !!bundle.interrupted && !streamDone;
+  const running = streamDone || interrupted ? false : stream.state === 'running' || bundle.running;
   const output =
     stream.output && stream.output.length > 0 ? stream.output : bundle.output;
   return {
@@ -39,6 +44,7 @@ function mergeBundle(bundle: ShellJobBundle, stream?: ShellStreamState | null): 
     shellType: stream.shellType || bundle.shellType,
     output,
     running,
+    interrupted,
     errored:
       stream.state === 'error' || stream.state === 'aborted' || (!running && bundle.errored),
   };
@@ -66,7 +72,7 @@ const ShellJobBody: React.FC<{
         <div className="text-[10px] text-emerald-400/70 flex items-center gap-1.5 min-w-0 font-mono">
           {bundle.running ? (
             <OpenSquadLoader size={12} />
-          ) : bundle.errored ? (
+          ) : bundle.errored || bundle.interrupted ? (
             <XCircle size={10} className="text-red-400" />
           ) : (
             <CheckCircle size={10} className="text-emerald-400" />
@@ -118,13 +124,17 @@ export const ShellJobFold: React.FC<ShellJobFoldProps> = ({
   const cmdShort = truncateCmd(bundle.command);
   // Agent 提供的调用目的说明：作为标题展示（缺省回退到"已执行命令 + 命令"）。
   const desc = (bundle.description || '').trim();
-  const doneLabel = shellJobDoneLabel(
-    bundle.running,
-    bundle.errored,
-    bundle.parent.result,
-    stream,
-    t,
-  );
+  // `interrupted` (turn is over, no result ever came back) is not "Completed" —
+  // resolve it before falling through to the done-label inference.
+  const doneLabel = bundle.interrupted
+    ? t('aiChat.toolFlow.shell.interrupted')
+    : shellJobDoneLabel(
+        bundle.running,
+        bundle.errored,
+        bundle.parent.result,
+        stream,
+        t,
+      );
   const statusLabel = bundle.running ? t('aiChat.toolFlow.shell.running') : doneLabel;
   const body = mounted ? <ShellJobBody bundle={bundle} statusLabel={statusLabel} /> : null;
 
@@ -170,7 +180,7 @@ export const ShellJobFold: React.FC<ShellJobFoldProps> = ({
 
   const statusIcon = bundle.running ? (
     <OpenSquadLoader size={12} className="flex-shrink-0" />
-  ) : bundle.errored ? (
+  ) : bundle.errored || bundle.interrupted ? (
     <XCircle size={12} className="text-red-500 flex-shrink-0" />
   ) : (
     <CheckCircle size={12} className="text-emerald-500 flex-shrink-0" />

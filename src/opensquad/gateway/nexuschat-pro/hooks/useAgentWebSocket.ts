@@ -16,7 +16,10 @@ import {
   genTimelineUID,
   isFinalFlag,
   isUiOnlyToolName,
+  readThoughtMs,
   sealIncompleteWorkflows,
+  stampThoughtDuration,
+  timelineHasWorkflowEvent,
   toWebMediaUrl,
   type TimelineEntry,
   type WorkflowEvent,
@@ -130,6 +133,7 @@ export function useAgentWebSocket(agentId: string, ctx: AgentWebWsCtx) {
       pinComposerLanding,
       reasoningEffort,
       refreshSessionChangesRef,
+      repliedBySidRef,
       scheduleRefreshSessionChanges,
       scheduleStreamFlush,
       sessionBootstrapDoneRef,
@@ -284,6 +288,15 @@ export function useAgentWebSocket(agentId: string, ctx: AgentWebWsCtx) {
         eventSidRef.current = sid;
         try {
           handler(msg);
+          // The frame that ENDS a thinking phase (the tool_call, or the answer
+          // after reasoning) carries the phase's exact recorded duration, which
+          // is later and more accurate than the last streamed chunk's figure.
+          // Sub-agent frames stream under this session's sid but belong to a
+          // delegate — never let them stamp the parent's row.
+          const endedMs = type === 'thought' ? undefined : readThoughtMs(msg);
+          if (endedMs != null && !(msg as any).data?.sub_agent) {
+            setTimeline((prev) => stampThoughtDuration(prev, endedMs));
+          }
         } finally {
           eventSidRef.current = '';
         }
@@ -523,8 +536,10 @@ export function useAgentWebSocket(agentId: string, ctx: AgentWebWsCtx) {
         // Dedup is handled inside speakFinalReply via lastAutoSpokenRef.
         if (role === 'assistant') {
           void speakFinalReplyRef.current(finalText);
-          // 温和结束提示：仅在页面处于后台时才响铃（不打扰正在使用的用户）
-          if (!pageActiveRef.current) playGentleNotificationSound();
+          // A reply reached the screen — but NOT necessarily the end of the turn:
+          // a long task emits one of these per LLM round. The chime waits for
+          // `turn_elapsed`; this only records that ringing will say something.
+          repliedBySidRef.current[finalSid || ''] = true;
         }
       }
 
@@ -668,8 +683,7 @@ export function useAgentWebSocket(agentId: string, ctx: AgentWebWsCtx) {
           return foldTaskProcessSinceLastUser(next);
         });
         void speakFinalReplyRef.current(finalText);
-        // 温和结束提示：仅在页面处于后台时才响铃（不打扰正在使用的用户）
-        if (!pageActiveRef.current) playGentleNotificationSound();
+        repliedBySidRef.current[endSid || ''] = true;
       }
 
       // A complex task ends on `to_user_end_task` INSTEAD of `to_user_final`
@@ -714,6 +728,9 @@ export function useAgentWebSocket(agentId: string, ctx: AgentWebWsCtx) {
             typeof raw === 'object' && raw !== null && (raw as any).job_id
               ? String((raw as any).job_id)
               : undefined,
+          // Agent-reported thinking time so far (ms) — the row shows this
+          // number verbatim instead of ticking a wall clock.
+          thoughtMs: readThoughtMs(msg),
         };
         if (isHydratingSessionRef.current) {
           pendingHydrationWorkflowEventsRef.current.push({ event, status: 'Thinking...' });
@@ -1500,6 +1517,9 @@ export function useAgentWebSocket(agentId: string, ctx: AgentWebWsCtx) {
         followupOfferArmedRef.current = false;
         setFollowupSuggestions([]);
       }
+      // A new workflow: nothing has answered yet. Scoped to the sid this frame
+      // carries, so a quiet turn cannot inherit the previous turn's "replied".
+      if (isFirstTurn) repliedBySidRef.current[turnSid || ''] = false;
       if (turnSid) {
         cancelStreamFlush();
         const st = { ...streamingTextBySessionRef.current };
@@ -1574,6 +1594,14 @@ export function useAgentWebSocket(agentId: string, ctx: AgentWebWsCtx) {
       if (typeof data !== 'object' || data === null) return;
       const { started_ms, ended_ms } = data as { started_ms?: number; ended_ms?: number };
       if (typeof started_ms !== 'number' || typeof ended_ms !== 'number') return;
+      // 温和结束提示音：只在回合真正结束时响一次（页面在后台才响，不打扰正在
+      // 使用的用户）。`to_user_final` 一轮一次，长任务里每一次都是"过程输出"，
+      // 所以不能挂在它上面 —— `turn_elapsed` 是整个回合的收尾帧。
+      const chimeSid = eventSidKey();
+      if (!pageActiveRef.current && repliedBySidRef.current[chimeSid] && !isSidStopped(chimeSid)) {
+        playGentleNotificationSound();
+      }
+      repliedBySidRef.current[chimeSid] = false;
       const finalMs = ended_ms - started_ms;
       // Stamp the final elapsed time onto the last workflow block in the timeline,
       // and mark it completed so the live timer stops.
@@ -2303,6 +2331,13 @@ export function useAgentWebSocket(agentId: string, ctx: AgentWebWsCtx) {
                 }
                 for (const wf of liveWfs) {
                   for (const evt of (wf as { data: WorkflowBlock }).data.events) {
+                    // Identity-dedup for EVERY event type. appendWorkflowEvent
+                    // only recognises tool ids, so a block whose tool rows were
+                    // already on disk still re-contributed its 过程输出 /
+                    // thinking rows — into the *current* turn's block, since a
+                    // carried-over event can only attach to the trailing
+                    // incomplete workflow.
+                    if (timelineHasWorkflowEvent(merged, evt)) continue;
                     merged = appendWorkflowEvent(
                       merged,
                       evt,

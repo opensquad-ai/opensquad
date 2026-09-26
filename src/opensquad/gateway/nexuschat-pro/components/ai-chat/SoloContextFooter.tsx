@@ -4,7 +4,7 @@
  */
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Check, ChevronDown, Folder, FolderOpen, List, Scissors, X } from 'lucide-react';
+import { Check, ChevronDown, FileDown, Folder, FolderOpen, List, Scissors, X } from 'lucide-react';
 import {
   folderLabel,
   loadCwdRecents,
@@ -12,6 +12,7 @@ import {
   pushCwdRecent,
 } from '../../utils/cwdRecents';
 import { POPOVER_SURFACE_CLASS } from './popoverSurface';
+import type { SessionExportResult } from '../../utils/sessionExport';
 
 export interface SoloTokenBreakdown {
   system?: number;
@@ -48,6 +49,9 @@ export interface SoloTokenStats {
   } | null;
 }
 
+/** Handler the panel calls to export the session it belongs to. */
+export type SoloExportContextHandler = () => Promise<SessionExportResult> | void;
+
 interface SoloContextFooterProps {
   cwd: string | null;
   tokenStats: SoloTokenStats | null;
@@ -60,6 +64,12 @@ interface SoloContextFooterProps {
   onCompressContext?: () => void;
   compressing?: boolean;
   compressDisabled?: boolean;
+  /**
+   * Export this session's transcript as a Markdown download. Resolves with the
+   * outcome so the panel can say why nothing was written (empty session, fetch
+   * failed) instead of closing on a click that produced no file.
+   */
+  onExportContext?: SoloExportContextHandler;
   /** Controls after folder (e.g. Mode) */
   children?: React.ReactNode;
   /** Controls immediately before the token ring (e.g. Model / Effort) */
@@ -153,6 +163,7 @@ export const SoloContextFooter: React.FC<SoloContextFooterProps> = ({
   onCompressContext,
   compressing = false,
   compressDisabled = false,
+  onExportContext,
   children,
   trailing,
 }) => {
@@ -164,6 +175,28 @@ export const SoloContextFooter: React.FC<SoloContextFooterProps> = ({
   const [copied, setCopied] = useState(false);
   const copiedTimer = useRef<number | null>(null);
   const cwdRootRef = useRef<HTMLDivElement>(null);
+  /** Export failure text; '' = idle (the row shows its normal hint instead). */
+  const [exportNote, setExportNote] = useState('');
+  const [exporting, setExporting] = useState(false);
+
+  const runExport = async () => {
+    if (!onExportContext || exporting) return;
+    setExporting(true);
+    setExportNote('');
+    try {
+      const res = await onExportContext();
+      // An older caller may not return a result at all; that is fire-and-forget
+      // (the browser download is its own feedback) and must not paint an error.
+      if (!res || res.ok) return;
+      setExportNote(
+        res.reason === 'empty'
+          ? t('aiChat.sessionSidebar.exportEmpty', { defaultValue: 'This session has no content yet' })
+          : t('aiChat.sessionSidebar.exportFailed', { defaultValue: 'Export failed, please retry' }),
+      );
+    } finally {
+      setExporting(false);
+    }
+  };
 
   const used = tokenStats?.used ?? 0;
   const max = tokenStats?.max ?? 0;
@@ -297,7 +330,7 @@ export const SoloContextFooter: React.FC<SoloContextFooterProps> = ({
   }, [recents, cwd]);
 
   const canPick = !locked && !!onSelectCwd;
-  const canOpenTokenPanel = max > 0 || !!onViewReport || !!onCompressContext;
+  const canOpenTokenPanel = max > 0 || !!onViewReport || !!onCompressContext || !!onExportContext;
 
   return (
     <div className="relative mt-1.5 w-full">
@@ -449,8 +482,8 @@ export const SoloContextFooter: React.FC<SoloContextFooterProps> = ({
             </div>
           )}
 
-          {/* Outside token breakdown: context details + compress */}
-          {(onViewReport || onCompressContext) && (
+          {/* Outside token breakdown: context details + compress + export */}
+          {(onViewReport || onCompressContext || onExportContext) && (
             <div className="px-3.5 py-2.5 border-t border-border/70 bg-black/[0.015] dark:bg-white/[0.03] space-y-2">
               {onViewReport ? (
                 <button
@@ -497,6 +530,37 @@ export const SoloContextFooter: React.FC<SoloContextFooterProps> = ({
                   </button>
                   <p className="text-[10px] leading-relaxed text-textMuted/75 text-center">
                     将较早对话归档摘要，释放上下文空间
+                  </p>
+                </>
+              ) : null}
+              {/* Sits under compress: same session, same "act on the context"
+                  family. Moved here from the sidebar, where a hover-only row
+                  icon was the only affordance for the session being read. */}
+              {onExportContext ? (
+                <>
+                  <button
+                    type="button"
+                    onClick={() => void runExport()}
+                    disabled={exporting}
+                    className="w-full flex items-center justify-center gap-2 px-3 py-2 rounded-lg text-[12px] font-medium
+                      border border-border/60 bg-panel text-textMain
+                      hover:bg-primary/10
+                      disabled:opacity-50 disabled:cursor-not-allowed
+                      transition-colors cursor-pointer"
+                    title={t('aiChat.exportContextHint', { defaultValue: 'Export this session as a Markdown file' })}
+                  >
+                    <FileDown
+                      size={14}
+                      className={exporting ? 'text-primary animate-pulse' : 'text-textMuted'}
+                    />
+                    <span>{t('aiChat.exportContext', { defaultValue: 'Export context' })}</span>
+                  </button>
+                  <p
+                    className={`text-[10px] leading-relaxed text-center ${
+                      exportNote ? 'text-rose-500' : 'text-textMuted/75'
+                    }`}
+                  >
+                    {exportNote || t('aiChat.exportContextHint', { defaultValue: 'Export this session as a Markdown file' })}
                   </p>
                 </>
               ) : null}

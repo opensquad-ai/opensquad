@@ -22,11 +22,11 @@ import { MobileComposerMenu } from './MobileComposerMenu';
 import { SoloModelPicker } from './SoloModelPicker';
 import { EffortPicker, type ReasoningEffort } from './EffortPicker';
 import { SoloAttachMenu } from './SoloAttachMenu';
-import { SoloContextFooter, type SoloTokenStats } from './SoloContextFooter';
+import { SoloContextFooter, type SoloExportContextHandler, type SoloTokenStats } from './SoloContextFooter';
 import { SessionChangesBar, type SessionChangesSummary } from './SessionChangesBar';
 import { SlashMenu } from './SlashMenu';
 import { OpenSquadLoader } from '../OpenSquadLoader';
-import { VoicePanel, type VoiceCardBindings } from './VoicePanel';
+import { VoicePanel, type VoiceCardBindings, type VoiceCaptureApi } from './VoicePanel';
 import { VoiceRecordPill } from './VoiceRecordPill';
 import {
   filterGoalSubcommands,
@@ -118,6 +118,8 @@ export interface AgentWebComposerProps {
   onCompressContext?: () => void;
   compressing?: boolean;
   compressDisabled?: boolean;
+  /** Export this pane's session transcript (context panel row). */
+  onExportContext?: SoloExportContextHandler;
   sessionChanges?: SessionChangesSummary | null;
   changesBusy?: boolean;
   onOpenChanges?: () => void;
@@ -191,6 +193,7 @@ export const AgentWebComposer = forwardRef<AgentWebComposerHandle, AgentWebCompo
     onCompressContext,
     compressing = false,
     compressDisabled = false,
+    onExportContext,
     sessionChanges,
     changesBusy = false,
     onOpenChanges,
@@ -263,7 +266,7 @@ export const AgentWebComposer = forwardRef<AgentWebComposerHandle, AgentWebCompo
     durationSec: 0,
     level: 0,
   });
-  const voiceCaptureApiRef = useRef<{ stopRecord: () => void } | null>(null);
+  const voiceCaptureApiRef = useRef<VoiceCaptureApi | null>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -319,6 +322,26 @@ export const AgentWebComposer = forwardRef<AgentWebComposerHandle, AgentWebCompo
     onActivate?.();
     onVoicePanelOpenChange?.(!voicePanelOpen);
   }, [onActivate, onVoicePanelOpenChange, voicePanelOpen]);
+
+  /**
+   * The mic records on the first click — it does not expand anything first.
+   *
+   * Capture lives in `VoicePanel`, which is mounted only on the focused pane, so
+   * on an unfocused pane the ref is not there yet: focus it and retry for a
+   * frame until that pane's panel (and its capture API) has mounted.
+   */
+  const startVoiceRecord = useCallback(() => {
+    onActivate?.();
+    const attempt = (triesLeft: number) => {
+      const api = voiceCaptureApiRef.current;
+      if (api) {
+        api.startRecord();
+        return;
+      }
+      if (triesLeft > 0) requestAnimationFrame(() => attempt(triesLeft - 1));
+    };
+    attempt(2);
+  }, [onActivate]);
 
   const slashMode = useMemo(() => parseSlashInput(inputText), [inputText]);
   const slashResetKey = slashMode ? `${slashMode.kind}:${slashMode.query}` : null;
@@ -750,88 +773,6 @@ export const AgentWebComposer = forwardRef<AgentWebComposerHandle, AgentWebCompo
         </div>
       ) : null}
 
-      {(images.length > 0 || attachments.length > 0 || quotes.length > 0 || isUploading) && (
-        <div className="px-2 sm:px-4 py-2 flex gap-2 flex-wrap items-center flex-shrink-0">
-          <div className={`${columnClass} flex gap-2 flex-wrap items-center`}>
-            {quotes.map((quote, i) => (
-              <div
-                key={`quote-${i}`}
-                className="relative group flex items-center gap-2 px-3 py-2 rounded-lg border border-border bg-bgLight max-w-[260px]"
-                title={quote.label ? `${quote.label}\n${quote.text}` : quote.text}
-              >
-                <TextQuote size={16} className="text-textMuted flex-shrink-0" />
-                <div className="min-w-0 flex-1">
-                  {/* A file quote names its source (path, and the line range in
-                      source mode) above the passage itself. */}
-                  <p
-                    className={`truncate ${quote.label ? 'text-[10px] font-mono text-textMuted' : 'text-xs text-textMain'}`}
-                  >
-                    {quote.label || t('aiChat.selectedText', { defaultValue: '选中的文本' })}
-                  </p>
-                  <p className="text-[10px] text-textMuted truncate">{quotePreview(quote.text)}</p>
-                </div>
-                <button
-                  type="button"
-                  onClick={() => setQuotes((prev) => prev.filter((_, idx) => idx !== i))}
-                  className="w-4 h-4 bg-red-500 rounded-full flex items-center justify-center opacity-0 group-hover:opacity-100 flex-shrink-0"
-                  title={t('common.remove', { defaultValue: 'Remove' })}
-                >
-                  <X size={10} className="text-white" />
-                </button>
-              </div>
-            ))}
-            {images.map((img, i) => (
-              <div key={`img-${i}`} className="relative group">
-                <img
-                  src={
-                    img.startsWith('http') || img.startsWith('/')
-                      ? img
-                      : `/uploads/${img.split(/[/\\]/).pop()}`
-                  }
-                  alt=""
-                  className="w-16 h-16 rounded-lg object-cover border border-border"
-                />
-                <button
-                  type="button"
-                  onClick={() => setImages((prev) => prev.filter((_, idx) => idx !== i))}
-                  className="absolute -top-1 -right-1 w-4 h-4 bg-red-500 rounded-full flex items-center justify-center opacity-0 group-hover:opacity-100"
-                >
-                  <X size={10} className="text-white" />
-                </button>
-              </div>
-            ))}
-            {attachments.map((att, i) => (
-              <div
-                key={`att-${i}`}
-                className="relative group flex items-center gap-2 px-3 py-2 rounded-lg border border-border bg-bgLight max-w-[200px]"
-              >
-                <FileIcon size={16} className="text-textMuted flex-shrink-0" />
-                <div className="min-w-0 flex-1">
-                  <p className="text-xs text-textMain truncate">{att.original_name}</p>
-                  <p className="text-[10px] text-textMuted">
-                    {att.type === 'voice' || att.is_audio ? 'VOICE' : 'FILE'} •{' '}
-                    {formatFileSize(att.size)}
-                  </p>
-                </div>
-                <button
-                  type="button"
-                  onClick={() => setAttachments((prev) => prev.filter((_, idx) => idx !== i))}
-                  className="w-4 h-4 bg-red-500 rounded-full flex items-center justify-center opacity-0 group-hover:opacity-100 flex-shrink-0"
-                >
-                  <X size={10} className="text-white" />
-                </button>
-              </div>
-            ))}
-            {isUploading && (
-              <div className="flex items-center gap-1.5 px-3 py-2 rounded-lg border border-border bg-bgLight">
-                <OpenSquadLoader size={16} />
-                <span className="text-xs text-textMuted">Uploading...</span>
-              </div>
-            )}
-          </div>
-        </div>
-      )}
-
       <div
         className={`flex-shrink-0 overflow-visible px-2 sm:px-4 ${
           landing ? 'py-2 sm:py-3' : 'pt-2 pb-3 sm:pb-4'
@@ -910,8 +851,90 @@ export const AgentWebComposer = forwardRef<AgentWebComposerHandle, AgentWebCompo
                 onForceAskAgentChange={onForceAskAgentChange}
                 onCaptureStateChange={setVoiceCapture}
                 captureApiRef={voiceCaptureApiRef}
+                // The mic button records with the panel closed, so a capture
+                // failure has nowhere to show: reveal the panel to say why.
+                onError={() => onVoicePanelOpenChange?.(true)}
               />
             ) : null}
+            {(images.length > 0 || attachments.length > 0 || quotes.length > 0 || isUploading) && (
+              <div className="px-3.5 pt-3 pb-0 order-2 md:order-1 max-md:px-2.5 max-md:pt-2 flex flex-wrap items-center gap-2 flex-shrink-0">
+                {quotes.map((quote, i) => (
+                  <div
+                    key={`quote-${i}`}
+                    className="relative group flex items-center gap-2 px-3 py-2 rounded-lg border border-border bg-bgLight max-w-[260px]"
+                    title={quote.label ? `${quote.label}\n${quote.text}` : quote.text}
+                  >
+                    <TextQuote size={16} className="text-textMuted flex-shrink-0" />
+                    <div className="min-w-0 flex-1">
+                      {/* A file quote names its source (path, and the line range in
+                          source mode) above the passage itself. */}
+                      <p
+                        className={`truncate ${quote.label ? 'text-[10px] font-mono text-textMuted' : 'text-xs text-textMain'}`}
+                      >
+                        {quote.label || t('aiChat.selectedText', { defaultValue: '选中的文本' })}
+                      </p>
+                      <p className="text-[10px] text-textMuted truncate">{quotePreview(quote.text)}</p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setQuotes((prev) => prev.filter((_, idx) => idx !== i))}
+                      className="w-4 h-4 bg-red-500 rounded-full flex items-center justify-center opacity-0 group-hover:opacity-100 flex-shrink-0"
+                      title={t('common.remove', { defaultValue: 'Remove' })}
+                    >
+                      <X size={10} className="text-white" />
+                    </button>
+                  </div>
+                ))}
+                {images.map((img, i) => (
+                  <div key={`img-${i}`} className="relative group">
+                    <img
+                      src={
+                        img.startsWith('http') || img.startsWith('/')
+                          ? img
+                          : `/uploads/${img.split(/[/\\]/).pop()}`
+                      }
+                      alt=""
+                      className="w-16 h-16 rounded-lg object-cover border border-border"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setImages((prev) => prev.filter((_, idx) => idx !== i))}
+                      className="absolute -top-1 -right-1 w-4 h-4 bg-red-500 rounded-full flex items-center justify-center opacity-0 group-hover:opacity-100"
+                    >
+                      <X size={10} className="text-white" />
+                    </button>
+                  </div>
+                ))}
+                {attachments.map((att, i) => (
+                  <div
+                    key={`att-${i}`}
+                    className="relative group flex items-center gap-2 px-3 py-2 rounded-lg border border-border bg-bgLight max-w-[200px]"
+                  >
+                    <FileIcon size={16} className="text-textMuted flex-shrink-0" />
+                    <div className="min-w-0 flex-1">
+                      <p className="text-xs text-textMain truncate">{att.original_name}</p>
+                      <p className="text-[10px] text-textMuted">
+                        {att.type === 'voice' || att.is_audio ? 'VOICE' : 'FILE'} •{' '}
+                        {formatFileSize(att.size)}
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setAttachments((prev) => prev.filter((_, idx) => idx !== i))}
+                      className="w-4 h-4 bg-red-500 rounded-full flex items-center justify-center opacity-0 group-hover:opacity-100 flex-shrink-0"
+                    >
+                      <X size={10} className="text-white" />
+                    </button>
+                  </div>
+                ))}
+                {isUploading && (
+                  <div className="flex items-center gap-1.5 px-3 py-2 rounded-lg border border-border bg-bgLight">
+                    <OpenSquadLoader size={16} />
+                    <span className="text-xs text-textMuted">Uploading...</span>
+                  </div>
+                )}
+              </div>
+            )}
             {pendingSkill ? (
               <div className="px-3.5 pt-3 pb-0 order-2 md:order-1 max-md:px-2.5 max-md:pt-2">
                 <button
@@ -983,6 +1006,9 @@ export const AgentWebComposer = forwardRef<AgentWebComposerHandle, AgentWebCompo
                   onOpenSkills={onOpenSkills}
                   autoSpeechEnabled={autoSpeechEnabled}
                   onToggleAutoSpeech={onToggleAutoSpeech}
+                  voiceEnabled={voiceEnabled}
+                  voiceActive={voicePanelOpen || voiceCallActive}
+                  onOpenVoice={toggleVoicePanel}
                   onSelectSkill={(skill) =>
                     setPendingSkill({ dir: skill.dir || skill.name, name: skill.display_name || skill.name })
                   }
@@ -1099,19 +1125,18 @@ export const AgentWebComposer = forwardRef<AgentWebComposerHandle, AgentWebCompo
                   <button
                     type="button"
                     disabled={disabled}
-                    onClick={toggleVoicePanel}
+                    onClick={() => {
+                      // In a call the panel is the only place to hang up / mute.
+                      // Idle: record straight away — the pill below replaces this.
+                      if (voiceCallActive) toggleVoicePanel();
+                      else startVoiceRecord();
+                    }}
                     className={`w-8 h-8 rounded-full flex items-center justify-center relative border-0 cursor-pointer transition-colors ${
-                      voicePanelOpen
-                        ? 'bg-primary/20 text-primary'
-                        : voiceCallActive
-                          ? 'bg-emerald-500/20 text-emerald-500'
-                          : 'text-textMuted hover:text-textMain hover:bg-primary/10 bg-transparent'
-                    }`}
-                    title={
                       voiceCallActive
-                        ? '实时通话进行中（点击展开/折叠）'
-                        : '语音消息 / 实时通话'
-                    }
+                        ? 'bg-emerald-500/20 text-emerald-500'
+                        : 'text-textMuted hover:text-textMain hover:bg-primary/10 bg-transparent'
+                    }`}
+                    title={voiceCallActive ? '实时通话进行中（点击展开/折叠）' : '录音转文字（点击开始）'}
                   >
                     <Mic size={18} strokeWidth={1.75} />
                     {voiceCallActive ? (
@@ -1135,6 +1160,7 @@ export const AgentWebComposer = forwardRef<AgentWebComposerHandle, AgentWebCompo
             onCompressContext={onCompressContext}
             compressing={compressing}
             compressDisabled={compressDisabled}
+            onExportContext={onExportContext}
           />
         </div>
       </div>

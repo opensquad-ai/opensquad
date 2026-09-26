@@ -38,9 +38,11 @@ if _project_root not in sys.path:
     sys.path.append(_project_root)
 
 try:
+    from plugins._service_runtime import ffmpeg_executable as _runtime_ffmpeg
     from plugins._service_runtime import port as _runtime_port
     from plugins._service_runtime import workspace_data_dir as _runtime_workspace_data_dir
 except ImportError:
+    from _service_runtime import ffmpeg_executable as _runtime_ffmpeg  # type: ignore
     from _service_runtime import port as _runtime_port  # type: ignore
     from _service_runtime import workspace_data_dir as _runtime_workspace_data_dir  # type: ignore
 
@@ -159,12 +161,13 @@ def convert_to_wav(input_path: str) -> str:
 
     Uses content sniffing (do not trust the file extension — clients sometimes
     upload webm/opus bytes under a ``.wav`` name).
-    """
-    import shutil
 
-    ffmpeg = shutil.which("ffmpeg")
-    if not ffmpeg:
-        raise RuntimeError("ffmpeg not found on PATH. Install ffmpeg so SenseVoice can convert browser recordings.")
+    The browser's native format is webm/opus, so this is the normal path for
+    microphone input, not an edge case: the ffmpeg binary is resolved through
+    ``plugins._service_runtime.ffmpeg_executable`` (PATH or the ``imageio-ffmpeg``
+    wheel the plugin declares as a pip dependency).
+    """
+    ffmpeg = _runtime_ffmpeg()
     wav_path = input_path + "_conv.wav"
     cmd = [
         ffmpeg,

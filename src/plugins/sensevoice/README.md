@@ -16,10 +16,15 @@
 ## 依赖
 
 ```bash
-pip install onnxruntime soundfile librosa numpy pyyaml flask flask-cors modelscope
+pip install onnxruntime soundfile librosa numpy pyyaml flask flask-cors imageio-ffmpeg modelscope
 ```
 
-另需本机安装 **ffmpeg**（浏览器 webm 等格式转 16k wav）。
+浏览器录音是 webm/opus，转 16k wav 需要 ffmpeg：这里用 **imageio-ffmpeg** 自带的静态
+构建，**不需要**本机再装 ffmpeg。该包已写进本插件 `plugin.json` 的 `dependencies.pip`，
+启动服务时 launcher 会自动装进 Agent Python（见 `process_manager._install_dependencies`）。
+
+若想改用自备的 ffmpeg，设环境变量 `OPENSQUAD_FFMPEG` 指向该二进制即可。
+查找顺序：`OPENSQUAD_FFMPEG` > 系统 PATH > `imageio-ffmpeg` 内置。
 
 ## 服务端口
 

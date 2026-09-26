@@ -88,10 +88,16 @@ EXPECTED_METHODS_PER_MODULE = {
     "_sessions": 10,
     "_mcp": 6,
     "_skills": 2,
-    "_cards": 17,
+    # 18 = 17 + ``_apply_card_to_agents``, which pushes a saved model card's
+    # capability switches and model fields (base_url / model_name / api_key /
+    # image_size / …) into every agent whose model block references it — the card
+    # is a template, each agent owns a copy, so flipping a switch there used to
+    # change nothing for the agents that use it.  Per-agent tuning (temperature,
+    # top_k, render_mode, …) is not synced.
+    "_cards": 18,
     "_workspace": 6,
 }
-EXPECTED_TOTAL_MIXIN_METHODS = 120
+EXPECTED_TOTAL_MIXIN_METHODS = 121
 
 # ``_do_*_impl`` if/elif chain lengths -- the URL surface of each verb.
 EXPECTED_DISPATCH_BRANCHES = {

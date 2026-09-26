@@ -24,7 +24,15 @@ export interface ThemePrefs {
   contrast: number; // ~3–12 (approx WCAG ratio target)
   fontSize: number; // relative multiplier, e.g. 0.875–1.25
   serif: boolean;
+  /** Whole-UI zoom factor applied via `html { zoom }` (0.85–1.2). */
+  uiScale: number;
+  /** Max width of the agent-chat document column. */
+  contentWidth: ContentWidth;
 }
+
+/** Discrete content-width stops for the chat document column. */
+export type ContentWidth = 'standard' | 'wide' | 'full';
+export const CONTENT_WIDTHS: ContentWidth[] = ['standard', 'wide', 'full'];
 
 export interface ThemePalette {
   primary: string;
@@ -191,6 +199,8 @@ export const DEFAULT_THEME_PREFS: ThemePrefs = {
   contrast: 7.5,
   fontSize: 1,
   serif: false,
+  uiScale: 1,
+  contentWidth: 'standard',
 };
 
 export const FONT_SIZE_MIN = 0.875;
@@ -199,6 +209,11 @@ export const PURITY_MIN = 0;
 export const PURITY_MAX = 100;
 export const CONTRAST_MIN = 3;
 export const CONTRAST_MAX = 12;
+/** Discrete 文字大小 stops surfaced in the settings panel (小 / 中 / 大). */
+export const FONT_SIZE_STOPS = [0.875, 1, 1.125] as const;
+/** Discrete 界面缩放 stops surfaced in the settings panel (小 / 标准 / 大). */
+export const UI_SCALE_MIN = 0.85;
+export const UI_SCALE_MAX = 1.25;
 
 export function clamp(n: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, n));

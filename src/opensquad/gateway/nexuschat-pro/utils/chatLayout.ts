@@ -5,9 +5,10 @@
  * width tweak that missed one of them silently misaligned the composer
  * against the messages.
  *
- * `max-w-3xl` (48rem / 768px) stays for narrow windows. Wide windows get
- * 56rem (the midpoint between 48rem and 64rem): markdown tables (代码 / 名称 /
- * 依据原句) were being squeezed at 768px until a 6-character stock code wrapped
- * onto its own second line, but 64rem read as too wide.
+ * The concrete max-width comes from `.os-chat-column` in index.css, driven by
+ * the 内容宽度 appearance setting (`html[data-content-width]`): standard keeps
+ * the historical 48rem / 56rem pair (markdown tables were squeezed at 768px —
+ * see the history note below — but 64rem read as too wide), wide opens 64rem,
+ * full drops the cap entirely.
  */
-export const CHAT_DOCUMENT_COLUMN_CLASS = 'max-w-3xl lg:max-w-4xl mx-auto w-full';
+export const CHAT_DOCUMENT_COLUMN_CLASS = 'os-chat-column mx-auto w-full';

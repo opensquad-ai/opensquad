@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { AI_MARKDOWN_CLASS, renderFencedMarkdown } from '../../utils/fencedMarkdown';
 import { escapeHtml } from '../../utils/safeHtml';
 import { useMermaidHydration } from '../../hooks/useMermaidHydration';
+import { useTableCopyButtons } from '../../hooks/useTableCopyButtons';
 import { FollowScrollBox } from './FollowScrollBox';
 
 interface StreamingMessageProps {
@@ -84,6 +85,7 @@ export const StreamingMessage: React.FC<StreamingMessageProps> = ({
   // Hydrate mermaid only after the stream is complete — incomplete fences
   // fail mermaid.render on every 100ms flush and spike CPU.
   const mermaidRef = useMermaidHydration(renderedHtml, !!isComplete && !!visibleContent);
+  useTableCopyButtons(mermaidRef, renderedHtml);
 
   if (!visibleContent) return null;
 

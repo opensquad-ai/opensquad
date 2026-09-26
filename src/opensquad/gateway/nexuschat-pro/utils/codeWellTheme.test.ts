@@ -44,15 +44,18 @@ describe('chat code wells follow the appearance like the file pane', () => {
     expect(body).not.toContain('#0b0f17');
   });
 
-  it('dark — the well keeps the classic near-black, scoped to html.dark only', () => {
+  it('dark — the well keeps the classic near-black via the shared html.dark token', () => {
     const darkRule = ruleFor('html.dark .ai-markdown .ai-code-wrap');
     expect(darkRule, 'html.dark well rule missing').not.toBeNull();
-    expect(darkRule).toContain('#0b0f17');
-    // The near-black must appear exactly once in the whole stylesheet and
-    // only inside that html.dark rule — a light-scope reoccurrence is how
-    // the original bug looked before it was ever reported.
+    // The near-black is defined once as a token on html.dark and consumed by
+    // every dark code well (chat, file pane, skill previews) — a light-scope
+    // reoccurrence is how the original bug looked before it was ever reported.
+    const tokenRule = ruleFor('html.dark');
+    expect(tokenRule, 'html.dark token rule missing').not.toBeNull();
+    expect(tokenRule).toContain('--os-code-well-bg: #0b0f17');
+    expect(darkRule).toContain('var(--os-code-well-bg)');
     const occurrences = INDEX_CSS.match(/#0b0f17/g)?.length ?? 0;
-    expect(occurrences, '#0b0f17 must exist only in the html.dark well rule').toBe(1);
+    expect(occurrences, '#0b0f17 must exist only in the html.dark token rule').toBe(1);
   });
 
   it('light — code text uses --color-text-main; #c8cdd8 only under html.dark', () => {

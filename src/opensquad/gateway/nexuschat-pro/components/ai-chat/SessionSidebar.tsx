@@ -26,8 +26,10 @@ import {
   Clock,
   ListTodo,
   Search,
+  FileDown,
 } from 'lucide-react';
 import { agentSessionAPI, AgentSession } from '../../services/api';
+import { exportSessionToMarkdown } from '../../utils/sessionExport';
 import {
   loadSessionProjectMeta,
   setSessionPinned,
@@ -58,6 +60,7 @@ import {
 } from '../../utils/sessionListWindow';
 import { SOFT_PRESENCE_MS, useSoftPresence } from '../../utils/useSoftPresence';
 import { formatRelativeAge } from '../../utils/time';
+import { isSessionRowBusy } from '../../utils/sessionBusy';
 import { PulseDotsOrbit } from './PulseDotsStatus';
 import { AccountRailFooter, type AccountUser } from '../AccountRailFooter';
 import { AgentNavShortcutAvatars } from '../AgentNavShortcutAvatars';
@@ -307,6 +310,30 @@ const SessionSidebarInner: React.FC<SessionSidebarProps> = ({
       })();
     },
     [agentId],
+  );
+
+  /**
+   * Export one session's conversation as Markdown.
+   *
+   * The flow lives in `utils/sessionExport` because the context panel's
+   * "导出上下文" row runs the same one — a second hand-rolled copy is how the
+   * two entry points drift (and a truncated transcript is invisible to the
+   * caller). This wrapper only maps the result onto the sidebar's error line.
+   */
+  const exportSession = useCallback(
+    async (session: AgentSession) => {
+      const sid = (session.id || '').trim();
+      if (!agentId || !sid) return;
+      const res = await exportSessionToMarkdown(agentId, sid, session.title);
+      if (res.ok) return;
+      if (res.reason === 'busy') return;
+      if (res.reason === 'empty') {
+        setError(t('aiChat.sessionSidebar.exportEmpty'));
+        return;
+      }
+      setError(res.message || t('aiChat.sessionSidebar.exportFailed'));
+    },
+    [agentId, t],
   );
 
   const reloadMeta = useCallback(() => {
@@ -728,7 +755,12 @@ const SessionSidebarInner: React.FC<SessionSidebarProps> = ({
     const meta = metaMap[session.id];
     const pinned = !!meta?.pinned;
     const archived = !!meta?.archived;
-    const busy = busySessionIds.includes(session.id) || (!!agentBusy && !!session.current);
+    const busy = isSessionRowBusy({
+      sessionId: session.id,
+      currentSessionId,
+      agentBusy,
+      busySessionIds,
+    });
     const unseenComplete = !busy && !isCurrent && unseenCompleteSessionIds.includes(session.id);
     const confirming = confirmingDeleteId === session.id;
     const editing = editingId === session.id;
@@ -880,6 +912,17 @@ const SessionSidebarInner: React.FC<SessionSidebarProps> = ({
             <button
               type="button"
               className="p-0.5 rounded hover:bg-primary/15"
+              title={t('aiChat.sessionSidebar.exportMarkdown')}
+              onClick={(e) => {
+                e.stopPropagation();
+                void exportSession(session);
+              }}
+            >
+              <FileDown size={11} />
+            </button>
+            <button
+              type="button"
+              className="p-0.5 rounded hover:bg-primary/15"
               title={t('aiChat.sessionSidebar.rename')}
               onClick={(e) => startRename(e, session)}
             >
@@ -1004,6 +1047,10 @@ const SessionSidebarInner: React.FC<SessionSidebarProps> = ({
           <Search size={16} className="text-textMuted/70" />
           <span className="flex-1 text-left">{t('aiChat.search.title')}</span>
         </button>
+        {/* The "export this session" row moved into the context panel, under
+            compress (see SoloContextFooter) — that is where the other
+            per-session context actions live. The hover-only per-row icon below
+            stays: it is the only way to export a session that is not open. */}
         <button
           type="button"
           disabled={!workspaceRootPath}

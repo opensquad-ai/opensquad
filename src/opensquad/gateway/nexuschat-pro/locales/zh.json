@@ -58,6 +58,7 @@
     "save": "保存",
     "cancel": "取消",
     "delete": "删除",
+    "remove": "移除",
     "edit": "编辑",
     "add": "添加",
     "close": "关闭",
@@ -954,6 +955,7 @@
         "completed": "已完成",
         "timedOut": "已超时",
         "aborted": "已中止",
+        "interrupted": "已中断",
         "statusFailed": "失败"
       },
       "outer": {
@@ -1003,6 +1005,9 @@
     "selectedText": "选中的文本",
     "selectionCopied": "已复制",
     "addToContext": "添加到上下文",
+    "copyTable": "复制表格",
+    "tableCopied": "已复制表格",
+    "voice": "语音",
     "expandFoldedLines": "展开折叠行",
     "unchangedLines": "行未变化 (点击展开)",
     "readFile": "读取文件",
@@ -1028,6 +1033,8 @@
     "creatingSession": "创建会话中...",
     "planPanel": "规划面板",
     "contextDetails": "上下文详情",
+    "exportContext": "导出上下文",
+    "exportContextHint": "将当前会话导出为 Markdown 文件",
     "contextUsage": "上下文用量",
     "tokenStatsPending": "暂无 Token 统计…",
     "hideTokenStats": "隐藏 Token 统计",
@@ -1099,7 +1106,10 @@
       "batchSelected": "已标记 {{count}} 个会话",
       "batchArchive": "批量归档",
       "batchDeleteConfirm": "确认删除这 {{count}} 个会话？",
-      "batchExit": "退出批量"
+      "batchExit": "退出批量",
+      "exportMarkdown": "导出 Markdown",
+      "exportEmpty": "这个会话还没有内容",
+      "exportFailed": "导出失败，请重试"
     },
     "workingDirModal": {
       "title": "设置工作目录",

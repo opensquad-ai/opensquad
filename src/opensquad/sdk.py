@@ -12,6 +12,11 @@ from dataclasses import dataclass
 
 import websockets
 
+# Turn/session metadata promoted to the frame's top level.  ``thought_ms`` is the
+# recorded thinking-phase duration (opensquad.thought_clock) — the Web UI reads it
+# to freeze a 深度思考 row with a real number instead of inferring one.
+_FRAME_META_KEYS = ("turn_id", "round_id", "agent_id", "trace_id", "thought_ms")
+
 logger = logging.getLogger(__name__)
 
 # Protocol-level keepalive (websockets library). Detects dead TCP / NAT drops
@@ -385,7 +390,7 @@ class BaseAgent:
             }
             if sid:
                 payload["sid"] = sid
-            for key in ("turn_id", "round_id", "agent_id", "trace_id"):
+            for key in _FRAME_META_KEYS:
                 val = meta.get(key)
                 if val is not None and val != "":
                     payload[key] = val
@@ -405,7 +410,7 @@ class BaseAgent:
             }
             if sid:
                 payload["sid"] = sid
-            for key in ("turn_id", "round_id", "agent_id", "trace_id"):
+            for key in _FRAME_META_KEYS:
                 val = meta.get(key)
                 if val is not None and val != "":
                     payload[key] = val

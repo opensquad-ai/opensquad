@@ -36,8 +36,8 @@ from opensquad.utils.local_http import open_local
 BUILTIN_CARDS_DIR = pathlib.Path(__file__).resolve().parents[1] / "src" / "model_cards"
 
 
-class _Recorder:
-    """Minimal ``self`` for the unbound handler: it only calls ``_send_json``."""
+class _Recorder(CardsMixin):
+    """Minimal ``self`` for the unbound handler: the mixin plus ``_send_json``."""
 
     def __init__(self):
         self.sent = []
@@ -63,6 +63,12 @@ def _read(cards_dir, card_name: str) -> dict:
 def cards_dir(tmp_path, monkeypatch):
     """Point the mixin's module-level card directory at a throwaway folder."""
     monkeypatch.setattr(cards_mod, "MODEL_CARDS_DIR", str(tmp_path))
+    # Saving a card now also pushes its capability switches into the agents that
+    # reference it; keep that scan inside the temp dir so no test can rewrite the
+    # real deployment's agent configs.
+    agents_dir = tmp_path / "agents"
+    agents_dir.mkdir()
+    monkeypatch.setattr(cards_mod, "AGENTS_DIR", str(agents_dir))
     return tmp_path
 
 

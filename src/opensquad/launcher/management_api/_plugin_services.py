@@ -18,7 +18,12 @@ import json
 import subprocess
 import time
 
-from opensquad.launcher.process_manager import MAX_RESTART_ATTEMPTS, _cleanup_runtime_registry, _resolve_discovery_port
+from opensquad.launcher.process_manager import (
+    MAX_RESTART_ATTEMPTS,
+    _cleanup_runtime_registry,
+    _resolve_discovery_port,
+    resolve_auto_start,
+)
 from opensquad.launcher_main import (
     _RUNTIME_LIST_TTL_S,
     _log,
@@ -70,7 +75,7 @@ class PluginServicesMixin:
                     "pid": None,
                     "port": _resolve_discovery_port(info),
                     "host": info.get("service_cfg", {}).get("host", "0.0.0.0"),
-                    "auto_start": syscfg.is_service_enabled(pid),
+                    "auto_start": resolve_auto_start(pid, info.get("service_cfg", {}) or {}),
                     "should_run": False,
                     "restart_count": 0,
                     "max_restarts": MAX_RESTART_ATTEMPTS,

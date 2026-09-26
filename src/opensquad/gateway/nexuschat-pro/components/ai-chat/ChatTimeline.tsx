@@ -66,6 +66,12 @@ export function ChatTimeline<T extends TimelineKeyed>({
   const columnRef = useRef<HTMLDivElement>(null);
   const userScrollingRef = useRef(false);
   const userScrollIdleRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // 最后一次"程序贴底"写入的 scrollTop。scroll 事件无法区分来源：程序写入
+  // （pin）与用户拖动都会触发它。回声事件必须忽略，否则每次贴底都会把自己
+  // 记成"用户正在滚动"，随后 180ms 内 pin() 全部 return —— 实时思考块逐 chunk
+  // 撑高列时就是"跟一下、停住、再跳一下"（抖动）。FollowScrollBox 用同样的
+  // lastSetTop 抑制修过同一个坑。
+  const lastPinTopRef = useRef(-1);
   const virt = useTimelineVirtualRange(scrollRef, entries.length, {
     unpinRef,
     scrollingRef: userScrollingRef,
@@ -146,8 +152,12 @@ export function ChatTimeline<T extends TimelineKeyed>({
 
   const handleScroll = useCallback<UIEventHandler<HTMLDivElement>>(
     (e) => {
-      syncUnpin(e.currentTarget);
-      markUserScrolling();
+      const el = e.currentTarget;
+      // scrollTop 正是 pin() 刚写入的值 → 程序贴底的回声，不是用户拖动。
+      // 把它当成用户滚动会让下一次 pin 被自己挡掉（见 lastPinTopRef）。
+      const echo = el.scrollTop === lastPinTopRef.current;
+      syncUnpin(el);
+      if (!echo) markUserScrolling();
       onScroll?.(e);
     },
     [markUserScrolling, onScroll, syncUnpin],
@@ -183,6 +193,7 @@ export function ChatTimeline<T extends TimelineKeyed>({
       const gap = el.scrollHeight - el.scrollTop - el.clientHeight;
       if (gap < 4) return;
       el.scrollTop = el.scrollHeight;
+      lastPinTopRef.current = el.scrollTop;
     };
     pin();
     const ro = new ResizeObserver(pin);

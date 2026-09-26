@@ -315,3 +315,38 @@ describe('agent inline code is legible in both appearances', () => {
     expect(rule![1]).toMatch(/color:\s*rgb\(var\(--color-primary\)\)/);
   });
 });
+
+describe('layout appearance prefs — 文字大小 / 界面缩放 / 内容宽度', () => {
+  beforeEach(() => {
+    localStorage.clear();
+  });
+
+  it('sanitises uiScale with a clamp and contentWidth with a whitelist', () => {
+    expect(sanitizePrefs({ ...DEFAULT_THEME_PREFS, uiScale: 5 }).uiScale).toBeLessThanOrEqual(1.25);
+    expect(sanitizePrefs({ ...DEFAULT_THEME_PREFS, uiScale: 0.1 }).uiScale).toBeGreaterThanOrEqual(0.85);
+    expect(sanitizePrefs({ ...DEFAULT_THEME_PREFS, uiScale: 'bogus' as never }).uiScale).toBe(1);
+    // Unknown values must self-heal to the default, never leak into the DOM.
+    expect(sanitizePrefs({ ...DEFAULT_THEME_PREFS, contentWidth: 'purple' as never }).contentWidth).toBe('standard');
+    expect(sanitizePrefs({ ...DEFAULT_THEME_PREFS, contentWidth: 'wide' }).contentWidth).toBe('wide');
+  });
+
+  it('applyThemePrefs writes html zoom + data-content-width', () => {
+    const root = document.documentElement;
+    applyThemePrefs(updateThemePrefs({ uiScale: 1.1, contentWidth: 'wide' }));
+    expect(root.style.zoom).toBe('1.1');
+    expect(root.dataset.contentWidth).toBe('wide');
+    applyThemePrefs(updateThemePrefs({ uiScale: 1, contentWidth: 'standard' }));
+    expect(root.style.zoom).toBe('');
+    expect(root.dataset.contentWidth).toBe('standard');
+  });
+
+  it('chat document column reads its cap from data-content-width css', () => {
+    // Source-level: the single shared column class must consume the
+    // appearance-driven rule (chat transcript AND composer stay aligned).
+    const layoutSrc = fs.readFileSync(path.join(APP_ROOT, 'utils/chatLayout.ts'), 'utf8');
+    expect(layoutSrc).toContain("'os-chat-column mx-auto w-full'");
+    expect(INDEX_CSS).toContain("html[data-content-width='wide'] .os-chat-column");
+    expect(INDEX_CSS).toContain("html[data-content-width='full'] .os-chat-column");
+    expect(INDEX_CSS).toMatch(/html\[data-content-width='standard'\] \.os-chat-column\s*\{[^}]*56rem/);
+  });
+});

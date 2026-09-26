@@ -309,7 +309,105 @@ class CardsMixin:
         card["title"] = card["title"] or card_name
         with open(fpath, "w", encoding="utf-8") as f:
             json.dump(card, f, ensure_ascii=False, indent=2)
-        return self._send_json({"ok": True, "name": card_name})
+        # A card is a template: each agent keeps its own copy of the model block, so
+        # a switch flipped (or an endpoint moved) here used to change nothing for the
+        # agents that use it.
+        applied = self._apply_card_to_agents(card_name, card)
+        return self._send_json({"ok": True, "name": card_name, "agents_updated": applied})
+
+    # Card field -> agent model field.  Both tables are the card's to decide: what
+    # the model can do, and which model it is (endpoint, key, context, generation
+    # knobs).  Everything else in an agent's model block -- temperature, penalties,
+    # top_k, tool_output_max_chars, render_mode, audio_output_voice, tool_call_mode
+    # -- is that agent's own tuning and must survive a card edit, or fixing one
+    # switch would silently rewrite every agent's sampling.
+    # ``is_audio`` is named ``is_audio_model`` on the agent side -- same mapping as
+    # ``_handle_put_model_card_assign``.
+    #
+    # Rule of thumb for where a field belongs: if a stale copy would make the agent
+    # silently run a *different model* (or lose a capability the card advertises),
+    # it goes here; if it only changes how that agent talks, it does not.
+    _CARD_CAPABILITY_KEYS = (
+        ("is_think", "is_think"),
+        ("is_image", "is_image"),
+        ("is_video", "is_video"),
+        ("is_audio", "is_audio_model"),
+        ("is_audio_output", "is_audio_output"),
+        ("is_image_output", "is_image_output"),
+        ("is_builtin", "is_builtin"),
+        ("group_asr", "group_asr"),
+        ("auto_asr", "auto_asr"),
+        ("enable_repetition_check", "enable_repetition_check"),
+    )
+    _CARD_MODEL_KEYS = (
+        ("api_protocol", "api_protocol"),
+        ("provider", "provider"),
+        ("api_key", "api_key"),
+        ("base_url", "base_url"),
+        ("model_name", "model_name"),
+        ("token_max", "token_max"),
+        ("image_size", "image_size"),
+        ("image_steps", "image_steps"),
+        ("image_cfg_scale", "image_cfg_scale"),
+        ("asr_protocol", "asr_protocol"),
+        ("builtin_service", "builtin_service"),
+    )
+
+    def _apply_card_to_agents(self, card_name: str, card: dict) -> list[str]:
+        """Push a card's capability switches and model fields into every agent that
+        references it.
+
+        Returns the agents whose config changed.  The agent process watches its own
+        config.json and re-applies the model on change
+        (``opensquad.model_switch.apply_model_reload`` -> ``_is_img_mode`` /
+        ``chat_api.is_img_model``), so no restart is needed for the change to bite.
+        """
+        updated: list[str] = []
+        if not os.path.isdir(AGENTS_DIR):
+            return updated
+        for name in sorted(os.listdir(AGENTS_DIR)):
+            config_path = os.path.join(AGENTS_DIR, name, "config.json")
+            if not os.path.isfile(config_path):
+                continue
+            cfg = _read_json(config_path)
+            model = cfg.get("model")
+            if not isinstance(model, dict) or model.get("_card") != card_name:
+                continue
+            changed = False
+            for card_key, model_key in self._CARD_CAPABILITY_KEYS:
+                if card_key not in card:
+                    continue
+                wanted = bool(card[card_key])
+                if model_key in model:
+                    if bool(model[model_key]) != wanted:
+                        model[model_key] = wanted
+                        changed = True
+                elif wanted:
+                    # An absent key reads as False at runtime, so only a True needs
+                    # writing -- otherwise every card save would touch every agent
+                    # once just to materialise False, and wake the runner for nothing.
+                    model[model_key] = True
+                    changed = True
+            for card_key, model_key in self._CARD_MODEL_KEYS:
+                if card_key not in card:
+                    continue
+                wanted = card[card_key]
+                # An absent key reads as the field's own default at runtime, so
+                # compare against that: a legacy agent config not carrying e.g.
+                # ``api_key`` must not be rewritten just to store the empty default.
+                current = model.get(model_key, _MODEL_CARD_DEFAULTS.get(card_key))
+                if current != wanted:
+                    model[model_key] = wanted
+                    changed = True
+            if not changed:
+                continue
+            with open(config_path, "w", encoding="utf-8") as f:
+                json.dump(cfg, f, ensure_ascii=False, indent=2)
+            proc = _processes.get(name)
+            if proc is not None:
+                proc.reload_config()
+            updated.append(name)
+        return updated
 
     def _handle_delete_model_card(self, card_name: str):
         fpath = os.path.join(MODEL_CARDS_DIR, f"{card_name}.json")

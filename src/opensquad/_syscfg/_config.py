@@ -583,3 +583,23 @@ def is_service_enabled(plugin_name: str) -> bool:
         return cfg.get("services", {}).get(plugin_name, {}).get("enabled", True)
     except Exception:
         return False
+
+
+def service_enabled_explicit(plugin_name: str) -> bool | None:
+    """Return ``services.<plugin>.enabled`` when it is set, else None.
+
+    ``is_service_enabled`` cannot express "never configured" — it defaults to
+    True — so it cannot tell a user's explicit opt-out from a plugin that just
+    never had the key written. Auto-start needs that distinction: the explicit
+    value (what the Service Manager's Auto toggle, and Start/Stop, write) must
+    beat the plugin manifest's own default, and only a *missing* key should
+    fall through to it.
+    """
+    try:
+        cfg = _load()
+        section = cfg.get("services", {}).get(plugin_name, {})
+        if "enabled" not in section:
+            return None
+        return bool(section["enabled"])
+    except Exception:
+        return None

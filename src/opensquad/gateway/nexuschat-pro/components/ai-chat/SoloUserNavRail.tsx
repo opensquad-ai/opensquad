@@ -5,6 +5,7 @@
  */
 import React, { useCallback, useEffect, useState } from "react";
 import { createPortal } from "react-dom";
+import { requestSteerReveal } from "../../utils/steerReveal";
 
 export interface SoloUserNavNode {
   id: string;
@@ -14,6 +15,11 @@ export interface SoloUserNavNode {
   previewFull?: string;
   /** Following assistant reply preview (optional) */
   replyPreview?: string;
+  /**
+   * `steer` — an interjection that has no bubble of its own: its row lives inside
+   * a tool fold, so jumping must open that fold first.
+   */
+  kind?: 'message' | 'steer';
 }
 
 interface SoloUserNavRailProps {
@@ -26,6 +32,69 @@ interface SoloUserNavRailProps {
 /** DOM id used as jump target for a user-message nav node. */
 export function userNavAnchorDomId(id: string): string {
   return `solo-msg-${id}`;
+}
+
+/** Nav-node id for a steer event (the id the rail hands to `onJump`). */
+export const STEER_NAV_PREFIX = 'steer:';
+
+export function steerNavNodeId(steerUid: string): string {
+  return `${STEER_NAV_PREFIX}${steerUid}`;
+}
+
+/** DOM id the steer row carries inside the fold. */
+export function steerNavAnchorDomId(steerUid: string): string {
+  return `solo-steer-${steerUid}`;
+}
+
+export function steerUidFromNavNodeId(id: string): string | null {
+  return id.startsWith(STEER_NAV_PREFIX) ? id.slice(STEER_NAV_PREFIX.length) : null;
+}
+
+/**
+ * Scroll a nav target into view, opening its fold first when it is an interjection.
+ *
+ * A steer row only exists in the DOM while its fold is mounted, so the lookup
+ * retries across frames instead of giving up on the first miss.
+ */
+export function jumpToNavNode(container: HTMLElement | null, id: string): void {
+  if (!container) return;
+  const steerUid = steerUidFromNavNodeId(id);
+  const domId = steerUid ? steerNavAnchorDomId(steerUid) : userNavAnchorDomId(id);
+  if (steerUid) requestSteerReveal(steerUid);
+
+  const scrollToTarget = (el: HTMLElement) => {
+    const cRect = container.getBoundingClientRect();
+    const eRect = el.getBoundingClientRect();
+    const top = eRect.top - cRect.top + container.scrollTop - 12;
+    container.scrollTo({ top: Math.max(0, top), behavior: "smooth" });
+    if (steerUid) flashSteerRow(el);
+  };
+
+  const attempt = (framesLeft: number) => {
+    const el = document.getElementById(domId);
+    if (el) {
+      scrollToTarget(el);
+      return;
+    }
+    if (framesLeft <= 0) return;
+    requestAnimationFrame(() => attempt(framesLeft - 1));
+  };
+  attempt(steerUid ? 30 : 1);
+}
+
+/** Brief outline on the revealed row, so a jump into a long fold is traceable. */
+function flashSteerRow(el: HTMLElement) {
+  const prevOutline = el.style.outline;
+  const prevOffset = el.style.outlineOffset;
+  const prevTransition = el.style.transition;
+  el.style.transition = "outline-color 400ms ease-out";
+  el.style.outline = "2px solid color-mix(in srgb, rgb(var(--color-primary)) 55%, transparent)";
+  el.style.outlineOffset = "4px";
+  window.setTimeout(() => {
+    el.style.outline = prevOutline;
+    el.style.outlineOffset = prevOffset;
+    el.style.transition = prevTransition;
+  }, 1400);
 }
 
 export function previewUserMessage(content: string, maxLen = 18): string {
@@ -42,8 +111,7 @@ export function previewUserMessage(content: string, maxLen = 18): string {
   return `${flat.slice(0, maxLen)}…`;
 }
 
-/** Soft-wrap friendly preview — keeps more text for the hover card body. */
-export function previewUserMessageWrap(content: string, maxLen = 96): string {
+/** Soft-wrap friendly preview — keeps more text for the hover card body. */export function previewUserMessageWrap(content: string, maxLen = 96): string {
   const flat = content
     .replace(/\r\n/g, "\n")
     .replace(/\[File:[^\]]*\](?:\([^)]*\))?/g, "")
@@ -64,6 +132,25 @@ export function buildUserNavNodesFromTimeline(
   const nodes: SoloUserNavNode[] = [];
   for (let i = 0; i < timeline.length; i++) {
     const entry = timeline[i];
+    if (entry.kind === "workflow") {
+      // A 插话 deliberately has no bubble of its own — it is a row inside the fold
+      // it interrupted. It still earns a rail marker, and the jump opens the fold.
+      for (const evt of entry.data?.events ?? []) {
+        if (evt?.type !== "user_steer") continue;
+        const raw =
+          typeof evt.content === "string" ? evt.content : (evt.content?.text ?? "");
+        if (!String(raw).trim()) continue;
+        const uid = typeof evt._uid === "string" && evt._uid ? evt._uid : `wf-${i}`;
+        nodes.push({
+          id: steerNavNodeId(uid),
+          kind: "steer",
+          preview: previewUserMessage(String(raw), 24),
+          previewFull:
+            previewUserMessageWrap(String(raw), 80) || previewUserMessage(String(raw), 24),
+        });
+      }
+      continue;
+    }
     if (entry.kind !== "message") continue;
     const msg = entry.data;
     if (!msg || msg.role !== "user") continue;
@@ -85,6 +172,7 @@ export function buildUserNavNodesFromTimeline(
     const raw = typeof msg.content === "string" ? msg.content : "";
     nodes.push({
       id,
+      kind: "message",
       preview: previewUserMessage(raw, 24),
       previewFull: previewUserMessageWrap(raw, 80) || previewUserMessage(raw, 24),
       replyPreview,
@@ -133,6 +221,7 @@ export const SoloUserNavRail: React.FC<SoloUserNavRailProps> = ({
         {nodes.map((node) => {
           const isActive = node.id === activeId;
           const isHovered = hovered?.id === node.id;
+          const isSteer = node.kind === "steer";
           const title = node.previewFull || node.preview;
 
           return (
@@ -159,7 +248,7 @@ export const SoloUserNavRail: React.FC<SoloUserNavRailProps> = ({
               <span
                 className="relative z-[1] block rounded-full shrink-0 transition-all duration-150"
                 style={{
-                  width: isActive ? 15 : isHovered ? 13 : 10,
+                  width: isActive ? 15 : isHovered ? 13 : isSteer ? 6 : 10,
                   height: isActive ? 3 : isHovered ? 2.5 : 2,
                   backgroundColor: isActive
                     ? primaryDash

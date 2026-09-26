@@ -4,7 +4,8 @@
  */
 import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { BookOpen, Check, ChevronRight, Image as ImageIcon, Paperclip, Plus, Upload, Volume2 } from 'lucide-react';
+import { useTranslation } from 'react-i18next';
+import { BookOpen, Check, ChevronRight, Image as ImageIcon, Mic, Paperclip, Plus, Upload, Volume2 } from 'lucide-react';
 import type { SkillInfo } from '../../services/api';
 import { POPOVER_SURFACE_CLASS, usePopMenuMounted } from './popoverSurface';
 
@@ -17,6 +18,15 @@ export interface SoloAttachMenuProps {
   onUploadImages: () => void;
   onSelectSkill: (skill: SkillInfo) => void;
   onOpenSkills?: () => void;
+  /**
+   * Voice panel (录音消息 / 实时通话 + model-card config). It lives here rather
+   * than behind the composer's mic button: the mic records on click, and this
+   * menu is where the panel — and the settings inside it — is reached.
+   */
+  voiceEnabled?: boolean;
+  onOpenVoice?: () => void;
+  /** Panel open or a call running — tints the row, like Auto speech's check. */
+  voiceActive?: boolean;
   /** When true, agent final replies are spoken via TTS automatically. */
   autoSpeechEnabled?: boolean;
   onToggleAutoSpeech?: (enabled: boolean) => void;
@@ -31,9 +41,13 @@ export const SoloAttachMenu: React.FC<SoloAttachMenuProps> = ({
   onUploadImages,
   onSelectSkill,
   onOpenSkills,
+  voiceEnabled = false,
+  onOpenVoice,
+  voiceActive = false,
   autoSpeechEnabled = false,
   onToggleAutoSpeech,
 }) => {
+  const { t } = useTranslation();
   const [open, setOpen] = useState(false);
   const [skillsOpen, setSkillsOpen] = useState(false);
   const [menuPos, setMenuPos] = useState<{ bottom: number; left: number } | null>(null);
@@ -167,28 +181,51 @@ export const SoloAttachMenu: React.FC<SoloAttachMenuProps> = ({
             </button>
           );
         })}
-        {onToggleAutoSpeech && (
+        {voiceEnabled || onToggleAutoSpeech ? (
           <>
             <div className="my-0.5 h-px bg-border/60" />
-            <button
-              type="button"
-              onMouseEnter={() => setSkillsOpen(false)}
-              onClick={() => onToggleAutoSpeech(!autoSpeechEnabled)}
-              className={`w-full flex items-center gap-2 px-3 py-1.5 text-left text-[12px] transition-colors border-0 cursor-pointer ${
-                autoSpeechEnabled
-                  ? 'bg-black/[0.06] dark:bg-white/[0.08] text-blue-600 dark:text-blue-400'
-                  : 'bg-transparent text-textMain hover:bg-black/[0.06] dark:hover:bg-white/[0.10]'
-              }`}
-              title="Automatically speak each final agent reply"
-            >
-              <span className="w-4 shrink-0 flex items-center justify-center">
-                <Volume2 size={14} className={autoSpeechEnabled ? 'text-blue-600 dark:text-blue-400' : 'text-textMuted'} />
-              </span>
-              <span className="flex-1 min-w-0 truncate font-medium">Auto speech</span>
-              {autoSpeechEnabled ? <Check size={13} className="text-blue-600 dark:text-blue-400" /> : null}
-            </button>
+            {voiceEnabled && onOpenVoice ? (
+              <button
+                type="button"
+                onMouseEnter={() => setSkillsOpen(false)}
+                onClick={() => run(onOpenVoice)}
+                className={`w-full flex items-center gap-2 px-3 py-1.5 text-left text-[12px] transition-colors border-0 cursor-pointer ${
+                  voiceActive
+                    ? 'bg-black/[0.06] dark:bg-white/[0.08] text-blue-600 dark:text-blue-400'
+                    : 'bg-transparent text-textMain hover:bg-black/[0.06] dark:hover:bg-white/[0.10]'
+                }`}
+                title="录音消息 / 实时通话与语音模型卡配置"
+              >
+                <span className="w-4 shrink-0 flex items-center justify-center">
+                  <Mic size={14} className={voiceActive ? 'text-blue-600 dark:text-blue-400' : 'text-textMuted'} />
+                </span>
+                <span className="flex-1 min-w-0 truncate font-medium">
+                  {t('aiChat.voice', { defaultValue: '语音' })}
+                </span>
+                {voiceActive ? <Check size={13} className="text-blue-600 dark:text-blue-400" /> : null}
+              </button>
+            ) : null}
+            {onToggleAutoSpeech && (
+              <button
+                type="button"
+                onMouseEnter={() => setSkillsOpen(false)}
+                onClick={() => onToggleAutoSpeech(!autoSpeechEnabled)}
+                className={`w-full flex items-center gap-2 px-3 py-1.5 text-left text-[12px] transition-colors border-0 cursor-pointer ${
+                  autoSpeechEnabled
+                    ? 'bg-black/[0.06] dark:bg-white/[0.08] text-blue-600 dark:text-blue-400'
+                    : 'bg-transparent text-textMain hover:bg-black/[0.06] dark:hover:bg-white/[0.10]'
+                }`}
+                title="Automatically speak each final agent reply"
+              >
+                <span className="w-4 shrink-0 flex items-center justify-center">
+                  <Volume2 size={14} className={autoSpeechEnabled ? 'text-blue-600 dark:text-blue-400' : 'text-textMuted'} />
+                </span>
+                <span className="flex-1 min-w-0 truncate font-medium">Auto speech</span>
+                {autoSpeechEnabled ? <Check size={13} className="text-blue-600 dark:text-blue-400" /> : null}
+              </button>
+            )}
           </>
-        )}
+        ) : null}
         <div className="my-0.5 h-px bg-border/60" />
         <button
           type="button"

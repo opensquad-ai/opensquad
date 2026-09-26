@@ -2,8 +2,9 @@
  * Scrollable Markdown body for thought / dialogue text.
  * Renders ```lang fences as highlighted code blocks.
  */
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { FollowScrollBox } from './FollowScrollBox';
+import { useTableCopyButtons } from '../../hooks/useTableCopyButtons';
 import { AI_MARKDOWN_CLASS, renderFencedMarkdown } from '../../utils/fencedMarkdown';
 
 interface MarkdownScrollBodyProps {
@@ -33,6 +34,8 @@ export const MarkdownScrollBody: React.FC<MarkdownScrollBodyProps> = ({
   softEdge = false,
 }) => {
   const html = useMemo(() => renderFencedMarkdown(text), [text]);
+  const htmlRef = useRef<HTMLDivElement>(null);
+  useTableCopyButtons(htmlRef, html);
 
   // Reading mode: while the reader is up in the text the tail is dropped, so
   // nothing is ever dimmed under their eyes mid-sentence. Re-armed every time a
@@ -64,6 +67,7 @@ export const MarkdownScrollBody: React.FC<MarkdownScrollBodyProps> = ({
       style={style}
     >
       <div
+        ref={htmlRef}
         className={`${AI_MARKDOWN_CLASS} text-[12px] leading-relaxed ${
           muted ? 'text-textMuted [&_*]:text-inherit' : 'text-textMain'
         }`}

@@ -52,8 +52,19 @@ export interface VoicePanelProps {
     durationSec: number;
     level: number;
   }) => void;
-  /** Parent can call stopRecord() from the composer pill. */
-  captureApiRef?: React.MutableRefObject<{ stopRecord: () => void } | null>;
+  /** Parent can start/stop record-message capture from the composer mic button. */
+  captureApiRef?: React.MutableRefObject<VoiceCaptureApi | null>;
+  /**
+   * A capture failure the user must see. The panel reports it because the mic
+   * button can start a recording while the panel is closed — without this, a
+   * denied microphone would look like a dead button.
+   */
+  onError?: (message: string) => void;
+}
+
+export interface VoiceCaptureApi {
+  startRecord: () => void;
+  stopRecord: () => void;
 }
 
 const FORCE_ASK_STORAGE_KEY = 'opensquad_voice_force_ask_agent';
@@ -119,6 +130,7 @@ export const VoicePanel: React.FC<VoicePanelProps> = ({
   onVoiceBindingsChange,
   onCaptureStateChange,
   captureApiRef,
+  onError,
 }) => {
   const [mode, setMode] = useState<VoiceMode>('record');
   const [isRecording, setIsRecording] = useState(false);
@@ -137,6 +149,15 @@ export const VoicePanel: React.FC<VoicePanelProps> = ({
   const [savingVoice, setSavingVoice] = useState(false);
   const uplinkPausedRef = useRef(false);
   const statusRef = useRef(realtimeStatus);
+  const onErrorRef = useRef(onError);
+  onErrorRef.current = onError;
+
+  /** Show a failure in the panel AND tell the composer, which is where the user
+   *  is looking when the mic button — not the panel — started the capture. */
+  const fail = useCallback((message: string) => {
+    setError(message);
+    if (message) onErrorRef.current?.(message);
+  }, []);
 
   useEffect(() => {
     if (!voiceBindings) return;
@@ -319,8 +340,8 @@ export const VoicePanel: React.FC<VoicePanelProps> = ({
     setIsRecording(false);
   }, [stopRecordMeter]);
 
-  const startRecord = async () => {
-    setError('');
+  const startRecord = useCallback(async () => {
+    fail('');
     try {
       const stream = await getUserMediaSafe({ audio: true });
       streamRef.current = stream;
@@ -342,7 +363,7 @@ export const VoicePanel: React.FC<VoicePanelProps> = ({
           try {
             await onSendVoiceMessage(blob, sec);
           } catch (e: any) {
-            setError(e?.message || '语音转写失败');
+            fail(e?.message || '语音转写失败');
           }
         })();
       };
@@ -357,17 +378,20 @@ export const VoicePanel: React.FC<VoicePanelProps> = ({
       }, 1000);
     } catch (e: any) {
       stopRecordMeter();
-      setError(e?.message || 'Microphone permission denied');
+      fail(e?.message || 'Microphone permission denied');
     }
-  };
+  }, [fail, onSendVoiceMessage, startRecordMeter, stopRecord, stopRecordMeter]);
 
   useEffect(() => {
     if (!captureApiRef) return;
-    captureApiRef.current = { stopRecord };
+    captureApiRef.current = {
+      startRecord: () => void startRecord(),
+      stopRecord,
+    };
     return () => {
       captureApiRef.current = null;
     };
-  }, [captureApiRef, stopRecord]);
+  }, [captureApiRef, startRecord, stopRecord]);
 
   const startRealtime = async (opts?: { notifyStart?: boolean }) => {
     setError('');

@@ -30,8 +30,13 @@
   background: color-mix(in srgb, rgb(var(--color-bg)) 88%, rgb(var(--color-text-muted)) 12%);
   overflow: hidden;
 }
+/* The classic near-black well colour, defined ONCE under html.dark and
+   consumed by every dark-mode code well (chat, file pane, skill previews). */
+html.dark {
+  --os-code-well-bg: #0b0f17;
+}
 html.dark .ai-markdown .ai-code-wrap {
-  background: color-mix(in srgb, #0b0f17 92%, transparent);
+  background: color-mix(in srgb, var(--os-code-well-bg) 92%, transparent);
 }
 .ai-markdown .ai-code-lang {
   font-size: 10px;
@@ -146,17 +151,13 @@ html.dark .file-indent-guides {
 /* Skill manager preview wells (skill.json / .py / other sources) — follow the
    appearance like every other code surface, not a hardcoded dark well that
    floats as a black block on light-themed pages. */
-.skill-code-well {
-  background: color-mix(in srgb, rgb(var(--color-bg)) 88%, rgb(var(--color-text-muted)) 12%);
-}
-html.dark .skill-code-well {
-  background: #0b0f17;
-}
+.skill-code-well,
 .skill-md-prose pre {
   background: color-mix(in srgb, rgb(var(--color-bg)) 88%, rgb(var(--color-text-muted)) 12%);
 }
+html.dark .skill-code-well,
 html.dark .skill-md-prose pre {
-  background: #0b0f17;
+  background: var(--os-code-well-bg);
 }
 
 /* Fullscreen diagram viewer (zoom / pan) */
@@ -856,6 +857,25 @@ html.dark .skill-md-prose pre {
   will-change: scroll-position;
 }
 
+/* ── 内容宽度 (appearance → content width) ─────────────────────────────
+   The chat document column (transcript + composer strips) reads its cap
+   from `html[data-content-width]`, set by the theme store. Narrow windows
+   keep the historical 48rem for every mode except `full`. */
+.os-chat-column {
+  max-width: 48rem;
+}
+html[data-content-width='full'] .os-chat-column {
+  max-width: 100%;
+}
+@media (min-width: 1024px) {
+  html[data-content-width='standard'] .os-chat-column {
+    max-width: 56rem;
+  }
+  html[data-content-width='wide'] .os-chat-column {
+    max-width: 64rem;
+  }
+}
+
 /* Long assistant reports: skip layout/paint for off-screen blocks.
    `auto` in contain-intrinsic-size remembers the last real height so the
    main scrollbar does not jump when a heading re-enters the viewport. */
@@ -876,6 +896,19 @@ html.dark .skill-md-prose pre {
 .os-chat-scroll .ai-markdown > .ai-mermaid {
   content-visibility: auto;
   contain-intrinsic-size: auto 4em;
+}
+
+/* The LAST block of a body is the one a streaming turn replaces on every
+   chunk, so it is the one block that can still be without a remembered size.
+   While such a block is only proxied by its `contain-intrinsic-size` fallback
+   (4em ≈ 56px), a bottom-pinned scroller measures the placeholder instead of
+   the text: it pins → the block un-skips and grows → the offset moves → the
+   block re-skips. That feedback loop is the whole-block jitter seen while a
+   thought streams (before its own scrollbar appears). The tail must always
+   lay out; frozen blocks above it keep the optimization, and `auto` gives them
+   their real remembered height. */
+.os-chat-scroll .ai-markdown > :last-child {
+  content-visibility: visible;
 }
 
 /* Virtualization spacers must NOT use content-visibility — skipped layout

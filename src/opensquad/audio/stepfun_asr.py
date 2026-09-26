@@ -243,13 +243,33 @@ async def transcribe_file(
                 pass
 
 
+def _resolve_ffmpeg() -> str | None:
+    """Locate an ffmpeg binary: PATH first, then the imageio-ffmpeg bundled build.
+
+    Browsers hand us webm/opus, so this conversion is on the normal path. The
+    frozen backend ships ``imageio-ffmpeg`` (see launcher/pkg_import_map.json);
+    a dev checkout may have neither, in which case callers keep the original
+    bytes and let the ASR endpoint deal with them.
+    """
+    import shutil
+
+    system = shutil.which("ffmpeg")
+    if system:
+        return system
+    try:
+        import imageio_ffmpeg
+
+        return imageio_ffmpeg.get_ffmpeg_exe()
+    except Exception:
+        return None
+
+
 def _ffmpeg_to_wav(src: str) -> str | None:
     """Convert browser webm/ogg to 16k mono wav via ffmpeg when available."""
-    import shutil
     import subprocess
     import tempfile
 
-    ffmpeg = shutil.which("ffmpeg")
+    ffmpeg = _resolve_ffmpeg()
     if not ffmpeg:
         return None
     fd, dst = tempfile.mkstemp(suffix=".wav", prefix="asr_")

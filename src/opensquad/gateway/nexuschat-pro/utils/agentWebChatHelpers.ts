@@ -3,9 +3,9 @@ import type { ChatMessage, FileAttachment } from '../components/ai-chat/MessageB
 import {
   genTimelineUID,
   rebaseTimelineUids,
-  timelineHasToolEvent,
-  workflowToolEventKey,
+  timelineHasWorkflowEvent,
   type TimelineEntry,
+  type WorkflowEvent,
 } from './aiChatTimeline';
 
 export interface UploadedFile {
@@ -236,17 +236,13 @@ export function mergeCompressionHydration(
     if (e.kind === 'workflow') {
       const wf = e.data;
       if (wf.completed) continue;
-      const hasNew = wf.events.some((evt) => {
-        const tk = workflowToolEventKey(evt);
-        if (!tk) return evt.type === 'summary_stream';
-        return !timelineHasToolEvent(next, evt);
-      });
-      if (!hasNew) continue;
-      const filteredEvents = wf.events.filter((evt) => {
-        const tk = workflowToolEventKey(evt);
-        if (!tk) return evt.type === 'summary_stream';
-        return !timelineHasToolEvent(next, evt);
-      });
+      // Keep only events the snapshot does not already carry — for EVERY type.
+      // A tool-only check here re-pushed the block's `process_output` /
+      // `thought` rows (they have no tool id) even though the disk snapshot
+      // already held them inside the finished turn's fold, so the previous
+      // turn's 过程输出 rows reappeared under the current turn.
+      const isNew = (evt: WorkflowEvent) => !timelineHasWorkflowEvent(next, evt);
+      const filteredEvents = wf.events.filter(isNew);
       if (filteredEvents.length === 0) continue;
       next.push({
         kind: 'workflow',

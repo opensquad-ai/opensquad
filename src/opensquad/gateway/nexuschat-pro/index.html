@@ -284,11 +284,19 @@
       .ai-markdown .ai-table-wrap {
         overflow-x: auto;
         max-width: 100%;
-        margin: 0.65em 0;
+        /* Room ABOVE the table for the copy button, which sits outside the top
+           border rather than on the last column's header. Reserved here in CSS,
+           not by the decorator: the decorator lands a frame after the html is
+           injected, so a band added from JS would shift the page on every
+           streamed chunk. */
+        margin: 1.9em 0 0.65em;
         border: 1px solid rgb(var(--color-border));
         border-radius: 0.5rem;
       }
-      .ai-markdown .ai-table-wrap > table {
+      /* Descendant, not `> table`: the copy button's scroller nests the table one
+         level deeper (`.ai-table-wrap > .ai-table-scroll > table`), and a
+         direct-child selector silently drops `width`/`border-collapse` there. */
+      .ai-markdown .ai-table-wrap table {
         border-collapse: collapse;
         width: 100%;
         font-size: 0.86em;
@@ -322,6 +330,81 @@
       .ai-markdown .ai-table-wrap thead th {
         background-color: rgb(var(--color-text-main) / 0.06);
         font-weight: 600;
+      }
+      /* Table copy button — added by `useTableCopyButtons` AFTER the markdown is
+         injected, never by the renderer: the sanitizer strips <button>/<svg>
+         from agent-authored html, and that allowlist is the XSS boundary. The
+         icon therefore lives here as a mask (so it takes the button's colour in
+         either appearance) instead of as inline markup. */
+      .ai-table-wrap.is-copy-ready {
+        position: relative;
+        /* Must NOT clip: the button floats above the top border, in the band the
+           wrapper's own top margin reserves. The scroller inside does the
+           clipping instead. */
+        overflow: visible;
+      }
+      .ai-table-wrap.is-copy-ready > .ai-table-scroll {
+        overflow-x: auto;
+        /* The wrapper no longer clips, so the scroller takes over clipping the
+           table to the wrapper's rounded corners. */
+        border-radius: inherit;
+      }
+      .ai-table-copy {
+        position: absolute;
+        /* Negative, i.e. ABOVE the table's top border: the button used to sit at
+           `top: 4px`, on top of the last column's header cell. 1.9em of margin is
+           reserved above the table for exactly this. */
+        top: -26px;
+        right: 0;
+        width: 22px;
+        height: 22px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 0;
+        border: 1px solid rgb(var(--color-border));
+        border-radius: 0.375rem;
+        cursor: pointer;
+        color: rgb(var(--color-text-muted));
+        opacity: 0.75;
+        background-color: color-mix(in srgb, rgb(var(--color-panel)) 86%, transparent);
+        transition:
+          opacity var(--duration-soft) var(--ease-soft),
+          color var(--duration-soft) var(--ease-soft);
+      }
+      .ai-table-copy:hover,
+      .ai-table-copy:focus-visible {
+        opacity: 1;
+        color: rgb(var(--color-text-main));
+      }
+      .ai-table-copy:focus-visible { outline: 2px solid rgb(var(--color-primary)); outline-offset: 1px; }
+      .ai-table-copy::before {
+        content: '';
+        width: 13px;
+        height: 13px;
+        background-color: currentColor;
+        -webkit-mask-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><rect width='14' height='14' x='8' y='8' rx='2'/><path d='M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2'/></svg>");
+        mask-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><rect width='14' height='14' x='8' y='8' rx='2'/><path d='M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2'/></svg>");
+        -webkit-mask-repeat: no-repeat;
+        mask-repeat: no-repeat;
+        -webkit-mask-size: 100% 100%;
+        mask-size: 100% 100%;
+      }
+      .ai-table-copy.is-copied { color: rgb(16 185 129); opacity: 1; }
+      .ai-table-copy.is-copied::before {
+        -webkit-mask-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'><path d='M20 6 9 17l-5-5'/></svg>");
+        mask-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'><path d='M20 6 9 17l-5-5'/></svg>");
+      }
+
+      /* Row hover: marks the row the reader is on. `--color-text-main` at low
+         alpha is a neutral grey in either appearance — it darkens light themes
+         and lightens dark ones — so no `.dark` pair is needed. Painted on the
+         cells, not the <tr>: under `border-collapse: collapse` a row background
+         only shows where the cells above it are transparent. Deliberately no
+         transition — the highlight must track the cursor, not trail it while
+         sweeping down the table. */
+      .ai-markdown .ai-table-wrap tbody tr:hover > td {
+        background-color: rgb(var(--color-text-main) / 0.07);
       }
 
       .dark ::-webkit-scrollbar-thumb { background: #30363d; }

@@ -73,11 +73,18 @@ if _plugins_dir not in sys.path:
 # Self-contained runtime helper — does NOT import opensquad (which is not
 # available to the Agent Python that runs plugin services in frozen mode).
 try:
+    from plugins._service_runtime import expose_ffmpeg_on_path as _expose_ffmpeg_on_path
     from plugins._service_runtime import port as _runtime_port
     from plugins._service_runtime import workspace_data_dir as _runtime_workspace_data_dir
 except ImportError:
+    from _service_runtime import expose_ffmpeg_on_path as _expose_ffmpeg_on_path
     from _service_runtime import port as _runtime_port
     from _service_runtime import workspace_data_dir as _runtime_workspace_data_dir
+
+# Browser recordings arrive as webm/opus and openai-whisper shells out to a bare
+# `ffmpeg` name, so make the resolved binary (PATH or the imageio-ffmpeg wheel
+# declared in plugin.json) resolvable before the first transcribe() call.
+_FFMPEG = _expose_ffmpeg_on_path()
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")

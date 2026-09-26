@@ -10,6 +10,7 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 | Version                                                                | Date       | Compare to previous                                                                    | Release page                                                                     |
 | ---------------------------------------------------------------------- | ---------- | -------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------- |
+| [0.8.46]                                                               | 2026-09-26 | [0.8.45 → 0.8.46](https://github.com/opensquad-ai/opensquad/compare/v0.8.45...v0.8.46) | [GitHub Release](https://github.com/opensquad-ai/opensquad/releases/tag/v0.8.46) |
 | [0.8.45]                                                               | 2026-09-09 | [0.8.44 → 0.8.45](https://github.com/opensquad-ai/opensquad/compare/v0.8.44...v0.8.45) | [GitHub Release](https://github.com/opensquad-ai/opensquad/releases/tag/v0.8.45) |
 | [0.8.44]                                                               | 2026-08-14 | [0.8.43 → 0.8.44](https://github.com/opensquad-ai/opensquad/compare/v0.8.43...v0.8.44) | [GitHub Release](https://github.com/opensquad-ai/opensquad/releases/tag/v0.8.44) |
 | [0.8.43]                                                               | 2026-08-11 | [0.8.42 → 0.8.43](https://github.com/opensquad-ai/opensquad/compare/v0.8.42...v0.8.43) | [GitHub Release](https://github.com/opensquad-ai/opensquad/releases/tag/v0.8.43) |
@@ -38,6 +39,389 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 ---
 
 ## [Unreleased]
+
+---
+
+## [0.8.46] — 2026-09-26
+
+> The task stack lands: resumable goals whose milestones checkpoint into
+> their own git worktree, survive an interrupt, and never rerun finished
+> work. Provider history/compression code is unified behind one base, and
+> an oversized `agent.md` can no longer 400 every session. Three loops that
+> burned hundreds of wasted model rounds — a repeated group reply, a dead
+> repeat guard, and a silent no-output retry — are closed.
+> `npm install -g opensquad-ai` is now the supported npm install path.
+
+### Added
+
+- **Resumable task stack (M0–M3).** `tasks/task_scheduler.py` gives tasks a
+  real lifecycle with per-agent concurrency caps, `tasks.json` persistence
+  and interrupted-task recovery. `tasks/goal_runner.py` runs ordered
+  milestones under token/time/retry budgets, checkpoints after every
+  milestone, and resumes without rerunning a finished one.
+  `tasks/hooks.py` drives a turn by awaiting the runner's own per-session
+  turn — the only completion signal that cannot be missed.
+- **Per-task git worktrees.** `workspace/worktree_manager.py` isolates each
+  task so parallel tasks cannot collide, with a diff report and manual
+  merge / keep / discard.
+- **Task ops over the WS command channel.** In a split deployment the
+  scheduler lives in the agent process, so `tasks/rpc.py` routes every
+  operation through the gateway bridge.
+- **Catastrophic shell patterns are rejected outright** in
+  `security/sandbox.py` — agent shell commands are non-interactive and never
+  get a confirmation.
+- **Scheduled tasks tool** (`tools/scheduled_tasks.py`).
+- **Service uninstall** from the Gateway: uninstalling a service uninstalls
+  the plugin that owns it. Builtin services cannot be removed, and the UI
+  stops the service first.
+- **Agent avatars.** An avatar upload syncs `profile.json`, the group-chat
+  user record, and broadcasts `user_updated`.
+- **Built-in group ASR.** Group transcribe prefers a builtin
+  SenseVoice/Whisper card; a cloud card's `group_asr` flag is consulted only
+  when no builtin card exists.
+- **Steered interjections render in place.** A mid-turn insert is stamped at
+  the drain (`steer=True` + `client_id`) and rebuilt as a `user_steer` event
+  inside the running tool fold, so it stays visible while the fold is
+  collapsed. Only a busy session can be steered; otherwise the send path
+  falls back to a normal message.
+- **Quoted selections.** Right-click over a selection in the chat timeline or
+  a workspace file offers 复制文本 / 添加到会话(上下文). An attached
+  selection rides the send as a `<user_quote>` tag and shows as a removable
+  composer chip, so quoted context never blends into the user's own words.
+- **Follow-up suggestions** render at the end of the final answer and clear
+  on a new turn.
+
+- **Copy a table straight out of an answer.** Every Markdown table carries a
+  copy button, and a wide one scrolls inside its own wrapper instead of squeezing
+  the chat column. The button is added *after* the sanitizer has run
+  (`useTableCopyButtons`), so the allowlist that strips `<button>` / `<svg>` from
+  agent-authored HTML stays the XSS boundary; the icon is a CSS mask instead of
+  inline markup.
+- **Export a session as Markdown.** The context panel gains a 导出上下文 row under
+  压缩上下文, and the sidebar keeps its per-row icon for a session that is not
+  open. Both run the one flow in `utils/sessionExport.ts`, which reports *why*
+  nothing was written (empty session, fetch failed) rather than closing on a
+  click that produced no file.
+- **Appearance: 文字大小 / 界面缩放 / 内容宽度.** The font-size slider becomes
+  three stops (小 / 中 / 大); a whole-UI zoom (`html { zoom }`) scales
+  fixed-position chrome too, which a root font-size tweak cannot; and the chat
+  document column reads its cap from `html[data-content-width]`
+  (standard / wide / full).
+- **Voice moves to the attach menu.** The composer's mic button records on the
+  first click; the voice panel (record message / realtime call, and the
+  model-card bindings) is reached from the `+` menu, and a call in progress opens
+  it directly. A capture that starts from the mic button while the panel is
+  closed reports its failure to the composer, so a denied microphone no longer
+  looks like a dead button.
+- **Interjections get their own nav marker.** A 插话 has no bubble of its own —
+  it is a row inside the fold it interrupted — so the user-nav rail now gives it
+  a marker; jumping opens that fold, widens the virtual window around the row and
+  flashes it.
+- **Thinking time is recorded, not guessed.** `opensquad/thought_clock.py` stamps
+  `thought_ms` on every thought frame and, with the exact total, on the frame that
+  ends the phase (the tool call that follows the reasoning). The UI shows that
+  number verbatim, and the persisted event carries it too, so a refresh no longer
+  loses every 深度思考 duration.
+
+### Fixed
+
+- **One group message produces one agent turn.** `agent305` answered a single
+  group message repeatedly. The gateway delivers every message once per live
+  WS connection and `connect_ws()` reconnects forever, so a stacked loop
+  replayed the same message N times; it now claims single ownership, waits
+  for the previous loop to exit, and dedupes inbound ids. The router ignored
+  `MessageQueue.put()` returning `False` and still fired
+  `trigger_process_queue`, waking the agent again for a message it already
+  had — it returns early now. And a hyphen is legal in a tool name
+  (`mcp__windows-cli__execute_command`), which the bare-name regex rejected
+  before folding `-` to `_` and renaming the call out of existence.
+- **Endless no-output turn.** That path returned a synthetic prompt as
+  `next_input`, but the parallel loop calls `chat(..., skip_add_user=True)`
+  from turn 2 on, so the model never saw it and re-sent byte-identical
+  history until `max_turns`. Measured: 5 API messages, 198 identical
+  requests, "No output produced" 77 times. Corrections are appended to the
+  conversation and bounded by `NO_OUTPUT_RETRY_MAX`, then the turn stops with
+  a visible hint.
+- **Tool-failure diagnostics reach the model.** `_turn_loop` collapsed every
+  result to `message` alone, so `partial_data`, `return_code`,
+  `working_directory` and `reason` were dropped and the model could not tell
+  "retry" from "switch strategy". `format_result_for_llm()` keeps the headline
+  and appends the diagnostic keys (`hint` last, so truncation keeps it).
+- **The repeat guard survives retries.** Its fingerprint digested the text
+  handed to the model, which names the shell session the retry just created,
+  so the digest changed every round and `fail_count` reset to 1. Measured on
+  the real payload: 40 rounds, no hint, no abort. It now digests a
+  `failure_key` taxonomy (`reason`, else `status` + digit-masked message) with
+  exit codes, line numbers and pids masked — the same failure warns at 6 and
+  aborts at 10.
+- **"User stop" is no longer merged with "shell exited".** A deliberate stop
+  reports `session_stopped` and does not recycle the shell (a fresh shell
+  would silently undo the stop); a self-exited shell reports `shell_exited`
+  with its exit code.
+- **An oversized system prompt can no longer 400 every session.**
+  `context_base.inject_standard()` injected the whole of `agent.md` as
+  `AGENT_PROFILE` with no size limit, every turn. On 2026-09-15 a 1.76 MB
+  (99.9% mojibake) `agent.md` put 1,336,859 system tokens against a
+  262,144-token window, and because the system message is always kept, *every*
+  session — including brand new ones — returned 400. `_cap_system_var()`
+  bounds each stable-layer variable to
+  `context_compression.system_prompt_budget_chars` (default 20000);
+  `_irreducible_prompt_tokens()` preflights system + tool schemas and raises
+  `ContextOverflowError` with an actionable message instead of issuing a
+  request that must 400; and `_looks_encoding_damaged()` warns at the
+  double-encoding signature, so the next occurrence is caught at 10 KB
+  instead of at the 400.
+- **Provider history/compression drift.** Three providers carried drifting
+  copies of the same code: `get_cumulative_stats` returned
+  `cache_read_tokens` on two and `total_cache_read_tokens` on the third, so
+  Gemini cache statistics were silently dropped; token counting skipped
+  `reasoning_content` / `role` / `tool_call_id` overhead; and
+  `_prepare_messages` had opposite degenerate-range branches, one of which
+  returned history uncompressed. All of it is hoisted into
+  `_provider_base.ProviderAPIBase`, and `_count_tools_tokens` gained the
+  missing `encoding is None` fallback.
+- **`is_final` vs `isFinal`.** The Python producer wrote `is_final` while the
+  TS hook wrote `isFinal`, so compression progress never settled. Event and
+  field names now derive from `protocol_version.py` and are mirrored by
+  `utils/wsFieldNames.ts`. `turn_cancelled` was broadcast but never
+  dispatched; it is in the dispatch set now.
+- **Changes panel verdicts.** List membership, per-file +/- and the rendered
+  diff all measured against a per-edit snapshot that was re-frozen to disk
+  before every shell command, so any re-scanned path reported +0/-0 while
+  still being listed. Measured on the live store: 242 rows all +0/-0 → 35130
+  additions / 11218 deletions, 0 empty diffs. Path keys now fold through one
+  helper (git porcelain echoes on-disk casing while tool paths are folded,
+  which made 101 of those 242 rows unresolvable), and the `edit_base` store is
+  retired by a meta v3 migration.
+- **Parallel context compression never settled.** The dispatcher dropped
+  `__COMPRESS_CONTEXT__` without a terminal frame, so the UI spinner ran
+  forever; it now resolves its own `session_id` and emits
+  `summary_stream(done)` + `compression_progress(is_final)` on every exit
+  path, and never falls back to the focused session.
+- **Paged history duplicated on scroll-up.** The `/paged` cursor counted
+  messages from the tail while a live session keeps appending there, so
+  `end_idx` slid backwards and every new turn re-fetched a window already on
+  screen. Pages anchor on the oldest rendered message id (`before_id`) now,
+  and seam duplicates are dropped when prepending.
+- **Cache-hit panel.** Ark emits no usage without
+  `stream_options.include_usage`; cached tokens are read only through
+  `extract_cached_tokens()`, and estimated turns show a dash instead of
+  `0.0%`.
+- **Session tabs file under the workspace that owns them.** A workspace
+  created and then used for a session appeared in the "+" menu but never as a
+  tab, and its sessions vanished from the sidebar. The owner is resolved in
+  one place (`workspaceStore.resolveSessionWorkspaceId`) and used at every
+  site that creates a session tab.
+- **`.session_cwd` never matched on Windows,** so every turn re-ran
+  `set_session_cwd` and each run cleared every shell session, killing commands
+  that were still executing (session `20260922_113451_zh08`). It now recycles
+  only the shells the cwd change invalidates, and a session-scoped abort
+  closes only that session's shells — withdrawing one pane no longer freezes
+  the others.
+- **Compaction re-pinned the original task.** The rebuilt request is
+  `[system, *recent]`, so the session's opening request was re-pinned as a
+  live instruction and the model restarted the original task right after a
+  compaction; it is summarised instead. The auto summariser now also receives
+  the summary it supersedes.
+- **Agent Web embeds with no reply were dropped** at the turn boundary;
+  orphaned payloads attach to the newest reply row and solo mode builds the
+  embed index too. The form protocol only lived in a tool docstring that the
+  native-FC schema clips to 96 chars, so the model never learned forms
+  existed — it ships through `prompts/parts/common_2.26` now.
+- **SenseVoice assembled the wrong input feed.** The service sent `speech` /
+  `speech_lengths` / `textnorm` while the shipped model declares `x` /
+  `x_length` / `language` / `text_norm`, so every request died with
+  "Required inputs are missing from input feed" (reported as 502). Tensors are
+  resolved against the graph's own input list now.
+- **Web white screens.** `ErrorBoundary` wraps the root and each L2 pane, so a
+  render throw costs one panel instead of the whole app.
+- **Session paging over-fetched.** `len >= limit` answered "more pages"
+  whenever a page was exactly full, so every refresh burned a wasted request
+  and the sidebar's load-more kept re-arming.
+- **Parallel-task detail white-screened.** A plain task serialised `plan` as
+  `{}`, which is truthy, so the detail panel dereferenced checkpoint fields
+  only a goal has; the wire shape is decoded through `utils/taskPlan.ts` now.
+- **「新会话」 could send to the previous session.** The empty-draft check read
+  only the in-memory bucket, which is `[]` after any "clear the view" write,
+  so a 12-message session was judged an empty draft and reused. Every evidence
+  source must agree before a sid is reused.
+- **Machine messages render as notices.** Form submissions, reminders and
+  inbound group/DM messages were painted as raw wire text — a
+  `[Form submission]` header followed by a JSON fence. They render as a
+  compact notice (label, summary, payload behind a 详情 toggle) derived from
+  persisted content, and a mid-turn submission renders inside the running tool
+  fold.
+- **Agent-page canvas blended out.** Generated pages ship their own
+  `body{background:#f0f4f8}`, which showed as a grey slab in the chat; the
+  seamless embed drops the page canvas while keeping the page's own cards, and
+  leaves it alone when removing it would fight the text. Theme switches reach
+  the page over `postMessage` instead of reloading the iframe.
+- **Live XML/dots tool calls from cheap models** are parsed instead of leaking
+  as chat text, and switching a model card reselects the strategy instead of
+  staying on the previous XML/native mode.
+- **Theme-following skill previews** (`skill.json` / `.py` / `.md` no longer
+  use a hardcoded dark well); the landing composer offsets scale with pane
+  height (`cqh`) so split panes stop pinning it to the top edge; the thinking
+  timer no longer swallows tool execution time; and a user stop renders a
+  styled 任务已取消 badge instead of a `[Stopped]` marker in the body, copy
+  and TTS.
+- **Stuck synchronous shell calls get a trash button** —
+  `stop_session_job` falls back to closing the shell session (taskkill tree).
+- **Markdown tables get a scroll wrapper,** so wide tables stop squeezing the
+  chat column.
+- **Bogus `<ns>__add_method` tool.** `ToolModuleWrapper.add_method` shipped as
+  a tool in every plugin namespace; renamed to `_add_method`.
+- **Duplicate `summary_stream` frames** are collapsed when rebuilding history,
+  so one context summary renders once instead of as two folds.
+- **Timeline fold.** `demoteTrailing` covers only the timeline tail, so a
+  finished turn's reply is no longer folded into the process-output row when
+  the next message arrives.
+- **Sessions restore what you were looking at.** A reload reopened whatever
+  `current_session.json` pointed at — an empty draft whenever the user had been
+  working in a session tab. The focused pane's active session tab is restored
+  instead, with `/current` as the fallback.
+- **The red Stop no longer sticks** after a reply has rendered: an end-task
+  turn never released the per-session run flag, so `isSessionBusy()` stayed
+  true off its fallback.
+- **Desktop/CI:** frontend build smoke and dependency audit unbroken (Node
+  pinned to 22.22.2 for jsdom 30; `pip-audit` runs after `uv sync`), and the
+  desktop backend bundle size budget is raised for Playwright CI.
+
+- **A shell call with no result stops counting as running.** Two independent
+  leaks fed the running-terminals bar. A `tool_call_delta` argument-streaming
+  preview (`partial: true`; ids `partial_tc_<n>` / `xml_preview_open`) was
+  classified as a CMD fold, so one call rendered two terminals — and because no
+  `tool_result` can ever carry a preview's id, that second one never sealed. And
+  "no result yet" was read as "running" with no upper bound, so a call whose
+  result never arrived (user re-sent, turn aborted, process died) leaked a phantom
+  whose elapsed time grew forever. A preview is no longer a shell call, and an
+  inference from absence now holds only while the turn that issued the call is
+  alive — otherwise the row reads 已中断. A `start_job` `completed:false` ack is
+  an explicit "still running" statement and still outlives the turn. Measured on
+  a real session: `call_1941_system__run_session_job_0`, never answered, matched
+  the UI's oldest pill at 1h 56m 45s exactly.
+- **Parallel panes no longer share one shell.** Shell sessions defaulted to a
+  single `"default"` key, so two panes running `run_session_job` wrote their
+  command and marker into one stdin and polled one output buffer — their output
+  and results could cross over. The key falls back to the calling chat session's
+  sid now; an explicit `session_id` (a model's own `gitcheck` / `mc_build` label)
+  still wins.
+- **Withdrawing one pane no longer stops every turn.** The gateway's
+  `withdraw_turn` branch always called the agent-wide `input_hub.request_stop()`,
+  so reverting a file in one pane killed a sibling pane's running turn and its
+  shells. The command carries the session id now; a client that sends none keeps
+  the old global stop.
+- **Saving a model card reaches the agents that use it.** A card is a template and
+  every agent keeps its own copy of the model block, so a switch flipped (or an
+  endpoint moved) in the card changed nothing for those agents.
+  `_apply_card_to_agents` pushes the capability switches and the model fields
+  (protocol, provider, key, base_url, model_name, token_max, image knobs,
+  builtin_service) into every agent whose model block references the card;
+  per-agent tuning — temperature, penalties, top_k, render_mode, tool_call_mode —
+  is deliberately left alone.
+- **Auto-start follows the toggle the user actually set.** Boot read the plugin
+  manifest's `service.auto_start` while the Service Manager displayed
+  `system_config`'s `services.<plugin>.enabled`, so a service shipped with
+  `auto_start: false` showed "Auto" on and never started (SenseVoice).
+  `resolve_auto_start` makes the explicit config win over the manifest default,
+  and the boot log now prints the value that actually decides.
+- **ASR no longer needs a system ffmpeg.** Browsers record webm/opus and both
+  built-in engines want 16 kHz PCM, so the conversion is the normal path — and the
+  Agent Python has no ffmpeg on `PATH`. The binary is resolved through
+  `plugins._service_runtime` (`OPENSQUAD_FFMPEG` > `PATH` > `imageio-ffmpeg`), and
+  the wheel is declared in the ASR plugins' own `dependencies.pip`, which the
+  launcher installs when the service starts.
+- **The previous turn's 过程输出 rows no longer reappear.** Carrying a live
+  workflow block into a freshly hydrated timeline deduped tool events only and
+  kept every narration / thinking row, so a block already on disk re-contributed
+  those rows into the *current* turn's fold. Dedup is by event identity for every
+  type now (`workflowCarryOverKey` / `timelineHasWorkflowEvent`), and the same key
+  gates the parallel-compression hydration.
+- **A form re-posted by a repainting embed is not a new submission.** A long turn
+  repaints the embed card and the page can post the same payload again; each
+  repeat queued another 已提交 notice. An identical payload inside 15 s is dropped,
+  next to the existing double-click guard — and the same check runs on the host
+  side before queueing.
+- **The gentle chime rings once, at the end of the turn.** It hung off
+  `to_user_final`, which a long task emits once per LLM round that speaks, so it
+  could ring mid-task. It waits for `turn_elapsed` now, and only if the turn
+  actually put something on screen.
+- **A chat image no longer greys out from across the row.** The per-image hover
+  overlay lived inside the message row's `group`, so `group-hover:` lit it up
+  whenever the pointer was anywhere on the row — the image dimmed and showed a
+  zoom badge with the mouse nowhere near it.
+- **The plugin card's name is no longer starved to zero width.** Once an agent was
+  selected, the On/Off chip and the service toggle crowded the header, flex
+  crushed the truncated `h3` (names vanished in 收藏 / 平台 / 钩子) and the meta row
+  painted over the buttons. The name owns its own line now, and star / trash moved
+  to the card footer.
+- **Scroll jitter while a thought streams.** Two causes: the streaming body's last
+  block could be proxied by its `content-visibility` placeholder (≈56 px), so a
+  bottom-pinned scroller measured the placeholder, pinned, un-skipped the block
+  and re-skipped it — the tail always lays out now; and `ChatTimeline` treated its
+  own programmatic pin as a user scroll, which then blocked the next pin for
+  180 ms.
+- **A long fold no longer flips between a plain list and a scroll box.** Line
+  counts wobble while a phase is small (a chunk merges upward, a UI-only tool
+  stops rendering a row) and the fold re-laid out each time; once a block needs
+  the box it keeps it.
+- **A consumed interjection is not restored as an outgoing bubble.** The pending
+  queue and the persisted per-session queue are both filtered on `steered`, so a
+  refresh cannot resurrect an insert that already lives inside the tool fold.
+- **`/admin/agents/{name}/role` is reachable.** The handler was missing its
+  `@admin_router.get` decorator, so the route never registered.
+
+### Changed
+
+- **Provider base.** `ChatAPI` / `ClaudeAPI` / `GoogleAPI` keep only what is
+  genuinely provider-specific (message/tool/response shaping,
+  `_summarizer_request`); history, token accounting and compression live in
+  `_provider_base.py`.
+- **`_context` is a leaf again.** `AgentContext.from_boot()` was dead code that
+  imported eight singletons at module level, the module's only runtime
+  out-edge and the reason it sat on a 41-module import cycle; removing it takes
+  the cycle to 32.
+- **Blocking I/O.** `open()` joined the blocking-call list and user-sized file
+  I/O moved to `utils/blocking_io.py` via `asyncio.to_thread`;
+  `FILE_IO_ALLOWLIST` became a count-based dict, so an extra `open()` inside an
+  already-reviewed function is caught too.
+- **One `is_loopback_url()` source of truth.** Loopback httpx clients use
+  `trust_env=False`, so an ambient proxy cannot hijack them.
+- **Subprocess output is decoded through one helper,** so a child's text can
+  never be silently dropped.
+- **npm package renamed to the unscoped `opensquad-ai`.** It was published as
+  `@opensquad-ai/opensquad`, a scope that does not exist — every `v*` tag from
+  v0.8.41 on failed, so the npm channel never shipped. Both READMEs now
+  document `npm install -g opensquad-ai`. `package-lock.json` is synced by
+  `scripts/sync_version.py` too (it had been stuck at 0.4.10).
+- **Internal reorganisation:** preset and locale helper scripts moved into
+  `scripts/`, session-list windowing into `utils/sessionListWindow.ts`,
+  UI tab-open event names into `utils/uiEvents.ts`, and message identity into a
+  single `sessionMessageIdentity()`.
+
+- **Appearance prefs are validated at the edge.** `ThemePrefs` gains `uiScale`
+  and `contentWidth`; `sanitizePrefs` clamps the zoom to 0.85–1.25 and whitelists
+  the width, so a stale or hand-edited value self-heals instead of reaching the
+  DOM.
+- **The chat document column is CSS-driven.** `CHAT_DOCUMENT_COLUMN_CLASS`
+  becomes `os-chat-column`, whose cap comes from `html[data-content-width]`
+  instead of a Tailwind `max-w-3xl lg:max-w-4xl` pair, so the transcript and the
+  composer keep reading the one class.
+- **The dark code well is a token.** `--os-code-well-bg` is defined once under
+  `html.dark` and consumed by the chat well, the file pane and the skill
+  previews, instead of the near-black literal being repeated per surface.
+- **"Service enabled" gained a "never configured" state.**
+  `service_enabled_or_none()` distinguishes "the user set this" from "the key was
+  never written" — the distinction auto-start needs.
+- **`withdraw_turn` carries a session id** (`services/aiWebSocket.ts`,
+  `AIChatPage`), and `thought_ms` joined the frame-metadata keys promoted to the
+  top level in `sdk.py`.
+
+### Docs
+
+- `doc_cn/ServicePlugin_Guide.md` documents the auto-start resolution order, and
+  the SenseVoice README explains that ffmpeg now comes from `imageio-ffmpeg`
+  (`OPENSQUAD_FFMPEG` to point at your own).
 
 ---
 

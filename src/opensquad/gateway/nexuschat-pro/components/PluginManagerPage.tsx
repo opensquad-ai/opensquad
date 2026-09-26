@@ -1015,63 +1015,73 @@ const PluginCard: React.FC<PluginCardProps> = ({
   const showGlobalDisabledStyle = !!plugin.service_toggle && !plugin.enabled;
   const isList = layout === 'list';
 
+  // Split actions so the grid header stays narrow (name gets the width):
+  // star/trash live in the footer next to the settings gear, per-agent
+  // controls stay in the header.
+  const starButton = (
+    <button
+      onClick={onToggleStar}
+      title={starred ? 'Remove from favorites' : 'Add to favorites'}
+      className="p-1 rounded transition-colors"
+    >
+      <Star
+        size={isList ? 14 : 16}
+        className={starred
+          ? 'fill-yellow-400 text-yellow-400'
+          : 'text-textMuted hover:text-yellow-400 transition-colors'
+        }
+      />
+    </button>
+  );
+
+  const serviceToggle = plugin.service_toggle && (
+    <button
+      onClick={plugin.service_only ? undefined : onToggle}
+      disabled={toggling || !!plugin.service_only}
+      className="transition-colors"
+      title={plugin.service_only ? tr('pluginManager.serviceOnlyTitle') : plugin.enabled ? 'Disable' : 'Enable'}
+    >
+      {toggling ? (
+        <OpenSquadLoader size={isList ? 18 : 24} />
+      ) : plugin.enabled ? (
+        <ToggleRight size={isList ? 22 : 28} className={plugin.service_only ? 'text-textMuted opacity-30' : 'text-primary'} />
+      ) : (
+        <ToggleLeft size={isList ? 22 : 28} className="text-textMuted opacity-30" />
+      )}
+    </button>
+  );
+
+  const agentChip = agentLoaded !== null && !SYSTEM_TOOLS.includes(plugin.name) && (
+    <button
+      onClick={onAgentToggle}
+      title={agentLoaded ? tr('pluginManager.removeFromAgent') : tr('pluginManager.addToAgent')}
+      className="flex items-center gap-0.5 px-1.5 py-0.5 rounded-md border text-[10px] font-medium transition-colors ml-0.5 shrink-0"
+      style={agentLoaded
+        ? { background: 'rgba(var(--color-primary-rgb,99,102,241),0.12)', color: 'var(--color-primary,#6366f1)', borderColor: 'rgba(var(--color-primary-rgb,99,102,241),0.3)' }
+        : { background: 'transparent', color: 'var(--tw-text-opacity,#9ca3af)', borderColor: 'rgba(156,163,175,0.3)' }
+      }
+    >
+      <Bot size={10} />
+      {agentLoaded ? 'On' : 'Off'}
+    </button>
+  );
+
+  const trashButton = !canUninstallPlugin(plugin) ? null : (
+    <button
+      onClick={onUninstall}
+      title={tr('pluginManager.uninstallTitle')}
+      className="p-1 rounded transition-colors text-textMuted hover:text-red-400 hover:bg-red-500/10 ml-0.5"
+    >
+      <Trash2 size={isList ? 13 : 14} />
+    </button>
+  );
+
   const actionButtons = (
     <div className="flex items-center gap-0.5 shrink-0">
-      <button
-        onClick={onToggleStar}
-        title={starred ? 'Remove from favorites' : 'Add to favorites'}
-        className="p-1 rounded transition-colors"
-      >
-        <Star
-          size={isList ? 14 : 16}
-          className={starred
-            ? 'fill-yellow-400 text-yellow-400'
-            : 'text-textMuted hover:text-yellow-400 transition-colors'
-          }
-        />
-      </button>
-
-      {plugin.service_toggle && (
-        <button
-          onClick={plugin.service_only ? undefined : onToggle}
-          disabled={toggling || !!plugin.service_only}
-          className="transition-colors"
-          title={plugin.service_only ? tr('pluginManager.serviceOnlyTitle') : plugin.enabled ? 'Disable' : 'Enable'}
-        >
-          {toggling ? (
-            <OpenSquadLoader size={isList ? 18 : 24} />
-          ) : plugin.enabled ? (
-            <ToggleRight size={isList ? 22 : 28} className={plugin.service_only ? 'text-textMuted opacity-30' : 'text-primary'} />
-          ) : (
-            <ToggleLeft size={isList ? 22 : 28} className="text-textMuted opacity-30" />
-          )}
-        </button>
-      )}
-
-      {agentLoaded !== null && !SYSTEM_TOOLS.includes(plugin.name) && (
-        <button
-          onClick={onAgentToggle}
-          title={agentLoaded ? tr('pluginManager.removeFromAgent') : tr('pluginManager.addToAgent')}
-          className="flex items-center gap-0.5 px-1.5 py-0.5 rounded-md border text-[10px] font-medium transition-colors ml-0.5 shrink-0"
-          style={agentLoaded
-            ? { background: 'rgba(var(--color-primary-rgb,99,102,241),0.12)', color: 'var(--color-primary,#6366f1)', borderColor: 'rgba(var(--color-primary-rgb,99,102,241),0.3)' }
-            : { background: 'transparent', color: 'var(--tw-text-opacity,#9ca3af)', borderColor: 'rgba(156,163,175,0.3)' }
-          }
-        >
-          <Bot size={10} />
-          {agentLoaded ? 'On' : 'Off'}
-        </button>
-      )}
-
-      {!canUninstallPlugin(plugin) ? null : (
-        <button
-          onClick={onUninstall}
-          title={tr('pluginManager.uninstallTitle')}
-          className="p-1 rounded transition-colors text-textMuted hover:text-red-400 hover:bg-red-500/10 ml-0.5"
-        >
-          <Trash2 size={isList ? 13 : 14} />
-        </button>
-      )}
+      {starButton}
+      {serviceToggle}
+      {agentChip}
+      {trashButton}
     </div>
   );
 
@@ -1122,8 +1132,8 @@ const PluginCard: React.FC<PluginCardProps> = ({
           {getPluginIcon(plugin, true)}
 
           <div className="flex-1 min-w-0">
-            <div className="flex items-center gap-1.5 min-w-0">
-              <h3 className="text-[13px] font-semibold text-textMain truncate leading-tight">
+            <div className="flex items-center gap-1.5 min-w-0 overflow-hidden">
+              <h3 className="text-[13px] font-semibold text-textMain truncate leading-tight min-w-[5rem]">
                 {plugin.display_name || plugin.name}
               </h3>
               <PluginOriginBadge plugin={plugin} compact />
@@ -1156,22 +1166,30 @@ const PluginCard: React.FC<PluginCardProps> = ({
         {getPluginIcon(plugin)}
 
         <div className="flex-1 min-w-0">
-          <div className="flex items-center gap-2 mb-1">
-            <h3
-              className="text-sm font-bold text-textMain truncate cursor-default"
-              title={plugin.display_name || plugin.name}
-            >
-              {plugin.display_name || plugin.name}
-            </h3>
-            <span className="text-xs text-textMuted shrink-0">v{plugin.version}</span>
-              <PluginOriginBadge plugin={plugin} />
+          {/* Name owns the full first line. It used to share a row with the
+              shrink-0 version/origin badge: once an agent was selected the
+              On/Off chip + service toggle crowded the header, flex starved
+              the truncate'd h3 to zero width (names vanished in 收藏/平台/钩子)
+              and the meta row painted over the action buttons. */}
+          <h3
+            className="text-sm font-bold text-textMain truncate cursor-default"
+            title={plugin.display_name || plugin.name}
+          >
+            {plugin.display_name || plugin.name}
+          </h3>
+          <div className="flex items-center gap-1.5 mt-0.5 min-w-0 overflow-hidden text-xs text-textMuted">
+            <span className="shrink-0">v{plugin.version}</span>
+            <PluginOriginBadge plugin={plugin} />
+            {plugin.author && <span className="truncate">by {plugin.author}</span>}
           </div>
-          {plugin.author && (
-            <p className="text-xs text-textMuted">by {plugin.author}</p>
-          )}
         </div>
 
-        {actionButtons}
+        {/* Header keeps only per-agent controls — star/trash moved to the
+            footer so a long name never fights the action buttons. */}
+        <div className="flex items-center gap-0.5 shrink-0">
+          {serviceToggle}
+          {agentChip}
+        </div>
       </div>
 
       {/* Description */}
@@ -1212,7 +1230,9 @@ const PluginCard: React.FC<PluginCardProps> = ({
           </span>
         )}
 
-        <div className={`flex items-center gap-0.5 ${hasSettings || contributedViews.length > 0 ? 'ml-auto' : ''}`}>
+        <div className="flex items-center gap-0.5 ml-auto">
+          {starButton}
+          {trashButton}
           {configAndViews}
         </div>
       </div>

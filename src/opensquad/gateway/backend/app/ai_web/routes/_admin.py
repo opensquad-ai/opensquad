@@ -899,6 +899,7 @@ async def admin_reset_agent_avatar(name: str, current_user: User = Depends(get_c
     }
 
 
+@admin_router.get("/admin/agents/{name}/role")
 async def admin_get_role(name: str, current_user: User = Depends(get_current_user_dep)):
     """Get Agent's role.md"""
     return await _proxy_get(f"/api/agents/{name}/role")

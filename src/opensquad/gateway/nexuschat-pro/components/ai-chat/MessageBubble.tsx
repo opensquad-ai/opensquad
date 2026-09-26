@@ -12,6 +12,7 @@ import { SERVER_BASE_URL, agentSessionAPI } from '../../services/api';
 import { useTranslation } from 'react-i18next';
 import { AI_MARKDOWN_CLASS, renderFencedMarkdown } from '../../utils/fencedMarkdown';
 import { useMermaidHydration } from '../../hooks/useMermaidHydration';
+import { useTableCopyButtons } from '../../hooks/useTableCopyButtons';
 import { VoicePlayer } from './VoicePlayer';
 import { MachineUserNotice } from './MachineUserNotice';
 import { parseMachineUserMessage } from '../../utils/machineUserMessage';
@@ -346,6 +347,7 @@ const MessageBubbleInner: React.FC<MessageBubbleProps> = ({
   }, [displayContent, isUser]);
 
   const mermaidRef = useMermaidHydration(renderedHtml, !isUser);
+  useTableCopyButtons(mermaidRef, renderedHtml);
 
   const handleCopy = async () => {
     try {

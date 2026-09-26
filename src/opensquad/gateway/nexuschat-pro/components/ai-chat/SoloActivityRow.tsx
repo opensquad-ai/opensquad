@@ -47,6 +47,8 @@ import {
 import { DelegateFold } from './DelegateFold';
 import { ShellJobFold } from './ShellJobFold';
 import { Collapse, useFold } from '../Collapse';
+import { steerNavAnchorDomId } from './SoloUserNavRail';
+import { usePendingSteerReveal } from '../../utils/steerReveal';
 import { parsePlanContent, PlanBlock, type PlanStep } from './PlanBlock';
 import { FollowScrollBox } from './FollowScrollBox';
 import { MarkdownScrollBody } from './MarkdownScrollBody';
@@ -515,7 +517,9 @@ export function buildLines(
     }
   }
   const baseItems = buildDisplayWorkflowItems(blockEvents);
-  const items = attachShellJobsToDisplayItems(baseItems, shellStreams);
+  // A finished block must be walked as finished: an unsealed shell call in it
+  // has no result coming any more (see refreshShellBundle).
+  const items = attachShellJobsToDisplayItems(baseItems, shellStreams, !!block.completed);
 
   for (let i = 0; i < items.length; i++) {
     const item = items[i];
@@ -541,7 +545,9 @@ export function buildLines(
           ? t('aiChat.toolFlow.shell.running')
           : item.bundle.errored
             ? t('aiChat.toolFlow.shell.failed')
-            : t('aiChat.toolFlow.shell.ran')),
+            : item.bundle.interrupted
+              ? t('aiChat.toolFlow.shell.interrupted')
+              : t('aiChat.toolFlow.shell.ran')),
         secondary: desc ? '' : item.bundle.command,
         detail: item.bundle.output,
         running: item.bundle.running,
@@ -566,6 +572,14 @@ export function buildLines(
     }
     for (const l of built) {
       if (l.kind === 'thought') {
+        // The agent recorded this phase's duration — show that number, verbatim.
+        // Nothing to infer, and nothing to tick: the row cannot keep counting
+        // past the phase (the whole class of "深度思考 Ns 还在算" bugs came from
+        // guessing it from neighbouring timestamps).
+        if (typeof item.event.thoughtMs === 'number') {
+          lines.push({ ...l, secondary: formatElapsedAtLeastOneSecond(item.event.thoughtMs) });
+          continue;
+        }
         // Deep-think duration = time from this thought until the next event
         // arrived (copy, never mutate — `built` is cached per event).
         const ts = item.event.timestamp;
@@ -1133,6 +1147,7 @@ const SoloEventLine = React.memo(function SoloEventLine({
   shellStreamFor,
   onOpenFile,
   embedVisualizations: _embedVisualizations = false,
+  anchorId,
 }: {
   line: ActivityLine;
   defaultOpen?: boolean;
@@ -1140,6 +1155,8 @@ const SoloEventLine = React.memo(function SoloEventLine({
   onOpenFile?: (path: string) => void;
   /** @deprecated Embeds render below the assistant reply; tool stream stays a normal tool row. */
   embedVisualizations?: boolean;
+  /** Set on the expanded fold's steer row only — the nav rail's scroll target. */
+  anchorId?: string;
 }) {
   void _embedVisualizations;
   const { t } = useTranslation();
@@ -1197,7 +1214,10 @@ const SoloEventLine = React.memo(function SoloEventLine({
     // raw marker text, and nothing at all when the notice is the whole line.
     if (line.machineNotice) {
       return (
-        <div className="w-full py-0.5 text-[12px] leading-relaxed flex items-start gap-1.5">
+        <div
+          id={anchorId ? steerNavAnchorDomId(anchorId) : undefined}
+          className="w-full py-0.5 text-[12px] leading-relaxed flex items-start gap-1.5"
+        >
           <Reply size={12} className="mt-[3px] flex-shrink-0 text-primary/70" />
           <div className="min-w-0 flex-1">
             <MachineUserNotice notice={line.machineNotice} variant="inline" />
@@ -1206,7 +1226,10 @@ const SoloEventLine = React.memo(function SoloEventLine({
       );
     }
     return (
-      <div className="w-full py-0.5 text-[12px] leading-relaxed flex items-start gap-1.5">
+      <div
+        id={anchorId ? steerNavAnchorDomId(anchorId) : undefined}
+        className="w-full py-0.5 text-[12px] leading-relaxed flex items-start gap-1.5"
+      >
         <Reply size={12} className="mt-[3px] flex-shrink-0 text-primary/70" />
         <span className="flex-shrink-0 text-[11px] text-primary/70">
           {t('aiChat.toolFlow.line.steer')}
@@ -1602,7 +1625,13 @@ export const SoloActivityRow = React.memo(function SoloActivityRow({
     return lines.map((l, i) => (i === lastThoughtIdx ? { ...l, running: true } : l));
   }, [lines, thinkingActive]);
 
-  const useStepsScrollBox = displayLines.length > SOLO_STEPS_SCROLL_THRESHOLD;
+  // Sticky per block: line counts wobble while a phase is small (a chunk merges
+  // into the row above, a ui-only tool stops rendering a row), and flipping
+  // between "plain list" and "280px scroll box" re-lays-out the whole fold —
+  // the visible bounce. Once this block needed the box, it keeps it.
+  const stepsScrollBoxRef = useRef(displayLines.length > SOLO_STEPS_SCROLL_THRESHOLD);
+  if (displayLines.length > SOLO_STEPS_SCROLL_THRESHOLD) stepsScrollBoxRef.current = true;
+  const useStepsScrollBox = stepsScrollBoxRef.current;
   const virtSteps = useStepsScrollBox && displayLines.length > STEP_VIRT_AFTER;
 
   // 插话始终可见：折叠时把这几行挪到外面单独渲染（展开时它们在流内的原位，
@@ -1611,6 +1640,24 @@ export const SoloActivityRow = React.memo(function SoloActivityRow({
     () => displayLines.filter((l) => l.kind === 'steer'),
     [displayLines],
   );
+
+  // A nav-rail jump asks for one of these rows by uid. A collapsed fold does not
+  // mount its body, and a long one virtualises its steps, so the row only exists
+  // once this fold has opened and widened its own window around it.
+  const revealSteerUid = usePendingSteerReveal();
+  useEffect(() => {
+    if (!revealSteerUid) return;
+    const idx = displayLines.findIndex((l) => l.kind === 'steer' && l.key === revealSteerUid);
+    if (idx < 0) return;
+    userOverrideRef.current = 'open';
+    setOuterOpen(true);
+    if (virtSteps) {
+      setStepVirt((prev) => ({
+        start: Math.max(0, Math.min(prev.start, idx - 4)),
+        end: Math.max(prev.end, idx + 12),
+      }));
+    }
+  }, [revealSteerUid, displayLines, virtSteps, setOuterOpen]);
 
   const shellStreamsRef = useRef(shellStreams);
   shellStreamsRef.current = shellStreams;
@@ -1950,6 +1997,7 @@ export const SoloActivityRow = React.memo(function SoloActivityRow({
                 <SoloEventLine
                   key={line.key}
                   line={line}
+                  anchorId={line.kind === 'steer' ? line.key : undefined}
                   shellStreamFor={shellStreamFor}
                   onOpenFile={onOpenFile}
                   embedVisualizations={embedVisualizations}

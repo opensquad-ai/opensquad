@@ -6,6 +6,8 @@ import {
   AppearanceMode,
   CONTRAST_MAX,
   CONTRAST_MIN,
+  ContentWidth,
+  CONTENT_WIDTHS,
   DEFAULT_THEME_PREFS,
   FONT_SIZE_MAX,
   FONT_SIZE_MIN,
@@ -15,6 +17,8 @@ import {
   ThemePalette,
   ThemePrefs,
   ThemePresetId,
+  UI_SCALE_MAX,
+  UI_SCALE_MIN,
   buildPalette,
   clamp,
   getPresetPrimary,
@@ -134,6 +138,10 @@ function isPresetId(v: unknown): v is ThemePresetId {
   return v === 'custom' || PRESET_METAS.some((m) => m.id === v);
 }
 
+function isContentWidth(v: unknown): v is ContentWidth {
+  return CONTENT_WIDTHS.includes(v as ContentWidth);
+}
+
 function isMode(v: unknown): v is AppearanceMode {
   return v === 'light' || v === 'dark' || v === 'system';
 }
@@ -163,6 +171,10 @@ export function sanitizePrefs(raw: Partial<ThemePrefs> | null | undefined): Them
     contrast: clamp(numOr(base.contrast, DEFAULT_THEME_PREFS.contrast), CONTRAST_MIN, CONTRAST_MAX),
     fontSize: clamp(numOr(base.fontSize, DEFAULT_THEME_PREFS.fontSize), FONT_SIZE_MIN, FONT_SIZE_MAX),
     serif: Boolean(base.serif),
+    uiScale: clamp(numOr(base.uiScale, DEFAULT_THEME_PREFS.uiScale), UI_SCALE_MIN, UI_SCALE_MAX),
+    contentWidth: isContentWidth(base.contentWidth)
+      ? base.contentWidth
+      : DEFAULT_THEME_PREFS.contentWidth,
   };
 }
 
@@ -287,6 +299,12 @@ export function applyThemePrefs(prefs?: ThemePrefs): ThemePrefs {
   root.classList.toggle('font-serif', next.serif);
   root.dataset.appearance = appearance;
   root.dataset.themePreset = next.preset;
+  // 界面缩放：whole-UI zoom (Chromium/Electron support `zoom` on html, which
+  // scales fixed-position chrome too — unlike a root font-size tweak, the app
+  // is authored in px utilities so rem scaling would only move text).
+  root.style.zoom = next.uiScale === 1 ? '' : String(next.uiScale);
+  // 内容宽度：chat document column reads `html[data-content-width]` in CSS.
+  root.dataset.contentWidth = next.contentWidth;
 
   // Tailwind opacity modifiers (e.g. `border-border/40`) compile to
   // `rgb(var(--color-border) / 0.4)`, which only works when the variable
@@ -373,7 +391,7 @@ export function updateThemePrefs(patch: Partial<ThemePrefs>): ThemePrefs {
  * selection; only the colour picker is allowed to switch to `custom`.
  */
 export function appearanceSliderPatch(
-  field: 'purity' | 'contrast' | 'fontSize',
+  field: 'purity' | 'contrast' | 'fontSize' | 'uiScale',
   value: number,
 ): Partial<ThemePrefs> {
   return { [field]: value };

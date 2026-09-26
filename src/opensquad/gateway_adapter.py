@@ -229,6 +229,14 @@ class GatewayAdapter(BaseAgent):
         Prefer the per-session user map (populated by _handle_chat) so parallel
         turns do not steal each other's outbound routing via current_user_id.
         """
+        # Attach the recorded thinking-phase duration (see opensquad.thought_clock):
+        # the UI must not have to infer it from neighbouring event timestamps.
+        from opensquad.thought_clock import stamp as _stamp_thought
+
+        _scope = "sub" if (isinstance(content, dict) and content.get("sub_agent")) else ""
+        _thought = _stamp_thought(msg_type, sid, meta, scope=_scope)
+        if _thought is None:
+            meta.pop("thought_ms", None)
         uid = ""
         if sid:
             uid = (self._user_id_by_sid.get(sid) or "").strip()
@@ -500,14 +508,21 @@ class GatewayAdapter(BaseAgent):
 
         if command == "withdraw_turn":
             # Stop any in-flight turn, then truncate session from the user message timestamp.
-            input_hub.request_stop()
+            # Scoped to the withdrawing pane when the client names it — an
+            # agent-wide stop here would kill a sibling pane's running turn and
+            # its shells too. Client without a sid keeps the old global stop.
+            _wd_sid = str(cmd_data.get("session_id") or "").strip()
+            if _wd_sid:
+                input_hub.request_stop_session(_wd_sid)
+            else:
+                input_hub.request_stop()
             ts = str(cmd_data.get("timestamp") or "").strip()
             mid = str(cmd_data.get("message_id") or "").strip()
             # Prefer ISO timestamp for cut; keep message_id for checkpoint / id lookup.
             if ts or mid:
                 payload = f"{ts}|{mid}" if mid else ts
                 input_hub.push_urgent(f"__WITHDRAW_TURN__:{payload}", source="gateway")
-                logger.info(f"[Adapter] withdraw_turn queued ts={ts!r} message_id={mid!r}")
+                logger.info(f"[Adapter] withdraw_turn queued ts={ts!r} message_id={mid!r} sid={_wd_sid or '-'}")
                 await self._try_wake_agent("urgent-command")
             else:
                 logger.warning("[Adapter] withdraw_turn missing timestamp/message_id")

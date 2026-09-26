@@ -1007,6 +1007,26 @@ class AgentProcess:
             _log.error(f"[Launcher] {self.agent_name} restart failed: {e}")
 
 
+def resolve_auto_start(plugin_id: str, service_cfg: dict) -> bool:
+    """Should this plugin service start at boot?
+
+    Priority: an explicit ``services.<plugin_id>.enabled`` (what the Service
+    Manager's Auto toggle, and Start/Stop, persist) > the plugin manifest's own
+    ``service.auto_start`` default > True.
+
+    The boot loop used to READ the manifest key while the UI DISPLAYED the
+    system_config value. For a service whose manifest ships
+    ``auto_start: false`` those two disagree, and the visible one loses:
+    SenseVoice showed "Auto" on (services.sensevoice.enabled=true, written by
+    the toggle) yet never started, because discovery reported
+    ``auto_start=False`` from plugin.json and Pass 2 required that key.
+    """
+    explicit = syscfg.service_enabled_or_none(plugin_id)
+    if explicit is not None:
+        return explicit
+    return bool(service_cfg.get("auto_start", True))
+
+
 class PluginServiceProcess:
     """Manages a single plugin HTTP service child process.
 
@@ -1111,8 +1131,8 @@ class PluginServiceProcess:
         return self.service_cfg.get("host", "0.0.0.0")
 
     def _resolve_auto_start(self) -> bool:
-        """Auto-start priority: system_config services.X.enabled > plugin.json service.auto_start > True"""
-        return syscfg.is_service_enabled(self.plugin_id)
+        """Does this service start at boot? Explicit config > manifest default > True."""
+        return resolve_auto_start(self.plugin_id, self.service_cfg)
 
     def _install_dependencies(self) -> bool:
         """Install pip dependencies declared in plugin.json before launching the service.

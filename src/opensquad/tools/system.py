@@ -827,21 +827,44 @@ def _cleanup_old_jobs():
         logger.info(f"Cleaned up {len(to_remove)} old jobs: {to_remove}")
 
 
+def _resolve_shell_session_id(session_id: str | None) -> str:
+    """Shell key for a call that may not name one.
+
+    An explicit ``session_id`` is the model's own shell label and always wins —
+    real sessions use labels like ``gitcheck`` / ``mc_build`` to keep separate
+    shells on purpose. Otherwise the shell belongs to the CHAT session making
+    the call: with a single ``"default"`` key, two parallel panes shared one
+    shell, and ``ShellSession.execute`` does not serialise whole commands (it
+    writes command+marker into one stdin and polls one output buffer), so the
+    panes' outputs and results could cross over. CLI and other sid-less callers
+    keep landing on ``"default"``.
+    """
+    explicit = (session_id or "").strip()
+    if explicit:
+        return explicit
+    try:
+        chat_sid = str(get_tool_call_context().get("sid") or "").strip()
+    except Exception:
+        chat_sid = ""
+    return chat_sid or _DEFAULT_SESSION_ID
+
+
 def _get_or_create_session(
-    session_id: str = _DEFAULT_SESSION_ID, working_directory: str | None = None, shell_type: str | None = None
+    session_id: str | None = None, working_directory: str | None = None, shell_type: str | None = None
 ) -> ShellSession:
-    sess = _SESSIONS.get(session_id)
+    key = _resolve_shell_session_id(session_id)
+    sess = _SESSIONS.get(key)
     if sess is None:
         resolved_cwd = _resolve_working_directory(working_directory)
         if not _is_path_safe(resolved_cwd):
             raise ValueError(f"working_directory outside workspace: {resolved_cwd}")
-        sess = ShellSession(session_id=session_id, shell_type=shell_type, working_directory=resolved_cwd)
-        _SESSIONS[session_id] = sess
+        sess = ShellSession(session_id=key, shell_type=shell_type, working_directory=resolved_cwd)
+        _SESSIONS[key] = sess
     return sess
 
 
 def create_shell_session(
-    session_id: str = _DEFAULT_SESSION_ID, working_directory: str | None = None, shell_type: str | None = None
+    session_id: str | None = None, working_directory: str | None = None, shell_type: str | None = None
 ) -> dict[str, Any]:
     """Create a persistent shell session under system namespace."""
     try:
@@ -859,7 +882,7 @@ def create_shell_session(
 def run_session_job(
     command: str,
     timeout: float = 120.0,
-    session_id: str = _DEFAULT_SESSION_ID,
+    session_id: str | None = None,
     description: str | None = None,
 ) -> dict[str, Any]:
     """Run command in persistent shell session. Uses the same shell per session_id.
@@ -871,7 +894,8 @@ def run_session_job(
     Args:
         command:    Command-line string to execute.
         timeout:    Seconds to wait for completion (default 120).
-        session_id: Persistent shell session id (one shell per session).
+        session_id: Persistent shell session id (one shell per session). Omit to
+            use the shell belonging to the current chat session.
         description: MANDATORY in practice — one short line explaining WHY this
             command is run (its purpose/goal, e.g. "查看目录结构以定位配置文件").
             Always include it; it is shown to the user in the tool-flow UI instead
@@ -887,7 +911,7 @@ def run_session_job(
         _shell_watch_end(watch_root)
 
 
-def get_shell_session_status(session_id: str = _DEFAULT_SESSION_ID) -> dict[str, Any]:
+def get_shell_session_status(session_id: str | None = None) -> dict[str, Any]:
     """Get status of a shell session."""
     try:
         sess = _get_or_create_session(session_id=session_id)
@@ -904,17 +928,18 @@ def get_shell_session_status(session_id: str = _DEFAULT_SESSION_ID) -> dict[str,
         return {"status": "error", "message": str(e)}
 
 
-def restart_shell_session(session_id: str = _DEFAULT_SESSION_ID) -> dict[str, Any]:
+def restart_shell_session(session_id: str | None = None) -> dict[str, Any]:
     """Restart a shell session while preserving its configured shell/cwd."""
     try:
-        old = _SESSIONS.get(session_id)
+        key = _resolve_shell_session_id(session_id)
+        old = _SESSIONS.get(key)
         old_cwd = old.working_directory if old else _resolve_working_directory(None)
         old_shell = old.shell_type if old else ("cmd" if os.name == "nt" else "bash")
         if old:
             old.close()
-            _SESSIONS.pop(session_id, None)
-        sess = ShellSession(session_id=session_id, shell_type=old_shell, working_directory=old_cwd)
-        _SESSIONS[session_id] = sess
+            _SESSIONS.pop(key, None)
+        sess = ShellSession(session_id=key, shell_type=old_shell, working_directory=old_cwd)
+        _SESSIONS[key] = sess
         return {
             "status": "success",
             "session_id": sess.session_id,
@@ -927,14 +952,15 @@ def restart_shell_session(session_id: str = _DEFAULT_SESSION_ID) -> dict[str, An
         return {"status": "error", "message": str(e)}
 
 
-def close_shell_session(session_id: str = _DEFAULT_SESSION_ID) -> dict[str, Any]:
+def close_shell_session(session_id: str | None = None) -> dict[str, Any]:
     """Close and remove a shell session."""
-    sess = _SESSIONS.get(session_id)
+    key = _resolve_shell_session_id(session_id)
+    sess = _SESSIONS.get(key)
     if not sess:
-        return {"status": "error", "message": f"Session {session_id} not found."}
+        return {"status": "error", "message": f"Session {key} not found."}
     sess.close()
-    _SESSIONS.pop(session_id, None)
-    return {"status": "success", "message": f"Session {session_id} closed."}
+    _SESSIONS.pop(key, None)
+    return {"status": "success", "message": f"Session {key} closed."}
 
 
 def list_shell_sessions() -> dict[str, Any]:

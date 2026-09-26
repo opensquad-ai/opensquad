@@ -58,6 +58,7 @@
     "save": "Save",
     "cancel": "Cancel",
     "delete": "Delete",
+    "remove": "Remove",
     "edit": "Edit",
     "add": "Add",
     "close": "Close",
@@ -954,6 +955,7 @@
         "completed": "Completed",
         "timedOut": "Timed out",
         "aborted": "Aborted",
+        "interrupted": "Interrupted",
         "statusFailed": "Failed"
       },
       "outer": {
@@ -1003,6 +1005,9 @@
     "selectedText": "Selected text",
     "selectionCopied": "Copied",
     "addToContext": "Add to context",
+    "copyTable": "Copy table",
+    "tableCopied": "Table copied",
+    "voice": "Voice",
     "expandFoldedLines": "Expand folded lines",
     "unchangedLines": "lines unchanged (click to expand)",
     "readFile": "Read file",
@@ -1030,6 +1035,8 @@
     "creatingSession": "Creating session...",
     "planPanel": "Plan Panel",
     "contextDetails": "Context Details",
+    "exportContext": "Export context",
+    "exportContextHint": "Export this session as a Markdown file",
     "contextUsage": "Context Usage",
     "tokenStatsPending": "Waiting for token stats…",
     "hideTokenStats": "Hide Token Stats",
@@ -1101,7 +1108,10 @@
       "batchSelected": "{{count}} sessions marked",
       "batchArchive": "Archive all",
       "batchDeleteConfirm": "Delete these {{count}} sessions?",
-      "batchExit": "Exit batch"
+      "batchExit": "Exit batch",
+      "exportMarkdown": "Export Markdown",
+      "exportEmpty": "This session has no content yet",
+      "exportFailed": "Export failed, please retry"
     },
     "workingDirModal": {
       "title": "Set working directory",
