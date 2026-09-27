@@ -10,7 +10,6 @@ a minimal fake runner (see tests/test_turn_loop.py).
 from __future__ import annotations
 
 import json
-import os
 import re
 from datetime import datetime
 from typing import Any
@@ -20,6 +19,7 @@ from opensquad.input_hub import input_hub
 from opensquad.log_setup import get_tool_call_debug_logger
 from opensquad.messages import parse_tool_calls
 from opensquad.parser import ResponseParser
+from opensquad.vision_inject import add_paths_to_turn, apply_vision_injection, clear_path_file
 
 # Consecutive format_error replies (leak guard) before we stop auto-retrying.
 # Dots / OpenRouter free models re-emit the same template; without a cap the
@@ -793,6 +793,10 @@ class TurnLoop:
 
                 _raw_events = event_pipeline.drain_sync(session_id=_tool_sid or None)
 
+                # Vision paths must reach the turn from EVERY drain site, not
+                # just this one — see opensquad.vision_inject.
+                apply_vision_injection(self.runner, _raw_events)
+
                 for evt in _raw_events:
                     if evt.source in ("web", "gateway", "group", "dm") and evt.content and evt.content.strip():
                         # 这条消息是工具执行中途被 drain 进来的插话，不是新一轮的开头。
@@ -815,23 +819,6 @@ class TurnLoop:
                                 "steer_consumed",
                                 {"message_id": _steer_cid, "content": evt.content},
                             )
-                    if evt.source == "vision_tool" and evt.metadata.get("action") == "inject_images":
-                        img_paths = evt.metadata.get("image_paths", [])
-                        if img_paths:
-                            already = set(self.runner._current_images)
-                            new_img_paths = [p for p in img_paths if p not in already]
-                            if new_img_paths:
-                                self.runner._current_images.extend(new_img_paths)
-                            try:
-                                _ipf = (
-                                    os.path.join(self.runner._agent_dir, "img_path.txt")
-                                    if self.runner._agent_dir
-                                    else "img_path.txt"
-                                )
-                                with open(_ipf, "w", encoding="utf-8") as _f:
-                                    _f.write(str(img_paths))
-                            except Exception:
-                                pass
 
                 if _raw_events:
                     lines = ["", "--- External Events (arrived during processing) ---"]
@@ -873,10 +860,9 @@ class TurnLoop:
                         # event_pipeline push was skipped / drained elsewhere.
                         _vision_paths = result.get("image_paths")
                         if isinstance(_vision_paths, list) and _vision_paths:
-                            already = set(self.runner._current_images or [])
-                            new_paths = [p for p in _vision_paths if p and p not in already]
+                            new_paths = add_paths_to_turn(self.runner, _vision_paths)
                             if new_paths:
-                                self.runner._current_images = list(self.runner._current_images or []) + new_paths
+                                clear_path_file(self.runner)
                                 logger.info(
                                     "[Runner] Injected %d vision.read_image path(s) for next turn",
                                     len(new_paths),

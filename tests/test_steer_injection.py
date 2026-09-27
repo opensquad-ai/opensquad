@@ -190,9 +190,19 @@ def test_steer_consumed_is_registered_end_to_end():
     assert "steer_consumed" in AGENT_OUTPUT_BROADCAST_TYPES
 
 
-def test_turn_loop_emits_steer_consumed_with_client_id():
+def _steer_drain_block() -> str:
+    """The per-event steer loop inside the per-tool drain.
+
+    Ends at the post-loop `if _raw_events:` block. It used to end at the vision
+    branch, which now lives in opensquad.vision_inject (every drain site calls
+    it), so the slice is anchored on the loop's own terminator instead.
+    """
     block = TURN_LOOP_SRC[TURN_LOOP_SRC.index("for evt in _raw_events") :]
-    block = block[: block.index('if evt.source == "vision_tool"')]
+    return block[: block.index("if _raw_events:")]
+
+
+def test_turn_loop_emits_steer_consumed_with_client_id():
+    block = _steer_drain_block()
     assert '"steer_consumed"' in block
     assert 'evt.metadata.get("client_id")' in block
     assert '"message_id"' in block
@@ -201,8 +211,7 @@ def test_turn_loop_emits_steer_consumed_with_client_id():
 def test_mid_turn_insert_is_stamped_steer_for_the_fold():
     # 写进 history 的插话必须带 steer 标记：前端据此把它嵌进正在跑的工具流
     # （而不是封口切段），刷新重建也走同一条路径。标记写在 add_message 上。
-    block = TURN_LOOP_SRC[TURN_LOOP_SRC.index("for evt in _raw_events") :]
-    block = block[: block.index('if evt.source == "vision_tool"')]
+    block = _steer_drain_block()
     assert "steer=True" in block
     assert "client_id=_steer_cid or None" in block
     # client_id 要在写消息之前取到（原来是写在 add_message 之后的）

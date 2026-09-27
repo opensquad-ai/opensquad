@@ -58,9 +58,10 @@ def read_image(image_path_list: list) -> dict[str, str]:
     Note: If the user sent an image directly in the chat interface, your native
     vision capability can already see it — do NOT call this tool in that case.
 
-    After calling this tool, the system will inject the image paths into the
-    conversation context in the same turn, and you will receive the image content
-    on the next LLM response. Wait for the image analysis result.
+    The system queues the image(s) into the next model call of this same turn.
+    Do NOT poll for them with sleep/wait tools: if your next reply still shows
+    only this tool result and no image, the current model has image input
+    disabled (model.is_image=false) — say so and stop, do not keep waiting.
 
     :param image_path_list: List of absolute paths to image files.
     :return: A dict indicating operation completion.
@@ -119,9 +120,11 @@ def read_image(image_path_list: list) -> dict[str, str]:
         return {
             "status": "success",
             "message": (
-                f"Image path(s) registered: {valid_paths}. "
-                "The images will be passed to your vision model on the next turn "
-                "(requires model.is_image=true). Describe what you see after they arrive."
+                f"Image path(s) queued for this turn: {valid_paths}. "
+                "The next model call carries them as image content if the current "
+                "model has image input enabled (model.is_image=true). Do not sleep or "
+                "poll waiting for them: if the next call still shows no image, image "
+                "input is off for this model — tell the user instead of retrying."
             ),
             "image_paths": valid_paths,
         }

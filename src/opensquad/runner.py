@@ -229,6 +229,7 @@ _RE_MANY_NEWLINES = re.compile(r"\n{4,}")
 _RE_TOOL_CALL_OPEN = re.compile(r"<tool_call", re.IGNORECASE)
 _RE_TAGS_EXCEPT_TOOL_CALL = re.compile(r"<(?!tool_call)[^>]+>")
 
+from opensquad.vision_inject import apply_vision_injection
 from opensquad.xml_parser import strip_silent_protocol_blocks as _strip_silent_protocol_blocks
 
 
@@ -3245,10 +3246,15 @@ class AgentRunner:
                 if _is_first_turn:
                     from opensquad.event_pipeline import event_pipeline
 
-                    drained = event_pipeline.drain_formatted_sync(session_id=self._turn_sid)
-                    if drained:
+                    # drain_sync rather than drain_formatted_sync: the formatted
+                    # text was discarded here, so a vision request parked in the
+                    # bucket was dropped without ever reaching the images list.
+                    _pre_events = event_pipeline.drain_sync(session_id=self._turn_sid)
+                    apply_vision_injection(self, _pre_events)
+                    if _pre_events:
                         logger.info(
-                            f"[Runner] Pre-chat event_pipeline drain: {len(drained)} chars (prevents role=user + role=tool duplication)"
+                            f"[Runner] Pre-chat event_pipeline drain: {len(_pre_events)} event(s) "
+                            f"(prevents role=user + role=tool duplication)"
                         )
                 # Image handling: is_img_mode=true (i.e. config.json model.is_image=true) passes directly to main model, false skips
                 _native_images = None  # Images passed directly to chat_api in native mode (file paths)
@@ -3930,6 +3936,7 @@ class AgentRunner:
 
                             # Drain event_pipeline and send as role=tool
                             _raw_events = event_pipeline.drain_sync(session_id=self._turn_sid)
+                            apply_vision_injection(self, _raw_events)
                             if _raw_events:
                                 # CRITICAL: Persist user-originated events to session_manager
                                 # so they survive a page refresh. Previously this was missing —

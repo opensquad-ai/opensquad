@@ -6,6 +6,8 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
+from opensquad.vision_inject import apply_vision_injection
+
 logger = logging.getLogger(__name__)
 
 
@@ -151,6 +153,10 @@ class RunnerWaitLoop:
         await self.runner._emit("status", "working")
         await self.runner._setup_prompt()
         raw_events = event_pipeline.drain_sync(session_id=getattr(self.runner, "_turn_sid", "") or None)
+        # The agent can call vision.read_image and then park in wait mode; this
+        # drain used to be text-only, so those images never reached the model and
+        # it kept sleeping on "[Image injection requested: …]".
+        apply_vision_injection(self.runner, raw_events)
         if raw_events:
             _turn_sid = getattr(self.runner, "_turn_sid", "") or None
             for event in raw_events:
