@@ -15,7 +15,7 @@ on:
 
 permissions:
   contents: read
-  id-token: write   # for future npm provenance; publish currently uses NPM_TOKEN (trusted publishing not yet configured on npmjs.com)
+  id-token: write   # OIDC token for npm trusted publishing (no NPM_TOKEN)
 
 jobs:
   validate:
@@ -49,8 +49,15 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '24'
           registry-url: 'https://registry.npmjs.org'
+
+      # Trusted publishing needs npm CLI >= 11.5.1 — pin it rather than trusting
+      # whatever npm the runner image ships with.
+      - name: Upgrade npm (trusted publishing needs >= 11.5.1)
+        run: |
+          npm install -g npm@latest
+          npm --version
 
       - name: Install dependencies
         run: npm install --omit=dev --ignore-scripts
@@ -60,10 +67,11 @@ jobs:
           test -f bin/opensquad.js || (echo "::error::bin/opensquad.js missing" && exit 1)
           node -e "require('./bin/opensquad.js')" || true   # syntax check only
 
+      # No NODE_AUTH_TOKEN: the OIDC token granted by `id-token: write` is
+      # exchanged for publish rights through the trusted publisher configured on
+      # npmjs.com (owner opensquad-ai, repo opensquad, workflow release-npm.yml).
       - name: Publish to npm
-        run: npm publish --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish --access public --provenance
 
       - name: Summary
         run: |
