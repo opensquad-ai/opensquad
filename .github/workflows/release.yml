@@ -104,8 +104,40 @@ jobs:
       - name: Install build tools
         run: pip install build
 
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      # The wheel's package-data ships the built web UI
+      # (opensquad/gateway/nexuschat-pro/dist/**), and dist/ is a gitignored build
+      # artifact — without this step `python -m build` silently produces a wheel
+      # with no frontend at all (v0.8.46 run: 0 frontend files in the wheel).
+      # The committed package-lock.json is generated on Windows and only records
+      # win32 optional deps, so it must be dropped or npm skips
+      # @rollup/rollup-linux-x64-gnu on this runner (npm bug #4828).
+      - name: Build frontend
+        working-directory: src/opensquad/gateway/nexuschat-pro
+        run: |
+          rm -f package-lock.json
+          rm -rf node_modules
+          npm install --no-package-lock --ignore-scripts
+          npm run build
+
       - name: Build package
         run: python -m build
+
+      - name: Verify wheel contains the built frontend
+        run: |
+          python - <<'PY'
+          import glob, zipfile
+          wheel = glob.glob("dist/*.whl")[0]
+          names = zipfile.ZipFile(wheel).namelist()
+          ui = [n for n in names if n.startswith("opensquad/gateway/nexuschat-pro/dist/")]
+          print(f"{wheel}: {len(names)} files, {len(ui)} under the frontend dist")
+          if len(ui) < 2:
+              raise SystemExit("wheel has no built frontend - check the Build frontend step")
+          PY
 
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
