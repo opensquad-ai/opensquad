@@ -124,6 +124,11 @@ jobs:
           npm install --no-package-lock --ignore-scripts
           npm run build
 
+      # Runs before the build so a checkout that carries something a build would
+      # sweep in fails in seconds, not after a multi-minute build.
+      - name: Verify the checkout is clean of local caches
+        run: python scripts/verify_release_artifacts.py --tree
+
       - name: Build package
         run: python -m build
 

@@ -95,8 +95,9 @@ git push origin v0.X.0
 # 6. release.yml runs automatically:
 #    - validate job: tag version == pyproject.toml version (else fail loudly)
 #    - docker job: builds & pushes ghcr.io/opensquad-ai/opensquad:0.X.0 and :latest
-#    - pypi job: builds the wheel + sdist, runs scripts/verify_release_artifacts.py
-#      and only then publishes via OIDC trusted publishing
+#    - pypi job: runs scripts/verify_release_artifacts.py --tree, builds the
+#      wheel + sdist, re-runs the verifier on them, and only then publishes via
+#      OIDC trusted publishing
 #    - release job: generates GitHub Release notes from commits since the previous tag
 #    Verify all three in:
 #      - https://github.com/opensquad-ai/opensquad/releases/tag/v0.X.0
@@ -105,10 +106,15 @@ git push origin v0.X.0
 #
 #    NEVER `twine upload` a locally built dist/. The repo is public and the
 #    working tree carries private plugins/skills, local model cards with real
-#    API keys, and (after `npm install`) node_modules. verify_release_artifacts.py
+#    API keys, local agent dirs (agent301 holds a live model.api_key), plugin
+#    UI node_modules and hand-made debug dumps. verify_release_artifacts.py
 #    catches all of that, but only the tag → CI path runs it. To check a local
 #    build before tagging:
+#        python scripts/verify_release_artifacts.py --tree   # pre-build, ~1 min
 #        python -m build && python scripts/verify_release_artifacts.py dist
+#    Note for local builds: a stale `build/lib` from an earlier run is packed
+#    into the wheel on top of the fresh file set, so `rm -rf build/lib` (or let
+#    the artifact check fail) before trusting a local wheel.
 
 # 7. Absorb main back into dev
 git checkout dev && git pull --ff-only

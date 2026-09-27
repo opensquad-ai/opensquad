@@ -53,9 +53,34 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   `release.yml` between the build and the PyPI upload. It fails on any private
   plugin/skill, model cache, `node_modules` or `.env` in the sdist/wheel, on any
   shipped file git does not track, and on a wheel missing the default resources
-  or the built web UI.
+  or the built web UI. `--tree` is its pre-build twin: it replays `MANIFEST.in`
+  over the checkout, so a tree that a build would sweep fails in about a minute
+  instead of after a full build. The `pypi` job now runs it before `python -m
+  build` too.
 
 ### Fixed
+
+- **Local caches, local agents and private skills reached the artifacts.** A
+  build on a working checkout produced a 46 MB sdist carrying 14,261 files git
+  does not track — the four plugin UI `node_modules` trees, `agent301`'s
+  `config.json` (a live `model.api_key`) with its session JSON / long-term
+  memory DB, 19 local `model_cards` with the operator's own `api_key`, and
+  `plugins/feishu/debug_config.txt` (a bridge key plus absolute workspace
+  paths). `MANIFEST.in` now prunes `node_modules` trees by glob, the local agent
+  dir and the test suite, and the credential-bearing dirs (`model_cards`,
+  `agents`) use explicit allowlists instead of `*.json` / `*/*.md` — enforced by
+  tests that compare both lists against `git ls-files`. The same sdist is now
+  3.7 MB and 586 files.
+- **`package_data`'s `**/*` globs swept private dirs into the wheel.** The
+  private plugin/skill exclusions were keyed per package, but the files arrive
+  through their *parent* package's glob (`package_data[plugins]` covers
+  `src/plugins/**`), where the path carries no package name. The parent keys are
+  excluded now too.
+- **Namespace-package discovery turned vendored `.py` files into wheel
+  modules.** `packages.find` (PEP 420) walked into
+  `gateway/nexuschat-pro/node_modules` and shipped `katex`/`node-gyp`'s `.py`
+  files — the same 64 files that leaked in 0.8.47. `packages.find.exclude` and
+  the global `exclude-package-data` key now cover `node_modules` anywhere.
 
 - **The PyPI wheel was not a deployable package.** It carried the runtime and
   the web UI but no `model_cards/`, `plugins/`, `agents/`, `pymcp/`,
@@ -93,6 +118,10 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   `上市|财报|年报|季报`, and `_QUERY_NEEDS_BROWSER_SERP_RE` matched market
   terms (`收评|行情|大盘|涨停|…`) to force the Playwright SERP path. All of
   those are gone; the browser-SERP preference now triggers on news terms only.
+- **The published sdist no longer contains the test suite.** A working tree
+  also holds untracked tests of private work, which `python -m build` swept in
+  alongside the tracked ones; `MANIFEST.in` prunes `tests/` rather than trying
+  to filter by name. The wheel never carried them.
 
 ---
 

@@ -26,6 +26,46 @@ prune src/plugins/websearch/service/reranker/models
 prune src/opensquad/gateway/nexuschat-pro/node_modules
 prune src/opensquad/gateway/nexuschat-pro/resources
 
+# node_modules trees under the shipped resource dirs. Plugin UIs install their
+# own deps (`npm`/`pnpm install` in <plugin>/ui), and a `git mv`-free rename
+# leaves `node_modules_old_*` copies behind. `graft`/`prune` accept globs, so
+# one line covers every plugin (including ones added later).
+prune src/plugins/*/ui/node_modules
+prune src/plugins/*/ui/node_modules_old_*
+prune src/plugins/*/node_modules
+prune src/plugins/node_modules
+prune src/skills/*/node_modules
+prune src/skills/node_modules
+
+# Local agent dirs and their runtime state. `src/agents/agent301` is a
+# dev-machine agent: its config.json holds a live `model.api_key` and its
+# `data/` holds the session JSON, chat history and long-term-memory DB.
+# Only `config.json` + `role.md` of each *tracked* agent ship.
+prune src/agents/agent301
+
+# Local model cards are the operator's own cards and carry their own
+# `api_key`. Only the tracked builtin set ships — keep this list equal to
+# `git ls-files src/model_cards` (tests/test_release_artifact_includes.py
+# enforces that, so a new card cannot silently drop out).
+prune src/model_cards
+include src/model_cards/deepseek-v4-flash.json
+include src/model_cards/deepseek-v4-pro.json
+include src/model_cards/step-image-edit-2.json
+include src/model_cards/stepaudio-2.5-asr.json
+include src/model_cards/stepaudio-2.5-chat.json
+include src/model_cards/stepaudio-2.5-realtime.json
+include src/model_cards/stepaudio-2.5-tts.json
+
+# Runtime markers and hand-made debug dumps. `.reload_ts` is written by the
+# plugin hot-reload watcher; `debug_config.txt` is an ad-hoc dump that carries
+# absolute workspace paths and a bridge key.
+global-exclude .reload_ts
+exclude src/plugins/feishu/debug_config.txt
+
+# No test suite in the published sdist: a working tree also holds untracked
+# tests of private work (n2t/z2t), which `python -m build` would sweep in.
+prune tests
+
 # Plugin UI lockfiles are build-time only (and the Windows-generated ones are
 # the npm bug #4828 trap). Third-party LICENSE files are deliberately kept.
 recursive-exclude src/plugins pnpm-lock.yaml package-lock.json yarn.lock npm-shrinkwrap.json

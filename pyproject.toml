@@ -130,6 +130,21 @@ include = [
     "collab_cards*",
     "role_cards*",
 ]
+# Belt for the `graft` lines in MANIFEST.in. Those sweep the whole tree, and
+# setuptools' namespace-package discovery (PEP 420) happily walks into vendored
+# JS trees and turns their `.py` files into modules — that is how 64
+# `nexuschat-pro/node_modules/**.py` files reached the 0.8.47 wheel. MANIFEST.in
+# governs the sdist only; a wheel built straight from the tree needs this.
+exclude = [
+    "*node_modules*",
+    "*resources*",
+    "*news2theme*",
+    "*zt2theme*",
+    "*j-space*",
+    "*cursor-api*",
+    "*vcs_collaboration*",
+    "*playwright*",
+]
 
 [tool.setuptools.package-data]
 opensquad = [
@@ -140,19 +155,63 @@ opensquad = [
 ]
 skills = ["**/*"]
 plugins = ["**/*"]
-model_cards = ["*.json"]
-agents = ["*/*.json", "*/*.md"]
+# Credential-bearing dirs use an explicit allowlist instead of `*.json`, because
+# a `*.json` glob cannot tell a tracked builtin from a local card/agent that
+# carries the operator's own api_key. Keep both lists equal to `git ls-files`
+# for those dirs — tests/test_release_artifact_includes.py enforces it.
+model_cards = [
+    "deepseek-v4-flash.json",
+    "deepseek-v4-pro.json",
+    "step-image-edit-2.json",
+    "stepaudio-2.5-asr.json",
+    "stepaudio-2.5-chat.json",
+    "stepaudio-2.5-realtime.json",
+    "stepaudio-2.5-tts.json",
+]
+agents = ["coder/*", "image_bot/*", "pm/*", "qa/*"]
 pymcp = ["*.json"]
 collab_cards = ["*.md"]
 role_cards = ["*.md"]
 
-# Belt for the `package_data` globs above, which bypass MANIFEST.in. This list
-# only has to cover paths that exist on a developer machine: CI builds from a
-# clean checkout, and release.yml re-verifies every artifact against
-# `git ls-files` before upload, so an unlisted local-only file can never reach
-# PyPI. See "Private plugins / skills" in .gitignore.
+# Belt for the `package_data` globs above, which bypass MANIFEST.in, and for
+# anything that reaches the wheel through the sdist manifest. Patterns are
+# fnmatch'd against package-relative paths, so `*` crosses `/` and one global
+# pattern covers every depth. A per-package key is needed when the *package
+# itself* is the private dir (its own relative paths carry no identifying
+# segment).
 [tool.setuptools.exclude-package-data]
-skills = [
+"*" = [
+    "*node_modules*",
+    # Plugin UI lockfiles: build-time only, unused at runtime. The Windows-
+    # generated ones are also the npm bug #4828 trap (win32-only optional deps).
+    "*pnpm-lock.yaml",
+    "*package-lock.json",
+    "*yarn.lock",
+    "*npm-shrinkwrap.json",
+    # Plugin hot-reload marker, and ad-hoc debug dumps that carry absolute
+    # workspace paths plus a bridge key.
+    ".reload_ts",
+    "*debug_config.txt",
+    "*__pycache__*",
+    "*.py[cod]",
+    "*.log",
+    "*.log.*",
+    "*reranker/models*",
+    "*.safetensors",
+    "*.gguf",
+    "*.onnx",
+    "*.bin",
+    "*.pt",
+    "*.DS_Store",
+]
+# Private dirs reached through their *parent* package's `**/*` glob
+# (`package_data[plugins]` sweeps `src/plugins/**`), so the pattern has to be
+# keyed on the parent as well as on the private package itself. Scoped per dir
+# rather than a global `*playwright*`: the repo tracks
+# `gateway/nexuschat-pro/playwright.config.ts`, which an unscoped marker would
+# silently drop from the wheel.
+"plugins" = ["news2theme/*"]
+"skills" = [
     "news2theme/*",
     "news2theme-ops/*",
     "zt2theme/*",
@@ -160,28 +219,16 @@ skills = [
     "cursor-api/*",
     "playwright/*",
     "vcs_collaboration/*",
-    "**/__pycache__/*",
 ]
-plugins = [
-    "news2theme/*",
-    "**/__pycache__/*",
-    "**/*.py[cod]",
-    "**/*.log",
-    "**/node_modules/**/*",
-    "**/models/**/*",
-    "**/*.safetensors",
-    "**/*.bin",
-    "**/*.pt",
-    "**/*.onnx",
-    "**/*.gguf",
-    # Plugin UI lockfiles: build-time only, unused at runtime. The Windows-
-    # generated ones are also the npm bug #4828 trap (win32-only optional deps).
-    "**/pnpm-lock.yaml",
-    "**/package-lock.json",
-    "**/yarn.lock",
-    "**/npm-shrinkwrap.json",
-]
-opensquad = ["gateway/nexuschat-pro/node_modules/**/*"]
+"plugins.news2theme" = ["*"]
+"skills.news2theme" = ["*"]
+"skills.news2theme-ops" = ["*"]
+"skills.zt2theme" = ["*"]
+"skills.j-space" = ["*"]
+"skills.cursor-api" = ["*"]
+"skills.playwright" = ["*"]
+"skills.vcs_collaboration" = ["*"]
+"agents.agent301" = ["*"]
 
 # ── Ruff linter & formatter ───────────────────────────
 [tool.ruff]
