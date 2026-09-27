@@ -18,6 +18,24 @@ export interface UpdateStatus extends Partial<DownloadProgress> {
 const TRUSTED_DOWNLOAD_HOSTS = new Set(['github.com', 'objects.githubusercontent.com'])
 const UI_SETTLE_MS = 1200
 const SHUTDOWN_SETTLE_MS = 900
+const UPDATE_LOG_FILE = 'update.log'
+
+/**
+ * Append-only trace of update attempts, in userData next to the app's other
+ * state files. A silent (/S) NSIS install gives the user no feedback at all: if
+ * it fails they are simply left with the old version and no explanation, which
+ * is how the 2026-09-27 report arrived ("it quit and nothing reopened"). With
+ * this file, "launched" present + version unchanged on next boot means the
+ * installer itself failed, not the download.
+ */
+function logUpdate(line: string): void {
+  try {
+    const file = path.join(app.getPath('userData'), UPDATE_LOG_FILE)
+    fs.appendFileSync(file, `${new Date().toISOString()} v${app.getVersion()} ${line}\n`, 'utf-8')
+  } catch {
+    /* logging must never break an update */
+  }
+}
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
@@ -156,11 +174,19 @@ export async function runDesktopUpdate(
   fileName: string,
   onStatus: (status: UpdateStatus) => void,
 ): Promise<void> {
+  logUpdate(`start downloading ${fileName}`)
   onStatus({ phase: 'downloading', percent: 0, transferred: 0, total: 0 })
 
-  const installerPath = await downloadInstaller(url, fileName, (progress) => {
-    onStatus({ phase: 'downloading', ...progress })
-  })
+  let installerPath: string
+  try {
+    installerPath = await downloadInstaller(url, fileName, (progress) => {
+      onStatus({ phase: 'downloading', ...progress })
+    })
+  } catch (err) {
+    logUpdate(`download FAILED ${fileName}: ${err instanceof Error ? err.message : String(err)}`)
+    throw err
+  }
+  logUpdate(`downloaded -> ${installerPath}`)
 
   onStatus({ phase: 'preparing' })
   await delay(UI_SETTLE_MS)
@@ -168,7 +194,13 @@ export async function runDesktopUpdate(
   onStatus({ phase: 'launching' })
   await delay(UI_SETTLE_MS)
 
-  await launchInstaller(installerPath)
+  try {
+    await launchInstaller(installerPath)
+  } catch (err) {
+    logUpdate(`launch FAILED ${installerPath}: ${err instanceof Error ? err.message : String(err)}`)
+    throw err
+  }
+  logUpdate('installer launched; app exiting (silent install relaunches from installer.nsh)')
 
   onStatus({ phase: 'shutting-down' })
   await delay(SHUTDOWN_SETTLE_MS)

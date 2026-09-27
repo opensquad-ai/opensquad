@@ -1,16 +1,27 @@
-"""opensquad update — check for new versions and upgrade from GitHub Releases."""
+"""opensquad update — check for new versions and upgrade from GitHub Releases.
+
+Releases ship desktop installers only (.exe / .dmg / .AppImage / .deb); there is
+no wheel or sdist attached, so asset selection delegates to the same picker the
+desktop app uses (`utils/desktop_release.py`). The previous local implementation
+matched only .whl/.tar.gz/.zip and therefore reported "No suitable release asset
+found" on every platform.
+"""
 
 import contextlib
 import json
 import os
+import platform
 import shutil
 import subprocess
 import sys
 import tempfile
 import urllib.request
 
+from opensquad.utils.desktop_release import pick_desktop_installer_asset
+
 GITHUB_REPO = "opensquad-ai/opensquad"
 GITHUB_API_LATEST = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
+RELEASES_PAGE = f"https://github.com/{GITHUB_REPO}/releases/latest"
 
 
 def _get_latest_github_release() -> dict | None:
@@ -50,6 +61,21 @@ def _compare_versions(current: str, latest: str) -> bool:
         return _parts(latest) > _parts(current)
 
 
+def current_desktop_platform() -> tuple[str, str | None]:
+    """(platform, arch) in the vocabulary `pick_desktop_installer_asset` expects."""
+    return sys.platform, platform.machine()
+
+
+def is_desktop_build() -> bool:
+    """True when running from the packaged app (PyInstaller/Electron bundle)."""
+    return bool(getattr(sys, "frozen", False))
+
+
+def select_installer(release: dict, plat: str, arch: str | None) -> dict | None:
+    """Pick this platform's installer asset: {name, url, size}."""
+    return pick_desktop_installer_asset(release.get("assets") or [], plat, arch)
+
+
 def _download_asset(url: str, dest: str) -> bool:
     """Download a GitHub release asset to dest. Returns True on success."""
     try:
@@ -68,46 +94,58 @@ def _download_asset(url: str, dest: str) -> bool:
         return False
 
 
-def _pick_asset(assets: list) -> dict | None:
-    """Pick the best asset for the current platform from the release assets list.
+def run_installer(installer_path: str, plat: str) -> None:
+    """Hand the downloaded installer to the OS. Raises if this platform is unsupported.
 
-    Priority: wheel matching current platform > source tarball > any wheel.
+    On Windows the NSIS installer kills the running app and its backend children
+    (see assets/installer.nsh) and relaunches itself when installed silently, so
+    the caller must not try to restart anything afterwards.
     """
-    if not assets:
-        return None
+    if not os.path.isfile(installer_path):
+        raise FileNotFoundError(installer_path)
 
-    # Identify current platform tag
-    is_win = sys.platform == "win32"
-    is_mac = sys.platform == "darwin"
-    is_linux = sys.platform.startswith("linux")
+    if plat == "win32":
+        subprocess.Popen([installer_path, "/S"], creationflags=_win_detached_flags())
+        return
 
-    wheel = None
-    sdist = None
+    if plat == "darwin":
+        subprocess.Popen(["open", installer_path])
+        return
 
-    for a in assets:
-        name = a.get("name", "")
-        url = a.get("browser_download_url", "")
-        if not url:
-            continue
+    if plat == "linux":
+        low = installer_path.lower()
+        if low.endswith(".appimage"):
+            os.chmod(installer_path, 0o755)
+            subprocess.Popen([installer_path])
+            return
+        if low.endswith(".deb"):
+            subprocess.Popen(["xdg-open", installer_path])
+            return
 
-        if name.endswith(".whl"):
-            # Prefer platform-specific wheel
-            if is_win and "win" in name.lower():
-                return a  # Best match
-            if is_mac and ("macosx" in name.lower() or "macos" in name.lower()):
-                return a
-            if is_linux and "linux" in name.lower():
-                return a
-            # Pure Python wheel (no platform tag)
-            if "py3-none-any" in name:
-                return a
-            if wheel is None:
-                wheel = a
-        elif name.endswith(".tar.gz") or name.endswith(".zip"):
-            if sdist is None:
-                sdist = a
+    raise RuntimeError(f"Automatic install is not supported for {plat}")
 
-    return wheel or sdist
+
+def _win_detached_flags() -> int:
+    # Detach so the installer survives this process being killed by the install.
+    return getattr(subprocess, "DETACHED_PROCESS", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+
+
+def print_python_install_guidance(picked: dict, latest: str) -> None:
+    """A pip/uv-installed CLI has nothing to upgrade from — say so plainly."""
+    print("This is a source / pip install of OpenSquad, not the packaged desktop app.")
+    print("GitHub Releases publish desktop installers only (no wheel, no sdist), so the")
+    print("CLI cannot self-upgrade this installation.")
+    print()
+    print(f"Newest installer for your platform ({picked['name']}):")
+    print(f"  {picked['url']}")
+    print()
+    print("Do NOT run 'pip install --upgrade opensquad': the PyPI project is still the")
+    print("0.1.1 placeholder (the Release workflow's 'Publish to PyPI' job is not")
+    print("configured), so that command would downgrade you.")
+    print()
+    print("To upgrade a source checkout instead:")
+    print(f"  git fetch --tags && git checkout v{latest}")
+    print("  python -m pip install -e .")
 
 
 def run_update(args):
@@ -139,46 +177,41 @@ def run_update(args):
         print("Upgrade cancelled.")
         return
 
-    # Pick suitable asset
-    assets = release.get("assets", [])
-    asset = _pick_asset(assets)
-    if not asset:
-        print("No suitable release asset found. Try upgrading manually:")
-        print("  pip install --upgrade opensquad")
+    plat, arch = current_desktop_platform()
+    picked = select_installer(release, plat, arch)
+    if not picked:
+        print(f"Release v{latest} has no installer asset for platform '{plat}'.")
+        print(f"Browse the releases page instead: {RELEASES_PAGE}")
         sys.exit(1)
 
-    asset_name = asset.get("name", "opensquad")
-    asset_url = asset.get("browser_download_url", "")
-    asset_size = asset.get("size", 0)
-    size_mb = asset_size / (1024 * 1024) if asset_size else 0
+    size_mb = picked.get("size", 0) / (1024 * 1024)
+    print(f"Selected {picked['name']} ({size_mb:.1f} MB)")
 
-    print(f"Downloading {asset_name} ({size_mb:.1f} MB)...")
+    if not is_desktop_build():
+        print_python_install_guidance(picked, latest)
+        sys.exit(1)
 
-    with tempfile.NamedTemporaryFile(suffix="-" + asset_name, delete=False) as tf:
+    with tempfile.NamedTemporaryFile(suffix="-" + picked["name"], delete=False) as tf:
         tmp_path = tf.name
 
-    try:
-        if not _download_asset(asset_url, tmp_path):
-            sys.exit(1)
-
-        # In frozen mode sys.executable is run.exe (the PyInstaller bundle),
-        # which cannot run ``-m pip install``. A frozen desktop app is upgraded
-        # by downloading a new installer, not via pip. Detect this and guide
-        # the user instead of crashing.
-        if getattr(sys, "frozen", False):
-            print(
-                "Detected frozen desktop build — cannot self-upgrade via pip.\n"
-                "Please download the latest installer from the GitHub Releases page:\n"
-                f"  https://github.com/{GITHUB_REPO}/releases/latest"
-            )
-            sys.exit(0)
-
-        print("Installing...")
-        subprocess.check_call([sys.executable, "-m", "pip", "install", "--upgrade", tmp_path])
-        print("Upgrade complete! Please restart OpenSquad.")
-    except subprocess.CalledProcessError as e:
-        print(f"Upgrade failed: {e}")
-        sys.exit(1)
-    finally:
+    if not _download_asset(picked["url"], tmp_path):
         with contextlib.suppress(Exception):
             os.unlink(tmp_path)
+        sys.exit(1)
+
+    print("Launching installer...")
+    try:
+        run_installer(tmp_path, plat)
+    except Exception as e:
+        # Keep the file: the user can finish the upgrade by hand.
+        print(f"Could not start the installer: {e}")
+        print(f"It was downloaded to: {tmp_path}")
+        print("Run it manually to finish the upgrade.")
+        sys.exit(1)
+
+    # The installer owns the temp file from here (and on Windows kills this
+    # process while copying), so nothing is cleaned up afterwards.
+    if plat == "win32":
+        print("The installer runs silently and will relaunch OpenSquad when it finishes.")
+    else:
+        print("Follow the installer window to finish the upgrade.")
