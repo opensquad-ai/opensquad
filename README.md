@@ -151,6 +151,23 @@ uv run opensquad start
 
 ### Option 3: pip
 
+From PyPI — runtime + web UI (see the gap note below):
+
+```bash
+pip install opensquad
+
+opensquad init
+opensquad start
+```
+
+> **Known gap (v0.8.47):** the PyPI wheel ships the Python runtime, the built web
+> UI and `skills/`, but **not** `src/model_cards/` or `src/plugins/`. `opensquad
+> init` therefore cannot seed a model card, and no bundled plugins are available.
+> Use Option 1/2 (clone + `uv sync`) for a full deployment; completing the PyPI
+> package is an open item.
+
+From a checkout — full deployment, editable install:
+
 ```bash
 git clone https://github.com/opensquad-ai/opensquad.git
 cd opensquad
@@ -208,6 +225,24 @@ docker run -d \
   -v ./src/system_config.json:/app/src/system_config.json:ro \
   opensquad
 ```
+
+---
+
+## Updating
+
+Use the row that matches how you installed OpenSquad:
+
+| Installed via | Update with | Notes |
+| --- | --- | --- |
+| Desktop app (installer) | In-app **Check for updates**, or `opensquad update` | Fully automatic: it downloads the installer, installs it silently and relaunches the app. Builds older than **v0.8.43** must download the installer once by hand — the relaunch-on-update logic shipped in that version. |
+| `pip install opensquad` | `pip install --upgrade opensquad` | |
+| `npm install -g opensquad-ai` | `npm install -g opensquad-ai@latest` | The wrapper re-installs the matching Python package when the versions differ. |
+| `git clone` (uv sync / `pip install -e .`) | `git pull`, then re-run the same install command | Re-run `npm install` under `src/opensquad/gateway/nexuschat-pro` if the frontend changed; `npm run build` there to serve the UI statically instead of through Vite. |
+| Docker | `git pull && docker compose up -d --build` | The image is built from the local Dockerfile, not pulled from a registry. |
+
+`opensquad update` only installs anything for the **packaged desktop app**. It
+cannot rewrite a pip / npm / source install, so on those it prints the command
+from the table and exits — without touching your environment or your git state.
 
 ---
 
