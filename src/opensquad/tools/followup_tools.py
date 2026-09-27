@@ -94,6 +94,11 @@ def _coerce_suggestion_list(value: Any) -> list[str]:
     return out
 
 
+def _offer_signature(items: list[str]) -> str:
+    """Order/case-insensitive identity of one offer, for within-turn dedupe."""
+    return "\x1f".join(sorted(item.strip().casefold() for item in items))
+
+
 async def suggest_followups(suggestions: list[str] | None = None, text: str = "") -> str:
     """Offer 1–3 likely follow-up questions the user may want to send next.
 
@@ -126,6 +131,24 @@ async def suggest_followups(suggestions: list[str] | None = None, text: str = ""
         )
     items = items[:MAX_SUGGESTIONS]
 
+    # One offer per user turn. The model is told to call this once, right before
+    # the final answer, but a text-less offer round keeps the turn alive (the
+    # runner only ends the turn on an *answer* + offer batch), so a model that
+    # splits the offer from the answer calls it a second time and two offers land
+    # in the transcript — the fold then showed the same offer twice. An identical
+    # repeat carries nothing new: the chips are already on screen.
+    from opensquad.session_parallel import get_turn_local
+
+    turn = get_turn_local()
+    signature = _offer_signature(items)
+    if turn is not None and getattr(turn, "followup_offer", None) == (signature, int(turn.round or 0)):
+        logger.info("[followup] Duplicate offer in round %s — keeping the chips already sent", turn.round)
+        return (
+            "Follow-up suggestions were already offered for this reply (identical set); they "
+            "are on screen as chips. Do not call suggest_followups again in this turn — finish "
+            "your answer normally."
+        )
+
     req_id = f"fu_{uuid.uuid4().hex[:14]}"
     payload = {
         "event": "suggest_followups",
@@ -147,6 +170,10 @@ async def suggest_followups(suggestions: list[str] | None = None, text: str = ""
     except Exception as e:
         logger.warning("[followup] Failed to emit suggest_followups event: %s", e)
         return f"Failed to offer follow-up suggestions: {e}"
+
+    if turn is not None:
+        # Latch only now — a failed emit must not block a retry in this turn.
+        turn.followup_offer = (signature, int(turn.round or 0))
 
     listed = "; ".join(f"{i + 1}. {s}" for i, s in enumerate(items))
     return (

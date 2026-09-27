@@ -76,6 +76,10 @@ class TurnLocal:
     auth_fallback_used: bool = False
     format_error_streak: int = 0
     repetition_rewind_count: int = 0
+    # Identity of the follow-up offer already sent this turn — (signature,
+    # round_id) so a stale entry from an earlier turn cannot suppress a new offer.
+    # See ``tools/followup_tools.suggest_followups``.
+    followup_offer: tuple[str, int] | None = None
 
 
 _cv_turn: contextvars.ContextVar[TurnLocal | None] = contextvars.ContextVar("opensquad_turn_local", default=None)

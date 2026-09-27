@@ -1258,6 +1258,7 @@
     "about": {
       "checkUpdateFailed": "检查更新失败",
       "checkFailedHint": "无法连接更新服务（网络受限或被限流），当前版本不一定是已是最新，请手动前往发布页面确认。",
+      "staleBundleHint": "界面资源版本 v{{bundle}} 与运行版本 v{{served}} 不一致，说明当前页面来自缓存。请按 Ctrl+Shift+R 强制刷新，或完全退出应用后重新打开。",
       "currentVersion": "当前版本:",
       "versionCheck": "版本检查",
       "checking": "检查中...",

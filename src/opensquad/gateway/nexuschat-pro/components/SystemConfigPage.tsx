@@ -563,6 +563,25 @@ const AboutTab: React.FC = () => {
     }
   };
 
+  /**
+   * True when the page assets disagree with the running install.
+   *
+   * `APP_VERSION` is the constant baked into this bundle; `versionInfo.current`
+   * is what the backend reports. They are built from the same pyproject.toml, so
+   * in a healthy install they match — a mismatch means the browser/Electron cache
+   * served a bundle from an earlier build (the field report behind the
+   * Cache-Control work: the UI kept rendering the previous release).
+   */
+  const bundleVersion = APP_VERSION;
+  const servedVersion = versionInfo.current;
+  const versionStale =
+    Boolean(servedVersion) &&
+    servedVersion !== 'unknown' &&
+    Boolean(bundleVersion) &&
+    bundleVersion !== 'unknown' &&
+    bundleVersion !== '0.0.0' &&
+    bundleVersion !== servedVersion;
+
   return (
     <div className="space-y-6">
       {/* Current Version */}
@@ -597,6 +616,14 @@ const AboutTab: React.FC = () => {
             </span>
           )}
         </div>
+        {versionStale && (
+          <p className="mt-3 text-xs text-amber-600">
+            {t('systemConfig.about.staleBundleHint', {
+              bundle: bundleVersion,
+              served: servedVersion,
+            })}
+          </p>
+        )}
       </div>
 
       {/* Update Check */}

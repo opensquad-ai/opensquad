@@ -811,6 +811,53 @@ describe('buildTimelineFromSession', () => {
     ).toBe(true);
   });
 
+  it('keeps the answer when the turn ends on a tool-call-only frame (double suggest_followups)', () => {
+    // Field report: the model offered follow-ups, wrote the answer, then offered
+    // again in a text-less round. The offer rounds are UI chrome (never drawn as
+    // tool rows), and the answer between them is still the turn's reply — it must
+    // stay a bubble, not become 过程输出.
+    const messages = [
+      { role: 'user', content: '那我这次发你一张图，你快看看能不能识别', timestamp: '2026-09-27T10:00:00.000Z' },
+      {
+        role: 'assistant',
+        content: '',
+        timestamp: '2026-09-27T10:00:01.000Z',
+        tool_calls: [{ id: 'c1', function: { name: 'followup_tools__suggest_followups', arguments: '{}' } }],
+      },
+      { role: 'assistant', content: '我这边还没收到图，直接把图片拖进对话框发送即可。', timestamp: '2026-09-27T10:00:02.000Z' },
+      {
+        role: 'assistant',
+        content: '',
+        timestamp: '2026-09-27T10:00:03.000Z',
+        tool_calls: [{ id: 'c2', function: { name: 'followup_tools__suggest_followups', arguments: '{}' } }],
+      },
+    ];
+    const events = [
+      { type: 'info', data: { text: 'Workflow started', started_ms: 1 }, timestamp: '2026-09-27T10:00:00.000Z' },
+      {
+        type: 'tool_call',
+        data: { id: 'c1', name: 'followup_tools__suggest_followups', args: '{}' },
+        timestamp: '2026-09-27T10:00:01.000Z',
+      },
+      { type: 'tool_result', data: { id: 'c1', content: 'offered' }, timestamp: '2026-09-27T10:00:01.000Z' },
+      {
+        type: 'tool_call',
+        data: { id: 'c2', name: 'followup_tools__suggest_followups', args: '{}' },
+        timestamp: '2026-09-27T10:00:03.000Z',
+      },
+      { type: 'tool_result', data: { id: 'c2', content: 'offered' }, timestamp: '2026-09-27T10:00:03.000Z' },
+    ];
+    const tl = buildTimelineFromSession(messages as any, events as any);
+    expect(
+      tl.some((e) => e.kind === 'message' && String(e.data.content).includes('还没收到图')),
+    ).toBe(true);
+    const folded = tl
+      .filter((e) => e.kind === 'workflow')
+      .flatMap((e) => (e as any).data.events)
+      .filter((e: any) => e.type === 'process_output');
+    expect(folded).toHaveLength(0);
+  });
+
   it('keeps same-turn tools AFTER the user even when event timestamps are earlier', () => {
     // Compression / sub-agent races often persist tool events with ts <= user ts.
     const messages = [

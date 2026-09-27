@@ -49,6 +49,12 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### Added
 
+- **The About tab now names a stale page for what it is.** It compares the
+  version baked into the page bundle with the version the backend reports — they
+  are built from the same `pyproject.toml`, so a mismatch can only mean the UI was
+  served from a cache — and tells the user to force-reload. Verifying a field
+  report otherwise needed a hard refresh plus a reread of the fold, because a
+  cached bundle renders almost normally.
 - **Release artifact verifier** (`scripts/verify_release_artifacts.py`), run by
   `release.yml` between the build and the PyPI upload. It fails on any private
   plugin/skill, model cache, `node_modules` or `.env` in the sdist/wheel, on any
@@ -60,6 +66,14 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### Fixed
 
+- **One turn could offer the same follow-up suggestions twice.** The model is told
+  to call `suggest_followups` once, right before its final answer, but a round
+  that offers them *without* any answer text deliberately keeps the turn alive
+  (the agent still owes the user an answer), so a model that split the offer from
+  the answer called it again — and both offers were emitted and persisted, so the
+  transcript (and the activity fold) carried the same offer twice. An identical
+  set offered twice in one turn is now emitted once; a genuinely different set still goes through
+  (the chips render the last one), and a failed offer can still be retried.
 - **An upgraded install could keep serving the previous release's UI.** A
   download that had moved on to a new version still showed the old UI and the
   old version number, and restarting the app did not help. Electron persists its

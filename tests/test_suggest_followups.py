@@ -10,6 +10,8 @@ from __future__ import annotations
 import asyncio
 import json
 
+import pytest
+
 from opensquad.tools.followup_tools import (
     MAX_SUGGESTIONS,
     _coerce_suggestion_list,
@@ -144,3 +146,84 @@ def test_bus_failure_is_reported_not_raised(monkeypatch):
     monkeypatch.setattr("opensquad.events.bus", _Broken())
     result = asyncio.run(suggest_followups(["甲"]))
     assert "Failed to offer follow-up suggestions" in result
+
+
+# ── one offer per user turn ─────────────────────────────────────────────
+#
+# A text-less offer round does not end the turn (the runner only ends on an
+# *answer* + offer batch), so a model that splits the offer from the answer
+# calls this again after writing it. Both offers used to be emitted and
+# persisted, which showed the same offer twice in the fold.
+
+
+@pytest.fixture
+def turn():
+    from opensquad.session_parallel import TurnLocal, reset_turn_local, set_turn_local
+
+    tl = TurnLocal(sid="s1", round=1)
+    token = set_turn_local(tl)
+    try:
+        yield tl
+    finally:
+        reset_turn_local(token)
+
+
+def test_identical_offer_in_the_same_turn_emits_once(monkeypatch, turn):
+    bus = _Bus()
+    monkeypatch.setattr("opensquad.events.bus", bus)
+    first = asyncio.run(suggest_followups(["甲", "乙"]))
+    second = asyncio.run(suggest_followups(["甲", "乙"]))
+    assert "Follow-up suggestions offered" in first
+    assert "already offered" in second
+    assert len(bus.emitted) == 1
+
+
+def test_same_set_reordered_or_recased_still_counts_as_a_repeat(monkeypatch, turn):
+    bus = _Bus()
+    monkeypatch.setattr("opensquad.events.bus", bus)
+    asyncio.run(suggest_followups(["导出报告", "看板块"]))
+    asyncio.run(suggest_followups(["看板块", "导出报告"]))
+    assert len(bus.emitted) == 1
+
+
+def test_a_different_offer_in_the_same_turn_is_kept(monkeypatch, turn):
+    """The chips render the *last* offer, so a different set must go through."""
+    bus = _Bus()
+    monkeypatch.setattr("opensquad.events.bus", bus)
+    asyncio.run(suggest_followups(["甲"]))
+    asyncio.run(suggest_followups(["乙"]))
+    assert len(bus.emitted) == 2
+
+
+def test_a_new_turn_may_offer_the_same_set_again(monkeypatch, turn):
+    bus = _Bus()
+    monkeypatch.setattr("opensquad.events.bus", bus)
+    asyncio.run(suggest_followups(["甲"]))
+    turn.round = 2
+    asyncio.run(suggest_followups(["甲"]))
+    assert len(bus.emitted) == 2
+
+
+def test_a_failed_emit_does_not_latch(monkeypatch, turn):
+    class _Broken:
+        async def emit_async(self, *a, **k):
+            raise RuntimeError("bus down")
+
+    monkeypatch.setattr("opensquad.events.bus", _Broken())
+    failed = asyncio.run(suggest_followups(["甲"]))
+    assert "Failed to offer follow-up suggestions" in failed
+
+    bus = _Bus()
+    monkeypatch.setattr("opensquad.events.bus", bus)
+    retried = asyncio.run(suggest_followups(["甲"]))
+    assert "Follow-up suggestions offered" in retried
+    assert len(bus.emitted) == 1
+
+
+def test_without_a_turn_scope_nothing_is_deduped(monkeypatch):
+    """CLI / group-chat callers have no TurnLocal — behaviour is unchanged."""
+    bus = _Bus()
+    monkeypatch.setattr("opensquad.events.bus", bus)
+    asyncio.run(suggest_followups(["甲"]))
+    asyncio.run(suggest_followups(["甲"]))
+    assert len(bus.emitted) == 2

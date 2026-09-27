@@ -1260,6 +1260,7 @@
     "about": {
       "checkUpdateFailed": "Failed to check for updates",
       "checkFailedHint": "Could not reach the update service (network blocked or rate-limited). Your build may not be the latest — please check the release page manually.",
+      "staleBundleHint": "The page assets (v{{bundle}}) do not match the running version (v{{served}}), so this UI came from a cache. Press Ctrl+Shift+R to force a reload, or quit the app completely and reopen it.",
       "currentVersion": "Current Version:",
       "versionCheck": "Version Check",
       "checking": "Checking...",
