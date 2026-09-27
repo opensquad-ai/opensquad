@@ -10,6 +10,7 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 | Version                                                                | Date       | Compare to previous                                                                    | Release page                                                                     |
 | ---------------------------------------------------------------------- | ---------- | -------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------- |
+| [0.8.47]                                                               | 2026-09-27 | [0.8.46 → 0.8.47](https://github.com/opensquad-ai/opensquad/compare/v0.8.46...v0.8.47) | [GitHub Release](https://github.com/opensquad-ai/opensquad/releases/tag/v0.8.47) |
 | [0.8.46]                                                               | 2026-09-26 | [0.8.45 → 0.8.46](https://github.com/opensquad-ai/opensquad/compare/v0.8.45...v0.8.46) | [GitHub Release](https://github.com/opensquad-ai/opensquad/releases/tag/v0.8.46) |
 | [0.8.45]                                                               | 2026-09-09 | [0.8.44 → 0.8.45](https://github.com/opensquad-ai/opensquad/compare/v0.8.44...v0.8.45) | [GitHub Release](https://github.com/opensquad-ai/opensquad/releases/tag/v0.8.45) |
 | [0.8.44]                                                               | 2026-08-14 | [0.8.43 → 0.8.44](https://github.com/opensquad-ai/opensquad/compare/v0.8.43...v0.8.44) | [GitHub Release](https://github.com/opensquad-ai/opensquad/releases/tag/v0.8.44) |
@@ -39,6 +40,43 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 ---
 
 ## [Unreleased]
+
+---
+
+## [0.8.47] — 2026-09-27
+
+> The updater works again: `opensquad update` no longer dead-ends on every
+> platform, and the PyPI wheel finally carries the web UI. Attached images stop
+> being dropped on three of the four event-drain paths, and per-session state
+> (working directory, files, panes) is isolated so concurrent sessions cannot
+> overwrite each other.
+
+### Fixed
+
+- **`opensquad update` dead-ended on every platform.** The CLI matched only
+  `.whl`/`.tar.gz`/`.zip` while Releases publish desktop installers only, so it
+  always printed "No suitable release asset found". It now selects the installer
+  for the current platform/arch through the same picker the desktop app uses,
+  and on a frozen desktop build downloads and launches it silently.
+- **Vision images were dropped on three of four drain paths.** Image injection
+  lived only in the parallel loop's per-tool drain; the wait loop, the pre-chat
+  drain and the serial loop now share `vision_inject.apply_vision_injection`, so
+  `read_image` output survives into the next model call of the same turn.
+- **Per-session state leaked between sessions.** Working directory, file
+  snapshots and pane state are session-scoped, and a compressed session reloads
+  by its own sid.
+- **ASR without a system ffmpeg.** `sensevoice` now declares `imageio-ffmpeg`,
+  which it already required implicitly.
+
+### Changed
+
+- **The PyPI wheel now bundles the built web UI.** `release.yml` builds the
+  frontend before `python -m build` — the wheel's package-data includes
+  `gateway/nexuschat-pro/dist/**`, a gitignored build artifact — and fails the
+  job if the wheel ends up without it. Previously the job silently published a
+  package with no frontend at all.
+- **The full pytest suite runs on every `dev` and `main` push** (previously a
+  subset).
 
 ---
 
