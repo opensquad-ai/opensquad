@@ -222,7 +222,21 @@ def test_bare_text_true_is_proven_broken():
 def test_to_text_normalises_bytes_str_and_none():
     assert to_text(None) == ""
     assert to_text("already text") == "already text"
-    assert to_text(_GBK_BYTES) == "中文"
+
+    # No explicit encoding -> the platform's native code page is used: cp936 on
+    # a zh-CN Windows box, UTF-8 on the Linux CI runner. Encode the probe with
+    # that same code page so the assertion holds on both. The previous form
+    # hard-coded cp936 bytes, which only ever proved the behaviour on the
+    # author's machine -- it went red the moment the full suite started running
+    # on the ubuntu gate.
+    native = native_encoding()
+    try:
+        native_probe = "中文".encode(native)
+    except (LookupError, UnicodeEncodeError):  # pragma: no cover - exotic locale
+        pytest.skip(f"native codec {native!r} cannot represent the probe text")
+    assert to_text(native_probe) == "中文"
+
+    # An explicit encoding always wins over the native fallback.
     assert to_text("中文".encode(), encoding="utf-8") == "中文"
 
 
