@@ -34,7 +34,8 @@ declare global {
         releaseNotes?: string
         isBeta: boolean
         releaseUrl?: string
-        error?: string
+        checkFailed?: boolean
+        checkError?: string
       }>
       downloadAndInstallUpdate?: (payload: {
         url: string

@@ -46,6 +46,21 @@ def test_repo_version_files_match_pyproject(sync_version):
     assert sync_version.read_package_json_version(sync_version.NEXUSCHAT_PACKAGE_JSON) == npm
 
 
+@pytest.mark.parametrize(
+    "lock_path_attr",
+    ["PACKAGE_LOCK", "NEXUSCHAT_PACKAGE_LOCK"],
+)
+def test_package_lock_roots_match_pyproject(sync_version, lock_path_attr):
+    """Both locks record the app version twice; a stale root is a silent drift."""
+    import json
+
+    npm = sync_version.pep440_to_npm(sync_version.read_pyproject_version())
+    lock_path = getattr(sync_version, lock_path_attr)
+    data = json.loads(lock_path.read_text(encoding="utf-8"))
+    assert data["version"] == npm, lock_path
+    assert data["packages"][""]["version"] == npm, lock_path
+
+
 def test_sync_version_check_passes_from_repo_root():
     import subprocess
 

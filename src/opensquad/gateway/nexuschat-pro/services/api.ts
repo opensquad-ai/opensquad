@@ -2934,6 +2934,14 @@ export interface VersionCheckResult {
   check_skipped: boolean;
   /** Human-readable explanation when ``check_skipped`` is true. */
   skip_reason: string | null;
+  /**
+   * True when the GitHub lookup itself failed (network blocked, rate-limited,
+   * non-200, malformed payload). ``update_available`` is then meaningless and
+   * must not be rendered as "already up to date".
+   */
+  check_failed?: boolean;
+  /** Short reason for ``check_failed``; safe to log, not always user-facing. */
+  check_error?: string | null;
   download_url?: string | null;
   download_name?: string | null;
   download_size?: number | null;

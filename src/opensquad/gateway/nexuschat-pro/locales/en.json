@@ -1259,6 +1259,7 @@
     },
     "about": {
       "checkUpdateFailed": "Failed to check for updates",
+      "checkFailedHint": "Could not reach the update service (network blocked or rate-limited). Your build may not be the latest — please check the release page manually.",
       "currentVersion": "Current Version:",
       "versionCheck": "Version Check",
       "checking": "Checking...",

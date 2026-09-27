@@ -425,6 +425,8 @@ interface VersionInfoState {
   update_available: boolean;
   check_skipped: boolean;
   skip_reason: string | null;
+  check_failed: boolean;
+  check_error: string | null;
   download_url: string | null;
   download_name: string | null;
   download_size: number | null;
@@ -440,13 +442,15 @@ const AboutTab: React.FC = () => {
       if (cached) {
         const parsed = JSON.parse(cached);
         return {
-          current: APP_VERSION,
+          current: parsed.current ?? APP_VERSION,
           channel: parsed.channel ?? 'unknown',
           latest: parsed.latest ?? null,
           url: parsed.url ?? null,
           update_available: Boolean(parsed.update_available),
           check_skipped: Boolean(parsed.check_skipped),
           skip_reason: parsed.skip_reason ?? null,
+          check_failed: Boolean(parsed.check_failed),
+          check_error: parsed.check_error ?? null,
           download_url: parsed.download_url ?? null,
           download_name: parsed.download_name ?? null,
           download_size: parsed.download_size ?? null,
@@ -461,6 +465,8 @@ const AboutTab: React.FC = () => {
       update_available: false,
       check_skipped: false,
       skip_reason: null,
+      check_failed: false,
+      check_error: null,
       download_url: null,
       download_name: null,
       download_size: null,
@@ -532,6 +538,8 @@ const AboutTab: React.FC = () => {
         update_available: data.update_available,
         check_skipped: data.check_skipped,
         skip_reason: data.skip_reason,
+        check_failed: Boolean(data.check_failed),
+        check_error: data.check_error ?? null,
         download_url: data.download_url ?? null,
         download_name: data.download_name ?? null,
         download_size: data.download_size ?? null,
@@ -570,8 +578,11 @@ const AboutTab: React.FC = () => {
         </div>
         <div className="flex items-center gap-2 text-sm flex-wrap">
           <span className="text-textMuted">{t('systemConfig.about.currentVersion')}</span>
+          {/* The backend reports the installed version; APP_VERSION is only the
+              constant baked into this bundle. A cached bundle would otherwise
+              keep claiming the old version long after the install moved on. */}
           <span className="font-mono font-semibold text-textMain px-2 py-0.5 bg-primary/10 rounded">
-            v{APP_VERSION}
+            v{versionInfo.current}
           </span>
           {versionInfo.channel && versionInfo.channel !== 'unknown' && (
             <span
@@ -616,7 +627,27 @@ const AboutTab: React.FC = () => {
           </div>
         )}
 
-        {updateChecked && !checking && !error && !versionInfo.check_skipped && (
+        {updateChecked && !checking && !error && !versionInfo.check_skipped && versionInfo.check_failed && (
+          <div className="mt-4 px-4 py-3 bg-amber-50 border border-amber-200 rounded-lg text-amber-800">
+            <div className="flex items-center gap-2 text-sm font-medium">
+              <AlertCircle size={16} />
+              {t('systemConfig.about.checkUpdateFailed')}
+            </div>
+            <p className="text-xs text-amber-700 mt-1">{t('systemConfig.about.checkFailedHint')}</p>
+            {versionInfo.url && (
+              <a
+                href={versionInfo.url}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex items-center gap-1 text-xs text-primary hover:underline mt-2"
+              >
+                {t('systemConfig.about.viewRelease')} <ExternalLink size={12} />
+              </a>
+            )}
+          </div>
+        )}
+
+        {updateChecked && !checking && !error && !versionInfo.check_skipped && !versionInfo.check_failed && (
           <div className="mt-4 space-y-3">
             {versionInfo.update_available ? (
               <div className="px-4 py-3 bg-amber-50 border border-amber-200 rounded-lg space-y-3">

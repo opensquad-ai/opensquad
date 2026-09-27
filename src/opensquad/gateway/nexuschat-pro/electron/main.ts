@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, Menu, Tray, nativeImage, ipcMain } from 'electron'
+import { app, BrowserWindow, dialog, Menu, Tray, nativeImage, ipcMain, session } from 'electron'
 import { spawn, ChildProcess } from 'child_process'
 import net from 'net'
 import path from 'path'
@@ -103,6 +103,49 @@ function ensureStableUserData(): void {
 
 ensureStableUserData()
 
+/**
+ * Drop the on-disk web cache once per version change.
+ *
+ * An upgrade replaces dist/ in place, but Electron's HTTP cache lives in
+ * userData (``Cache`` / ``Code Cache`` / ``GPUCache``) and therefore survives
+ * both the reinstall and a restart. The gateway serves the un-hashed
+ * ``index.html`` with ``Cache-Control: no-cache`` now, so a *fresh* cache always
+ * revalidates — but installs upgraded from a build that predates that header
+ * still hold a heuristically-fresh shell pointing at the previous release's
+ * hashed chunks. Clearing once, when the version changes, loads the new UI on
+ * the first launch after the upgrade with no user action (users were otherwise
+ * told to press Ctrl+Shift+R).
+ *
+ * Only on a version change: clearing on every launch would throw away the
+ * asset cache and make every start a cold one.
+ */
+const WEB_CACHE_VERSION_MARKER = 'last-version.txt'
+
+async function clearWebCacheOnVersionChange(): Promise<void> {
+  const marker = path.join(app.getPath('userData'), WEB_CACHE_VERSION_MARKER)
+  const current = app.getVersion()
+  let last = ''
+  try {
+    last = fs.readFileSync(marker, 'utf-8').trim()
+  } catch {
+    /* no marker yet — first launch of a build that knows about this */
+  }
+  if (last === current) return
+
+  try {
+    await session.defaultSession.clearCache()
+    await session.defaultSession.clearCodeCaches({})
+  } catch (err) {
+    console.warn('[electron] Failed to clear the web cache:', err)
+  }
+  try {
+    fs.writeFileSync(marker, `${current}\n`)
+  } catch (err) {
+    console.warn('[electron] Failed to record the web cache version:', err)
+  }
+  console.log(`[electron] Cleared the web cache on version change: ${last || '(none)'} -> ${current}`)
+}
+
 function resolvePackagedAsset(name: string): string {
   const devPath = path.join(__dirname, '..', 'assets', name)
   if (!app.isPackaged) return devPath
@@ -201,7 +244,8 @@ function registerElectronIpc(): void {
           currentVersion: app.getVersion(),
           latestVersion: app.getVersion(),
           isBeta: false,
-          error: message,
+          checkFailed: true,
+          checkError: message,
         }
       }
     },
@@ -651,6 +695,8 @@ app.whenReady().then(async () => {
     // serialized by workspace_utils.workspace_bootstrap_lock (file lock).
     startBackend()
     startLauncher()
+    // Must finish before the window loads APP_URL, or the stale shell wins.
+    await clearWebCacheOnVersionChange()
   } else {
     console.log(
       '[electron] DEV_MODE enabled — skipping backend spawn; loading Vite at',

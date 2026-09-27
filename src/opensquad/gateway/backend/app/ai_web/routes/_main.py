@@ -612,8 +612,15 @@ async def check_version(platform: str | None = None, arch: str | None = None):
     """Get current version and check for updates from GitHub.
 
     Returns ``{current, channel, latest, url, update_available,
-    check_skipped, skip_reason, download_url?, download_name?, download_size?}``.
+    check_skipped, skip_reason, check_failed, check_error, download_url?,
+    download_name?, download_size?}``.
     The frontend should respect ``check_skipped=True`` and not show an update banner.
+
+    ``check_failed=True`` means the GitHub lookup itself did not complete
+    (network blocked, rate-limited, non-200, malformed payload). The frontend
+    must render an explicit "could not reach the update service" state rather
+    than the green "already up to date" panel: a silent failure used to look
+    exactly like a genuine "no newer release", which left users on old builds.
 
     When *platform* is ``win32``, ``darwin``, or ``linux`` and an update exists,
     the response includes a GitHub Release asset URL suitable for in-app install.
@@ -638,6 +645,8 @@ async def check_version(platform: str | None = None, arch: str | None = None):
         "update_available": False,
         "check_skipped": not do_check,
         "skip_reason": skip_reason,
+        "check_failed": False,
+        "check_error": None,
         "download_url": None,
         "download_name": None,
         "download_size": None,
@@ -659,6 +668,9 @@ async def check_version(platform: str | None = None, arch: str | None = None):
             tag = data.get("tag_name", "").lstrip("v")
             result["latest"] = tag
             result["url"] = data.get("html_url", "")
+            if not tag:
+                result["check_failed"] = True
+                result["check_error"] = "GitHub release has no tag_name"
             # Compare versions
             if tag and current and tag != current:
                 try:
@@ -679,7 +691,13 @@ async def check_version(platform: str | None = None, arch: str | None = None):
                     result["download_url"] = picked["url"]
                     result["download_name"] = picked["name"]
                     result["download_size"] = picked["size"]
+        else:
+            result["check_failed"] = True
+            result["check_error"] = f"GitHub API returned HTTP {resp.status_code}"
+            logger.debug(f"[version] GitHub check failed: HTTP {resp.status_code}")
     except Exception as e:
+        result["check_failed"] = True
+        result["check_error"] = str(e) or e.__class__.__name__
         logger.debug(f"[version] GitHub check failed: {e}")
 
     return result

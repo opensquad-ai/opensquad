@@ -18,6 +18,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import Response
 from fastapi.staticfiles import StaticFiles
+from starlette.staticfiles import PathLike
+from starlette.types import Scope
 
 # ── Phase 2.5: Workspace initialization (must happen before all other imports) ──
 # Ensure workspace is initialized, otherwise all paths will be wrong
@@ -773,8 +775,11 @@ elif _VITE_AVAILABLE:
 def _serve_dist_file(path: str):
     """Serve a file from the built frontend dist/ directory, if it exists.
 
-    Falls back to index.html for SPA routing (same behaviour as
-    StaticFiles(..., html=True)). Returns None if the file is not found.
+    Falls back to index.html for unknown paths, so a deep link still loads the
+    app shell. (Plain ``StaticFiles(..., html=True)`` does not do that — its
+    index.html fallback only applies to a directory URL, and it otherwise
+    serves a ``404.html`` when one exists.) Returns None if the file is not
+    found.
     """
     if not os.path.exists(FRONTEND_DIST):
         return None
@@ -791,6 +796,50 @@ def _serve_dist_file(path: str):
     if os.path.isfile(index_path):
         return index_path
     return None
+
+
+# ── Cache policy for the built UI ────────────────────────────────────────────
+# Starlette's StaticFiles sends only ``etag`` / ``last-modified``. With no
+# Cache-Control at all, Chromium falls back to *heuristic* freshness — 10% of
+# the time since Last-Modified — which, after a few days of use, is hours
+# during which the un-hashed ``index.html`` is served from the on-disk cache
+# without ever asking this server. Electron keeps that cache in userData
+# (``Cache`` / ``Code Cache`` / ``GPUCache``), so it survives a reinstall *and*
+# a restart. A stale shell keeps referencing the previous release's hashed
+# chunks — also still cached — so the whole UI reverts to the old release and
+# only Ctrl+Shift+R (or deleting those directories) escapes it. That is the
+# "still shows the old version after I restart the app" report.
+#
+# So: the shell revalidates on every launch (a 304 is cheap), and the
+# content-addressed bundles under ``assets/`` may be cached forever.
+_SHELL_CACHE_CONTROL = "no-cache"
+_ASSET_CACHE_CONTROL = "public, max-age=31536000, immutable"
+_HASHED_ASSET_DIR = "assets"
+
+
+def _frontend_cache_control(full_path: PathLike) -> str:
+    """Cache policy for one file under the built frontend dist/."""
+    parts = str(full_path).replace("\\", "/").split("/")
+    if parts[-1].endswith(".html"):
+        return _SHELL_CACHE_CONTROL
+    if len(parts) >= 2 and parts[-2] == _HASHED_ASSET_DIR:
+        return _ASSET_CACHE_CONTROL
+    return _SHELL_CACHE_CONTROL
+
+
+class _FrontendStaticFiles(StaticFiles):
+    """StaticFiles for dist/ that always states an explicit cache policy."""
+
+    def file_response(
+        self,
+        full_path: PathLike,
+        stat_result: os.stat_result,
+        scope: Scope,
+        status_code: int = 200,
+    ) -> Response:
+        response = super().file_response(full_path, stat_result, scope, status_code)
+        response.headers["Cache-Control"] = _frontend_cache_control(full_path)
+        return response
 
 
 if _VITE_AVAILABLE:
@@ -886,7 +935,11 @@ if _VITE_AVAILABLE:
                 elif dist_file.endswith(".css"):
                     content_type = "text/css"
                 # dist assets are MB-scale: read them off the event loop.
-                return Response(content=await blocking_io.read_bytes(dist_file), media_type=content_type)
+                return Response(
+                    content=await blocking_io.read_bytes(dist_file),
+                    media_type=content_type,
+                    headers={"Cache-Control": _frontend_cache_control(dist_file)},
+                )
             return Response(
                 content="<html><body><h2>Frontend dev server unavailable</h2>"
                 "<p>The Vite dev server is not running and no built dist/ "
@@ -899,7 +952,7 @@ if _VITE_AVAILABLE:
 
 elif os.path.exists(FRONTEND_DIST):
     _startup_log.info("[Frontend] Serving static dist from %s", FRONTEND_DIST)
-    app.mount("/", StaticFiles(directory=FRONTEND_DIST, html=True), name="frontend")
+    app.mount("/", _FrontendStaticFiles(directory=FRONTEND_DIST, html=True), name="frontend")
 else:
     _startup_log.error("[Frontend] dist directory not found: %s — UI will be blank", FRONTEND_DIST)
 

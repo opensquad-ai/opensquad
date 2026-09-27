@@ -60,6 +60,27 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### Fixed
 
+- **An upgraded install could keep serving the previous release's UI.** A
+  download that had moved on to a new version still showed the old UI and the
+  old version number, and restarting the app did not help. Electron persists its
+  HTTP cache in userData (`Cache` / `Code Cache` / `GPUCache`), and the gateway
+  served `dist/` through a plain `StaticFiles` mount — `etag` / `last-modified`
+  only, no `Cache-Control` — so Chromium applied heuristic freshness to the
+  un-hashed `index.html` and kept serving the old shell, which referenced the
+  previous release's (also cached) hashed chunks. Only `Ctrl+Shift+R` or
+  deleting those directories escaped it. Three layers now address it: the shell
+  revalidates (`Cache-Control: no-cache`) while content-addressed `assets/**`
+  are cached immutably; the desktop app clears that cache once per version
+  change, before the window loads; and the About tab reports the version the
+  backend actually runs instead of the constant baked into the bundle.
+- **A failed update check was indistinguishable from "already up to date".**
+  When `api.github.com` is unreachable (blocked, rate-limited, non-200) the
+  `/version` route returned `update_available: false` with no failure marker, and
+  the About tab rendered the green "already the latest version" panel — telling
+  users they were current while they were stuck on an old build. Electron's
+  `checkForUpdates` did the same, seeding `latestVersion` with the running
+  version. Both now report `checkFailed` / `check_failed` with a reason, and the
+  UI shows an explicit "could not reach the update service" state instead.
 - **Local caches, local agents and private skills reached the artifacts.** A
   build on a working checkout produced a 46 MB sdist carrying 14,261 files git
   does not track — the four plugin UI `node_modules` trees, `agent301`'s
@@ -122,6 +143,11 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   also holds untracked tests of private work, which `python -m build` swept in
   alongside the tracked ones; `MANIFEST.in` prunes `tests/` rather than trying
   to filter by name. The wheel never carried them.
+- **`scripts/sync_version.py` now also syncs the desktop lockfile.**
+  `gateway/nexuschat-pro/package-lock.json` was left at `0.8.45` while its
+  `package.json` moved on, so a `npm ci` in that directory would report a
+  version mismatch. Both `package-lock.json` roots are updated (and checked by
+  `--check`) now.
 
 ---
 

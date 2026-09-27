@@ -21,6 +21,13 @@ export interface UpdateInfo {
   releaseNotes?: string
   isBeta: boolean
   releaseUrl?: string
+  /**
+   * True when the check could not be completed (network blocked, timeout,
+   * non-200, unparseable payload). When set, `hasUpdate: false` only means
+   * "unknown", never "up to date" — the UI must not claim the app is current.
+   */
+  checkFailed?: boolean
+  checkError?: string
 }
 
 export type UpdateChannel = 'stable' | 'beta'
@@ -93,12 +100,14 @@ function pickAssetForPlatform(
   return { url: asset.browser_download_url, fileName: asset.name }
 }
 
-function noUpdate(currentVersion: string): UpdateInfo {
+function checkFailedResult(currentVersion: string, reason: string): UpdateInfo {
   return {
     hasUpdate: false,
     currentVersion,
     latestVersion: currentVersion,
     isBeta: false,
+    checkFailed: true,
+    checkError: reason,
   }
 }
 
@@ -106,7 +115,7 @@ export async function checkForUpdates(channel: UpdateChannel = 'stable'): Promis
   const currentVersion = app.getVersion()
   const currentParsed = parseVersion(`v${currentVersion}`)
   if (!currentParsed) {
-    return noUpdate(currentVersion)
+    return checkFailedResult(currentVersion, `Unparseable running version: ${currentVersion}`)
   }
 
   return new Promise((resolve) => {
@@ -114,14 +123,14 @@ export async function checkForUpdates(channel: UpdateChannel = 'stable'): Promis
     request.setHeader('User-Agent', 'OpenSquad-Desktop-Updater')
     const timer = setTimeout(() => {
       request.abort()
-      resolve(noUpdate(currentVersion))
+      resolve(checkFailedResult(currentVersion, 'Update check timed out'))
     }, REQUEST_TIMEOUT_MS)
 
     request.on('response', (response) => {
       const status = response.statusCode ?? 0
       if (status !== 200) {
         clearTimeout(timer)
-        resolve(noUpdate(currentVersion))
+        resolve(checkFailedResult(currentVersion, `GitHub API returned HTTP ${status}`))
         return
       }
       let body = ''
@@ -174,7 +183,7 @@ export async function checkForUpdates(channel: UpdateChannel = 'stable'): Promis
           }
 
           if (!target || !targetParsed) {
-            resolve(noUpdate(currentVersion))
+            resolve(checkFailedResult(currentVersion, 'No parseable release found'))
             return
           }
 
@@ -192,13 +201,13 @@ export async function checkForUpdates(channel: UpdateChannel = 'stable'): Promis
             releaseUrl: target.html_url,
           })
         } catch {
-          resolve(noUpdate(currentVersion))
+          resolve(checkFailedResult(currentVersion, 'Malformed release payload'))
         }
       })
     })
-    request.on('error', () => {
+    request.on('error', (error: Error) => {
       clearTimeout(timer)
-      resolve(noUpdate(currentVersion))
+      resolve(checkFailedResult(currentVersion, error?.message || 'Request failed'))
     })
     request.end()
   })
