@@ -181,8 +181,7 @@ def test_every_event_drain_site_injects_vision():
             checked += 1
             window = "\n".join(lines[max(0, i - 2) : i + 8])
             ok = (
-                "apply_vision_injection" in window
-                or "_leftover" in line  # turn-end sweep re-pushes non-user events
+                "apply_vision_injection" in window or "_leftover" in line  # turn-end sweep re-pushes non-user events
             )
             assert ok, f"{rel}:{i + 1} drains events without injecting vision paths"
     assert checked >= 5, f"expected the known drain sites to still exist, found {checked}"
