@@ -23,6 +23,32 @@ if TYPE_CHECKING:
 __all__ = ["InputHandler"]
 
 
+def _cancel_scope_sid(runner: Any, get_session_manager: Callable[[], Any] | None = None) -> str:
+    """Session a New-Session / draft-abort command belongs to (``""`` if unknown).
+
+    These commands used to call an agent-wide ``job_manager.cancel_all(...)``,
+    so opening a new chat in one pane tore down every *other* pane's running
+    sub-agents. Resolving the owning session first lets the caller scope the
+    cancel (``cancel_by_sid``) and leave siblings alone.
+    """
+    try:
+        if get_session_manager is not None:
+            sm = get_session_manager()
+        else:  # pragma: no cover - callers pass it; kept for direct use
+            from opensquad.session_manager import get_session_manager as _get
+
+            sm = _get()
+        sid = str(sm.get_focused_session_id() or sm.get_current_session_id() or "").strip()
+        if sid:
+            return sid
+    except Exception:
+        pass
+    try:
+        return str(getattr(runner, "_turn_sid", "") or "").strip()
+    except Exception:
+        return ""
+
+
 class InputHandler:
     """
     Routes internal commands from the main run() loop.
@@ -98,7 +124,11 @@ class InputHandler:
             try:
                 from opensquad.sub_agent_runner import job_manager
 
-                job_manager.cancel_all("new_session")
+                _cs = _cancel_scope_sid(runner, get_session_manager)
+                if _cs:
+                    job_manager.cancel_by_sid(_cs, "new_session")
+                else:
+                    job_manager.cancel_all("new_session")
             except Exception:
                 pass
             runner._reset_session_stats()
@@ -195,7 +225,11 @@ class InputHandler:
             try:
                 from opensquad.sub_agent_runner import job_manager
 
-                job_manager.cancel_all("new_session")
+                _cs = _cancel_scope_sid(runner, get_session_manager)
+                if _cs:
+                    job_manager.cancel_by_sid(_cs, "new_session")
+                else:
+                    job_manager.cancel_all("new_session")
             except Exception:
                 pass
             runner._reset_session_stats()

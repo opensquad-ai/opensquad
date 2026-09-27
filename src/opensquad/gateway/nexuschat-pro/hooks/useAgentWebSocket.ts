@@ -61,6 +61,7 @@ import {
   unwrapTokenStatsPayload,
 } from '../utils/sessionTokenStats';
 import { requestSessionListRefresh } from '../utils/sessionProjectMeta';
+import { compressionHydrateSid } from '../utils/compressionHydrate';
 import { hydrateOptionsProposalsFromEvents } from '../components/ai-chat/OptionsApprovalCard';
 import {
   hydrateFollowupsFromEvents,
@@ -1870,7 +1871,17 @@ export function useAgentWebSocket(agentId: string, ctx: AgentWebWsCtx) {
     const hydrateCurrentSession = (opts?: {
       showLoading?: boolean;
       wasNewSession?: boolean;
+      /**
+       * Hydrate THIS session instead of the agent's `/current` pointer.
+       *
+       * Required after a session-scoped mutation (manual compression of a
+       * non-focused session): `/current` is the agent's pointer and answers
+       * with a DIFFERENT session in a multi-tab layout, so painting its
+       * response here crossed the panes.
+       */
+      targetSid?: string;
     }) => {
+      const targetSid = (opts?.targetSid || '').trim();
       hydrateCurrentSessionRef.current = hydrateCurrentSession;
       const seq = ++sessionReloadSeqRef.current;
       isHydratingSessionRef.current = true;
@@ -1894,7 +1905,17 @@ export function useAgentWebSocket(agentId: string, ctx: AgentWebWsCtx) {
           const attemptFetch = () =>
             Promise.race([
               // First page only — older turns load on scroll-up via loadMoreHistory.
-              agentSessionAPI.getCurrentSession(agentId, 0, SESSION_HISTORY_PAGE_SIZE),
+              // A targeted hydrate MUST read the session it names: `/current` is
+              // the agent's pointer and may point at a different session.
+              targetSid
+                ? agentSessionAPI
+                    .getSessionHistoryPaged(agentId, targetSid, 0, SESSION_HISTORY_PAGE_SIZE)
+                    .then((r) => ({
+                      agent_id: agentId,
+                      current_session_id: targetSid,
+                      session: r.session,
+                    }))
+                : agentSessionAPI.getCurrentSession(agentId, 0, SESSION_HISTORY_PAGE_SIZE),
               new Promise<never>((_, reject) =>
                 setTimeout(() => reject(new Error('Hydration timeout (10s)')), 10000)
               ),
@@ -1932,7 +1953,9 @@ export function useAgentWebSocket(agentId: string, ctx: AgentWebWsCtx) {
           const currentSid = resp.current_session_id;
           let session = resp.session;
           let viewedSid = currentSid;
-          if (currentSid) {
+          // A targeted hydrate is BY DEFINITION not the agent's current session —
+          // never let a session-scoped refresh move the agent-current pointer.
+          if (currentSid && !targetSid) {
             agentCurrentSessionIdRef.current = currentSid;
           }
           const guard = newSessionGuardRef.current;
@@ -1960,7 +1983,8 @@ export function useAgentWebSocket(agentId: string, ctx: AgentWebWsCtx) {
           const restoreSid = String(
             typeof getBootRestoreSessionId === 'function' ? getBootRestoreSessionId() || '' : '',
           ).trim();
-          if (restoreSid && restoreSid !== currentSid) {
+          // Never let the boot-restore fallback hijack an explicit target.
+          if (!targetSid && restoreSid && restoreSid !== currentSid) {
             try {
               const restored = await agentSessionAPI.getSessionHistoryPaged(
                 agentId,
@@ -2500,7 +2524,7 @@ export function useAgentWebSocket(agentId: string, ctx: AgentWebWsCtx) {
       })();
     };
 
-    const scheduleCurrentSessionHydration = (delayMs: number = 120) => {
+    const scheduleCurrentSessionHydration = (delayMs: number = 120, targetSid: string = '') => {
       if (newSessionPendingRef.current) return;
       if (sessionReloadTimerRef.current) {
         clearTimeout(sessionReloadTimerRef.current);
@@ -2508,7 +2532,7 @@ export function useAgentWebSocket(agentId: string, ctx: AgentWebWsCtx) {
       sessionReloadTimerRef.current = setTimeout(() => {
         sessionReloadTimerRef.current = null;
         if (viewingHistorySessionRef.current || newSessionPendingRef.current) return;
-        hydrateCurrentSession({ showLoading: false });
+        hydrateCurrentSession({ showLoading: false, targetSid });
       }, delayMs);
     };
 
@@ -3021,8 +3045,11 @@ export function useAgentWebSocket(agentId: string, ctx: AgentWebWsCtx) {
       if (reason === 'compression') {
         // Always reload after compression so the "已归档" section appears
         // without requiring a page refresh. Merge path keeps in-flight tools.
+        // Hydrate the session the compressor NAMED: `/current` is the agent's
+        // pointer, and whenever another session is focused it answers with a
+        // different session — that painted the wrong chat into the pane (串页).
         compressionHydrationPendingRef.current = true;
-        scheduleCurrentSessionHydration(80);
+        scheduleCurrentSessionHydration(80, compressionHydrateSid(data));
         return;
       }
       if (reason === 'withdraw') {

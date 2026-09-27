@@ -40,6 +40,12 @@ class InputHub:
         self._session_queues: dict[str, asyncio.Queue] = {}
         self._session_urgent_queues: dict[str, asyncio.Queue] = {}
         self._stop_sessions: set[str] = set()
+        # Sessions that were running when an *agent-wide* Stop was raised. The
+        # bare ``_stop_requested`` latch used to make ``is_session_stop_requested``
+        # answer True for **any** sid, so a session started after a Stop was born
+        # "stopped" and its first message was discarded until something cleared
+        # the latch. The latch now only covers the sessions it was raised against.
+        self._global_stop_sids: set[str] = set()
         self.last_message_source = None  # records the source of the last message, used for replies
         self._stop_requested = False  # stop request flag (agent-wide)
         self.agent_dir = None  # Agent root directory (e.g. agents/ai002)
@@ -50,41 +56,52 @@ class InputHub:
         """Set Agent context for localizing multi-modal resources."""
         self.agent_dir = agent_dir
 
-    def _check_session_cwd(self):
-        """Check for .session_cwd signal file and apply working directory.
+    def _check_session_cwd(self, session_id: str = ""):
+        """Check for the ``.session_cwd`` signal file and apply the working directory.
 
-        Called at the start of every conversation turn (in
-        ``get_user_response()``). If the launcher has written a
-        ``.session_cwd`` file in the agent's directory, we read the path
-        and call ``filesystem.set_session_cwd()`` to update the agent's
+        Called at the start of every conversation turn. If the launcher has
+        written a ``.session_cwd`` file in the agent's directory, we read the
+        path and call ``filesystem.set_session_cwd()`` to update the agent's
         working directory in real-time.
 
-        Also updates ``AgentContext.session_cwd`` so that
-        ``get_workspace_root()`` returns the new path.
+        ``session_id`` scopes **both** halves of that: the file
+        (``.session_cwd.<key>``, falling back to the agent-level file) and the
+        apply (that session's cwd, and only that session's shells). An empty
+        ``session_id`` keeps the historical agent-level behaviour that the
+        serial path and the launcher's sid-less writer still rely on.
         """
         if not self.agent_dir:
             logger.debug("[InputHub] _check_session_cwd: agent_dir not set, skipping")
             return
-        from opensquad.utils.session_cwd import read_session_cwd, session_cwd_path
+        from opensquad.utils.session_cwd import read_session_cwd
 
-        cwd_file = session_cwd_path(self.agent_dir)
-        if not os.path.isfile(cwd_file):
+        sid = (session_id or "").strip()
+        data = read_session_cwd(self.agent_dir, sid)
+        if not data:
+            # Nothing set (neither a session-scoped nor an agent-level file) —
+            # make sure no stale value is still in force.
             try:
                 from opensquad._context import get_current_context
-                from opensquad.utils.path_utils import set_session_cwd_override
+                from opensquad.utils.path_utils import (
+                    clear_session_cwd_for,
+                    get_session_cwd_for,
+                    set_session_cwd_override,
+                )
 
-                ctx = get_current_context()
-                if ctx and ctx.session_cwd:
-                    ctx.session_cwd = ""
-                    set_session_cwd_override(None)
-                    logger.info("[InputHub] Session working directory reset (signal file removed)")
+                if sid:
+                    if get_session_cwd_for(sid):
+                        clear_session_cwd_for(sid)
+                        logger.info("[InputHub] Session working directory reset (sid=%s)", sid)
+                else:
+                    ctx = get_current_context()
+                    if ctx and ctx.session_cwd:
+                        ctx.session_cwd = ""
+                        set_session_cwd_override(None)
+                        logger.info("[InputHub] Session working directory reset (signal file removed)")
             except Exception as e:
                 logger.debug(f"[InputHub] _check_session_cwd reset skipped: {e}")
             return
 
-        data = read_session_cwd(self.agent_dir)
-        if not data:
-            return
         new_cwd = (data.get("path") or "").strip()
 
         if not new_cwd or not os.path.isdir(new_cwd):
@@ -97,32 +114,38 @@ class InputHub:
         #
         # Compare NORMALISED paths. The signal file stores
         # ``os.path.abspath(p)`` verbatim, while ``set_session_cwd`` records
-        # ``os.path.normcase(os.path.abspath(p))`` into ``ctx.session_cwd`` —
-        # on Windows that lower-cases the drive letter, so a plain ``==``
-        # never matches and the cwd was re-applied on *every* turn. Each
-        # re-apply closes every live shell session (see
+        # ``os.path.normcase(os.path.abspath(p))`` — on Windows that lower-cases
+        # the drive letter, so a plain ``==`` never matches and the cwd was
+        # re-applied on *every* turn. Each re-apply recycles shells (see
         # ``filesystem.set_session_cwd``), which is what killed shell commands
         # that were still running mid-turn.
         try:
-            from opensquad._context import get_current_context
+            from opensquad.utils.path_utils import get_session_cwd_for
 
-            ctx = get_current_context()
-            if ctx and ctx.session_cwd and _norm_path(ctx.session_cwd) == _norm_path(new_cwd):
+            if sid:
+                current = get_session_cwd_for(sid)
+            else:
+                from opensquad._context import get_current_context
+
+                ctx = get_current_context()
+                current = (ctx.session_cwd if ctx and ctx.session_cwd else "") or ""
+            if current and _norm_path(current) == _norm_path(new_cwd):
                 logger.debug(f"[InputHub] _check_session_cwd: already applied '{new_cwd}', skipping")
                 return
             logger.info(
-                f"[InputHub] _check_session_cwd: applying new cwd '{new_cwd}' (ctx.session_cwd was '{ctx.session_cwd if ctx else 'None'}')"
+                f"[InputHub] _check_session_cwd: applying new cwd '{new_cwd}' (sid={sid or 'legacy'}, was '{current}')"
             )
         except Exception as e:
             logger.warning(f"[InputHub] _check_session_cwd: context check failed: {e}")
 
-        # Apply the new working directory
+        # Apply the new working directory. The sid-less call keeps the exact
+        # single-argument shape callers/tests already stub.
         try:
             from opensquad.tools.filesystem import set_session_cwd
 
-            result = set_session_cwd(new_cwd)
+            result = set_session_cwd(new_cwd, session_id=sid) if sid else set_session_cwd(new_cwd)
             if result.get("status") == "success":
-                logger.info(f"[InputHub] Session working directory applied: {new_cwd}")
+                logger.info(f"[InputHub] Session working directory applied: {new_cwd} (sid={sid or 'legacy'})")
             else:
                 logger.warning(f"[InputHub] set_session_cwd returned: {result}")
         except Exception as e:
@@ -167,8 +190,14 @@ class InputHub:
         if self._new_input_event is not None:
             self._new_input_event.set()
 
-    def _try_pop_any(self) -> tuple[str | None, dict] | None:
-        """Non-blocking: prefer agent urgent, then per-sid urgent, then global, then per-sid normal."""
+    def _try_pop_any(self, exclude_sids: set[str] | None = None) -> tuple[str | None, dict] | None:
+        """Non-blocking: prefer agent urgent, then per-sid urgent, then global, then per-sid normal.
+
+        ``exclude_sids`` temporarily skips the **normal** inbox of those
+        sessions only. Their urgent queues are still drained, so a queued
+        ``__STOP__`` / ``__NEW_SESSION__`` for a busy pane can never be starved
+        behind a running sibling.
+        """
         uq = self._get_urgent_queue()
         if not uq.empty():
             try:
@@ -188,7 +217,10 @@ class InputHub:
                 return (item.get("session_id") or None, item)
             except asyncio.QueueEmpty:
                 pass
+        blocked = exclude_sids or ()
         for sid, sq in list(self._session_queues.items()):
+            if blocked and sid in blocked:
+                continue
             if not sq.empty():
                 try:
                     return (sid, sq.get_nowait())
@@ -196,19 +228,35 @@ class InputHub:
                     continue
         return None
 
-    async def wait_any(self, timeout: float | None = None) -> tuple[str | None, dict] | None:
+    async def wait_any(
+        self,
+        timeout: float | None = None,
+        exclude_sids: set[str] | None = None,
+    ) -> tuple[str | None, dict] | None:
         """Wait for the next input from any session (or agent-level queue).
 
         Returns (session_id|None, item). session_id is None for agent-level commands
         (global urgent / legacy global queue without sid).
+
+        ``exclude_sids`` lets the dispatcher stop re-reading a session whose turn
+        is already running without parking the whole loop: the excluded session's
+        normal inbox is skipped while every other session keeps being served.
+
+        NOTE: this deliberately does **not** poll ``.session_cwd`` any more. It
+        used to, on every dispatcher tick, which replayed whichever pane had
+        touched the folder picker last onto *every* session. The cwd is now
+        applied per turn, by the owning session, in
+        ``runner._parallel_session_turn``.
         """
-        self._check_session_cwd()
-        popped = self._try_pop_any()
+        event = self.get_input_event()
+        # Clear BEFORE the non-blocking probe: a push landing between the probe
+        # and the wait would otherwise be swallowed by the clear and the loop
+        # would sit until the timeout (a lost wake-up).
+        event.clear()
+        popped = self._try_pop_any(exclude_sids)
         if popped is not None:
             return popped
 
-        event = self.get_input_event()
-        event.clear()
         try:
             if timeout is None:
                 await event.wait()
@@ -217,7 +265,7 @@ class InputHub:
         except asyncio.TimeoutError:
             return None
         event.clear()
-        return self._try_pop_any()
+        return self._try_pop_any(exclude_sids)
 
     def peek_session_pending(self, sid: str) -> bool:
         sq = self._session_queues.get(sid)
@@ -629,6 +677,7 @@ class InputHub:
                 for sid in list(getattr(sched, "busy_sessions", set()) or set()):
                     try:
                         self._stop_sessions.add(sid)
+                        self._global_stop_sids.add(sid)
                         sched.request_stop_session(sid)
                     except Exception:
                         pass
@@ -697,7 +746,21 @@ class InputHub:
         self._stop_sessions.discard(session_id or "")
 
     def is_session_stop_requested(self, session_id: str) -> bool:
-        return (session_id or "") in self._stop_sessions or self._stop_requested
+        """Whether *session_id* is currently stopped.
+
+        A per-session latch always wins. The agent-wide latch only covers the
+        sessions that were running when it was raised (``_global_stop_sids``);
+        a session started afterwards is not born stopped. ``session_id`` empty
+        keeps the old "any Stop means stopped" answer for sid-less callers.
+        """
+        sid = session_id or ""
+        if sid in self._stop_sessions:
+            return True
+        if not self._stop_requested:
+            return False
+        if not sid:
+            return True
+        return sid in self._global_stop_sids
 
     def clear_stop_request(self):
         """Clear the agent-wide stop latch only.
@@ -706,6 +769,7 @@ class InputHub:
         message on pane A cannot resume a Stop still in flight on pane B.
         """
         self._stop_requested = False
+        self._global_stop_sids.clear()
 
     def is_stop_requested(self) -> bool:
         """Check whether a stop has been requested."""

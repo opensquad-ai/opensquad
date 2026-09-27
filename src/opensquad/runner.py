@@ -658,6 +658,36 @@ class AgentRunner:
     def _last_user_input(self, value):
         self._active_tl().last_user_input = value or ""
 
+    # ── Per-turn counters ───────────────────────────────────────────────
+    # These three were the last bare ``self._x`` per-turn fields: every
+    # concurrent session in this process shared them, so pane A resetting a
+    # streak while pane B was mid-turn silently discarded B's count (the exact
+    # lost-update shape of a shared counter across ``await`` points). They now
+    # follow the same ContextVar proxy as the other per-turn state above.
+    @property
+    def _auth_fallback_used(self) -> bool:
+        return self._active_tl().auth_fallback_used
+
+    @_auth_fallback_used.setter
+    def _auth_fallback_used(self, value) -> None:
+        self._active_tl().auth_fallback_used = bool(value)
+
+    @property
+    def _format_error_streak(self) -> int:
+        return self._active_tl().format_error_streak
+
+    @_format_error_streak.setter
+    def _format_error_streak(self, value) -> None:
+        self._active_tl().format_error_streak = int(value or 0)
+
+    @property
+    def _repetition_rewind_count(self) -> int:
+        return self._active_tl().repetition_rewind_count
+
+    @_repetition_rewind_count.setter
+    def _repetition_rewind_count(self, value) -> None:
+        self._active_tl().repetition_rewind_count = int(value or 0)
+
     @property
     def _tool_result_images(self):
         return self._active_tl().tool_result_images
@@ -974,9 +1004,14 @@ class AgentRunner:
         try:
             from opensquad.sub_agent_runner import job_manager
 
-            job_manager.cancel_all("withdraw_turn")
+            # Scoped to the withdrawing pane: an agent-wide cancel here killed
+            # sibling panes' sub-agents whenever one pane withdrew a turn.
+            if sid:
+                job_manager.cancel_by_sid(sid, "withdraw_turn")
+            else:
+                job_manager.cancel_all("withdraw_turn")
         except Exception:
-            logger.debug("[Runner] sub-agent cancel_all on withdraw skipped", exc_info=True)
+            logger.debug("[Runner] sub-agent cancel on withdraw skipped", exc_info=True)
 
         result = _get_session_manager().truncate_from_timestamp(
             timestamp or "",
@@ -1604,6 +1639,14 @@ class AgentRunner:
             pass
         token = set_turn_local(tl)
         _round_usage_start: dict | None = None
+        # Apply THIS session's project folder before the turn touches any path.
+        # Resolving it here — per turn, by the owning session — is what stops one
+        # pane's folder picker from re-rooting another pane's relative paths.
+        # The dispatcher used to do this on every tick, for every session.
+        try:
+            input_hub._check_session_cwd(sid)
+        except Exception:
+            logger.debug("[Runner] per-session cwd apply skipped sid=%s", sid, exc_info=True)
         try:
             content = str(item.get("content") or "")
             # Fresh user message: clear THIS sid's Stop latch so a new turn can run.

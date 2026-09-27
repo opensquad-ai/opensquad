@@ -14,7 +14,10 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-from opensquad.utils.path_utils import get_workspace_root, set_session_cwd_override
+from opensquad.utils.path_utils import (
+    get_workspace_root,
+    set_session_cwd_for,
+)
 from opensquad.utils.path_utils import is_path_safe as _is_path_safe_unified
 
 try:
@@ -99,20 +102,25 @@ def set_allowed_dirs(dirs: list[str]) -> None:
     logger.info(f"[filesystem] Extra allowed dirs: {_EXTRA_ALLOWED_DIRS}")
 
 
-def set_session_cwd(path: str) -> dict[str, Any]:
-    """Set the agent's session-level working directory.
+def set_session_cwd(path: str, session_id: str = "") -> dict[str, Any]:
+    """Set a session-level working directory.
 
     Called by the gateway when the user picks a folder via the chat UI
     folder-picker button. The selected directory becomes the default cwd
     for all shell commands and file operations — ``ls(".")`` will list
     this directory, ``run_command("dir")`` will run in it, etc.
 
+    With *session_id* the value is stored **per session** and only that
+    session's shells are recycled, so a sibling pane running a command in its
+    own directory keeps running. Without it the historical process-wide
+    behaviour is preserved for CLI / serial callers.
+
     The directory is also added to ``_EXTRA_ALLOWED_DIRS`` so that
-    ``is_path_safe()`` permits access, and the ``AgentContext.session_cwd``
-    field is updated so ``get_workspace_root()`` returns it.
+    ``is_path_safe()`` permits access.
 
     Args:
         path: Absolute directory path selected by the user.
+        session_id: Owning chat session; empty = the legacy shared value.
 
     Returns:
         Dict with status and the resolved path.
@@ -126,40 +134,56 @@ def set_session_cwd(path: str) -> dict[str, Any]:
     if not os.path.isdir(abs_path):
         return {"status": "error", "message": f"Directory does not exist: {abs_path}"}
 
-    # 0. Module-level override so executor threads see session cwd immediately
-    set_session_cwd_override(abs_path)
+    sid = (session_id or "").strip()
 
-    # 1. Update AgentContext.session_cwd so get_workspace_root() returns it
-    try:
-        from opensquad._context import get_current_context
+    # 0. Store the cwd — per session when the session is known, otherwise in the
+    #    legacy module-level slot (also what keyless executor threads read).
+    set_session_cwd_for(sid, abs_path)
 
-        ctx = get_current_context()
-        if ctx:
-            ctx.session_cwd = abs_path
-    except Exception as e:
-        logger.warning(f"[filesystem] Could not set AgentContext.session_cwd: {e}")
+    # 1. Only the legacy (sid-less) path writes AgentContext.session_cwd. That
+    #    field hangs off the single AgentContext object every session shares,
+    #    so storing a pane's project there is exactly the cross-session leak
+    #    this function no longer performs.
+    if not sid:
+        try:
+            from opensquad._context import get_current_context
 
-    # 2. Add to _EXTRA_ALLOWED_DIRS so is_path_safe() allows access
+            ctx = get_current_context()
+            if ctx:
+                ctx.session_cwd = abs_path
+        except Exception as e:
+            logger.warning(f"[filesystem] Could not set AgentContext.session_cwd: {e}")
+
+    # 2. Add to _EXTRA_ALLOWED_DIRS so is_path_safe() allows access.
+    #    Deliberately a union: reads are not whitelist-gated at all, and
+    #    mutating tools are bounded by the session-root check, so a strict
+    #    per-session whitelist would only break legitimate cross-project work.
     if abs_path not in _EXTRA_ALLOWED_DIRS:
         _EXTRA_ALLOWED_DIRS.append(abs_path)
         from opensquad.utils.path_utils import set_allowed_dirs as _set_allowed_dirs_unified
 
         _set_allowed_dirs_unified(_EXTRA_ALLOWED_DIRS)
 
-    # 3. Recycle only the shells this cwd change actually invalidates.
-    #    Existing ShellSession objects keep their old working_directory, so a
-    #    shell still sitting in a different directory must be recreated to pick
-    #    up the new one — but a shell ALREADY in the target directory is
-    #    unaffected, and closing it would abort whatever command it is running
-    #    (the command came back as reason=session_stopped). The signal file is
-    #    agent-scoped and this runs before a session is known, so "belongs to
-    #    this session" can only be decided by what the change invalidates.
+    # 3. Recycle the shells this cwd change invalidates.
+    #    - With a session id: only shells owned by it (``ShellSession.ui_sid``)
+    #      plus unattributed ones (created outside a tool call → CLI / serial,
+    #      which follow the focused cwd). A sibling pane's shell is left alone.
+    #    - Without one: the historical "everything not already in the target
+    #      directory" heuristic, which the cwd guard tests lock in.
     try:
         from opensquad.tools import system as _sysmod
+
+        def _in_scope(sess) -> bool:
+            if not sid:
+                return True
+            return (getattr(sess, "ui_sid", "") or "") in (sid, "")
 
         stale: list[str] = []
         kept = 0
         for shell_sid, sess in list(_sysmod._SESSIONS.items()):
+            if not _in_scope(sess):
+                kept += 1
+                continue
             shell_cwd = getattr(sess, "working_directory", "") or ""
             if shell_cwd and os.path.normcase(os.path.abspath(shell_cwd)) == abs_path:
                 kept += 1
@@ -177,7 +201,7 @@ def set_session_cwd(path: str) -> dict[str, Any]:
     except Exception as e:
         logger.warning(f"[filesystem] Could not clear shell sessions: {e}")
 
-    logger.info(f"[filesystem] Session working directory set to: {abs_path}")
+    logger.info(f"[filesystem] Session working directory set to: {abs_path} (session={sid or 'legacy'})")
     return {"status": "success", "path": abs_path}
 
 
@@ -611,11 +635,23 @@ def _reject_outside_session_project(resolved: str) -> str | None:
     Absolute paths under the permanent workspace / other allowed dirs used to
     succeed while session changeset tracking no-op'd (path outside session
     root) — UI Changes then never saw the edit.
+
+    The session folder is resolved from the **executing turn's** sid first.
+    Reading only the process-wide override meant a sibling pane's folder (or
+    none at all) decided whether this write was rejected — which is how a
+    legitimate write came back ``Path outside project root`` after some other
+    pane touched the folder picker.
     """
     try:
-        from opensquad.utils.path_utils import get_session_cwd_override
+        from opensquad.utils.path_utils import (
+            current_session_id,
+            get_session_cwd_for,
+            get_session_cwd_override,
+        )
 
-        session = (get_session_cwd_override() or "").strip()
+        session = (get_session_cwd_for(current_session_id()) or "").strip()
+        if not session:
+            session = (get_session_cwd_override() or "").strip()
         if not session:
             from opensquad._context import get_current_context
 

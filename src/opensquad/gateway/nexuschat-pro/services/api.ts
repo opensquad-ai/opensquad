@@ -922,11 +922,17 @@ export const adminAPI = {
   },
 
   /** 设置 Agent 的 session 工作目录（实时生效，无需重启）
-   *  经 Gateway admin 代理到 Launcher */
-  setWorkingDirectory: async (name: string, path: string) => {
+   *  经 Gateway admin 代理到 Launcher
+   *
+   *  `sessionId` 省略 → 写 agent 级 `.session_cwd`（历史行为）：所有没有自己
+   *  取值的会话都会回退到它。传入 → 只写该会话的 `.session_cwd.<key>`，
+   *  其它 pane 的相对路径根不受影响（多 pane 隔离）。
+   *  后端按「会话级优先、agent 级兜底」解析。 */
+  setWorkingDirectory: async (name: string, path: string, sessionId?: string) => {
+    const sid = (sessionId || '').trim();
     return apiRequest<{ status: string; path: string }>(`/ai-web/admin/agents/${name}/working-directory`, {
       method: 'PUT',
-      body: JSON.stringify({ path }),
+      body: JSON.stringify(sid ? { path, session_id: sid } : { path }),
     });
   },
 

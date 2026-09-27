@@ -383,16 +383,24 @@ async def test_dispatcher_process_queue_starts_primary_turn(tmp_path: Path, monk
     class _Sched:
         busy_sessions: set[str] = set()
 
+        def set_on_free(self, callback):
+            # Mirrors ParallelTurnScheduler: the dispatcher registers a wake-up
+            # so it never has to poll for a freed slot.
+            self._on_free = callback
+
         def reap(self):
             return None
 
         def is_session_busy(self, sid: str) -> bool:
             return False
 
+        def has_capacity(self) -> bool:
+            return True
+
         def request_stop_session(self, sid: str):
             return None
 
-        async def acquire_slot(self, sid: str) -> bool:
+        async def acquire_slot(self, sid: str, timeout: float | None = None) -> bool:
             return True
 
         def start(self, sid: str, coro):

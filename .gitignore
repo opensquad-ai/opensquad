@@ -380,3 +380,6 @@ scripts/cfg_news2theme_agent.py
 tests/test_n2t_*.py
 tests/test_z2t.py
 tests/test_ds_web_answer_clean.py
+
+# ===== Promotion materials (local only, not for public repo) =====
+promotion/

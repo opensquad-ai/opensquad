@@ -68,6 +68,14 @@ class TurnLocal:
     parallel_scheduled_mode: bool = False
     sched_any_tool: bool = False
     sched_continue_count: int = 0
+    # Per-turn counters that used to live as bare ``self._x`` attributes on
+    # AgentRunner. Those are shared by every concurrent session in the process,
+    # so two panes clobbered each other's streak (lost update at an ``await``):
+    # pane A reset the counter, pane B read a stale value mid-turn. Turn-local
+    # storage is the only correct scope — they are reset per user turn.
+    auth_fallback_used: bool = False
+    format_error_streak: int = 0
+    repetition_rewind_count: int = 0
 
 
 _cv_turn: contextvars.ContextVar[TurnLocal | None] = contextvars.ContextVar("opensquad_turn_local", default=None)
@@ -98,6 +106,32 @@ class ParallelTurnScheduler:
         # for the whole duration of a long turn and pinning the event loop.
         # waiters now sleep on this event instead.
         self._idle_events: dict[str, asyncio.Event] = {}
+        # Called whenever a turn stops running (natural end, reap or finish).
+        # The dispatcher uses it to wake its own idle wait immediately, instead
+        # of discovering the freed slot on its next tick.
+        self._on_free: Any = None
+
+    def set_on_free(self, callback: Any) -> None:
+        """Register a zero-arg callback fired whenever a turn leaves the busy set."""
+        self._on_free = callback
+
+    def _notify_free(self) -> None:
+        cb = self._on_free
+        if cb is None:
+            return
+        try:
+            cb()
+        except Exception:
+            logger.debug("[ParallelTurnScheduler] on_free callback failed", exc_info=True)
+
+    @property
+    def busy_count(self) -> int:
+        return len(self._busy_sessions)
+
+    def has_capacity(self) -> bool:
+        """True when another turn could start right now (non-blocking)."""
+        self.reap()
+        return len(self._busy_sessions) < self.max_parallel
 
     def _signal_idle(self, sid: str) -> None:
         evt = self._idle_events.get(sid)
@@ -132,6 +166,8 @@ class ParallelTurnScheduler:
                 exc = task.exception() if not task.cancelled() else None
                 if exc:
                     logger.error("[ParallelTurnScheduler] turn failed sid=%s: %s", sid, exc, exc_info=exc)
+        if done:
+            self._notify_free()
         return done
 
     async def wait_session_free(self, sid: str, timeout: float = 5.0) -> bool:
@@ -193,6 +229,7 @@ class ParallelTurnScheduler:
                 # to run for a turn that just returns, and wait_session_free
                 # must not linger until its timeout in that case.
                 self._signal_idle(sid)
+                self._notify_free()
 
         task = asyncio.create_task(_wrapped(), name=f"session-turn:{sid}")
         self._tasks[sid] = task
@@ -225,5 +262,7 @@ class ParallelTurnScheduler:
             self._sem.release()
         except ValueError:
             pass
-        # Wake anything waiting in wait_session_free (dispatcher re-push path).
+        # Wake anything waiting in wait_session_free (dispatcher re-push path)
+        # and the dispatcher's own idle wait, which is now the only waiter.
         self._signal_idle(sid)
+        self._notify_free()

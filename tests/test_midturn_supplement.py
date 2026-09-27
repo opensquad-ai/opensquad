@@ -210,13 +210,40 @@ def test_supplement_drain_targets_the_event_pipeline_with_session_id():
     assert 'content.startswith("__")' in block
 
 
-def test_dispatcher_busy_path_waits_on_scheduler_event_not_sleep_polling():
+def _code_only(src: str) -> str:
+    """Drop whole-line comments so a source lock asserts on behaviour, not prose."""
+    return "\n".join(line for line in src.splitlines() if not line.lstrip().startswith("#"))
+
+
+def test_dispatcher_busy_path_defers_instead_of_parking():
+    """A busy session must never hold the single dispatcher loop.
+
+    This lock used to demand ``wait_session_free`` right here. That was the
+    bug, not the contract: parking the only dispatcher loop on one session's
+    turn meant no *other* session could start until that turn finished (or the
+    5s timeout expired) — the head-of-line stall users saw as "another project
+    starts, the first one freezes".
+
+    The busy path now re-queues into that session's own inbox and immediately
+    continues; ``exclude_sids`` (passed to ``wait_any``) is what keeps the loop
+    from re-reading the same message, and a turn completing wakes it at once.
+    """
     busy_block = DISPATCHER_SRC[DISPATCHER_SRC.index("Same session already running") :]
-    busy_block = busy_block[: busy_block.index("Acquire parallel slot")]
-    assert "wait_session_free" in busy_block, "busy path must wait on the scheduler event"
-    assert "asyncio.sleep(0.05)" not in busy_block, "50ms busy-polling must be gone from the busy path"
-    # The re-push must preserve the pane's model card (it used to be dropped).
-    assert "model_card" in busy_block
+    busy_block = busy_block[: busy_block.index("no free slot")]
+    code = _code_only(busy_block)
+
+    assert "await scheduler.wait_session_free" not in code, (
+        "parking the dispatcher on a busy pane is the head-of-line bug"
+    )
+    assert "wait_session_free" not in code
+    assert "asyncio.sleep(0.05)" not in code, "50ms busy-polling must stay gone from the busy path"
+    assert "_requeue(item, str(sid))" in code, "the message must go back to its own session inbox"
+    # The re-queue must preserve the pane's model card (it used to be dropped).
+    requeue_block = DISPATCHER_SRC[DISPATCHER_SRC.index("def _requeue(item") :]
+    requeue_block = requeue_block[: requeue_block.index("_last_busy")]
+    assert "model_card" in requeue_block
+    # And the exclusion set must reach the hub — that is the no-spin mechanism.
+    assert "exclude_sids=busy | cap_blocked" in DISPATCHER_SRC
 
 
 def test_turn_loop_drain_prefers_turnlocal_sid_over_shared_attr():

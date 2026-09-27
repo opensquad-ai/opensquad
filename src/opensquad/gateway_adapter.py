@@ -76,6 +76,30 @@ def coerce_command_data(message: dict) -> dict:
     return merged
 
 
+def resolve_command_session_id(cmd_data: dict) -> str:
+    """Session a gateway command targets: explicit payload sid → focused → ``""``.
+
+    Commands that abort work (``new_session``, ``abandon_current_draft``) must
+    be scoped to one session. They used an agent-wide ``cancel_all``, so opening
+    a new chat in one pane tore down sub-agents running for every other pane.
+    """
+    sid = str((cmd_data or {}).get("session_id") or "").strip()
+    if sid:
+        return sid
+    try:
+        from opensquad._context import get_current_context
+
+        ctx = get_current_context()
+        sm = ctx.session_manager if ctx else None
+        if sm is None:
+            from opensquad.session_manager import get_session_manager
+
+            sm = get_session_manager()
+        return str(sm.get_focused_session_id() or sm.get_current_session_id() or "").strip()
+    except Exception:
+        return ""
+
+
 class GatewayAdapter(BaseAgent):
     """
     Adapter that connects the Main Runner to the Gateway.
@@ -472,14 +496,19 @@ class GatewayAdapter(BaseAgent):
 
         if command == "new_session":
             # Abort sub-agents immediately (don't wait for Runner to drain urgent queue).
+            # Scoped to THIS pane: the previous agent-wide cancel_all killed every
+            # other pane's running sub-agents the moment a new chat was opened.
+            _csid = resolve_command_session_id(cmd_data)
             try:
                 from opensquad.sub_agent_runner import job_manager
 
-                n = job_manager.cancel_all("new_session")
+                n = job_manager.cancel_by_sid(_csid, "new_session") if _csid else job_manager.cancel_all("new_session")
                 if n:
-                    logger.info(f"[Adapter] cancelled {n} sub-agent job(s)/runner(s) on new_session")
+                    logger.info(
+                        f"[Adapter] cancelled {n} sub-agent job(s)/runner(s) on new_session (sid={_csid or 'all'})"
+                    )
             except Exception:
-                logger.debug("[Adapter] sub-agent cancel_all on new_session skipped", exc_info=True)
+                logger.debug("[Adapter] sub-agent cancel on new_session skipped", exc_info=True)
             input_hub.push_urgent("__NEW_SESSION__", source="gateway")
             logger.info("[Adapter] New session command sent via urgent queue")
             await self._try_wake_agent("urgent-command")
@@ -490,15 +519,20 @@ class GatewayAdapter(BaseAgent):
             # sid (so the empty-draft reuse logic in start_new_session does not
             # keep the same sid) and to drop the current shell so the follow-up
             # delete_session call can clean it up. See SessionManager.abandon_current_draft.
+            _csid = resolve_command_session_id(cmd_data)
             try:
                 from opensquad.sub_agent_runner import job_manager
 
-                n = job_manager.cancel_all("abandon_current_draft")
+                n = (
+                    job_manager.cancel_by_sid(_csid, "abandon_current_draft")
+                    if _csid
+                    else job_manager.cancel_all("abandon_current_draft")
+                )
                 if n:
                     logger.info(f"[Adapter] cancelled {n} sub-agent job(s)/runner(s) on abandon_current_draft")
             except Exception:
                 logger.debug(
-                    "[Adapter] sub-agent cancel_all on abandon_current_draft skipped",
+                    "[Adapter] sub-agent cancel on abandon_current_draft skipped",
                     exc_info=True,
                 )
             input_hub.push_urgent("__ABANDON_CURRENT_DRAFT__", source="gateway")

@@ -356,6 +356,12 @@ class AgentsMixin:
 
         Body: ``{"path": "C:\\Users\\admin\\projects\\my-app"}``
 
+        Optional ``{"session_id": "<sid>"}`` scopes the value to one chat pane,
+        writing ``.session_cwd.<key>`` instead of the agent-level file. Without
+        it the agent-level file is written, which every session without a value
+        of its own falls back to — that is the historical behaviour, and it is
+        what made one pane's folder picker re-root another pane's paths.
+
         To reset back to the permanent workspace root, send
         ``{"path": ""}`` or ``{"path": null}``.
         """
@@ -365,16 +371,17 @@ class AgentsMixin:
             return self._send_json({"error": "Agent directory not found"}, 404)
 
         path = body.get("path", "").strip() if body else ""
+        sid = str((body or {}).get("session_id") or "").strip()
 
         if not path:
             # Reset to workspace root: remove the signal file
             try:
                 from opensquad.utils.session_cwd import clear_session_cwd
 
-                clear_session_cwd(agent_dir)
+                clear_session_cwd(agent_dir, sid)
             except Exception:
                 pass
-            _log.info(f"[Launcher] Reset working directory for agent '{name}' to workspace root")
+            _log.info(f"[Launcher] Reset working directory for agent '{name}' (sid={sid or 'agent'})")
             return self._send_json(
                 {
                     "status": "success",
@@ -391,11 +398,11 @@ class AgentsMixin:
         try:
             from opensquad.utils.session_cwd import write_session_cwd
 
-            payload = write_session_cwd(agent_dir, path)
+            payload = write_session_cwd(agent_dir, path, sid)
         except Exception as e:
             return self._send_json({"error": f"Failed to write session cwd file: {e}"}, 500)
 
-        _log.info(f"[Launcher] Set working directory for agent '{name}' to: {path}")
+        _log.info(f"[Launcher] Set working directory for agent '{name}' to: {path} (sid={sid or 'agent'})")
         return self._send_json(
             {
                 "status": "success",

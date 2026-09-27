@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from typing import TYPE_CHECKING, Any
 
@@ -195,15 +194,59 @@ async def run_parallel_dispatcher(runner: AgentRunner, initial_query: str | None
         MAX_PARALLEL_TURNS,
     )
 
+    # Sessions whose *normal* inbox must not be re-read right now: either their
+    # turn is already in flight, or every parallel slot is taken. The busy half
+    # is derived fresh each iteration; ``cap_blocked`` holds the capacity half
+    # and is cleared the moment a turn finishes, so a deferred session is
+    # retried on the next wake-up rather than being forgotten.
+    cap_blocked: set[str] = set()
+
+    def _wake_dispatcher() -> None:
+        """A turn just left the busy set — re-evaluate deferrals immediately."""
+        cap_blocked.clear()
+        try:
+            hub._signal_input()
+        except Exception:
+            logger.debug("[Dispatcher] wake signal failed", exc_info=True)
+
+    scheduler.set_on_free(_wake_dispatcher)
+
+    def _requeue(item: dict, sid: str) -> None:
+        """Put an item back in *sid*'s own inbox, preserving every field."""
+        hub.push(
+            item.get("content", ""),
+            source=item.get("source", "gateway"),
+            images=item.get("images"),
+            attachments=item.get("attachments"),
+            channel=item.get("channel", ""),
+            sender_name=item.get("sender_name", ""),
+            chat_name=item.get("chat_name", ""),
+            source_chat_id=item.get("source_chat_id", ""),
+            user_id=item.get("user_id", ""),
+            client_id=item.get("client_id", ""),
+            session_id=sid,
+            model_card=item.get("model_card", ""),
+        )
+
+    _last_busy: set[str] | None = None
     while True:
         scheduler.reap()
-        # Emit busy_sessions for UI
-        try:
-            await runner._emit_busy_sessions(scheduler.busy_sessions)
-        except Exception:
-            pass
+        busy = scheduler.busy_sessions
+        if busy != _last_busy:
+            # Emit only when the set actually changes: the idle tick is 1s, and
+            # re-broadcasting an unchanged set is one needless WS frame/second.
+            _last_busy = busy
+            try:
+                await runner._emit_busy_sessions(busy)
+            except Exception:
+                pass
+        if scheduler.has_capacity():
+            cap_blocked.clear()
 
-        got = await hub.wait_any(timeout=5.0)
+        # 1.0s rather than 5s: the event below is the fast path, this only
+        # bounds a lost wake-up, and a shorter bound keeps a session that just
+        # became idle from waiting seconds for its queued follow-up.
+        got = await hub.wait_any(timeout=1.0, exclude_sids=busy | cap_blocked)
         if got is None:
             # Idle timeout: hot-reload / health checks on runner if available
             if hasattr(runner, "_dispatcher_idle_tick"):
@@ -349,46 +392,31 @@ async def run_parallel_dispatcher(runner: AgentRunner, initial_query: str | None
             # panes' session stops or a live agent-wide latch belonging to them.
             hub.clear_session_stop(sid)
 
-        # Same session already running → leave in queue (re-push) wait_any already popped
+        # Same session already running → put the message back in ITS OWN inbox
+        # and move on. The old code re-pushed into the *global* hub and then
+        # awaited ``wait_session_free(sid, timeout=5.0)``, which stalled the
+        # whole dispatcher — no other pane could start — for the entire
+        # duration of that turn. Re-queueing here means the next ``wait_any``
+        # skips this session via ``exclude_sids`` while every other session is
+        # still served, and the turn's completion wakes us immediately.
         if scheduler.is_session_busy(sid):
-            # Re-queue at front of session inbox, then WAIT for the turn to
-            # finish instead of busy-polling. The old `sleep(0.05)` + continue
-            # loop re-popped and re-pushed the same message every ~50ms for the
-            # whole duration of the turn, emitting busy_sessions+status WS
-            # frames each cycle (frame storm + the queued message visibly
-            # cycling in the logs while the model never saw it).
-            hub.push(
-                item.get("content", ""),
-                source=item.get("source", "gateway"),
-                images=item.get("images"),
-                attachments=item.get("attachments"),
-                channel=item.get("channel", ""),
-                sender_name=item.get("sender_name", ""),
-                chat_name=item.get("chat_name", ""),
-                source_chat_id=item.get("source_chat_id", ""),
-                user_id=item.get("user_id", ""),
-                client_id=item.get("client_id", ""),
-                session_id=sid,
-                model_card=item.get("model_card", ""),
-            )
-            await scheduler.wait_session_free(str(sid), timeout=5.0)
+            logger.info("[Dispatcher] sid=%s busy — deferring its own follow-up", sid)
+            _requeue(item, str(sid))
             continue
 
-        # Acquire parallel slot (returns False if sid busy or capacity timeout)
-        ok = await scheduler.acquire_slot(sid)
+        # Acquire a parallel slot without blocking on it. Exhausted capacity
+        # defers THIS session (excluded until a turn frees a slot) instead of
+        # the old ``requeue + asyncio.sleep(0.05)`` spin.
+        if not scheduler.has_capacity():
+            logger.info("[Dispatcher] no free slot — deferring sid=%s", sid)
+            cap_blocked.add(str(sid))
+            _requeue(item, str(sid))
+            continue
+        ok = await scheduler.acquire_slot(sid, timeout=0.25)
         if not ok:
-            logger.info("[Dispatcher] slot busy/full — requeue sid=%s", sid)
-            hub.push(
-                item.get("content", ""),
-                source=item.get("source", "gateway"),
-                session_id=sid,
-                images=item.get("images"),
-                attachments=item.get("attachments"),
-                channel=item.get("channel", ""),
-                client_id=item.get("client_id", ""),
-                user_id=item.get("user_id", ""),
-            )
-            await asyncio.sleep(0.05)
+            logger.info("[Dispatcher] slot busy/full — deferring sid=%s", sid)
+            cap_blocked.add(str(sid))
+            _requeue(item, str(sid))
             continue
 
         logger.info(
