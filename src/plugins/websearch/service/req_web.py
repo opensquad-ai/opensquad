@@ -52,7 +52,6 @@ def run_get_api_test():
     print("\n\n--- [Step 2] Calling /fetch endpoint... ---")
     urls_list = [
         "https://www.chinairn.com/news/20250625/171247928.shtml",
-        "https://finance.sina.com.cn/roll/2025-01-03/doc-inecsewy8977601.shtml",
         "https://www.sohu.com/a/903288203_121155505",
         "https://www.chinairn.com/scfx/20250227/090955105.shtml",
         "https://baike.baidu.com/item/2025%E5%B9%B4%E4%BA%BA%E5%BD%A2%E6%9C%BA%E5%99%A8%E4%BA%BA%E4%BA%A7%E4%B8%9A%E5%8F%91%E5%B1%95%E8%93%9D%E7%9A%AE%E4%B9%A6/65574570",

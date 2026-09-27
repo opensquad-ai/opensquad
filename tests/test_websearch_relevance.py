@@ -363,12 +363,11 @@ def test_dynamic_rerank_window_preserves_overflow_keyword_hits_as_tail():
     assert [r["url"] for r in tail] == [f"https://example.com/{i}" for i in range(10, 15)]
 
 
-def test_finance_news_query_prefers_browser_serp():
+def test_news_query_prefers_browser_serp():
     from websearch_api import _query_needs_browser_serp
 
-    assert _query_needs_browser_serp("A股 收评 上证指数 深证成指 创业板指")
-    assert _query_needs_browser_serp("A股 今日行情 上证指数 深证成指 创业板指 涨跌")
     assert _query_needs_browser_serp("OpenAI GPT-5 发布")
+    assert _query_needs_browser_serp("今日头条 快讯")
     assert not _query_needs_browser_serp("福州今天天气")
 
 

@@ -87,6 +87,12 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   build-time only, and the Windows-generated ones carry the npm bug #4828
   trap. Third-party licence files (e.g. `plugins/email_assistant/LICENSE`) are
   deliberately kept.
+- **The websearch plugin no longer ships A-share/finance retrieval hints.**
+  `web_crawler._BROAD_SITE_REWRITES` steered stock queries to
+  `finance.sina.com.cn` / `eastmoney.com`, `_BROAD_QUERY_RE` carried
+  `上市|财报|年报|季报`, and `_QUERY_NEEDS_BROWSER_SERP_RE` matched market
+  terms (`收评|行情|大盘|涨停|…`) to force the Playwright SERP path. All of
+  those are gone; the browser-SERP preference now triggers on news terms only.
 
 ---
 

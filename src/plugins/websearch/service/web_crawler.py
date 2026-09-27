@@ -75,7 +75,7 @@ _NEWS_QUERY_RE = re.compile(
 # qualifier so the top hits match the concrete intent.
 _BROAD_QUERY_RE = re.compile(
     r"(GDP|gdp|统计|统计数据|统计局|报告|白皮书|蓝皮书|数据|排名|排行|榜单|对比|比较|"
-    r"价格|报价|多少钱|上市|财报|年报|季报|市场规模|增长率|占比|预测|展望|最新消息|进展)",
+    r"价格|报价|多少钱|市场规模|增长率|占比|预测|展望|最新消息|进展)",
     re.I,
 )
 # Tokens that are too generic to anchor a site: rewrite (keep them, just add qualifiers).
@@ -207,7 +207,6 @@ _BROAD_SITE_REWRITES: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"(GDP|gdp|国内生产总值)"), " (site:stats.gov.cn OR site:gov.cn OR site:fuzhou.gov.cn)"),
     (re.compile(r"(统计公报|统计年鉴|统计局|统计数据)"), " (site:stats.gov.cn OR site:gov.cn)"),
     (re.compile(r"(价格|报价|多少钱|房价)"), " (site:baidu.com OR site:anjuke.com OR site:zhongguancun.com.cn)"),
-    (re.compile(r"(股票|股价|行情|上证|A股)"), " (site:finance.sina.com.cn OR site:eastmoney.com)"),
 )
 
 

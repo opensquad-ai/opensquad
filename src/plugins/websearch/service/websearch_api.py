@@ -748,14 +748,13 @@ def _query_variants(query: str) -> list[str]:
 
 # ── API 1: Search ─────────────────────────────────────────────────────
 _QUERY_NEEDS_BROWSER_SERP_RE = re.compile(
-    r"(收评|收盘|复盘|行情|大盘|股市|A股|上证指数|深证成指|创业板指|"
-    r"涨停|跌停|涨跌|新闻|资讯|头条|快讯|要闻|消息|发布|公布)",
+    r"(新闻|资讯|头条|快讯|要闻|消息|发布|公布)",
     re.I,
 )
 
 
 def _query_needs_browser_serp(query: str) -> bool:
-    """News/finance queries get richer Bing browser SERPs than httpx organics."""
+    """News queries get richer Bing browser SERPs than httpx organics."""
     return bool(_QUERY_NEEDS_BROWSER_SERP_RE.search(query or ""))
 
 
@@ -785,7 +784,7 @@ async def search_links_async(queries: list[str], max_results_per_query: int = 30
     ad_str_list = ["选购"]
     prefer_browser = any(_query_needs_browser_serp(q) for q in queries)
     if prefer_browser:
-        print("[WebSearch] Browser SERP preferred (news/finance query); skipping http-direct fast path")
+        print("[WebSearch] Browser SERP preferred (news query); skipping http-direct fast path")
 
     # ── Fast path: http-direct Bing (reuses exported persistent cookies) ──
     # Try to serve the whole request with httpx first; only fall back to
@@ -929,7 +928,7 @@ async def search_links_async(queries: list[str], max_results_per_query: int = 30
                     final_list.append(next(fb_iter))
             search_results_list = final_list
     else:
-        # News/finance queries: httpx returns only sparse quote/portal organics,
+        # News queries: httpx returns only sparse portal organics,
         # while the rendered Bing SERP includes news cards and answer boxes.
         print("[WebSearch] Browser SERP preferred; running Playwright for all queries")
         search_results_list = [[] for _ in queries]
