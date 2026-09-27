@@ -154,29 +154,58 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # tags + history, so the previous tag actually resolves
 
-      - name: Generate changelog from commits
-        id: changelog
+      # The release body is the curated CHANGELOG.md section for this tag.
+      # Deriving it from a commit list used to be silently empty: on a shallow
+      # checkout `git tag --sort=-v:refname | head -2 | tail -1` resolves to the
+      # tag being released, so `git log <tag>..HEAD` had nothing in it and both
+      # v0.8.46 and v0.8.47 shipped a blank "Changes since …" body.
+      - name: Build release body from CHANGELOG.md
+        id: notes
+        env:
+          REF_NAME: ${{ github.ref_name }}
         run: |
-          # Get previous tag
-          PREV_TAG=$(git tag --sort=-v:refname | grep '^v' | head -2 | tail -1)
-          if [ -z "$PREV_TAG" ]; then
-            echo "body=Initial release" >> $GITHUB_OUTPUT
-          else
-            CHANGES=$(git log ${PREV_TAG}..HEAD --pretty=format:"- %s (%h)" --no-merges)
-            {
-              echo "body<<EOF"
-              echo "## Changes since ${PREV_TAG}"
-              echo ""
-              echo "$CHANGES"
-              echo "EOF"
-            } >> $GITHUB_OUTPUT
-          fi
+          python3 - <<'PY'
+          import os, pathlib, re, subprocess, sys
+
+          tag = os.environ["REF_NAME"]
+          version = tag.lstrip("v")
+          prerelease = any(s in tag for s in ("-rc", "-beta", "-alpha"))
+
+          text = pathlib.Path("CHANGELOG.md").read_text(encoding="utf-8")
+          match = re.search(
+              rf"^## \[{re.escape(version)}\][^\n]*\n(.*?)(?=^## \[|\Z)",
+              text,
+              re.S | re.M,
+          )
+          body = match.group(1).strip() if match else ""
+
+          if not body and not prerelease:
+              sys.exit(f"CHANGELOG.md has no '## [{version}]' section - write it before tagging {tag}")
+
+          if not body:  # pre-release without its own section: fall back to commits
+              prev = subprocess.run(
+                  ["git", "describe", "--tags", "--abbrev=0", f"{tag}^"],
+                  capture_output=True, text=True,
+              ).stdout.strip()
+              rng = f"{prev}..{tag}" if prev else tag
+              log = subprocess.run(
+                  ["git", "log", rng, "--pretty=format:- %s (%h)", "--no-merges"],
+                  capture_output=True, text=True,
+              ).stdout.strip()
+              body = f"## Changes since {prev or 'the initial release'}\n\n{log}" if log else "_No changelog entry for this pre-release._"
+
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as fh:
+              fh.write("body<<NOTES_EOF\n" + body + "\nNOTES_EOF\n")
+          PY
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
-          body: ${{ steps.changelog.outputs.body }}
+          body: ${{ steps.notes.outputs.body }}
+          # Appends GitHub's own "What's Changed" + compare link under the curated notes.
           generate_release_notes: true
           prerelease: ${{ contains(github.ref_name, '-rc') || contains(github.ref_name, '-beta') || contains(github.ref_name, '-alpha') }}
         env:

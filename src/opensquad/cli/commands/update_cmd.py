@@ -131,21 +131,15 @@ def _win_detached_flags() -> int:
 
 
 def print_python_install_guidance(picked: dict, latest: str) -> None:
-    """A pip/uv-installed CLI has nothing to upgrade from — say so plainly."""
-    print("This is a source / pip install of OpenSquad, not the packaged desktop app.")
-    print("GitHub Releases publish desktop installers only (no wheel, no sdist), so the")
-    print("CLI cannot self-upgrade this installation.")
+    """A pip/uv install has no installer to run in place of it — name the two real paths."""
+    print("This is a source / pip install of OpenSquad, not the packaged desktop app,")
+    print("so there is no installer to run in place of it. Upgrade it either way:")
     print()
-    print(f"Newest installer for your platform ({picked['name']}):")
+    print("  pip install --upgrade opensquad")
+    print(f"  git fetch --tags && git checkout v{latest} && python -m pip install -e .")
+    print()
+    print(f"Or install the desktop app for your platform ({picked['name']}):")
     print(f"  {picked['url']}")
-    print()
-    print("Do NOT run 'pip install --upgrade opensquad': the PyPI project is still the")
-    print("0.1.1 placeholder (the Release workflow's 'Publish to PyPI' job is not")
-    print("configured), so that command would downgrade you.")
-    print()
-    print("To upgrade a source checkout instead:")
-    print(f"  git fetch --tags && git checkout v{latest}")
-    print("  python -m pip install -e .")
 
 
 def run_update(args):

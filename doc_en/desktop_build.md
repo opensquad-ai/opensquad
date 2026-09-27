@@ -28,7 +28,7 @@ bash scripts/build_desktop.sh
 
 # Or build Electron only after scripts/build_backend.* already ran:
 cd src/opensquad/gateway/nexuschat-pro
-npm run electron:win     # Windows .exe (NSIS + portable)
+npm run electron:win     # Windows .exe (NSIS installer)
 npm run electron:mac     # macOS .dmg + .zip (x64 + arm64)
 npm run electron:linux   # Linux .AppImage + .deb
 ```
@@ -171,7 +171,7 @@ Each of these runs:
 
 | Platform | Command | Outputs (in `build/release/`) |
 |----------|---------|------------------------------|
-| Windows  | `electron:win`  | `*-setup.exe` (NSIS installer), `*portable.exe` (no install) |
+| Windows  | `electron:win`  | `*-Setup.exe` (NSIS installer; no portable target is configured) |
 | macOS    | `electron:mac`  | `*.dmg` and `*.zip` for **both** x64 and arm64 |
 | Linux    | `electron:linux`| `*.AppImage`, `*.deb` |
 | All three (current OS only) | `electron:build` | whatever the current platform builds |

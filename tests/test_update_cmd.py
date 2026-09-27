@@ -15,9 +15,10 @@ Two separate faults behind that output:
    .zip. Releases attach desktop installers only, so *every* platform returned
    None — while `utils/desktop_release.py` already had a correct picker that the
    desktop app used.
-2. The suggested remedy was actively wrong: PyPI `opensquad` is a 0.1.1
-   placeholder (the Release workflow's "Publish to PyPI" job has never been
-   configured), so following the advice downgrades the user.
+2. The suggested remedy was actively wrong *at the time*: PyPI `opensquad` was
+   then a 0.1.1 placeholder (the Release workflow's "Publish to PyPI" job had
+   never succeeded), so following the advice downgraded the user. That job went
+   green with v0.8.47 (2026-09-27), so the guidance points at PyPI again.
 """
 
 import builtins
@@ -69,7 +70,7 @@ def test_update_cmd_delegates_asset_choice_to_shared_picker():
 
 
 def test_source_install_is_told_the_truth(monkeypatch, capsys):
-    """A pip/uv install cannot self-upgrade — and must not be sent to PyPI."""
+    """A pip/uv install cannot self-upgrade in place — send it to PyPI, not a dead end."""
     import opensquad
 
     monkeypatch.setattr(opensquad, "__version__", "0.8.10")
@@ -85,7 +86,8 @@ def test_source_install_is_told_the_truth(monkeypatch, capsys):
     assert exc.value.code == 1
     assert "OpenSquad-0.8.46-win-x64-Setup.exe" in out
     assert "https://dl.example/" in out
-    assert "Do NOT run 'pip install --upgrade opensquad'" in out
+    assert "pip install --upgrade opensquad" in out
+    assert "0.1.1 placeholder" not in out, "the stale 'PyPI is a placeholder' warning is back"
     assert "Try upgrading manually" not in out
 
 

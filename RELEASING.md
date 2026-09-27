@@ -357,9 +357,11 @@ After the final tag is pushed and `release.yml` completes:
 - [ ] **GitHub Release looks right** — notes render, artifacts attached, pre-release flag correct.
 - [ ] **Desktop installers attached** — `build-desktop.yml` finishes its
   `attach-to-release` job (~10–15 min after the tag). Check Actions →
-  **Build Desktop App** → **Attach desktop artifacts to Release**. Six files
-  expected: Windows NSIS + portable, Linux AppImage + `.deb`, macOS x64 +
-  arm64 DMG (see [desktop_build.md](doc_en/desktop_build.md)).
+  **Build Desktop App** → **Attach desktop artifacts to Release**. Five files
+  expected: Windows `OpenSquad-X.Y.Z-win-x64-Setup.exe`, Linux
+  `…-linux-x86_64.AppImage` + `…-linux-amd64.deb`, macOS `…-mac-x64.dmg` +
+  `…-mac-arm64.dmg` (no Windows portable — `package.json`'s `win.target` is
+  `nsis` only; see [desktop_build.md](doc_en/desktop_build.md)).
 - [ ] **Docker image is on `ghcr.io/opensquad-ai/opensquad:0.X.Y` and `:latest`** (final release only).
 - [ ] **PyPI shows the new version** at https://pypi.org/project/opensquad/#history.
 - [ ] **npm package published** (`opensquad-ai` on the public registry).
