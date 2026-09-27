@@ -1,6 +1,6 @@
 ---
 name: distributed_deep_research
-description: A multi-agent collaboration protocol for distributed deep research tasks. PM coordinates research scope and topic assignment, multiple researcher agents conduct parallel deep-research using the deep-research skill, and PM synthesizes findings into a structured report.
+description: A multi-agent collaboration protocol for distributed deep research tasks. PM coordinates research scope and topic assignment, multiple researcher agents conduct parallel deep research, and PM synthesizes findings into a structured report.
 tags: research, deep-research, report, analysis, team
 suggested_roles: pm, researcher, analyst
 min_members: 2
@@ -35,7 +35,7 @@ PM uses `board_update(item_type="requirement", ...)` to record the research scop
 ### P2 Parallel Research
 
 Each Researcher responsibilities:
-1. Load the `deep-research` skill before starting
+1. Follow the 4-phase research methodology below (load a `deep-research` skill first only if the skill library has one)
 2. Follow the 4-phase research methodology:
    - **Phase 1: Broad Exploration** — Initial survey, identify dimensions, map territory
    - **Phase 2: Deep Dive** — Specific queries, multiple phrasings, fetch full content
@@ -145,7 +145,7 @@ Please check for gaps and coherence
 - **No overstepping**: Researchers do not write the final report; Analyst does not conduct independent research; PM does not skip research phases
 - **No silence**: Report progress or blockers in group chat; send an update if no output for 15+ minutes
 - **No assumptions**: Ask @PM when research scope is unclear; do not expand scope independently
-- **Skill compliance**: All researchers MUST load and follow the `deep-research` skill methodology — do not shortcut with single searches
+- **Skill compliance**: All researchers MUST follow the 4-phase research methodology above — do not shortcut with single searches
 - **No premature synthesis**: PM must not start writing the report until all researchers report [RESEARCH-DONE]
 - **Cross-researcher awareness**: Post interim findings as public discussions so other researchers can spot overlaps or contradictions early
 

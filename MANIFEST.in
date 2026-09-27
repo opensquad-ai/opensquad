@@ -1,0 +1,33 @@
+# ── Ship the default resources the runtime resolves via syscfg.get_builtin_root() ──
+# They must land as siblings of the `opensquad` package, exactly like the
+# PyInstaller bundle (resources/backend-win/run/_internal/) lays them out.
+graft src/skills
+graft src/plugins
+graft src/model_cards
+graft src/agents
+graft src/pymcp
+graft src/collab_cards
+graft src/role_cards
+
+# ── Never ship ──
+# Private plugins / skills (keep in sync with the "Private plugins / skills"
+# block in .gitignore).
+prune src/plugins/news2theme
+prune src/skills/news2theme
+prune src/skills/news2theme-ops
+prune src/skills/zt2theme
+prune src/skills/j-space
+prune src/skills/cursor-api
+prune src/skills/playwright
+prune src/skills/vcs_collaboration
+# Multi-hundred-MB caches and the frozen Electron bundle. The websearch
+# reranker weights are gitignored and are fetched per install instead.
+prune src/plugins/websearch/service/reranker/models
+prune src/opensquad/gateway/nexuschat-pro/node_modules
+prune src/opensquad/gateway/nexuschat-pro/resources
+
+# Plugin UI lockfiles are build-time only (and the Windows-generated ones are
+# the npm bug #4828 trap). Third-party LICENSE files are deliberately kept.
+recursive-exclude src/plugins pnpm-lock.yaml package-lock.json yarn.lock npm-shrinkwrap.json
+
+global-exclude __pycache__ *.py[cod] *.log *.log.* .DS_Store

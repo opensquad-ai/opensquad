@@ -116,15 +116,72 @@ opensquad = "opensquad.cli.main:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
-include = ["opensquad*", "skills"]
+# `opensquad` plus every default-resource dir the runtime resolves through
+# syscfg.get_builtin_root() (i.e. the parent of the `opensquad` package).
+# These must ship as top-level siblings in site-packages, mirroring the
+# PyInstaller bundle layout in resources/backend-win/run/_internal/.
+include = [
+    "opensquad*",
+    "skills",
+    "plugins*",
+    "model_cards*",
+    "agents*",
+    "pymcp*",
+    "collab_cards*",
+    "role_cards*",
+]
 
 [tool.setuptools.package-data]
 opensquad = [
     "py.typed",
+    "gateway/config.json",
     "gateway/nexuschat-pro/dist/**/*",
     "gateway/plugin_registry/*.json",
 ]
 skills = ["**/*"]
+plugins = ["**/*"]
+model_cards = ["*.json"]
+agents = ["*/*.json", "*/*.md"]
+pymcp = ["*.json"]
+collab_cards = ["*.md"]
+role_cards = ["*.md"]
+
+# Belt for the `package_data` globs above, which bypass MANIFEST.in. This list
+# only has to cover paths that exist on a developer machine: CI builds from a
+# clean checkout, and release.yml re-verifies every artifact against
+# `git ls-files` before upload, so an unlisted local-only file can never reach
+# PyPI. See "Private plugins / skills" in .gitignore.
+[tool.setuptools.exclude-package-data]
+skills = [
+    "news2theme/*",
+    "news2theme-ops/*",
+    "zt2theme/*",
+    "j-space/*",
+    "cursor-api/*",
+    "playwright/*",
+    "vcs_collaboration/*",
+    "**/__pycache__/*",
+]
+plugins = [
+    "news2theme/*",
+    "**/__pycache__/*",
+    "**/*.py[cod]",
+    "**/*.log",
+    "**/node_modules/**/*",
+    "**/models/**/*",
+    "**/*.safetensors",
+    "**/*.bin",
+    "**/*.pt",
+    "**/*.onnx",
+    "**/*.gguf",
+    # Plugin UI lockfiles: build-time only, unused at runtime. The Windows-
+    # generated ones are also the npm bug #4828 trap (win32-only optional deps).
+    "**/pnpm-lock.yaml",
+    "**/package-lock.json",
+    "**/yarn.lock",
+    "**/npm-shrinkwrap.json",
+]
+opensquad = ["gateway/nexuschat-pro/node_modules/**/*"]
 
 # ── Ruff linter & formatter ───────────────────────────
 [tool.ruff]

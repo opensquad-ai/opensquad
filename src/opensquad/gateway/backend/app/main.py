@@ -21,7 +21,6 @@ from fastapi.staticfiles import StaticFiles
 
 # ── Phase 2.5: Workspace initialization (must happen before all other imports) ──
 # Ensure workspace is initialized, otherwise all paths will be wrong
-_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..", ".."))
 
 # ── PyInstaller compatibility: use executable directory as root in frozen env ──────────────────────
 _IS_FROZEN = getattr(sys, "frozen", False)
@@ -67,8 +66,9 @@ else:
         _console_log.info("[Workspace] Loaded from last session: %s", last_workspace)
     else:
         # Use install directory as a temporary workspace until user selects/creates one in the UI
-        _syscfg.set_workspace(_root)
-        _console_log.info("[Workspace] No workspace configured, using install directory: %s", _root)
+        _install_root = _syscfg.get_builtin_root()
+        _syscfg.set_workspace(_install_root)
+        _console_log.info("[Workspace] No workspace configured, using install directory: %s", _install_root)
         _console_log.info("[Workspace] Please configure workspace in Web UI: Settings -> Workspace")
 
 from app.ai_web.agent_sessions import set_ws_handler as _set_ws_handler

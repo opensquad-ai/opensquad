@@ -226,7 +226,7 @@ board_update(
 **Lead**: All agents (parallel)
 
 **Steps**:
-1. Each agent loads relevant skills (e.g., `deep-research`)
+1. Each agent loads the skills relevant to its task (e.g. a research skill, if the skill library has one)
 2. Execute research/tools in parallel
 3. Update progress regularly
 4. Post interim findings for team awareness
@@ -433,7 +433,7 @@ The board renders:
 
 - ❌ **Skipping user authorization** — never proceed to next phase without explicit user approval
 - ❌ PM writes the report before all researchers finish
-- ❌ Researchers skip the deep-research methodology and do single searches
+- ❌ Researchers skip the research methodology and do single searches
 - ❌ Not updating progress — team can't see where things stand
 - ❌ Not posting interim findings — other researchers miss overlaps
 - ❌ Using the same item_key for different entries (causes overwrites)

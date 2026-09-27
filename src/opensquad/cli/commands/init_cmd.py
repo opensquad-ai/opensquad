@@ -12,12 +12,14 @@ def run_init(args):
     os.makedirs(workspace, exist_ok=True)
     print(f"[init] Initializing workspace at: {workspace}")
 
-    # Ensure opensquad package is importable
-    _root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..", ".."))
-    if _root not in sys.path:
-        sys.path.insert(0, _root)
-
     from opensquad.system_config import syscfg
+
+    # Default resources live next to the `opensquad` package: `src/` in a repo
+    # checkout, site-packages for a pip install. Same resolver the launcher and
+    # the gateway use, so a wheel install seeds a complete workspace.
+    builtin_root = syscfg.get_builtin_root()
+    if builtin_root not in sys.path:
+        sys.path.insert(0, builtin_root)
 
     try:
         syscfg.init_workspace(workspace, copy_config=not args.no_config)
@@ -35,7 +37,7 @@ def run_init(args):
     # Copy default model cards and agent to workspace
     from opensquad.workspace_utils import _copy_default_resources
 
-    _copy_default_resources(workspace, os.path.join(_root, "src"))
+    _copy_default_resources(workspace, builtin_root)
 
     # Print directory structure
     print("\n[init] Directory structure:")

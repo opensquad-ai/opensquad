@@ -20,8 +20,16 @@ def _port_open(host: str, port: int, timeout: float = 0.4) -> bool:
         return False
 
 
-def _repo_root() -> str:
-    return os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..", ".."))
+def _package_dir() -> str:
+    """Directory holding the installed `opensquad` package.
+
+    Anchored on the package rather than "up four levels from this file": the
+    latter resolves relative to a repo checkout and points outside
+    site-packages for a pip install.
+    """
+    import opensquad
+
+    return os.path.dirname(os.path.abspath(opensquad.__file__))
 
 
 def _wait_port(port: int, timeout: float = 60.0) -> bool:
@@ -43,8 +51,8 @@ def _ensure_frontend(vite_port: int) -> bool:
     from opensquad.cli.commands.start_cmd import _find_npm
     from opensquad.cli.win_process import detach_popen_kwargs
 
-    root = _repo_root()
-    frontend_dir = os.path.join(root, "src", "opensquad", "gateway", "nexuschat-pro")
+    root = _package_dir()
+    frontend_dir = os.path.join(root, "gateway", "nexuschat-pro")
     if not os.path.isfile(os.path.join(frontend_dir, "package.json")):
         print("[web] Frontend package.json not found — will try Gateway static UI", file=sys.stderr)
         return False
@@ -110,7 +118,7 @@ def run_web(args: Namespace) -> None:
     # avoid the 5-15s Vite cold start on every `opensquad web`.
     dev_mode = bool(getattr(args, "dev", False))
     vite_up = _port_open("127.0.0.1", vite_port)
-    dist_index = os.path.join(_repo_root(), "src", "opensquad", "gateway", "nexuschat-pro", "dist", "index.html")
+    dist_index = os.path.join(_package_dir(), "gateway", "nexuschat-pro", "dist", "index.html")
     use_vite = dev_mode or not os.path.isfile(dist_index)
 
     if use_vite and (vite_up or (not no_start and _ensure_frontend(vite_port))):

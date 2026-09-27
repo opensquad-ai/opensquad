@@ -151,7 +151,7 @@ uv run opensquad start
 
 ### Option 3: pip
 
-From PyPI — runtime + web UI (see the gap note below):
+From PyPI — runtime, built web UI and the default resources:
 
 ```bash
 pip install opensquad
@@ -160,11 +160,14 @@ opensquad init
 opensquad start
 ```
 
-> **Known gap (v0.8.47):** the PyPI wheel ships the Python runtime, the built web
-> UI and `skills/`, but **not** `src/model_cards/` or `src/plugins/`. `opensquad
-> init` therefore cannot seed a model card, and no bundled plugins are available.
-> Use Option 1/2 (clone + `uv sync`) for a full deployment; completing the PyPI
-> package is an open item.
+> **Since 0.8.48 the wheel is a complete deployment.** It ships the default
+> `model_cards/`, `plugins/`, `agents/`, `pymcp/`, `collab_cards/`,
+> `role_cards/` and `skills/` next to the `opensquad` package, so `opensquad
+> init` seeds a runnable workspace and `opensquad start` finds every service.
+> One gap remains: a fresh pip workspace has no `system_config.json` (the wheel
+> carries no template), so ports stay on their defaults — gateway 9555,
+> launcher 9600, registry 9720, frontend 5173 — until you save one from the Web
+> UI's Settings.
 
 From a checkout — full deployment, editable install:
 

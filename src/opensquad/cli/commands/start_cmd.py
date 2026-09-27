@@ -16,6 +16,23 @@ from opensquad.proc_text import native_text_kwargs, to_text, utf8_text_kwargs
 # Default Vite dev server port; can be overridden by system_config.json ports.frontend
 _DEFAULT_VITE_PORT = 5173
 
+
+def _package_dir() -> str:
+    """Directory holding the installed `opensquad` package."""
+    import opensquad
+
+    return os.path.dirname(os.path.abspath(opensquad.__file__))
+
+
+def _builtin_root() -> str:
+    """Parent of the package: `src/` in a repo checkout, site-packages for a wheel.
+
+    Same value as ``syscfg.get_builtin_root()``. Kept local so start_cmd does
+    not need the config layer imported to resolve its own scripts.
+    """
+    return os.path.dirname(_package_dir())
+
+
 # Shared shutdown state for signal / console-close / atexit / finally paths.
 _SHUTDOWN_LOCK = threading.Lock()
 _SHUTDOWN_DONE = False
@@ -438,7 +455,7 @@ def _setup_local_mode(_root):
     Idempotent: skips config rewrites and the workspace-config subprocess when
     the target local-mode state already exists (saves 0.3-2s per CLI cold start).
     """
-    src_dir = os.path.join(_root, "src")
+    src_dir = _root
     cfg_path = os.path.join(src_dir, "system_config.json")
 
     if os.path.isfile(cfg_path):
@@ -464,14 +481,14 @@ def _setup_local_mode(_root):
                 timeout=10,
             )
 
-    frontend_dir = os.path.join(_root, "src", "opensquad", "gateway", "nexuschat-pro")
+    frontend_dir = os.path.join(_package_dir(), "gateway", "nexuschat-pro")
     env_local = os.path.join(frontend_dir, ".env.local")
     try:
         # Read gateway port from workspace config — NOT hardcoded.
         # The workspace dir is resolved via bootstrap_workspace() elsewhere;
         # as a fallback read the src/system_config.json directly.
         gateway_port = None
-        for search_dir in [_root, os.path.join(_root, "src")]:
+        for search_dir in [_root]:
             candidate = os.path.join(search_dir, "system_config.json")
             if os.path.isfile(candidate):
                 try:
@@ -533,7 +550,7 @@ def run_start(args):
         sys.exit(0 if ok else 1)
 
     _t0 = time.perf_counter()
-    _root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..", ".."))
+    _root = _builtin_root()
     if _root not in sys.path:
         sys.path.insert(0, _root)
     python_exe = _find_python()
@@ -561,8 +578,10 @@ def run_start(args):
     # kills startup threads and can cascade into the whole stack being torn
     # down. PYTHONUTF8=1 inherited by all children fixes the encoding chain.
     os.environ["PYTHONUTF8"] = "1"
-    # Also set PYTHONPATH for subprocesses
-    python_path = os.path.join(_root, "src")
+    # Also set PYTHONPATH for subprocesses: the dir holding the `opensquad`
+    # package (src/ in a repo, site-packages for a wheel), so children can
+    # `import opensquad` when launched by script path.
+    python_path = _root
     if "PYTHONPATH" in os.environ:
         if python_path not in os.environ["PYTHONPATH"]:
             os.environ["PYTHONPATH"] = python_path + os.pathsep + os.environ["PYTHONPATH"]
@@ -602,7 +621,7 @@ def run_start(args):
     processes = _ACTIVE_PROCESSES
 
     gateway_port = args.port or syscfg.port("gateway")
-    frontend_dir = os.path.join(_root, "src", "opensquad", "gateway", "nexuschat-pro")
+    frontend_dir = os.path.join(_package_dir(), "gateway", "nexuschat-pro")
     frontend_dist = os.path.join(frontend_dir, "dist")
     has_frontend_dist = os.path.isfile(os.path.join(frontend_dist, "index.html"))
     force_frontend = bool(getattr(args, "frontend", False))
@@ -620,7 +639,7 @@ def run_start(args):
 
     # [1/4] Start gateway (FastAPI backend, default port 9555 per system_config)
     if not args.no_gateway:
-        gateway_cwd = os.path.join(_root, "src", "opensquad", "gateway", "backend")
+        gateway_cwd = os.path.join(_package_dir(), "gateway", "backend")
         gateway_script = os.path.join(gateway_cwd, "run.py")
 
         print(f"[start] [1/4] Starting Gateway Backend (port {gateway_port})...")
@@ -653,7 +672,7 @@ def run_start(args):
 
     # [2/4] Start plugin registry (port 9720)
     if not args.no_registry:
-        registry_cwd = os.path.join(_root, "src", "opensquad", "gateway", "plugin_registry")
+        registry_cwd = os.path.join(_package_dir(), "gateway", "plugin_registry")
         registry_script = os.path.join(registry_cwd, "main.py")
 
         print(f"[start] [2/4] Starting Plugin Registry (port {syscfg.port('registry')})...")
@@ -689,7 +708,7 @@ def run_start(args):
     launcher_port = (args.port + 1) if args.port else syscfg.port("launcher")
     _LAUNCHER_PORT = launcher_port
     if not args.no_launcher:
-        launcher_cmd = [python_exe, os.path.join(_root, "src", "opensquad", "launcher_main.py")]
+        launcher_cmd = [python_exe, os.path.join(_package_dir(), "launcher_main.py")]
         launcher_cmd.extend(["--mgmt-port", str(launcher_port)])
 
         print(f"[start] [4/4] Starting Launcher (port {launcher_port})...")

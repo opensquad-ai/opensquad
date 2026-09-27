@@ -95,12 +95,20 @@ git push origin v0.X.0
 # 6. release.yml runs automatically:
 #    - validate job: tag version == pyproject.toml version (else fail loudly)
 #    - docker job: builds & pushes ghcr.io/opensquad-ai/opensquad:0.X.0 and :latest
-#    - pypi job: builds the wheel + sdist, publishes via OIDC trusted publishing
+#    - pypi job: builds the wheel + sdist, runs scripts/verify_release_artifacts.py
+#      and only then publishes via OIDC trusted publishing
 #    - release job: generates GitHub Release notes from commits since the previous tag
 #    Verify all three in:
 #      - https://github.com/opensquad-ai/opensquad/releases/tag/v0.X.0
 #      - https://pypi.org/project/opensquad/#history
 #      - https://github.com/opensquad-ai/opensquad/pkgs/container/opensquad
+#
+#    NEVER `twine upload` a locally built dist/. The repo is public and the
+#    working tree carries private plugins/skills, local model cards with real
+#    API keys, and (after `npm install`) node_modules. verify_release_artifacts.py
+#    catches all of that, but only the tag → CI path runs it. To check a local
+#    build before tagging:
+#        python -m build && python scripts/verify_release_artifacts.py dist
 
 # 7. Absorb main back into dev
 git checkout dev && git pull --ff-only

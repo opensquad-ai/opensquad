@@ -41,6 +41,53 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+> The pip channel is now a real deployment path. The PyPI wheel ships the default
+> resources next to the `opensquad` package, `opensquad init` seeds a usable
+> workspace from a wheel install, and `opensquad start` / `opensquad web` resolve
+> their scripts from the installed package instead of a repo-relative path.
+> Published artifacts are verified against `git ls-files` before upload.
+
+### Added
+
+- **Release artifact verifier** (`scripts/verify_release_artifacts.py`), run by
+  `release.yml` between the build and the PyPI upload. It fails on any private
+  plugin/skill, model cache, `node_modules` or `.env` in the sdist/wheel, on any
+  shipped file git does not track, and on a wheel missing the default resources
+  or the built web UI.
+
+### Fixed
+
+- **The PyPI wheel was not a deployable package.** It carried the runtime and
+  the web UI but no `model_cards/`, `plugins/`, `agents/`, `pymcp/`,
+  `collab_cards/` or `role_cards/`, so `opensquad init` seeded nothing and no
+  bundled plugins existed. Those directories now ship as siblings of the
+  `opensquad` package — the same layout the PyInstaller bundle uses, and the one
+  `syscfg.get_builtin_root()` already resolves to.
+- **`opensquad start` / `opensquad web` resolved their scripts and the built web
+  UI relative to the repo root** ("up four levels" from the command file), which
+  points outside site-packages for a pip install — neither command could find
+  the gateway, registry, launcher or `index.html`. Both now anchor on the
+  installed package; the paths are unchanged for a checkout.
+- **`node_modules` leaked into the published sdist and wheel.** CI runs
+  `npm install` before `python -m build`, and setuptools' sdist swept the
+  vendored `.py` files in — 64 of them in 0.8.47.
+- **`distributed_deep_research` pointed at a skill that does not exist.**
+  `collab_cards/distributed_deep_research.md` told every researcher to load a
+  `deep-research` skill and `skills/collaboration-workflow/SKILL.md` used the
+  same name as a required step, but no such skill ships or exists. Both now
+  make the inline 4-phase methodology authoritative and treat the skill as an
+  optional library lookup.
+
+### Changed
+
+- Packaging declares the default-resource directories explicitly and excludes
+  private plugins/skills, model caches, `node_modules` and build junk, so a
+  local build cannot pick them up either. Plugin UI lockfiles
+  (`pnpm-lock.yaml` / `package-lock.json`) are dropped too — they are
+  build-time only, and the Windows-generated ones carry the npm bug #4828
+  trap. Third-party licence files (e.g. `plugins/email_assistant/LICENSE`) are
+  deliberately kept.
+
 ---
 
 ## [0.8.47] — 2026-09-27

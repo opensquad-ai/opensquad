@@ -127,17 +127,15 @@ jobs:
       - name: Build package
         run: python -m build
 
-      - name: Verify wheel contains the built frontend
-        run: |
-          python - <<'PY'
-          import glob, zipfile
-          wheel = glob.glob("dist/*.whl")[0]
-          names = zipfile.ZipFile(wheel).namelist()
-          ui = [n for n in names if n.startswith("opensquad/gateway/nexuschat-pro/dist/")]
-          print(f"{wheel}: {len(names)} files, {len(ui)} under the frontend dist")
-          if len(ui) < 2:
-              raise SystemExit("wheel has no built frontend - check the Build frontend step")
-          PY
+      # Last line of defence before the public upload:
+      #  - no private plugin/skill, model cache, node_modules or .env may ship
+      #    (npm install above means node_modules/ exists when `python -m build`
+      #    sweeps the tree — that is how 64 vendored .py files once leaked in),
+      #  - every shipped file must be tracked by git,
+      #  - the default resources (model_cards/plugins/agents/pymcp/…) and the
+      #    built web UI must actually be in the wheel.
+      - name: Verify release artifacts
+        run: python scripts/verify_release_artifacts.py dist
 
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
