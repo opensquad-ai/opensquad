@@ -228,3 +228,74 @@ describe('estimated usage', () => {
     expect(text).toContain('输入 · 命中缓存1.6M');
   });
 });
+
+/**
+ * 同一会话里来回切换模型（2026-09-28 报告）：面板说「模型未返回统计用量，无法计算缓存
+ * 命中率」. The gate used to be "was ANY turn estimated" — a cumulative counter that never
+ * decrements, and which travels with the session across model switches
+ * (`transfer_usage_counters`), so a single estimated turn hid the rate for the rest of
+ * the session's life no matter how many later turns reported usage.
+ *
+ * The contract now: the ratio is taken over the turns that **reported**
+ * (`reported_input_tokens`), estimated turns are excluded and counted out loud.
+ */
+describe('reported-only hit rate across model switches', () => {
+  it('keeps a real rate after an estimated turn instead of hiding it for good', () => {
+    const text = openPanel({
+      ...BASE,
+      session: {
+        // The session total includes the estimated turns…
+        input_tokens: 300_000,
+        output_tokens: 4_000,
+        // …and the split below is taken over the reported ones only.
+        cache_read_tokens: 4_000,
+        reported_input_tokens: 5_000,
+        cache_miss_tokens: 1_000,
+        estimated_turns: 3,
+        usage_estimated: true,
+      },
+    });
+
+    expect(text).toContain('缓存命中率80.0%'); // 4000 / (4000 + 1000)
+    expect(text).toContain('输入 · 命中缓存4.0K');
+    expect(text).toContain('输入 · 未命中缓存1.0K');
+    expect(text).toContain('输入合计5.0K'); // hit + miss, over the reported subset
+    expect(text).toContain('有 3 个回合未返回用量数据');
+  });
+
+  it('still reports unavailable while no turn has reported anything', () => {
+    const text = openPanel({
+      ...BASE,
+      session: {
+        input_tokens: 300_000,
+        output_tokens: 6_600,
+        cache_read_tokens: 0,
+        reported_input_tokens: 0,
+        cache_miss_tokens: 0,
+        estimated_turns: 2,
+        usage_estimated: true,
+      },
+    });
+
+    expect(text).toContain('缓存命中率—');
+    expect(text).not.toContain('未命中缓存');
+    expect(text).toContain('该模型未返回用量数据');
+    // The rough total is still useful, so it stays — marked approximate.
+    expect(text).toContain('输入合计~300.0K');
+  });
+
+  it('adds no exclusion note when every turn reported', () => {
+    const text = openPanel({
+      ...BASE,
+      session: {
+        input_tokens: 1_000,
+        output_tokens: 100,
+        cache_read_tokens: 250,
+        reported_input_tokens: 1_000,
+        cache_miss_tokens: 750,
+      },
+    });
+    expect(text).toContain('缓存命中率25.0%');
+    expect(text).not.toContain('未返回用量数据');
+  });
+});

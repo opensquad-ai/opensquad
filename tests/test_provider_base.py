@@ -670,6 +670,21 @@ def test_cache_miss_is_input_minus_hit_floored_at_zero():
     assert pb.cache_miss_tokens("n/a", 1) == 0
 
 
+def test_reported_input_excludes_the_estimated_share():
+    """The hit rate's denominator: provider-reported prompt tokens only.
+
+    Estimated turns put a tokenizer guess into ``total_input_tokens`` and a hard
+    0 into cache-read, so a ratio that includes them fabricates a low rate.
+    """
+    assert pb.reported_input_tokens(1000, 0) == 1000
+    assert pb.reported_input_tokens(1040, 40) == 1000
+    # Clamped: a counter mismatch must not produce a negative denominator.
+    assert pb.reported_input_tokens(100, 500) == 0
+    assert pb.reported_input_tokens(None, None) == 0
+    assert pb.reported_input_tokens(1000, None) == 1000
+    assert pb.reported_input_tokens("n/a", 1) == 0
+
+
 def _code_without_comments(path: Path) -> str:
     """Source with ``#`` comments dropped, string literals kept.
 
@@ -724,6 +739,12 @@ def test_every_token_stats_emitter_publishes_the_cache_split():
         assert '"cache_read_tokens"' in src, rel
         assert '"cache_miss_tokens"' in src, rel
         assert "cache_miss_tokens(" in compact, f"{rel}: the split must use the shared clamp helper"
+        # The denominator is the *reported* input, not the session total: a
+        # session that estimated one turn (counters travel across model
+        # switches) must keep showing a real rate for the turns that reported.
+        assert '"reported_input_tokens"' in src, rel
+        assert "reported_input_tokens(" in compact, rel
+        assert '"estimated_turns"' in src, rel
         # Provenance travels to the UI: without it a session whose usage was
         # estimated renders a confident 0.0% hit rate instead of "unavailable".
         assert '"usage_estimated"' in src, rel
@@ -758,6 +779,38 @@ def test_a_stream_without_usage_is_marked_estimated_not_zero():
     assert api.usage_estimated_turns == 1
     assert api.usage_reported_turns == 0
     assert api.usage_is_estimated() is True, "a 0 here is 'unknown', not 'no cache hits'"
+    # The estimate is kept separable, so it never becomes the hit rate's
+    # denominator (there is nothing reported yet).
+    assert api.estimated_input_tokens == api.total_input_tokens
+    assert pb.reported_input_tokens(api.total_input_tokens, api.estimated_input_tokens) == 0
+
+
+def test_a_later_reported_turn_restores_the_rate_after_an_estimated_one():
+    """多切换模型后「模型未返回统计用量」— the panel must recover, not latch.
+
+    The gate used to be ``usage_estimated_turns > 0``, a cumulative counter that
+    never decrements and travels with the session across model switches.  One
+    estimated turn therefore hid the cache split for the rest of the session.
+    The rate is now taken over the reported turns, so the very next reporting
+    turn brings it back.
+    """
+    api, client = _run_one_turn(emit_usage=False)
+    assert pb.reported_input_tokens(api.total_input_tokens, api.estimated_input_tokens) == 0
+    estimated_only = api.total_input_tokens
+    assert estimated_only > 0
+
+    # Same client, now the endpoint reports usage (the model was switched).
+    client.emit_usage = True
+    api, _client = _run_one_turn(api=api, client=client)
+
+    reported = pb.reported_input_tokens(api.total_input_tokens, api.estimated_input_tokens)
+    assert reported == 4827, "the reported turn's prompt tokens, none of the guess"
+    assert api.total_cache_read_tokens == 4800
+    assert api.total_input_tokens == estimated_only + 4827, "the guess stays in the total"
+    assert api.usage_estimated_turns == 1 and api.usage_reported_turns == 1
+    # The rate is computable again, and the exclusion is still declared.
+    assert pb.cache_miss_tokens(reported, api.total_cache_read_tokens) == 27
+    assert pb.has_estimated_usage(api.usage_estimated_turns) is True
 
 
 def test_endpoints_that_reject_stream_options_still_complete_the_turn():

@@ -17,7 +17,7 @@ from . import session_manager as _session_module
 from . import state_manager as _state_module
 
 # Compression logic lives in the _runner sub-package (extracted from this file).
-from ._provider_base import cache_miss_tokens, has_estimated_usage
+from ._provider_base import cache_miss_tokens, has_estimated_usage, reported_input_tokens
 from ._runner._compression import (
     build_summary_payload as _build_summary_payload,
 )
@@ -4727,6 +4727,19 @@ class AgentRunner:
             self.chat_api.total_cache_read_tokens = 0
         if hasattr(self.chat_api, "total_cache_creation_tokens"):
             self.chat_api.total_cache_creation_tokens = 0
+        # Provenance resets with the totals it describes.  Left behind, a stale
+        # `estimated_input_tokens` would be subtracted from the *new* session's
+        # reported input for the rest of this client's life (the panel's hit rate
+        # is taken over `reported_input_tokens`), and a stale
+        # `usage_estimated_turns` would keep marking the new session's totals as
+        # approximate.  The roll-over above deliberately keeps them out of
+        # `_hist_*`: the cumulative block reports raw totals only.
+        if hasattr(self.chat_api, "estimated_input_tokens"):
+            self.chat_api.estimated_input_tokens = 0
+        if hasattr(self.chat_api, "usage_reported_turns"):
+            self.chat_api.usage_reported_turns = 0
+        if hasattr(self.chat_api, "usage_estimated_turns"):
+            self.chat_api.usage_estimated_turns = 0
         # GoogleAPI-specific: reset prompt_token_count baseline to avoid incorrect delta calculation on first turn of new session
         if hasattr(self.chat_api, "_last_prompt_token_count"):
             self.chat_api._last_prompt_token_count = 0
@@ -5041,6 +5054,15 @@ class AgentRunner:
             )
 
             token_max = int(getattr(chat_api, "token_max", 0) or 0)
+            # Hit rate denominator: prompt tokens from the turns that *reported*
+            # usage. An estimated turn adds a tokenizer guess to `input` and a
+            # hard 0 to cache-read, which used to make the ratio unmeasurable for
+            # the rest of the session — and that state followed the session
+            # across model switches (see `reported_input_tokens`).
+            session_reported_input = reported_input_tokens(
+                getattr(chat_api, "total_input_tokens", 0),
+                getattr(chat_api, "estimated_input_tokens", 0),
+            )
             token_data = {
                 "used": total,
                 "max": token_max,
@@ -5067,19 +5089,23 @@ class AgentRunner:
                     "cache_read_tokens": getattr(chat_api, "total_cache_read_tokens", 0),
                     # Prompt-token split for the context panel's cache hit rate.
                     # `cache_read` is a subset of `input` on every provider (see
-                    # extract_cached_tokens), so miss = input - read.  Computed
-                    # here so the UI never re-derives a provider-specific rule.
+                    # extract_cached_tokens), so miss = input - read.  Both sides
+                    # cover the reported turns only (see the denominator above);
+                    # computed here so the UI never re-derives a provider rule.
+                    "reported_input_tokens": session_reported_input,
                     "cache_miss_tokens": cache_miss_tokens(
-                        getattr(chat_api, "total_input_tokens", 0),
+                        session_reported_input,
                         getattr(chat_api, "total_cache_read_tokens", 0),
                     ),
                     "cache_creation_tokens": getattr(chat_api, "total_cache_creation_tokens", 0),
+                    # How many turns were left out of the ratio above — the panel
+                    # prints the count instead of silently changing the numbers.
+                    "estimated_turns": getattr(chat_api, "usage_estimated_turns", 0),
                     # True when a turn ran without provider usage, so the two
                     # counters above mix tokenizer estimates with real numbers
-                    # and the hit rate is unknown — not zero.  The panel shows
-                    # "unavailable" instead of 0.0% in that case.  Read off the
-                    # counter (not a method) so duck-typed chat clients in tests
-                    # and plugins keep working.
+                    # and the *totals* are approximations.  Read off the counter
+                    # (not a method) so duck-typed chat clients in tests and
+                    # plugins keep working.
                     "usage_estimated": has_estimated_usage(getattr(chat_api, "usage_estimated_turns", 0)),
                 },
             }

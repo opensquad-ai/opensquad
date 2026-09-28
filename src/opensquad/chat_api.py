@@ -1816,7 +1816,12 @@ class ChatAPI(ProviderAPIBase):
             # Fallback: estimate based on tiktoken. Cache read is unknowable
             # here, so the turn is recorded as estimated and the context panel
             # refuses to print a hit rate for it.
-            self.total_input_tokens += self._count_tokens(messages, self._last_tools)
+            estimated_input = self._count_tokens(messages, self._last_tools)
+            self.total_input_tokens += estimated_input
+            # Keep the estimated share separable: the panel computes the hit rate
+            # over reported turns only, so this must not be lumped into the real
+            # prompt count it is printed next to.
+            self.estimated_input_tokens += estimated_input
             self.total_output_tokens += len(self.encoding.encode(res_text)) if res_text else 0
             self.usage_estimated_turns += 1
 

@@ -72,11 +72,19 @@ class FakeResizeObserver {
 type Harness = {
   /** Content grows by `px` and the column observer reports a resize. */
   grow: (px: number) => void;
+  /**
+   * Content grows by `px` with NO observer callback — a height change that only
+   * lands a frame later (a fold body finishing its expand, a virtual spacer
+   * swap, a font/wrap reflow). The observer never sees it.
+   */
+  reflow: (px: number) => void;
   /** The reader drags the thumb to `top` (no echo: it is not our value). */
   dragTo: (top: number) => void;
   /** The scroll event the browser fires after our own scrollTop write. */
   pinEcho: () => void;
   top: () => number;
+  /** Largest scrollTop the element accepts (i.e. the pinned-to-bottom value). */
+  max: () => number;
 };
 
 let container: HTMLDivElement;
@@ -141,6 +149,9 @@ const renderTimeline = (): Harness => {
       contentPx += px;
       fireResize();
     },
+    reflow: (px: number) => {
+      contentPx += px;
+    },
     dragTo: (top: number) => {
       topPx = Math.max(0, Math.min(top, Math.max(0, contentPx - VIEW_PX)));
       act(() => {
@@ -153,6 +164,7 @@ const renderTimeline = (): Harness => {
       });
     },
     top: () => topPx,
+    max: () => Math.max(0, contentPx - VIEW_PX),
   };
 };
 
@@ -184,5 +196,42 @@ describe('ChatTimeline stick-to-bottom', () => {
     tl.grow(ROW_PX);
 
     expect(tl.top()).toBe(0);
+  });
+
+  it('T3 — 观察者回调之后才落地的增高也被跟上，滑块不停在半路', () => {
+    // 症状：贴底时来了新的工具调用 / 折叠体撑开，滑块"突然上涨一截"再不动了。
+    // 只钉一次就停在那一刻的 scrollHeight 上；迟一帧才落地的增高没人补。
+    vi.useFakeTimers();
+    try {
+      const tl = renderTimeline();
+      tl.grow(ROW_PX);
+      expect(tl.top()).toBe(tl.max());
+
+      // 迟一帧的重排：观察者不会再报一次，只有"钉完再盯几帧"能跟上。
+      tl.reflow(30);
+      act(() => {
+        vi.advanceTimersByTime(64);
+      });
+
+      expect(tl.top()).toBe(tl.max());
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('T4 — 跟随只在贴底时发生，读者拖走后迟到的增高不再把人拽回底部', () => {
+    vi.useFakeTimers();
+    try {
+      const tl = renderTimeline();
+      tl.grow(ROW_PX);
+      tl.dragTo(0);
+      tl.reflow(40);
+      act(() => {
+        vi.advanceTimersByTime(64);
+      });
+      expect(tl.top()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

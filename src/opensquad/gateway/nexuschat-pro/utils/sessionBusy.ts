@@ -1,29 +1,35 @@
 /**
  * Is THIS session row running right now?
  *
- * The agent reports the running sessions explicitly (``busy_sessions``, broadcast
- * on a ~5s loop) — that per-session list is the authority.  The agent-wide flag is
- * only a stopgap for the window before the first snapshot lands, and then only for
- * the session the user is driving.
+ * Two per-session sources, both about *this* row — never an agent-wide flag:
  *
- * The bug this replaces: the row used the backend's ``session.current`` flag, which
- * is the disk "current session" pointer, not "this session is running" (the sidebar
- * already refuses to trust it for the *highlight*, see ``isCurrent``).  So whenever
- * the agent was busy for ANY session, a long-finished session that happened to be
- * the current pointer kept pulsing with the working animation.
+ *   1. the sessions the agent reports as running a turn (``busy_sessions``,
+ *      broadcast on a ~5s loop) — the authority;
+ *   2. sessions this client is streaming right now (``isStreamingBySession``) —
+ *      covers the window before the snapshot lands.
+ *
+ * The bug this replaces (first round): the row used the backend's
+ * ``session.current`` flag, which is the disk "current session" pointer, not
+ * "this session is running", so whenever the agent was busy for ANY session a
+ * long-finished session that happened to be the current pointer kept pulsing.
+ *
+ * The bug this replaces (second round, 2026-09-28): the stopgap for window (2)
+ * was ``agentBusy && sessionId === currentSessionId`` — i.e. "whatever row the
+ * user has selected, if the agent is busy somewhere".  Selecting a session in
+ * the sidebar is not driving it, so clicking through the list repainted the
+ * working animation onto every row the user touched (「点击哪个会话，哪个会话就
+ * 任务流进度动画」), and a stale agent-wide flag made it stick there for good.
+ * A row lights up only on evidence about that row.
  */
 export function isSessionRowBusy(opts: {
   sessionId: string;
-  /** Session the user has selected in the UI */
-  currentSessionId?: string | null;
-  /** Agent-wide "something is running" flag */
-  agentBusy?: boolean;
   /** Session ids the agent reports as running a turn */
   busySessionIds?: string[];
+  /** Session ids this client is currently streaming */
+  streamingSessionIds?: string[];
 }): boolean {
-  const { sessionId, currentSessionId, agentBusy, busySessionIds } = opts;
+  const { sessionId, busySessionIds, streamingSessionIds } = opts;
   if (!sessionId) return false;
-  const list = busySessionIds || [];
-  if (list.includes(sessionId)) return true;
-  return !!agentBusy && sessionId === currentSessionId && list.length === 0;
+  if ((busySessionIds || []).includes(sessionId)) return true;
+  return (streamingSessionIds || []).includes(sessionId);
 }

@@ -922,7 +922,12 @@ class GoogleAPI(ProviderAPIBase):
                     # has the uncalibrated x3 hard guard. Verify the semantics of
                     # the gateway's usage_metadata before wiring it up.
                 except Exception:
-                    self.total_input_tokens += self._count_tokens(all_msgs)
+                    estimated_input = self._count_tokens(all_msgs)
+                    self.total_input_tokens += estimated_input
+                    # No usable usage_metadata: mark the turn estimated and keep
+                    # its tokenizer guess out of the reported-only hit rate.
+                    self.estimated_input_tokens += estimated_input
+                    self.usage_estimated_turns += 1
                     if self.encoding and full_text:
                         self.total_output_tokens += len(self.encoding.encode(full_text))
 

@@ -67,6 +67,7 @@ __all__ = [
     "cache_miss_tokens",
     "extract_cached_tokens",
     "has_estimated_usage",
+    "reported_input_tokens",
     "transfer_usage_counters",
 ]
 
@@ -165,13 +166,42 @@ def cache_miss_tokens(input_tokens: object, cache_read_tokens: object) -> int:
     return max(0, total - hit)
 
 
+def reported_input_tokens(input_tokens: object, estimated_input_tokens: object) -> int:
+    """Prompt tokens that were billed with *provider-reported* usage.
+
+    ``total_input_tokens`` mixes two kinds of number: real prompt counts from the
+    provider's ``usage`` object, and local tokenizer estimates for turns whose
+    stream never carried one.  Only the first kind can be paired with
+    ``total_cache_read_tokens`` — an estimated turn contributes a guess to the
+    input side and a hard 0 to the cache side, so putting it in the denominator
+    fabricates a low hit rate (and, before this split existed, the UI gave up on
+    the whole session the moment one turn was estimated, forever).
+
+    Subtracting the estimated share keeps the ratio defined over the turns that
+    actually reported, which is also what makes it survive a model switch: the
+    counters travel between clients (see :func:`transfer_usage_counters`), and
+    what travels is real input, not guesses.
+    """
+    try:
+        total = int(input_tokens or 0)
+        estimated = int(estimated_input_tokens or 0)
+    except (TypeError, ValueError):
+        return 0
+    return max(0, total - estimated)
+
+
 def has_estimated_usage(estimated_turns: object) -> bool:
     """True when a client ran turns without provider usage data.
 
     Those turns contribute tokenizer estimates to ``total_input_tokens`` and a
-    hard 0 to ``total_cache_read_tokens``, so any cache ratio derived from the
-    two is meaningless.  Consumers must show "unavailable" rather than a
-    real-looking number.
+    hard 0 to ``total_cache_read_tokens``, so the *totals* are approximations.
+
+    This used to be the UI's gate for the whole cache block, which made a single
+    estimated turn permanent: switching models copies/moves the counter, nothing
+    ever decrements it, and a session that reported usage for hours kept saying
+    "unavailable".  Consumers must gate the hit **rate** on
+    :func:`reported_input_tokens` instead and use this only to mark the totals
+    (``~``) and to explain the excluded turns.
 
     Module-level on purpose: ``runner`` builds the ``token_stats`` payload from
     a duck-typed chat client (``getattr`` everywhere), so the rule must be
@@ -198,6 +228,10 @@ USAGE_COUNTER_FIELDS: tuple[str, ...] = (
     "total_requests",
     "total_cache_read_tokens",
     "total_cache_creation_tokens",
+    #: Share of ``total_input_tokens`` that came from the local tokenizer rather
+    #: than a provider ``usage`` object.  Travels with the rest so the hit rate
+    #: stays computable over the reported turns after a model switch.
+    "estimated_input_tokens",
     "usage_reported_turns",
     "usage_estimated_turns",
 )
@@ -269,6 +303,11 @@ class ProviderAPIBase:
         # printing a confident 0.0%.
         self.usage_reported_turns = 0  # turns whose usage came from the provider
         self.usage_estimated_turns = 0  # turns that fell back to the local estimate
+        #: Input tokens contributed by those estimated turns.  Kept apart from
+        #: the total so the cache hit rate can be computed over the reported
+        #: turns alone (``reported_input_tokens``) — estimated input with a
+        #: hard-0 cache read is what used to poison the ratio for good.
+        self.estimated_input_tokens = 0
         self._stream_options_rejected = False  # endpoint 400s on stream_options
         self._auto_compress_stats: dict[str, Any] = {}
         # Measured ratio between provider-reported input tokens and the local
@@ -468,9 +507,10 @@ class ProviderAPIBase:
         """True when any turn ran without provider usage data.
 
         Those turns contribute tokenizer estimates to ``total_input_tokens``
-        and a hard 0 to ``total_cache_read_tokens``, so any cache ratio derived
-        from the two is meaningless.  Consumers must show "unavailable" rather
-        than a real-looking number.
+        and a hard 0 to ``total_cache_read_tokens``, so the *totals* are
+        approximations.  It is not the gate for the cache hit rate: that is
+        :func:`reported_input_tokens` over the reported subset, so one estimated
+        turn (which also survives model switches) cannot disable the number.
         """
         return has_estimated_usage(self.usage_estimated_turns)
 

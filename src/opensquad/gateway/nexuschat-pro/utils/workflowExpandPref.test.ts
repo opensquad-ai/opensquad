@@ -33,19 +33,24 @@ describe('workflowExpandPref', () => {
   });
 
   it('maps progressive flags', () => {
+    // plan + process output auto-open at every level; thinking joins at
+    // "思考", tools only at "完整".
     expect(workflowExpandFlags('collapsed')).toEqual({
       thoughts: false,
-      plan: false,
+      plan: true,
+      process: true,
       tools: false,
     });
     expect(workflowExpandFlags('thoughts')).toEqual({
       thoughts: true,
       plan: true,
+      process: true,
       tools: false,
     });
     expect(workflowExpandFlags('full')).toEqual({
       thoughts: true,
       plan: true,
+      process: true,
       tools: true,
     });
   });

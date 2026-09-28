@@ -92,9 +92,11 @@ interface SessionSidebarProps {
   rolesActive?: boolean;
   isOpen: boolean;
   sessionTitleUpdate?: { id: string; title: string } | null;
-  agentBusy?: boolean;
   /** Session ids currently running a parallel turn */
   busySessionIds?: string[];
+  /** Session ids this client is streaming right now (fills the gap before the
+   *  backend's busy_sessions snapshot lands) — per session, never agent-wide. */
+  streamingSessionIds?: string[];
   /** Sessions that finished while not selected — show grey unread-complete dot */
   unseenCompleteSessionIds?: string[];
   primarySessionId?: string | null;
@@ -213,8 +215,8 @@ const SessionSidebarInner: React.FC<SessionSidebarProps> = ({
   rolesActive = false,
   isOpen,
   sessionTitleUpdate,
-  agentBusy = false,
   busySessionIds = [],
+  streamingSessionIds = [],
   unseenCompleteSessionIds = [],
   primarySessionId = null,
   pendingPrimarySessionId = null,
@@ -757,9 +759,8 @@ const SessionSidebarInner: React.FC<SessionSidebarProps> = ({
     const archived = !!meta?.archived;
     const busy = isSessionRowBusy({
       sessionId: session.id,
-      currentSessionId,
-      agentBusy,
       busySessionIds,
+      streamingSessionIds,
     });
     const unseenComplete = !busy && !isCurrent && unseenCompleteSessionIds.includes(session.id);
     const confirming = confirmingDeleteId === session.id;

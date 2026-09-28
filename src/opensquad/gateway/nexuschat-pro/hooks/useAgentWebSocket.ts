@@ -18,6 +18,7 @@ import {
   isUiOnlyToolName,
   readThoughtMs,
   sealIncompleteWorkflows,
+  sessionMessageIdentity,
   stampThoughtDuration,
   timelineHasWorkflowEvent,
   toWebMediaUrl,
@@ -113,7 +114,6 @@ export function useAgentWebSocket(agentId: string, ctx: AgentWebWsCtx) {
       finalizeWorkflowAndAddMessage,
       finalizingBySidRef,
       getBootRestoreSessionId,
-      historyOffsetRef,
       hydrateCurrentSessionRef,
       isHydratingSessionRef,
       isSidFinalizing,
@@ -150,7 +150,8 @@ export function useAgentWebSocket(agentId: string, ctx: AgentWebWsCtx) {
       setCurrentCardName,
       setCurrentSessionId,
       setFollowupSuggestions,
-      setHasMoreHistory,
+      setPaging,
+      setPagingCursor,
       setIsCompressingContext,
       setIsLoadingSession,
       setIsStreaming,
@@ -378,9 +379,18 @@ export function useAgentWebSocket(agentId: string, ctx: AgentWebWsCtx) {
       event: WorkflowEvent,
       status: string | null,
       immediate = false,
+      ownSid?: string,
     ) => {
-      const sid = (eventSidRef.current || currentSessionIdRef.current || '').trim();
-      if (!sid) return;
+      // The session must come from the frame that produced the event. The old
+      // `|| currentSessionIdRef.current` fallback was only ever reached from
+      // *deferred* callers (rAF / setTimeout), whose frame context is already
+      // gone — so pane A's tool call landed in whichever pane the user had just
+      // switched to. An unattributable live event is dropped instead.
+      const sid = (ownSid || eventSidRef.current || '').trim();
+      if (!sid) {
+        console.warn('[AIChatPage] live workflow event dropped: no session id', event.type);
+        return;
+      }
       pendingLiveWorkflowEvents.push({ event, status, sid });
       if (immediate) {
         flushLiveWorkflowEvents();
@@ -396,6 +406,10 @@ export function useAgentWebSocket(agentId: string, ctx: AgentWebWsCtx) {
 
     let markupSniffBuf = '';
     let markupToolSig = '';
+    // The 66ms debounce below fires AFTER the WS handler returned and cleared
+    // `eventSidRef` — remember whose stream this buffer came from so the sniffed
+    // tool call cannot be filed under the session the user just switched to.
+    let markupSniffSid = '';
     let markupSniffTimer: ReturnType<typeof setTimeout> | null = null;
     const emitSniffedMarkupTool = () => {
       const parsed = extractLiveToolCallFromMarkup(markupSniffBuf);
@@ -420,11 +434,16 @@ export function useAgentWebSocket(agentId: string, ctx: AgentWebWsCtx) {
           timestamp: Date.now(),
         },
         `Calling ${parsed.name}...`,
+        false,
+        markupSniffSid,
       );
     };
     const sniffMarkupTool = (chunk: string) => {
       if (!chunk) return;
       markupSniffBuf += chunk;
+      // Inside the handler: this is the only moment the owning sid is known.
+      const sid = (eventSidRef.current || '').trim();
+      if (sid) markupSniffSid = sid;
       if (markupSniffBuf.length > 8000) markupSniffBuf = markupSniffBuf.slice(-8000);
       if (markupSniffTimer != null) return;
       markupSniffTimer = setTimeout(() => {
@@ -570,6 +589,16 @@ export function useAgentWebSocket(agentId: string, ctx: AgentWebWsCtx) {
       if (!clearSid || clearSid === (currentSessionIdRef.current || '')) {
         streamingTextRef.current = '';
         setStreamingText('');
+      }
+      // The global flag is read as "some session is still streaming" (isAgentBusy
+      // reads it whenever the busy list is empty). Gating it on "the finalized sid
+      // happens to be the focused one" latched it forever: a turn that ends after
+      // the user switched away left `isStreaming` true, so a perfectly idle
+      // session looked busy to `isSessionBusy()` — its sends parked with no one to
+      // release them (「发送没反应」), and the sidebar row it selected pulsed.
+      // Release it on the per-session evidence instead: the session that just
+      // finalized is already gone from the map above.
+      if (!Object.values(isStreamingBySessionRef.current).some(Boolean)) {
         setIsStreaming(false);
         setAgentStatus('connected');
       }
@@ -600,7 +629,16 @@ export function useAgentWebSocket(agentId: string, ctx: AgentWebWsCtx) {
       if (title) {
         // Agent-chosen title wins over the provisional first-message title.
         pendingSessionTitleRef.current = null;
-        setCurrentSessionId(prev => prev || sessionId);
+        // Adopting `sessionId` only ever fires while the focused id is empty — the
+        // new-session window. There it must adopt the *new* conversation's id
+        // (its title may beat current_session). But a just-abandoned session's
+        // async title lands seconds later too: adopting that one yanked the pane
+        // back to the old chat and the next send went into its stream (串会话).
+        const abandoned =
+          !!sessionId
+          && newSessionPendingRef.current
+          && sessionId === agentCurrentSessionIdRef.current;
+        if (!abandoned) setCurrentSessionId(prev => prev || sessionId);
         if (sessionId) {
           setSessionTitleUpdate({ id: sessionId, title });
         }
@@ -2421,8 +2459,11 @@ export function useAgentWebSocket(agentId: string, ctx: AgentWebWsCtx) {
             viewingHistorySessionRef.current = false;
             setViewingHistorySession(false);
             loadingSessionIdRef.current = viewedSid;
-            historyOffsetRef.current = session.messages?.length || 0;
-            setHasMoreHistory(session.has_more ?? false);
+            setPagingCursor(viewedSid, {
+              offset: session.messages?.length || 0,
+              anchor: sessionMessageIdentity(session.messages?.[0]) || null,
+            });
+            setPaging(viewedSid, { hasMore: session.has_more ?? false });
             diskSessionLoadedRef.current = true;
           } else {
             // Disk session unavailable — use buffered WS history as fallback

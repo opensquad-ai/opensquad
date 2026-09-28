@@ -13,7 +13,7 @@ import json
 from collections.abc import Callable
 from typing import Any
 
-from opensquad._provider_base import cache_miss_tokens, has_estimated_usage
+from opensquad._provider_base import cache_miss_tokens, has_estimated_usage, reported_input_tokens
 from opensquad.tool import logger
 
 __all__ = ["OutputHandler"]
@@ -194,6 +194,11 @@ class OutputHandler:
             cumul_total = cumul_input + cumul_output
             cumul_requests = hist_req + getattr(chat_api, "total_requests", 0)
             cumul_cache = hist_cache + getattr(chat_api, "total_cache_read_tokens", 0)
+            # Hit rate denominator: reported turns only (see reported_input_tokens).
+            session_reported_input = reported_input_tokens(
+                getattr(chat_api, "total_input_tokens", 0),
+                getattr(chat_api, "estimated_input_tokens", 0),
+            )
 
             token_data = {
                 "used": total,
@@ -218,11 +223,16 @@ class OutputHandler:
                     # payload.  Kept in sync deliberately: whichever emitter a
                     # future refactor keeps, the panel must still be able to
                     # tell a real 0% hit rate from "usage was never reported".
+                    # The hit rate is defined over *reported* turns only —
+                    # `reported_input_tokens` is the denominator, so one
+                    # estimated turn cannot disable the number.
+                    "reported_input_tokens": session_reported_input,
                     "cache_miss_tokens": cache_miss_tokens(
-                        getattr(chat_api, "total_input_tokens", 0),
+                        session_reported_input,
                         getattr(chat_api, "total_cache_read_tokens", 0),
                     ),
                     "cache_creation_tokens": getattr(chat_api, "total_cache_creation_tokens", 0),
+                    "estimated_turns": getattr(chat_api, "usage_estimated_turns", 0),
                     "usage_estimated": has_estimated_usage(getattr(chat_api, "usage_estimated_turns", 0)),
                 },
                 "breakdown": stats,

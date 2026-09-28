@@ -57,9 +57,35 @@ type TurnWorkflowBlock = {
   events?: TurnWorkflowEvent[];
 };
 
+/**
+ * Same file, two spellings. The agent writes the same path both ways inside one
+ * turn (`C:\...\model_cards\commandcode_space-bunny-alpha.json` and
+ * `commandcode_space-bunny-alpha.json` — verified in session
+ * 20260928_070309_n8ls), so keying the card by the raw path painted the SAME
+ * file twice, side by side, which reads as a duplicated card.
+ */
+function pathKey(p: string): string {
+  return p.replace(/\\/g, '/').replace(/\/+$/, '');
+}
+
+const isAbsolutePath = (p: string): boolean => /^[a-zA-Z]:\//.test(p) || p.startsWith('/');
+
+function isSameFile(a: string, b: string): boolean {
+  const na = pathKey(a);
+  const nb = pathKey(b);
+  if (na === nb) return true;
+  // A relative spelling is the same file as an absolute one that ends with it —
+  // but two relative paths never collapse into each other (`x.json` and
+  // `sub/x.json` are different files).
+  const abs = isAbsolutePath(na) ? na : isAbsolutePath(nb) ? nb : null;
+  const rel = abs === na ? nb : abs === nb ? na : null;
+  if (!abs || !rel || isAbsolutePath(rel)) return false;
+  return abs.endsWith(`/${rel}`);
+}
+
 /** Collect unique created/modified file paths from workflow tool_call events. */
 export function collectTurnChangedFiles(blocks: TurnWorkflowBlock[]): TurnChangedFile[] {
-  const byPath = new Map<string, TurnChangedFile>();
+  const files: TurnChangedFile[] = [];
   for (const block of blocks) {
     for (const evt of block.events || []) {
       if (evt.type !== 'tool_call' || evt.subAgent) continue;
@@ -70,12 +96,11 @@ export function collectTurnChangedFiles(blocks: TurnWorkflowBlock[]): TurnChange
       if (!info || (info.kind !== 'write' && info.kind !== 'edit')) continue;
       const path = info.filePath;
       if (!path) continue;
-      if (!byPath.has(path)) {
-        byPath.set(path, { path, name: info.fileName || path, kind: info.kind === 'write' ? 'write' : 'edit' });
-      }
+      if (files.some((f) => isSameFile(f.path, path))) continue;
+      files.push({ path, name: info.fileName || path, kind: info.kind === 'write' ? 'write' : 'edit' });
     }
   }
-  return Array.from(byPath.values());
+  return files;
 }
 
 /** Scan backwards from a timeline index for the completed workflow run that produced this reply. */

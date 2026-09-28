@@ -857,13 +857,16 @@
         "im": "发送消息",
         "task_watch": "任务盯守",
         "memory": "长期记忆",
+        "long_memory": "长期记忆",
         "goal": "目标进度",
         "reminder": "定时提醒",
         "scheduled_tasks": "定时任务",
         "vision": "图像理解",
         "media": "多媒体",
         "whisper": "语音转写",
-        "whisper_transcribe": "语音转写"
+        "whisper_transcribe": "语音转写",
+        "workspace": "工作区",
+        "agent_setup": "技能管理"
       },
       "fn": {
         "search": "搜索",
@@ -896,7 +899,31 @@
         "wait": "等待",
         "sleep": "等待",
         "set_state": "切换状态",
-        "set_wake_mode": "唤醒模式"
+        "set_wake_mode": "唤醒模式",
+        "get_allowed_dirs": "查看允许目录",
+        "list_allowed_dirs": "查看允许目录",
+        "add_allowed_dir": "添加允许目录",
+        "set_allowed_dirs": "设置允许目录",
+        "create_directory": "创建目录",
+        "set_session_cwd": "切换工作目录",
+        "set_config_path": "设置配置路径",
+        "check_job": "查看命令",
+        "stop_job": "停止命令",
+        "list_jobs": "查看命令列表",
+        "close_shell_session": "关闭终端",
+        "restart_shell_session": "重启终端",
+        "list_shell_sessions": "查看终端列表",
+        "emit_job_event": "推送任务事件",
+        "write_binary_file": "写入文件",
+        "get_system_info": "查看系统信息",
+        "get_time": "获取当前时间",
+        "get_wake_mode": "查看唤醒模式",
+        "send_file_to_web": "发送文件到界面",
+        "send_message_to_web": "发送消息到界面",
+        "abort_all_tool_processes": "中止工具进程",
+        "get_tool_call_context": "读取工具上下文",
+        "set_tool_call_context": "设置工具上下文",
+        "reset_tool_call_context": "重置工具上下文"
       },
       "summary": {
         "read": "读取 {{n}} 个文件",
@@ -932,6 +959,7 @@
         "exploring": "正在探索",
         "explored": "已探索",
         "fail": "失败",
+        "repeatHint": "同一调用连续重复了 {{count}} 次（切到“完整”展开级别可看每一次）",
         "done": "完成",
         "live": "进行中",
         "summaryContext": "上下文摘要",
@@ -969,6 +997,7 @@
         "plan": "计划",
         "planned": "已制定计划",
         "thoughtFor": "深度思考 {{time}}",
+        "tokensPerSec": "{{rate}} tok/s",
         "activity": "活动记录"
       },
       "delegate": {
@@ -1031,6 +1060,7 @@
     "modelSwitched": "已切换模型 → {{model}}",
     "loadingSession": "加载会话中...",
     "creatingSession": "创建会话中...",
+    "loadEarlierMessages": "加载更早的消息",
     "planPanel": "规划面板",
     "contextDetails": "上下文详情",
     "exportContext": "导出上下文",
@@ -1044,12 +1074,12 @@
     "archivedCollapse": "收起已归档",
     "archivedCount": "{{count}} 条已归档",
     "pendingLabel": "待发送",
-    "pendingQueueHint": "{{count}} 条引导消息，不打断当前任务、下一轮注入",
+    "pendingQueueHint": "{{count}} 条排队中，本轮任务结束后自动发送；点 ↗ 立即插话",
     "sendNext": "发送下一条",
     "queueMessage": "排队等待发送",
-    "pendingCount": "{{count}} 条引导中",
-    "pendingSteerHint": "已引导注入，模型下一轮可见、不中断",
-    "steerHint": "引导会话，消息将被发出但模型不会中断",
+    "pendingCount": "{{count}} 条待发送",
+    "pendingSteerHint": "已引导注入，模型下次工具返回后可见、不中断",
+    "steerHint": "立即插话：下一次工具返回后进入模型上下文，不打断当前任务",
     "editPending": "撤回到输入框编辑",
     "deletePending": "删除",
     "turnCancelled": "任务已取消",
@@ -1224,13 +1254,13 @@
       },
       "workflowExpand": {
         "title": "工作流信息展示程度",
-        "hint": "控制对话中思考、Plan、工具调用等折叠的默认展开程度。你随时可手动展开或折叠，设置不会覆盖你的操作。",
+        "hint": "控制对话中思考、Plan、过程输出、工具调用等折叠的默认展开程度。你随时可手动展开或折叠，设置不会覆盖你的操作。",
         "collapsed": "精简",
-        "collapsedDesc": "不主动展开思考、Plan 与工具调用折叠。",
+        "collapsedDesc": "自动展开 Plan 与过程输出，思考与工具调用保持折叠。",
         "thoughts": "思考",
-        "thoughtsDesc": "主动展开思考与 Plan，工具调用保持折叠。",
+        "thoughtsDesc": "自动展开深度思考、Plan 与过程输出，工具调用保持折叠。",
         "full": "完整",
-        "fullDesc": "主动展开思考、Plan 与工具调用折叠。"
+        "fullDesc": "自动展开深度思考、Plan、过程输出与工具调用折叠。"
       }
     },
     "toggleEnabled": "已启用",
@@ -1613,7 +1643,8 @@
     "inputTokens": "输入合计",
     "outputTokens": "输出",
     "cacheHitUnknown": "—",
-    "cacheHitUnavailable": "该模型未返回用量数据，无法统计缓存命中率"
+    "cacheHitUnavailable": "该模型未返回用量数据，无法统计缓存命中率",
+    "cacheHitPartial": "有 {{count}} 个回合未返回用量数据，已从命中率中排除"
   },
   "toolCall": {
     "deliveryWarning": "文件已上传但未投递到任何在线 Web 客户端。请确认已打开该 agent 的 AI Chat 页面并保持连接后重试。"

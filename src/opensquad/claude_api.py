@@ -916,7 +916,13 @@ class ClaudeAPI(ProviderAPIBase):
                             final_msg.usage.input_tokens + _cache_read + _cache_creation, all_msgs, self._last_tools
                         )
                     else:
-                        self.total_input_tokens += self._count_tokens(all_msgs)
+                        estimated_input = self._count_tokens(all_msgs)
+                        self.total_input_tokens += estimated_input
+                        # No usage block: the numbers are tokenizer guesses, so
+                        # keep them out of the reported-only cache hit rate and
+                        # mark the turn estimated (same bookkeeping as chat_api).
+                        self.estimated_input_tokens += estimated_input
+                        self.usage_estimated_turns += 1
                         self.total_output_tokens += len(self.encoding.encode(full_text)) if self.encoding else 0
 
                 self.total_requests += 1

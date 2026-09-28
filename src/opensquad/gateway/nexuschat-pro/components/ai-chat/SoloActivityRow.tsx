@@ -66,6 +66,11 @@ const SOLO_STEPS_SCROLL_MAX_CLASS = 'max-h-[280px]';
 const STEP_VIRT_AFTER = 80;
 const STEP_EST_PX = 26;
 const STEP_OVERSCAN = 18;
+/**
+ * 贴底后继续盯几帧：虚拟窗口换挡、（自动展开的）行体撑高都在这之后才落地。
+ * 自终止 + 上限，绝不常驻 rAF。
+ */
+const STEP_FOLLOW_FRAMES = 12;
 
 function virtTailWindow(length: number, clientH = 280): { start: number; end: number } {
   const visible = Math.ceil((clientH || 280) / STEP_EST_PX) + STEP_OVERSCAN * 2;
@@ -214,6 +219,13 @@ interface ActivityLine {
   shellJob?: ShellJobBundle;
   /** Parsed <plan> steps for Solo plan fold */
   planSteps?: PlanStep[];
+  /**
+   * How many consecutive identical calls this row stands for. A retry storm
+   * (the same file rewritten 27× against an endpoint that keeps answering 403)
+   * used to render as 27 identical rows; the row keeps its own args/result and
+   * only the count is added — see `collapseRepeatedToolLines`.
+   */
+  repeatCount?: number;
 }
 
 function fileEditEqual(a?: FileEditInfo | null, b?: FileEditInfo | null): boolean {
@@ -253,6 +265,74 @@ function activityLineEqual(a: ActivityLine, b: ActivityLine): boolean {
     && a.toolArgs === b.toolArgs
     && fileEditEqual(a.fileEdit, b.fileEdit)
   );
+}
+
+/**
+ * Retry storms: the same call repeated back to back. A stuck agent that keeps
+ * re-writing one file and getting the same 403 produced 27 identical rows in a
+ * row — a wall of copies that reads as a rendering bug even though every row is
+ * real history (session 20260928_070309_n8ls has 27 such writes).
+ *
+ * `collapseRepeatedToolLines` folds a run of byte-identical consecutive tool
+ * calls into its first row plus `repeatCount`. Identity is the *whole* call —
+ * tool, args, file edit, status, and (for failures) the error text — so two
+ * different edits to one file never merge, and only an honest repeat does.
+ * Running rows are never folded: that call is still in flight, and it is the
+ * only one of its kind so far.
+ */
+function stableStringify(value: unknown): string {
+  if (value === null || typeof value !== 'object') return JSON.stringify(value) ?? 'null';
+  if (Array.isArray(value)) return `[${value.map(stableStringify).join(',')}]`;
+  const obj = value as Record<string, unknown>;
+  return `{${Object.keys(obj)
+    .sort()
+    .map((k) => `${JSON.stringify(k)}:${stableStringify(obj[k])}`)
+    .join(',')}}`;
+}
+
+function retrySignature(line: ActivityLine): string | null {
+  if (line.kind !== 'tool' || line.running || !line.toolName) return null;
+  const edit = line.fileEdit
+    ? [
+        line.fileEdit.kind,
+        line.fileEdit.filePath,
+        line.fileEdit.oldStr || '',
+        line.fileEdit.newStr || '',
+      ].join('\u0001')
+    : '';
+  // Successful results often embed a duration/timestamp ("written at …"), so they
+  // are excluded from the identity; a failure message is the whole point of the
+  // repeat, so it is included.
+  const result = line.toolStatus === 'error' ? line.toolResult || '' : '';
+  return [line.toolName, line.toolStatus || '', stableStringify(line.toolArgs), edit, result].join('\u0000');
+}
+
+/** Keeps the merged row referentially stable while the run's count is unchanged. */
+const mergedRepeatCache = new WeakMap<ActivityLine, { count: number; line: ActivityLine }>();
+
+function withRepeatCount(head: ActivityLine, count: number): ActivityLine {
+  if (count <= 1) return head;
+  const hit = mergedRepeatCache.get(head);
+  if (hit && hit.count === count) return hit.line;
+  const merged = { ...head, repeatCount: count };
+  mergedRepeatCache.set(head, { count, line: merged });
+  return merged;
+}
+
+export function collapseRepeatedToolLines(lines: ActivityLine[]): ActivityLine[] {
+  const out: ActivityLine[] = [];
+  let lastSig: string | null = null;
+  for (const line of lines) {
+    const sig = retrySignature(line);
+    const head = out[out.length - 1];
+    if (sig && head && head.kind === 'tool' && lastSig === sig) {
+      out[out.length - 1] = withRepeatCount(head, (head.repeatCount || 1) + 1);
+      continue;
+    }
+    out.push(line);
+    lastSig = sig;
+  }
+  return out;
 }
 
 function eventToLines(evt: WorkflowEvent, key: string, blockCompleted: boolean, t: TFunction): ActivityLine[] {
@@ -678,7 +758,11 @@ function classifyWorkTool(name: string): WorkToolCategory {
   if (isUiOnlyToolName(name)) return 'interaction';
   // 多智能体协作与消息：delegate_task 通常已被 delegation 折叠消费，兜底归协作。
   if (ns === 'collaboration' || ns === 'delegate_task' || ns === 'im' || ns === 'task_watch') return 'collab';
-  if (ns === 'memory') return 'memory';
+  // 长期记忆有两个注册命名空间：`memory`（runner_bootstrap 旧路径）与
+  // `long_memory`（agents_boot 配置 key）。两条路径上报的工具名前缀不同，
+  // 只认一个就会让另一条链路的记忆工具掉进裸名兜底 —— 被 `write` 正则
+  // 误判成"编辑文件"，标签也退化成英文 "memory write"。
+  if (ns === 'memory' || ns === 'long_memory') return 'memory';
   if (ns === 'goal') return 'goal';
   // 系统控制：等待（system.wait）/ 定时提醒（reminder.set 等闹钟类）/ 状态切换。
   if (ns === 'reminder' || ns === 'scheduled_tasks') return 'system';
@@ -689,10 +773,15 @@ function classifyWorkTool(name: string): WorkToolCategory {
     // on (^|_)…($|_) instead. Edit runs before list so create_directory
     // doesn't trip the directory-listing pattern. Only true strangers fall
     // through to 'other'.
+    // 允许目录（allowed dirs）是"查看/设置可访问范围"，不是编辑文件 —— 放在
+    // read/search/edit 之前，否则 add_allowed_dir 之类的名字会漏到 'other'。
+    if (/(^|_)(allowed_dirs|allowed_dir|allowed_dirs_list)($|_)/.test(fn)) return 'list';
     if (/(^|_)(read_file|read_multiple_files|view_file|read|cat|view)($|_)/.test(fn)) return 'read';
     if (/(^|_)(search_files|find_files|grep|search|glob)($|_)/.test(fn)) return 'search';
     if (/(^|_)(write_file|edit_file|replace_in_file|str_replace|apply_diff|patch|write|edit|create_file|create_directory|mkdir|delete_file|rename|move)($|_)/.test(fn)) return 'edit';
     if (/(^|_)(ls|tree)($|_)/.test(fn) || /(^|_)list(_|$)/.test(fn)) return 'list';
+    // 会话工作目录 / 配置路径切换：改的是作用域，不是文件内容。
+    if (/(^|_)(set_session_cwd|set_config_path)($|_)/.test(fn)) return 'system';
     return 'other';
   }
   if (ns === 'system') {
@@ -700,17 +789,26 @@ function classifyWorkTool(name: string): WorkToolCategory {
     if (/(^|_)(write|binary)($|_)/.test(fn)) return 'edit';
     // 等待 / 睡眠 / 状态切换是系统控制，不是"其他工具"。
     if (/^(wait|sleep|set_state|set_wake_mode)$/.test(fn)) return 'system';
+    // 环境查询（系统信息 / 时间 / 唤醒模式）、投递到界面、工具调用上下文
+    // 读写同样属于系统控制 —— 否则标题里会冒出"调用工具 N 次"。
+    if (/(^|_)(get_system_info|get_time|get_wake_mode|abort_all_tool_processes|tool_call_context|send_file_to_web|send_message_to_web)($|_)/.test(fn)) return 'system';
     return 'other';
   }
   // 裸名兜底（部分链路会剥掉 system. 前缀再上报）。
   if (/^(wait|sleep|set_state|set_wake_mode)$/.test(fn)) return 'system';
+  // 技能名永远优先：`agent_setup__read_skill` / `list_skills` 不该被 read /
+  // list 的泛用正则抢走，否则标题会显示"读取 N 个文件"。
+  if (fn.includes('skill')) return 'skill';
   if (/(^|_)(read_file|read_multiple_files|view_file|read|cat|view)($|_)/.test(fn)) return 'read';
   if (/(^|_)(grep|search_files|find_files|search|glob)($|_)/.test(fn)) return 'search';
   if (/(^|_)(write_file|edit_file|replace_in_file|str_replace|patch|apply_diff|write|edit|replace)($|_)/.test(fn)) return 'edit';
   if (/terminal|(^|_)(bash|run_command|run_session_job|start_job|job|shell|session|exec|command|run)($|_)/.test(fn)) return 'terminal';
   if (/(^|_)(todo|update_task_progress|batch_update_tasks|add_task|update_todo|task)($|_)/.test(fn)) return 'task';
   if (/(^|_)(ls|tree)($|_)/.test(fn) || /(^|_)list(_|$)/.test(fn)) return 'list';
-  if (fn.includes('skill')) return 'skill';
+  // 命名空间兜底：这些集合里没命中任何 fn 特征的名字按命名空间归位，避免
+  // 整个命名空间都掉进"其他工具"（workspace__switch 等）。
+  if (ns === 'workspace') return 'system';
+  if (ns === 'agent_setup') return 'skill';
   return 'other';
 }
 
@@ -797,12 +895,39 @@ function summarizeWorkTools(block: WorkflowBlock, t: TFunction): string {
   return parts.join('，');
 }
 
+/**
+ * Model-produced text in a block: thinking + intermediate prose (过程输出).
+ * Tool arguments/results are tool I/O, not generation, so they never count.
+ */
+export function outputCharsOf(lines: readonly { kind: string; detail?: string }[]): number {
+  return lines.reduce(
+    (sum, l) => (l.kind === 'thought' || l.kind === 'process' ? sum + (l.detail?.length || 0) : sum),
+    0,
+  );
+}
+
+/**
+ * Output rate across the *last interval* between two samples — not the average
+ * since the turn started, so a slow first phase cannot drag the number down
+ * forever. `null` until there is a usable interval.
+ */
+export function rollingCharsPerSec(
+  prev: { t: number; chars: number } | null,
+  next: { t: number; chars: number },
+): number | null {
+  if (!prev) return null;
+  const dt = (next.t - prev.t) / 1000;
+  if (!(dt > 0)) return null;
+  return Math.max(0, (next.chars - prev.chars) / dt);
+}
+
 function outerSummary(
   block: WorkflowBlock,
   lines: ActivityLine[],
   turnStartedMs: number | undefined,
   uiMode: 'classic' | 'solo',
   t: TFunction,
+  rateLabel: string | null,
 ): { primary: string; secondary: string } {
   const thoughts = lines.filter((l) => l.kind === 'thought').length;
   const tools = lines.filter((l) => l.kind === 'tool' || l.kind === 'delegation' || l.kind === 'shell_job').length;
@@ -830,9 +955,14 @@ function outerSummary(
   const elapsedLabel =
     elapsedMs != null ? formatElapsedAtLeastOneSecond(elapsedMs) : null;
 
+  const withRate = (primary: string) => (rateLabel ? `${primary} · ${rateLabel}` : primary);
+
   if (liveSummary) {
-    if (elapsedLabel != null) return { primary: t('aiChat.toolFlow.outer.compressingFor', { time: elapsedLabel }), secondary: '' };
-    return { primary: t('aiChat.toolFlow.outer.compressing'), secondary: '' };
+    const base =
+      elapsedLabel != null
+        ? t('aiChat.toolFlow.outer.compressingFor', { time: elapsedLabel })
+        : t('aiChat.toolFlow.outer.compressing');
+    return { primary: withRate(base), secondary: '' };
   }
   // Summary finished (even if workflow block not yet marked completed).
   if (summaries.length > 0 && summaries.every((l) => !l.running) && block.completed) {
@@ -846,19 +976,23 @@ function outerSummary(
     const summary = summarizeWorkTools(block, t);
     if (summary) {
       return {
-        primary: elapsedLabel != null ? `${summary} · ${elapsedLabel}` : summary,
+        primary: withRate(elapsedLabel != null ? `${summary} · ${elapsedLabel}` : summary),
         secondary: '',
       };
     }
   }
   if (liveTool || livePlan || (hasLiveLine && !block.completed)) {
-    if (elapsedLabel != null) return { primary: t('aiChat.toolFlow.outer.workingFor', { time: elapsedLabel }), secondary: '' };
-    return { primary: t('aiChat.toolFlow.outer.working'), secondary: '' };
+    const base = elapsedLabel != null
+      ? t('aiChat.toolFlow.outer.workingFor', { time: elapsedLabel })
+      : t('aiChat.toolFlow.outer.working');
+    return { primary: withRate(base), secondary: '' };
   }
   // Incomplete block = still working (even between tool rounds / without turnStartedMs).
   if (!block.completed) {
-    if (elapsedLabel != null) return { primary: t('aiChat.toolFlow.outer.workingFor', { time: elapsedLabel }), secondary: '' };
-    return { primary: t('aiChat.toolFlow.outer.working'), secondary: '' };
+    const base = elapsedLabel != null
+      ? t('aiChat.toolFlow.outer.workingFor', { time: elapsedLabel })
+      : t('aiChat.toolFlow.outer.working');
+    return { primary: withRate(base), secondary: '' };
   }
   if (tools > 0 && elapsedLabel != null) return { primary: t('aiChat.toolFlow.outer.workedFor', { time: elapsedLabel }), secondary: '' };
   if (tools > 0) return { primary: t('aiChat.toolFlow.outer.worked'), secondary: '' };
@@ -949,7 +1083,9 @@ const TextChevronToggle: React.FC<{
   leadingPulse?: boolean;
   /** Category icon rendered before the title (tool lines only) */
   leadingIcon?: React.ReactNode;
-}> = React.memo(({ primary, secondary, open, onToggle, running, shimmer, depth = 0, addedLines, removedLines, errored, fileLabel, onFileClick, leadingPulse, leadingIcon }) => {
+  /** Collapsed retry run: shows “×N” after the title (see collapseRepeatedToolLines). */
+  repeatCount?: number;
+}> = React.memo(({ primary, secondary, open, onToggle, running, shimmer, depth = 0, addedLines, removedLines, errored, fileLabel, onFileClick, leadingPulse, leadingIcon, repeatCount }) => {
   const { t } = useTranslation();
   // Inline color-mix: Tailwind opacity utilities were not reliably fading
   // primary labels (inherited theme muted stayed too strong).
@@ -996,6 +1132,14 @@ const TextChevronToggle: React.FC<{
         <span className={errored && secondary === 'fail' ? 'font-medium' : undefined}>
           {' '}
           {secondary === 'fail' ? t('aiChat.toolFlow.line.fail') : secondary}
+        </span>
+      ) : null}
+      {repeatCount && repeatCount > 1 ? (
+        <span
+          className="ml-1 px-1 rounded bg-black/[0.07] dark:bg-white/[0.12] text-[10px] tabular-nums"
+          title={t('aiChat.toolFlow.line.repeatHint', { count: repeatCount })}
+        >
+          ×{repeatCount}
         </span>
       ) : null}
     </>
@@ -1314,6 +1458,7 @@ const SoloEventLine = React.memo(function SoloEventLine({
         removedLines={isFileEdit ? removed : undefined}
         errored={line.kind === 'tool' && line.toolStatus === 'error'}
         fileLabel={line.fileEdit?.fileName}
+        repeatCount={line.repeatCount}
         onFileClick={
           line.fileEdit && onOpenFile
             ? () => onOpenFile(line.fileEdit!.filePath)
@@ -1510,9 +1655,6 @@ export const SoloActivityRow = React.memo(function SoloActivityRow({
   // result — do not keep "Working" / spinner from those open tools.
   const isLiveTurn =
     !effBlock.completed || hasLiveCompression || hasAsyncDelegate || hasLiveShell;
-  const hasToolSteps = effBlock.events.some(
-    (e) => e.type === 'tool_call' || e.type === 'tool_result',
-  );
 
   // Outer fold state goes through useFold so the body mounts lazily and the
   // open/close animates via <Collapse> (same motion as the sidebar groups).
@@ -1527,6 +1669,12 @@ export const SoloActivityRow = React.memo(function SoloActivityRow({
   const userOverrideRef = useRef<'open' | 'closed' | null>(null);
   const stepsScrollRef = useRef<HTMLDivElement>(null);
   const stepsAtBottomRef = useRef(true);
+  // 最后一次"程序贴底"写入的 scrollTop。scroll 事件无法区分来源：我们的
+  // `scrollTop = scrollHeight` 与用户拖动都会触发它。回声必须忽略，否则每次
+  // 贴底都把自己记成"用户正在滚动"，随后 180ms 内所有贴底 return —— 新的工具
+  // 调用正好落在这个窗口里就是"滑块突然上涨一截"。ChatTimeline 与
+  // FollowScrollBox 用同一个 lastSetTop 抑制修过同一个坑（见 chatTimelineFollow）。
+  const lastStepsSetTopRef = useRef(-1);
   const rootRef = useRef<HTMLDivElement>(null);
 
   const toggleOuter = useCallback(() => {
@@ -1586,9 +1734,35 @@ export const SoloActivityRow = React.memo(function SoloActivityRow({
     prevLinesRef.current = next;
     return next;
   }, [effBlock, shellStreams, t]);
+
+  // 输出速率 = **过去这一秒**新产生的量，而不是开跑至今的平均 —— 否则早期慢的一段
+  // 会把数字一直拖低。按既有的 1s tick 采样，取相邻两次样本的增量。
+  const outputChars = useMemo(() => outputCharsOf(lines), [lines]);
+  const outputCharsRef = useRef(outputChars);
+  useEffect(() => {
+    outputCharsRef.current = outputChars;
+  }, [outputChars]);
+  const rateSampleRef = useRef<{ t: number; chars: number } | null>(null);
+  const [liveRate, setLiveRate] = useState<number | null>(null);
+  useEffect(() => {
+    if (!isLiveTurn) {
+      rateSampleRef.current = null;
+      setLiveRate(null);
+      return;
+    }
+    const sample = { t: Date.now(), chars: outputCharsRef.current };
+    setLiveRate(rollingCharsPerSec(rateSampleRef.current, sample));
+    rateSampleRef.current = sample;
+  }, [tick, isLiveTurn]);
+  // 估算值：结算口径的 token 只在回合收尾（turn_usage）才有，所以运行中按流出的
+  // 字数折算。
+  const rateLabel = isLiveTurn && liveRate != null && liveRate > 0
+    ? t('aiChat.toolFlow.outer.tokensPerSec', { rate: liveRate.toFixed(1) })
+    : null;
+
   const summary = useMemo(
-    () => outerSummary(effBlock, lines, turnStartedMs, uiMode, t),
-    [effBlock, lines, turnStartedMs, tick, uiMode, t],
+    () => outerSummary(effBlock, lines, turnStartedMs, uiMode, t, rateLabel),
+    [effBlock, lines, turnStartedMs, tick, uiMode, t, rateLabel],
   );
 
   // Active phase detection: while the latest step is still thought / plan /
@@ -1613,17 +1787,24 @@ export const SoloActivityRow = React.memo(function SoloActivityRow({
     (lastActivity?.kind === 'plan' || lines.some((l) => l.kind === 'plan' && !!l.running));
 
   const displayLines = useMemo(() => {
-    if (!thinkingActive) return lines;
-    let lastThoughtIdx = -1;
-    for (let i = lines.length - 1; i >= 0; i--) {
-      if (lines[i].kind === 'thought') {
-        lastThoughtIdx = i;
-        break;
-      }
-    }
-    if (lastThoughtIdx < 0) return lines;
-    return lines.map((l, i) => (i === lastThoughtIdx ? { ...l, running: true } : l));
-  }, [lines, thinkingActive]);
+    const base = !thinkingActive
+      ? lines
+      : (() => {
+          let lastThoughtIdx = -1;
+          for (let i = lines.length - 1; i >= 0; i--) {
+            if (lines[i].kind === 'thought') {
+              lastThoughtIdx = i;
+              break;
+            }
+          }
+          if (lastThoughtIdx < 0) return lines;
+          return lines.map((l, i) => (i === lastThoughtIdx ? { ...l, running: true } : l));
+        })();
+    // Retry storms collapse for display only: `lines` (and therefore the tool
+    // counts in the header and the output-rate sampling) still sees every call.
+    // "完整" expand level is the explicit escape hatch that shows each one.
+    return expand.tools ? base : collapseRepeatedToolLines(base);
+  }, [lines, thinkingActive, expand.tools]);
 
   // Sticky per block: line counts wobble while a phase is small (a chunk merges
   // into the row above, a ui-only tool stops rendering a row), and flipping
@@ -1694,24 +1875,59 @@ export const SoloActivityRow = React.memo(function SoloActivityRow({
   // first thought lines and the tool headers never enter the viewport.
   // Window jumps to the tail only here (new rows while stuck to bottom), never
   // from the scroll handler — that fight with the thumb is the jitter source.
-  useLayoutEffect(() => {
-    if (!outerOpen || !useStepsScrollBox) return;
-    const sel = window.getSelection();
-    if (sel && !sel.isCollapsed) return;
+  const pinStepsToBottom = useCallback(() => {
     const el = stepsScrollRef.current;
     if (!el) return;
-    const n = displayLines.length;
-    if (userScrollingRef.current) {
-      if (virtSteps) syncStepVirt(el);
-      return;
+    if (virtSteps) {
+      // 带回退的函数式更新：贴底时会反复算同一个窗口，没有这个回退就是自我循环。
+      setStepVirt((p) => {
+        const next = virtTailWindow(displayLines.length, el.clientHeight);
+        return p.start === next.start && p.end === next.end ? p : next;
+      });
     }
-    if (!stepsAtBottomRef.current) {
-      if (virtSteps) syncStepVirt(el);
-      return;
-    }
-    if (virtSteps) setStepVirt(virtTailWindow(n, el.clientHeight));
     el.scrollTop = el.scrollHeight;
-  }, [displayLines.length, outerOpen, useStepsScrollBox, virtSteps, syncStepVirt]);
+    lastStepsSetTopRef.current = el.scrollTop;
+  }, [virtSteps, displayLines.length]);
+
+  useLayoutEffect(() => {
+    if (!outerOpen || !useStepsScrollBox) return;
+    const el = stepsScrollRef.current;
+    if (!el) return;
+    const sel = window.getSelection();
+    if (sel && !sel.isCollapsed) return;
+    // 用户在看历史：窗口跟着视口走，不贴底。
+    if (userScrollingRef.current || !stepsAtBottomRef.current) {
+      if (virtSteps) syncStepVirt(el);
+      return;
+    }
+    let raf: number | null = null;
+    let budget = 0;
+    const tick = () => {
+      if (raf != null) {
+        cancelAnimationFrame(raf);
+        raf = null;
+      }
+      const box = stepsScrollRef.current;
+      if (!box || userScrollingRef.current || !stepsAtBottomRef.current) {
+        budget = 0;
+        return;
+      }
+      const s = window.getSelection();
+      if (s && !s.isCollapsed) {
+        budget = 0;
+        return;
+      }
+      if (box.scrollHeight - box.scrollTop - box.clientHeight >= 1) pinStepsToBottom();
+      if (budget-- > 0) raf = requestAnimationFrame(tick);
+    };
+    // 新增行会让虚拟窗口换挡、自动展开的行体在下一帧才撑高 —— 钉完再盯几帧，
+    // 又长了就补上，否则滑块停在差一截的位置（"突然上涨一截"）。
+    budget = STEP_FOLLOW_FRAMES;
+    tick();
+    return () => {
+      if (raf != null) cancelAnimationFrame(raf);
+    };
+  }, [displayLines.length, outerOpen, useStepsScrollBox, virtSteps, syncStepVirt, pinStepsToBottom]);
 
   const hasSettledActivity = displayLines.some(
     (l) =>
@@ -1960,7 +2176,11 @@ export const SoloActivityRow = React.memo(function SoloActivityRow({
         onPointerDown={markStepsUserScrolling}
         onScroll={(e) => {
           const el = e.currentTarget;
-          markStepsUserScrolling();
+          // 我们自己的贴底写入也会触发 scroll 事件。把它当成用户滚动 = 贴底
+          // 自己把自己关掉 180ms，新工具调用正好落进这个窗口 —— 滑块就"突然
+          // 上涨一截"。回声不算用户操作，也不该打断已装的虚拟窗口同步。
+          const echo = el.scrollTop === lastStepsSetTopRef.current;
+          if (!echo) markStepsUserScrolling();
           stepsAtBottomRef.current =
             el.scrollHeight - el.scrollTop - el.clientHeight < 48;
           if (!virtSteps) return;
@@ -2006,8 +2226,9 @@ export const SoloActivityRow = React.memo(function SoloActivityRow({
                     // each open panel pretty-prints args/results and used to stay
                     // open after the call finished, so fast bursts got slower
                     // with every extra tool. Expand-all remains an explicit pref.
-                    (line.kind === 'thought' && expand.thoughts && !hasToolSteps) ||
+                    (line.kind === 'thought' && expand.thoughts) ||
                     (line.kind === 'plan' && expand.plan) ||
+                    (line.kind === 'process' && expand.process) ||
                     (line.kind === 'tool' && expand.tools) ||
                     !!(line.kind === 'summary' && line.running)
                   }

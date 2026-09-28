@@ -38,12 +38,20 @@ export interface SoloTokenStats {
     total_output_tokens?: number;
     /** Prompt tokens served from the provider's cache (subset of input). */
     cache_read_tokens?: number;
+    /**
+     * Prompt tokens from turns that *reported* usage — the hit rate's
+     * denominator. Estimated turns are excluded, so one of them (which also
+     * survives a mid-task model switch) cannot make the ratio unmeasurable.
+     */
+    reported_input_tokens?: number;
     /** Input − cache hit, precomputed server-side; derived when absent. */
     cache_miss_tokens?: number;
+    /** How many turns were left out of the split above (no usage reported). */
+    estimated_turns?: number;
     /**
      * True when a turn ran without provider usage (the endpoint sent no usage
-     * chunk), so the counters above are tokenizer estimates and cache read is
-     * structurally 0. The panel must not present that as a real 0% hit rate.
+     * chunk), so the *totals* above are approximations. It no longer gates the
+     * hit rate: that one is computed over `reported_input_tokens`.
      */
     usage_estimated?: boolean;
   } | null;
@@ -218,29 +226,51 @@ export const SoloContextFooter: React.FC<SoloContextFooterProps> = ({
   // `cache_read_tokens` is a *subset* of the session input tokens on every
   // provider (OpenAI/Ark/Gemini `cached_tokens`, DeepSeek `prompt_cache_hit`,
   // Claude `cache_read_input_tokens`), which is what makes a hit rate
-  // well-defined as read / (read + miss).  `cache_miss_tokens` is precomputed
-  // server-side; deriving it here only keeps older payloads working.
+  // well-defined as read / (read + miss).
+  //
+  // The ratio is taken over the turns that **reported** usage
+  // (`reported_input_tokens`). Turns whose stream carried no usage object only
+  // have a tokenizer guess for input and a hard 0 for cache read, so including
+  // them fabricated a low rate — and when the panel keyed the whole block off
+  // "was anything estimated", a single such turn (which also travels with the
+  // session across model switches) hid the rate for good: 多切换模型 → 「模型未
+  // 返回统计用量」.
   const cache = useMemo(() => {
     const s: NonNullable<SoloTokenStats['session']> | null = tokenStats?.session ?? null;
     if (!s) return null;
     const input = Number(s.input_tokens ?? s.total_input_tokens ?? 0) || 0;
     const output = Number(s.output_tokens ?? s.total_output_tokens ?? 0) || 0;
     const hit = Math.max(0, Number(s.cache_read_tokens ?? 0) || 0);
+    // Older gateway payloads have no reported subset: keep their behaviour
+    // (all input counts, unless the turn was flagged estimated).
+    const hasReported = typeof s.reported_input_tokens === 'number';
+    const reported = hasReported
+      ? Math.max(0, Number(s.reported_input_tokens) || 0)
+      : (s.usage_estimated === true ? 0 : input);
     const miss = typeof s.cache_miss_tokens === 'number'
       ? Math.max(0, s.cache_miss_tokens)
-      : Math.max(0, input - hit);
+      : Math.max(0, reported - hit);
     const billed = hit + miss;
     if (billed <= 0 && output <= 0) return null;
+    const estimatedTurns = Math.max(
+      0,
+      Number(s.estimated_turns ?? (s.usage_estimated === true ? 1 : 0)) || 0,
+    );
     return {
       hit,
       miss,
       /** The three rows sum to this, so they always reconcile on screen. */
       input: billed,
+      /** Session input including the estimated turns — shown when nothing
+       *  reported yet, where the only honest figure is the rough total. */
+      totalInput: input,
       output,
       hitPct: billed > 0 ? (hit / billed) * 100 : 0,
       hitShare: billed > 0 ? (hit / billed) * 100 : 0,
-      /** Provider never reported usage → hit/miss split is not trustworthy. */
-      estimated: s.usage_estimated === true,
+      /** No turn ever reported usage yet → nothing to divide by. */
+      unavailable: reported <= 0,
+      /** Turns excluded from the split — reported to the reader, not hidden. */
+      estimatedTurns,
     };
   }, [tokenStats?.session]);
 
@@ -410,14 +440,15 @@ export const SoloContextFooter: React.FC<SoloContextFooterProps> = ({
                         {t('contextViewer.cacheHitRate', { defaultValue: 'Cache hit rate' })}
                       </span>
                       <span className="font-mono text-[12px] font-semibold text-textMain tabular-nums">
-                        {cache.estimated
+                        {cache.unavailable
                           ? t('contextViewer.cacheHitUnknown', { defaultValue: '—' })
                           : `${cache.hitPct.toFixed(1)}%`}
                       </span>
                     </div>
-                    {cache.estimated ? (
-                      // No provider usage: the split would be a fabricated
-                      // 0 / everything-uncached pair, so it is not rendered.
+                    {cache.unavailable ? (
+                      // No turn has ever reported usage: there is no denominator,
+                      // so the split would be a fabricated 0 / everything-uncached
+                      // pair and is not rendered.
                       <>
                         <p className="text-[11px] text-textMuted leading-snug">
                           {t('contextViewer.cacheHitUnavailable', {
@@ -428,7 +459,7 @@ export const SoloContextFooter: React.FC<SoloContextFooterProps> = ({
                         <TokenRow
                           color="#94a3b8"
                           label={t('contextViewer.inputTokens', { defaultValue: 'Input' })}
-                          value={`~${fmtTokens(cache.input)}`}
+                          value={`~${fmtTokens(cache.totalInput)}`}
                         />
                         <TokenRow
                           color="#60a5fa"
@@ -470,6 +501,18 @@ export const SoloContextFooter: React.FC<SoloContextFooterProps> = ({
                           label={t('contextViewer.outputTokens', { defaultValue: 'Output' })}
                           value={fmtTokens(cache.output)}
                         />
+                        {cache.estimatedTurns > 0 ? (
+                          // The rows above cover the reported turns only; say so
+                          // instead of letting the reader reconcile them against
+                          // the session total and assume a bug.
+                          <p className="text-[10px] text-textMuted/80 leading-snug pt-0.5">
+                            {t('contextViewer.cacheHitPartial', {
+                              count: cache.estimatedTurns,
+                              defaultValue:
+                                '{{count}} turn(s) returned no usage data and are excluded from this split.',
+                            })}
+                          </p>
+                        ) : null}
                       </>
                     )}
                   </div>

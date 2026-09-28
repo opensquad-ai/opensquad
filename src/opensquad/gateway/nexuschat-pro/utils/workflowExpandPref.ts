@@ -14,19 +14,26 @@ export function isWorkflowExpandLevel(v: unknown): v is WorkflowExpandLevel {
   return typeof v === 'string' && (LEVELS as readonly string[]).includes(v);
 }
 
-/** Map level → which fold kinds auto-open (user toggles always win). */
+/**
+ * Map level → which fold kinds auto-open (user toggles always win).
+ *
+ * 精简 (collapsed): plan + 过程输出 open; thoughts and tools stay folded.
+ * 思考 (thoughts): the above plus deep-thinking.
+ * 完整 (full): everything, tools included.
+ */
 export function workflowExpandFlags(level: WorkflowExpandLevel): {
   thoughts: boolean;
   plan: boolean;
+  process: boolean;
   tools: boolean;
 } {
   switch (level) {
     case 'full':
-      return { thoughts: true, plan: true, tools: true };
+      return { thoughts: true, plan: true, process: true, tools: true };
     case 'thoughts':
-      return { thoughts: true, plan: true, tools: false };
+      return { thoughts: true, plan: true, process: true, tools: false };
     default:
-      return { thoughts: false, plan: false, tools: false };
+      return { thoughts: false, plan: true, process: true, tools: false };
   }
 }
 

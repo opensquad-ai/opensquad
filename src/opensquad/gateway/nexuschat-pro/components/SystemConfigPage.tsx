@@ -18,7 +18,8 @@ import { ThemeSettingsPanel } from './ThemeSettingsModal';
 import { SoftOverlay } from './SoftOverlay';
 import {
   type WorkflowExpandLevel,
-  useWorkflowExpandLevel,
+  readWorkflowExpandLevel,
+  writeWorkflowExpandLevel,
 } from '../utils/workflowExpandPref';
 import { setLanguage } from '../i18n';
 import { SETTINGS_APP_NAV_ITEMS } from '../utils/appNavItems';
@@ -139,9 +140,11 @@ const WORKFLOW_EXPAND_OPTIONS: {
   },
 ];
 
-const GeneralTab: React.FC = () => {
+const GeneralTab: React.FC<{
+  level: WorkflowExpandLevel;
+  onChange: (level: WorkflowExpandLevel) => void;
+}> = ({ level, onChange }) => {
   const { t, i18n } = useTranslation();
-  const [level, setLevel] = useWorkflowExpandLevel();
   const isZh = i18n.language === 'zh' || i18n.language.startsWith('zh');
   const [wfOpen, setWfOpen] = useState(false);
   const wfWrapRef = useRef<HTMLDivElement>(null);
@@ -231,7 +234,7 @@ const GeneralTab: React.FC = () => {
                     key={opt.id}
                     type="button"
                     onClick={() => {
-                      setLevel(opt.id);
+                      onChange(opt.id);
                       setWfOpen(false);
                     }}
                     className={`flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs transition-colors duration-soft ease-soft ${
@@ -785,6 +788,12 @@ export const SystemConfigPage: React.FC<SystemConfigPageProps> = ({
   const [error, setError] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
   const advancedTabRef = useRef<AdvancedTabHandle>(null);
+  // Workflow-detail draft: picked on the General tab but written (and applied
+  // live) only on 完成 — a bare click must not save. Held here, not in the
+  // tab, so switching tabs keeps it; reopening the dialog re-reads the pref.
+  const [generalLevel, setGeneralLevel] = useState<WorkflowExpandLevel>(
+    () => readWorkflowExpandLevel(),
+  );
 
   const load = useCallback(async (opts?: { silent?: boolean; force?: boolean }) => {
     if (!opts?.silent) setLoading(true);
@@ -826,6 +835,15 @@ export const SystemConfigPage: React.FC<SystemConfigPageProps> = ({
       localStorage.setItem(SETTINGS_TAB_KEY, activeTab);
     } catch {}
   }, [activeTab]);
+
+  // Every open starts from the persisted level, so a discarded pick is gone.
+  useEffect(() => {
+    if (isOpen) setGeneralLevel(readWorkflowExpandLevel());
+  }, [isOpen]);
+
+  const commitGeneralLevel = () => {
+    if (generalLevel !== readWorkflowExpandLevel()) writeWorkflowExpandLevel(generalLevel);
+  };
 
   const patch = (updates: Record<string, any>) => {
     setConfig(prev => prev ? { ...prev, ...updates } : prev);
@@ -1020,7 +1038,9 @@ export const SystemConfigPage: React.FC<SystemConfigPageProps> = ({
                     </div>
                   )}
 
-                  {activeTab === 'general' && <GeneralTab />}
+                  {activeTab === 'general' && (
+                    <GeneralTab level={generalLevel} onChange={setGeneralLevel} />
+                  )}
 
                   {activeTab === 'theme' && <ThemeSettingsPanel />}
 
@@ -1098,7 +1118,10 @@ export const SystemConfigPage: React.FC<SystemConfigPageProps> = ({
                     ) : (
                       <button
                         type="button"
-                        onClick={onClose}
+                        onClick={() => {
+                          commitGeneralLevel();
+                          onClose();
+                        }}
                         className="whitespace-nowrap rounded-full bg-primary px-4 py-2 text-sm font-medium text-white transition-opacity hover:opacity-90 md:px-5"
                       >
                         {t('themeSettings.done')}

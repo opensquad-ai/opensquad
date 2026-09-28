@@ -31,7 +31,12 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
-from opensquad._provider_base import USAGE_COUNTER_FIELDS, transfer_usage_counters
+from opensquad._provider_base import (
+    USAGE_COUNTER_FIELDS,
+    cache_miss_tokens,
+    reported_input_tokens,
+    transfer_usage_counters,
+)
 from opensquad.session_dispatcher import make_session_chat_api
 
 SRC = Path(__file__).resolve().parents[1] / "src" / "opensquad"
@@ -75,14 +80,23 @@ def _seed(root: _FakeChatAPI) -> _FakeChatAPI:
     root.total_cache_read_tokens = 800_000
     root.usage_reported_turns = 50
     root.usage_estimated_turns = 0
+    root.estimated_input_tokens = 0
     return root
 
 
 def _billed(api) -> tuple[int, int, int]:
-    """(hit, miss, output) exactly as ``runner._broadcast_token_stats`` computes."""
+    """(hit, miss, output) exactly as ``runner._broadcast_token_stats`` computes.
+
+    The denominator is the *reported* input (`reported_input_tokens`), so a turn
+    that fell back to the tokenizer estimate cannot dilute the split — see the
+    module docstring of that helper.
+    """
     hit = int(getattr(api, "total_cache_read_tokens", 0) or 0)
-    inp = int(getattr(api, "total_input_tokens", 0) or 0)
-    return hit, max(0, inp - hit), int(getattr(api, "total_output_tokens", 0) or 0)
+    reported = reported_input_tokens(
+        getattr(api, "total_input_tokens", 0),
+        getattr(api, "estimated_input_tokens", 0),
+    )
+    return hit, cache_miss_tokens(reported, hit), int(getattr(api, "total_output_tokens", 0) or 0)
 
 
 # ── the pure transfer ──────────────────────────────────────────────────────
@@ -124,11 +138,42 @@ def test_a_field_the_source_lacks_is_left_alone_not_zeroed():
 
 
 def test_provenance_travels_with_the_numbers():
-    """A session with estimated turns must keep reporting the rate as unknown."""
+    """The exclusion set travels too, or the rate changes meaning at the switch.
+
+    `usage_estimated_turns` marks the totals as approximate and
+    `estimated_input_tokens` is what keeps those turns out of the hit rate's
+    denominator.  Losing either on the way across would let a guess be printed
+    as a real prompt count for the rest of the session.
+    """
     src, dst = _FakeChatAPI(), _FakeChatAPI()
     src.usage_estimated_turns = 3
+    src.estimated_input_tokens = 4_000
     transfer_usage_counters(src, dst)
     assert dst.usage_estimated_turns == 3
+    assert dst.estimated_input_tokens == 4_000
+
+
+def test_an_estimated_turn_stays_out_of_the_rate_after_a_re_home():
+    """多切换模型 → 面板说「模型未返回统计用量」.  The rate must survive the switch.
+
+    One estimated turn puts a tokenizer guess in the input total and a hard 0 in
+    cache-read; excluding it (rather than hiding the whole block) is what keeps a
+    real hit rate on screen — before *and* after the client is re-homed.
+    """
+    root = _seed(_FakeChatAPI())
+    # One turn ended without a usage chunk, adding a 40k guess to the prompt total.
+    root.total_input_tokens = 1_040_000
+    root.estimated_input_tokens = 40_000
+    root.usage_estimated_turns = 1
+    root._sid_provider = lambda: "sess-A"
+    runner = _FakeRunner(root)
+
+    clone = make_session_chat_api(runner, "sess-A")
+    runner._session_chat_apis["sess-A"] = clone
+
+    # Same split as the clean session: 800k hit / 200k miss over the reported 1M.
+    assert _billed(clone) == (800_000, 200_000, 42_000)
+    assert clone.estimated_input_tokens == 40_000
 
 
 # ── re-homing the session onto its own client ──────────────────────────────
@@ -181,6 +226,32 @@ def test_the_baseline_is_not_counted_twice_once_the_root_is_archived():
 
     cumulative_read = runner._hist_cache_read_tokens + clone.total_cache_read_tokens
     assert cumulative_read == 800_000, "the same prompt tokens were billed twice"
+
+
+def test_the_provenance_counters_reset_with_the_totals():
+    """New Session zeroes the totals — the estimate share must go with them.
+
+    Left behind, a stale ``estimated_input_tokens`` is subtracted from the *new*
+    session's reported input (that is the hit rate's denominator) for the rest of
+    the client's life, and a stale ``usage_estimated_turns`` keeps calling the new
+    session's totals approximate.
+    """
+    from opensquad.runner import AgentRunner
+
+    root = _seed(_FakeChatAPI())
+    root.estimated_input_tokens = 40_000
+    root.usage_estimated_turns = 1
+    root.usage_reported_turns = 49
+    runner = _FakeRunner(root)
+    for field in HIST_FIELDS:
+        setattr(runner, field, 0)
+
+    AgentRunner._reset_session_stats(runner)
+
+    assert root.total_input_tokens == 0
+    assert root.estimated_input_tokens == 0
+    assert root.usage_estimated_turns == 0
+    assert root.usage_reported_turns == 0
 
 
 # ── structural fences ──────────────────────────────────────────────────────

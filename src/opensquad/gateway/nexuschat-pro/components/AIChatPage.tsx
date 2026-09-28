@@ -49,6 +49,7 @@ import {
   sealPendingCompression,
   sealWorkflowAndAppendAssistantMessage,
   serializeUserQuote,
+  timelineRichness,
   toWebMediaUrl,
   type TimelineEntry,
   type WorkflowBlock,
@@ -785,20 +786,53 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
   const [contextViewerSessionId, setContextViewerSessionId] = useState<string | null>(null);
   const [isCompressingContext, setIsCompressingContext] = useState(false);
 
-  // Lazy loading state
-  const [hasMoreHistory, setHasMoreHistory] = useState(false);
-  const [isLoadingMore, setIsLoadingMore] = useState(false);
-  const historyOffsetRef = useRef(0);        // how many messages already loaded (from the end)
+  // Lazy loading state — **per session**.
+  //
+  // This used to be a single `hasMoreHistory` + offset/anchor pair guarded by
+  // `hasMoreHistorySid`. That made "scroll up for older" impossible for any
+  // session that was not the one those refs described: opening an older session
+  // from the sidebar renders it as a *mirrored* pane (AIChatPage owns its live
+  // bucket), so the pane's own pager is off and the parent's flags belonged to
+  // another session — the reported "刷新后只能看到上一个任务流，更早的加载不出来".
+  const [pagingBySid, setPagingBySid] = useState<
+    Record<string, { hasMore: boolean; loading: boolean }>
+  >({});
+  const pagingBySidRef = useRef(pagingBySid);
+  pagingBySidRef.current = pagingBySid;
+  const setPaging = useCallback(
+    (sid: string, patch: Partial<{ hasMore: boolean; loading: boolean }>) => {
+      const id = String(sid || '').trim();
+      if (!id) return;
+      setPagingBySid((prev) => {
+        const cur = prev[id] || { hasMore: false, loading: false };
+        const next = { ...cur, ...patch };
+        if (next.hasMore === cur.hasMore && next.loading === cur.loading) return prev;
+        return { ...prev, [id]: next };
+      });
+    },
+    [],
+  );
   /**
-   * Identity of the oldest message currently loaded FROM THE PAGED ENDPOINT.
-   * `historyOffsetRef` counts from the tail, so it silently re-aims backwards
-   * every time the live turn appends messages — the next page then overlaps
-   * what is already painted and the user's own bubbles render twice. This
-   * anchor pins the window to a message instead, so pages can never overlap.
-   * Kept separate from the timeline head: the head may be archived content,
-   * which the paged endpoint's `messages` array does not contain.
+   * Per-session paging cursor.
+   * `offset` counts messages already painted (from the tail) and `anchor` is the
+   * identity of the OLDEST painted message. The anchor pins the window to a
+   * message, so pages can never overlap: a tail-relative offset silently re-aims
+   * backwards every time the live turn appends messages, which re-fetches a
+   * window that is already on screen (nothing visibly changes) and can paint the
+   * user's own bubble twice.
    */
-  const pagedAnchorIdRef = useRef<string | null>(null);
+  const pagingCursorRef = useRef<Record<string, { offset: number; anchor: string | null }>>({});
+  const setPagingCursor = useCallback(
+    (sid: string, patch: Partial<{ offset: number; anchor: string | null }>) => {
+      const id = String(sid || '').trim();
+      if (!id) return;
+      const cur = pagingCursorRef.current[id] || { offset: 0, anchor: null };
+      pagingCursorRef.current[id] = { ...cur, ...patch };
+    },
+    [],
+  );
+  /** Paging state of the session the live chat slot is showing. */
+  const livePaging = currentSessionId ? pagingBySid[currentSessionId] : undefined;
   const loadingSessionIdRef = useRef<string | null>(null); // session being lazily loaded
 
   // Session loading state (加载/创建会话中)
@@ -1420,74 +1454,95 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     userScrolledRef.current = away;
   }, []);
 
-  // Load earlier messages (prepend to timeline)
-  const loadMoreHistory = useCallback(async () => {
-    const sid = loadingSessionIdRef.current;
-    if (!sid || isLoadingMore || !hasMoreHistory) return;
+  // Load earlier messages (prepend to timeline).
+  // `sidOverride` comes from a pane paging its own session (see SessionChatPane
+  // `onLoadEarlier`); without it the window is the one the refs describe.
+  const loadMoreHistory = useCallback(async (sidOverride?: string) => {
+    const sid = String(sidOverride || loadingSessionIdRef.current || '').trim();
+    if (!sid) return;
+    const paging = pagingBySidRef.current[sid];
+    if (!paging?.hasMore || paging.loading) return;
+    const cursor = pagingCursorRef.current[sid] || { offset: 0, anchor: null };
 
-    setIsLoadingMore(true);
+    setPaging(sid, { loading: true });
     const el = messagesContainerRef.current;
     const prevScrollHeight = el ? el.scrollHeight : 0;
     // Snapshot BEFORE this page is counted; the state updater below runs after
-    // the synchronous body, so reading the ref there would double-count.
-    const loadedBeforePage = historyOffsetRef.current;
+    // the synchronous body, so reading the cursor there would double-count.
+    const loadedBeforePage = cursor.offset;
+    let olderEntries: TimelineEntry[] = [];
+    /** Merge this page into whichever timeline owns `sid`. */
+    const mergeInto = (prev: TimelineEntry[]) =>
+      mergeAdjacentWorkflowEntries(
+        demoteIntermediateAssistantMessages([
+          ...dropEntriesAlreadyPresent(olderEntries, prev),
+          ...prev,
+        ]),
+      );
 
     try {
       const resp = await agentSessionAPI.getSessionHistoryPaged(
-        agentId, sid, historyOffsetRef.current, 50,
-        pagedAnchorIdRef.current || undefined,
+        agentId, sid, cursor.offset, SESSION_HISTORY_PAGE_SIZE,
+        cursor.anchor || undefined,
       );
       const session = resp.session;
       if (session && (session.messages?.length > 0 || session.events?.length > 0)) {
-        const olderEntries = buildTimelineFromSession(
+        olderEntries = buildTimelineFromSession(
           session.messages || [],
           session.events || [],
         );
         // The anchor of the NEXT page is this page's oldest message — it is
         // what "strictly older than" must mean, regardless of how much the
         // live turn has appended in the meantime.
-        pagedAnchorIdRef.current =
-          sessionMessageIdentity((session.messages || [])[0]) || pagedAnchorIdRef.current;
+        const nextAnchor =
+          sessionMessageIdentity((session.messages || [])[0]) || cursor.anchor;
+        setPagingCursor(sid, { anchor: nextAnchor });
         if (olderEntries.length > 0) {
-          setTimeline(prev => {
+          const cacheWrite = (next: TimelineEntry[]) =>
+            putCachedSessionTimeline(agentId, sid, next, {
+              complete: !(session.has_more ?? false),
+              // NOTE: computed from the cursor's pre-increment value —
+              // reading it here would already include this page (React runs
+              // updaters after the synchronous body), inflating the count and
+              // desyncing the cursor on the next cache restore.
+              messageCount: loadedBeforePage,
+              totalMessages: session.total_messages,
+              oldestMessageId: nextAnchor || undefined,
+            });
+          if (loadingSessionIdRef.current === sid) {
+            // The live slot's timeline is the top-level one.
+            //
             // Cross-seam renormalization: each page is rebuilt independently,
             // so a turn split across the page boundary ends up as "tool folds
             // stacked above, text bubbles below" (page-local demote cannot see
-            // the workflows of the other page). Re-run demote + merge over the
-            // combined array so the seam stitches back into one interleaved
-            // turn.
-            //
-            // `dropEntriesAlreadyPresent` first: prepending is the only path
-            // that concatenates two independently deduped arrays, so it is the
-            // only place a message already on screen can slip back in.
-            const next = mergeAdjacentWorkflowEntries(
-              demoteIntermediateAssistantMessages([
-                ...dropEntriesAlreadyPresent(olderEntries, prev),
-                ...prev,
-              ]),
-            );
-            putCachedSessionTimeline(agentId, sid, next, {
-              complete: !(session.has_more ?? false),
-              // NOTE: computed from the ref's pre-increment value below —
-              // reading it here would already include this page (React runs
-              // updaters after the synchronous body), inflating the count and
-              // desyncing `historyOffsetRef` on the next cache restore.
-              messageCount: loadedBeforePage,
-              totalMessages: session.total_messages,
-              oldestMessageId: pagedAnchorIdRef.current || undefined,
+            // the workflows of the other page). `mergeInto` re-runs demote +
+            // merge over the combined array so the seam stitches back into one
+            // interleaved turn.
+            setTimeline(prev => {
+              const next = mergeInto(prev);
+              cacheWrite(next);
+              return next;
             });
-            return next;
-          });
-          historyOffsetRef.current += session.messages?.length || 0;
+          } else {
+            // A mirrored pane shows its own bucket (see liveTimelinesBySession):
+            // the page must land there, not in the focused session's timeline.
+            setLiveTimelinesBySession(prev => {
+              const out = { ...prev, [sid]: mergeInto(prev[sid] || []) };
+              liveTimelinesBySessionRef.current = out;
+              cacheWrite(out[sid]);
+              return out;
+            });
+          }
+          setPagingCursor(sid, { offset: loadedBeforePage + (session.messages?.length || 0) });
         }
-        setHasMoreHistory(session.has_more ?? false);
+        setPaging(sid, { hasMore: session.has_more ?? false });
       } else {
-        setHasMoreHistory(false);
+        setPaging(sid, { hasMore: false });
       }
     } catch (err: any) {
       console.warn('[AIChatPage] Failed to load more history:', err.message);
     } finally {
-      setIsLoadingMore(false);
+      setPaging(sid, { loading: false });
       // Restore scroll position after prepending
       requestAnimationFrame(() => {
         if (el) {
@@ -1496,7 +1551,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
         }
       });
     }
-  }, [agentId, isLoadingMore, hasMoreHistory]);
+  }, [agentId, setPaging, setPagingCursor]);
 
   // Stick-to-bottom is owned by ChatTimeline (unpinRef + overflow-anchor: none).
 
@@ -1545,7 +1600,8 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     // snapshot was captured.
     getBootRestoreSessionId: () =>
       getRestorableSessionId(agentId, bootRestoreAliasRef.current),
-    historyOffsetRef,
+    setPaging,
+    setPagingCursor,
     hydrateCurrentSessionRef,
     isHydratingSessionRef,
     isSidFinalizing,
@@ -1582,7 +1638,6 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     setCurrentCardName,
     setCurrentSessionId,
     setFollowupSuggestions,
-    setHasMoreHistory,
     setIsCompressingContext,
     setIsLoadingSession,
     setIsStreaming,
@@ -1637,6 +1692,14 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
 
   // ---- Actions ----
 
+  /** Sessions with live stream evidence in this client — per session, so the
+   *  sidebar row can light up before the backend's busy_sessions snapshot names
+   *  them without falling back to "whoever the user selected". */
+  const streamingSessionIds = useMemo(
+    () => Object.keys(isStreamingBySession).filter((sid) => isStreamingBySession[sid]),
+    [isStreamingBySession],
+  );
+
   // Whether the focused session is busy (other sessions may still accept parallel sends).
   const isAgentBusy = useMemo(
     () =>
@@ -1667,6 +1730,21 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
       return false;
     },
     [isAgentBusy, isStreaming, agentStatus, isStreamingBySession],
+  );
+
+  /**
+   * Is the *target* session busy? An empty sid means we cannot tell — the
+   * new-session window clears `currentSessionId` optimistically, and the
+   * agent-wide busy flag belongs to whatever session the backend is running,
+   * which is not this message's target. Treating it as busy parks the send and
+   * (auto-drain skips busy sessions) strands it in the queue forever: "发送没反应".
+   */
+  const isTargetSessionBusy = useCallback(
+    (sid?: string | null) => {
+      const key = (sid || '').trim();
+      return !!key && isSessionBusy(key);
+    },
+    [isSessionBusy],
   );
 
   /**
@@ -2316,18 +2394,23 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     }
   }, [currentSessionId, agentId]);
 
-  // 引导注入（steer）：忙时会话的排队消息在入队的同时立即经 WS 发往后端，
-  // 由 runner 在当前工具轮/普通输出结束后的下一轮塞进模型上下文——不打断
-  // 连续工具流，但模型能看见这条消息。本地队列条目仅作展示（steered=true），
-  // 消费回执（steer_consumed）到达后挪进时间线。
+  // 插话（steer）注入 —— 只有队列里点「插话」那一下才走这里：立即经 WS 发往后端，
+  // 由 runner 在**下一次工具返回**的边界塞进模型上下文（不打断连续工具流，模型
+  // 下一轮就能看见）。本地条目仅作展示（steered=true），消费回执（steer_consumed）
+  // 到达后挪进时间线。
+  //
+  // 普通发送**不**走这里：忙时只是入队（park），等本轮任务流结束后由 auto-drain 用
+  // flushPendingMessage 自动发出 —— 立即插入才是插话，排队两轮过去就不叫了。
   //
   // 只有这一轮**真的在跑**才谈得上插话：runner 是在当前工具的边界把消息塞进上下
   // 文的，任务已经结束时它只会把这批残留兜底重排成一个新回合，而前端那时等的是
-  // steer_consumed —— 用户气泡不会出现，消息在界面上等于消失。已结束的任务按普通
-  // 消息发：这里不标 steered，交给下面的 auto-drain 用 flushPendingMessage 正常
-  // 投递（它本来就只挑非 steered 的条目）。
+  // steer_consumed —— 用户气泡不会出现，消息在界面上等于消失。所以这里必须过
+  // isTargetSessionBusy 这道闸（调用方负责把没在跑的情况退回普通发送）。判忙用的
+  // 会话号必须和调用方一致（空 sid 回落当前会话），否则两边结论可能相反：调用方
+  // 判定"在跑"、这里却因空 sid 判成不忙而静默丢下这条消息。
   const steerPendingSnapshot = useCallback((snapshot: PendingMessage) => {
-    if (!isSessionBusy((snapshot.sessionId || '').trim())) return;
+    const sid = (snapshot.sessionId || '').trim() || (currentSessionIdRef.current || '').trim();
+    if (!isTargetSessionBusy(sid)) return;
     setPendingMessages((prev) => prev.map((m) => (m.id === snapshot.id ? { ...m, steered: true } : m)));
     deliverMessage(
       {
@@ -2342,7 +2425,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
       },
       { clearInputState: false, salvageStream: false, steer: true },
     );
-  }, [deliverMessage, isSessionBusy]);
+  }, [deliverMessage, isTargetSessionBusy]);
 
   const handleSend = () => {
     // A user send consumes the agent's follow-up offer (see
@@ -2369,7 +2452,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
       }
       const sid = currentSessionIdRef.current || '';
       const shouldQueue =
-        isSessionBusy(sid) ||
+        isTargetSessionBusy(sid) ||
         isOutboundPending(sid) ||
         pendingMessagesRef.current.some((m) => (m.sessionId || '') === sid);
       if (shouldQueue) {
@@ -2394,7 +2477,6 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
           sessionId: sid || undefined,
         };
         setPendingMessages((prev) => [...prev, snapshot]);
-        steerPendingSnapshot(snapshot);
         setInputText('');
         setImages([]);
         setAttachments([]);
@@ -2433,7 +2515,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
       }
       const sid = currentSessionIdRef.current || '';
       const shouldQueue =
-        isSessionBusy(sid) ||
+        isTargetSessionBusy(sid) ||
         isOutboundPending(sid) ||
         pendingMessagesRef.current.some((m) => (m.sessionId || '') === sid);
       if (shouldQueue) {
@@ -2458,7 +2540,6 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
           sessionId: sid || undefined,
         };
         setPendingMessages((prev) => [...prev, snapshot]);
-        steerPendingSnapshot(snapshot);
         setInputText('');
         setImages([]);
         setAttachments([]);
@@ -2487,7 +2568,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     // Other sessions run in parallel and must not force a global queue.
     const sid = currentSessionIdRef.current || '';
     const shouldQueue =
-      isSessionBusy(sid) ||
+      isTargetSessionBusy(sid) ||
       isOutboundPending(sid) ||
       pendingMessagesRef.current.some((m) => (m.sessionId || '') === sid);
 
@@ -2515,7 +2596,6 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
         sessionId: sid || undefined,
       };
       setPendingMessages(prev => [...prev, snapshot]);
-      steerPendingSnapshot(snapshot);
       // Clear the composer only — do not touch streaming state (agent is busy).
       setInputText('');
       setPendingSkill(null);
@@ -2565,18 +2645,18 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
             session.archived_events,
           );
           const hasMore = !!session.has_more;
-          pagedAnchorIdRef.current = sessionMessageIdentity(messages[0]) || null;
+          const oldest = sessionMessageIdentity(messages[0]) || null;
+          setPagingCursor(sid, { anchor: oldest, offset: messages.length });
           putCachedSessionTimeline(agentId, sid, entries, {
             complete: !hasMore,
             messageCount: messages.length,
             totalMessages: session.total_messages,
-            oldestMessageId: pagedAnchorIdRef.current || undefined,
+            oldestMessageId: oldest || undefined,
           });
           setTimeline(entries);
           setShellStreams(rebuildShellStreamsFromTimeline(entries));
           loadingSessionIdRef.current = sid;
-          historyOffsetRef.current = messages.length;
-          setHasMoreHistory(hasMore);
+          setPaging(sid, { hasMore });
         }
       } catch (err: any) {
         console.error('[AIChatPage] Failed to reload session before pending flush:', err);
@@ -2617,6 +2697,28 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     );
   }, [agentId, armOutboundTurnPending, deliverMessage]);
 
+  // 出队并发出**一条**：手动发送与 auto-drain 共用这唯一入口，并且同样占住
+  // isFlushingPendingRef。手动那一下不占闸的话，它引起的 length 变化会让 drain
+  // 立刻把下一条也发出去 —— 一次点击连发两三条（点击「发送下一条」时的连发）。
+  // 发送失败就把条目原样放回队首：既不静默丢失，也不打乱顺序。
+  const releasePending = useCallback((target: PendingMessage) => {
+    if (isFlushingPendingRef.current) return;
+    isFlushingPendingRef.current = true;
+    setPendingMessages((prev) => prev.filter((m) => m.id !== target.id));
+    void (async () => {
+      try {
+        await flushPendingMessage(target);
+      } catch (e) {
+        console.warn('[AIChatPage] pending send failed; re-queued', e);
+        setPendingMessages((prev) =>
+          prev.some((m) => m.id === target.id) ? prev : [target, ...prev],
+        );
+      } finally {
+        setTimeout(() => { isFlushingPendingRef.current = false; }, 0);
+      }
+    })();
+  }, [flushPendingMessage]);
+
   // 引导消息撤回：从注入队列撤回到输入框重新编辑（后端尚未消费时同步移除；
   // 已被模型消费的条目此前已随 steer_consumed 移出队列，不存在该入口）。
   const handleEditPending = useCallback((id: string) => {
@@ -2648,16 +2750,33 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     wsServiceRef.current?.cancelSteer((target.sessionId || '').trim() || undefined, target.id);
   }, []);
 
-  // Header "Send now": release only the first queued message (sequential drain).
-  // 已引导注入的条目不重发（后端注入队列里已在排队）。
+  // 「立即发这条」：忙时走插话注入（runner 在下一次工具返回后塞进模型上下文）；
+  // 这一轮没在跑就没有插话可言（后端只会把残留兜底重排成新回合，前端等不到
+  // steer_consumed，气泡会消失），此时按普通消息立即发出。
+  // 忙态必须按**本条目**的会话判：park 时可能还没有会话号，空 sid 会让忙态判定
+  // 落到 agent 级，把消息插进正在跑的回合里逐条封口切开。
+  const handleSteerPending = useCallback((pm: PendingMessage) => {
+    if (pm.steered) return;
+    const sid = (pm.sessionId || '').trim() || (currentSessionIdRef.current || '').trim();
+    // 会话未知时不谈插话：注入会落进后端当前聚焦的那个回合，而这条消息的目标未必
+    // 是它。正常发出即可（后端按自己的聚焦会话路由）。
+    if (isTargetSessionBusy(sid)) {
+      steerPendingSnapshot(pm);
+      return;
+    }
+    releasePending(pm);
+  }, [isTargetSessionBusy, releasePending, steerPendingSnapshot]);
+
+  // Header "Send now": the head of the queue, through the same single-send path.
+  // 已引导注入的条目不重发（后端注入队列里已在排队）。它**不再**直接
+  // flushPendingMessage：那条老路径会绕过在飞闸、并且在忙时把消息硬插进正在跑的
+  // 回合（逐条封口 → 气泡散成一堆）。
   const handleSendNextPending = useCallback(() => {
-    const queue = pendingMessagesRef.current;
-    if (queue.length === 0) return;
-    const next = queue.find((m) => !m.steered);
+    if (isFlushingPendingRef.current) return;
+    const next = pendingMessagesRef.current.find((m) => !m.steered);
     if (!next) return;
-    setPendingMessages(prev => prev.filter(m => m.id !== next.id));
-    void flushPendingMessage(next);
-  }, [flushPendingMessage]);
+    handleSteerPending(next);
+  }, [handleSteerPending]);
 
   // Clear the entire queue without sending anything. 已引导条目需同步撤销后端注入。
   const handleCancelAllPending = useCallback(() => {
@@ -2739,7 +2858,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
       );
       const shouldQueue =
         !alreadyQueued &&
-        (isSessionBusy(sid) ||
+        (isTargetSessionBusy(sid) ||
           isOutboundPending(sid) ||
           pendingMessagesRef.current.some((m) => (m.sessionId || '') === sid));
       if (shouldQueue) {
@@ -2752,7 +2871,6 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
           sessionId: sid || undefined,
         };
         setPendingMessages((prev) => [...prev, snapshot]);
-        steerPendingSnapshot(snapshot);
         return;
       }
       armOutboundTurnPending(sid);
@@ -2774,23 +2892,16 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     const next = queue.find((m) => {
       // 已引导注入的条目由后端消费（steer_consumed / 回合结束清理），绝不重发。
       if (m.steered) return false;
-      const sid = (m.sessionId || "").trim();
-      if (sid && isSessionBusy(sid)) return false;
-      if (sid && isOutboundPending(sid)) return false;
+      // 会话未知时不拿 agent 级忙态扣住它（见 isTargetSessionBusy）：新会话窗口
+      // 里那会把消息永远扣在队列里。但"刚发过"这道乐观锁照旧 —— 防止连发。
+      const sid = (m.sessionId || '').trim() || (currentSessionIdRef.current || '').trim();
+      if (isTargetSessionBusy(sid)) return false;
+      if (isOutboundPending(sid)) return false;
       return true;
     });
     if (!next) return;
-
-    isFlushingPendingRef.current = true;
-    setPendingMessages((prev) => prev.filter((m) => m.id !== next.id));
-    void (async () => {
-      try {
-        await flushPendingMessage(next);
-      } finally {
-        setTimeout(() => { isFlushingPendingRef.current = false; }, 0);
-      }
-    })();
-  }, [busySessions, isStreaming, agentStatus, pendingMessages.length, flushPendingMessage, isSessionBusy, isOutboundPending]);
+    releasePending(next);
+  }, [busySessions, isStreaming, agentStatus, pendingMessages.length, releasePending, isTargetSessionBusy, isOutboundPending]);
 
   useEffect(() => () => {
     for (const key of Object.keys(outboundPendingTimersRef.current)) {
@@ -3141,11 +3252,9 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
       // New session: unlock path picker; keep last cwd as default selection (or system default).
       if (defaultCwd && !agentCwd) setAgentCwd(defaultCwd);
     }
-    // Reset lazy loading state
-    setHasMoreHistory(false);
-    setIsLoadingMore(false);
-    historyOffsetRef.current = 0;
-    pagedAnchorIdRef.current = null;
+    // New session: drop the "who owns the live timeline" marker. The paging
+    // state needs no reset — it is keyed by session, so the previous session's
+    // entry still (correctly) describes the previous session.
     loadingSessionIdRef.current = null;
 
     // Fallback: if Runner/Gateway WS ack (current_session) is delayed or lost,
@@ -3181,9 +3290,11 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
       setCurrentSessionId(currentSid);
       requestSessionListRefresh(agentId, currentSid);
       diskSessionLoadedRef.current = msgCount > 0;
-      historyOffsetRef.current = msgCount;
-      pagedAnchorIdRef.current = sessionMessageIdentity(session?.messages?.[0]) || null;
-      setHasMoreHistory(session?.has_more ?? false);
+      setPagingCursor(currentSid, {
+        offset: msgCount,
+        anchor: sessionMessageIdentity(session?.messages?.[0]) || null,
+      });
+      setPaging(currentSid, { hasMore: session?.has_more ?? false });
       if (msgCount === 0 && !timelineHasVisibleChatContent(entries)) {
         pinComposerLanding(currentSid);
       }
@@ -3253,6 +3364,32 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     }, 600);
   };
 
+  /**
+   * Park a page in that session's OWN live bucket.
+   *
+   * A payload for a session that is not the focused one must never reach
+   * `setTimeline`: that is the focused pane's timeline, so the other session's
+   * messages / 过程输出 / workflow folds show up in the session the user is
+   * looking at — the reported "福州天气的输出跑到当前会话的过程输出". The pane that
+   * actually shows this session reads the bucket (see `renderSessionChat`).
+   * A richer WS-streamed bucket is kept: disk lags the live turn by design.
+   */
+  const parkSessionTimeline = useCallback((sessionId: string, entries: TimelineEntry[]) => {
+    setLiveTimelinesBySession((prev) => {
+      const existing = prev[sessionId];
+      if (
+        Array.isArray(existing)
+        && existing.length > 0
+        && timelineRichness(existing) >= timelineRichness(entries)
+      ) {
+        return prev;
+      }
+      const out = { ...prev, [sessionId]: entries };
+      liveTimelinesBySessionRef.current = out;
+      return out;
+    });
+  }, []);
+
   /** Apply a paged/full session payload into timeline + cache (no network). */
   const applySessionPayload = useCallback(
     (
@@ -3265,6 +3402,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
         has_more?: boolean;
         total_messages?: number;
       },
+      opts?: { background?: boolean },
     ) => {
       const messages = session.messages || [];
       const entries = buildTimelineFromSession(
@@ -3277,24 +3415,28 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
       // This page replaces the timeline, so it also re-anchors scroll-up: the
       // oldest message of the page is the boundary everything older must come
       // strictly before.
-      pagedAnchorIdRef.current = sessionMessageIdentity(messages[0]) || null;
+      const oldest = sessionMessageIdentity(messages[0]) || null;
       putCachedSessionTimeline(agentId, sessionId, entries, {
         complete: !hasMore,
         messageCount: messages.length,
         totalMessages: session.total_messages,
-        oldestMessageId: pagedAnchorIdRef.current || undefined,
+        oldestMessageId: oldest || undefined,
       });
+      setPagingCursor(sessionId, { offset: messages.length, anchor: oldest });
+      setPaging(sessionId, { hasMore });
+      if (opts?.background || currentSessionIdRef.current !== sessionId) {
+        parkSessionTimeline(sessionId, entries);
+        return;
+      }
       eventSidRef.current = sessionId;
       setTimeline(entries);
       eventSidRef.current = '';
       setShellStreams(rebuildShellStreamsFromTimeline(entries));
       loadingSessionIdRef.current = sessionId;
-      historyOffsetRef.current = messages.length;
-      setHasMoreHistory(hasMore);
       // Session history is on screen — ask agent for matching context %.
       requestSessionTokenStats(sessionId);
     },
-    [agentId, requestSessionTokenStats],
+    [agentId, parkSessionTimeline, requestSessionTokenStats, setPaging, setPagingCursor],
   );
 
   /**
@@ -3311,20 +3453,25 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
       const meta = getCachedSessionTimelineMeta(agentId, sessionId);
       const cached = meta?.entries;
       if (cached && cached.length > 0 && !opts?.forceFetch) {
-        eventSidRef.current = sessionId;
-        setTimeline(cached);
-        eventSidRef.current = '';
         if (!opts?.allowNonCurrent) {
+          eventSidRef.current = sessionId;
+          setTimeline(cached);
+          eventSidRef.current = '';
           setShellStreams(rebuildShellStreamsFromTimeline(cached));
           loadingSessionIdRef.current = sessionId;
-          historyOffsetRef.current = meta.messageCount || cached.filter((e) => e.kind === 'message').length;
-          // Restore the paged anchor so scroll-up resumes from the exact
-          // message the cached window ended on instead of the tail-relative
-          // offset (which drifts once the live turn appends messages).
-          pagedAnchorIdRef.current = meta.oldestMessageId || null;
-          setHasMoreHistory(!meta.complete);
+          // Restore the paged cursor so scroll-up resumes from the exact message
+          // the cached window ended on instead of the tail-relative offset
+          // (which drifts once the live turn appends messages).
+          setPagingCursor(sessionId, {
+            offset: meta.messageCount || cached.filter((e) => e.kind === 'message').length,
+            anchor: meta.oldestMessageId || null,
+          });
+          setPaging(sessionId, { hasMore: !meta.complete });
+          requestSessionTokenStats(sessionId);
+        } else {
+          // Another session's cache: its own bucket, never the focused timeline.
+          parkSessionTimeline(sessionId, cached);
         }
-        requestSessionTokenStats(sessionId);
         // Complete cache: skip network. Incomplete: soft-refresh in background.
         if (meta.complete && !opts?.softRefresh) return true;
         void (async () => {
@@ -4224,7 +4371,6 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
         paneId,
       };
       setPendingMessages((prev) => [...prev, snapshot]);
-      steerPendingSnapshot(snapshot);
       return;
     }
 
@@ -4297,6 +4443,10 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     const renderPendingFor = (sessionId: string): React.ReactNode => {
       const queue = pendingMessages.filter((m) => m.sessionId === sessionId);
       if (queue.length === 0) return null;
+      // 排队与已注入是两种状态，提示必须跟着真实状态走 —— 恒说"已引导注入"会让
+      // 只排队（本轮结束才发）的条目看起来已经进了模型上下文。
+      const steeredCount = queue.filter((m) => m.steered).length;
+      const queuedCount = queue.length - steeredCount;
       return (
         <div className="rounded-lg border border-border/50 bg-transparent overflow-hidden">
           <div className="flex items-center gap-2 px-2.5 py-1.5 border-b border-border/40 bg-transparent">
@@ -4305,7 +4455,9 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
               {t('aiChat.pendingCount', { count: queue.length })}
             </span>
             <span className="text-[10px] text-textMuted">
-              · ↗ {t('aiChat.pendingSteerHint')}
+              {queuedCount > 0
+                ? `· ${t('aiChat.pendingQueueHint', { count: queuedCount })}`
+                : `· ↗ ${t('aiChat.pendingSteerHint')}`}
             </span>
             <div className="flex-1" />
             <button
@@ -4373,14 +4525,20 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
                       )}
                     </div>
                     <div className="flex-shrink-0 flex items-center gap-0.5 opacity-60 group-hover:opacity-100 transition-opacity">
-                      <button
-                        type="button"
-                        onClick={(e) => e.stopPropagation()}
-                        className="p-1 rounded text-primary hover:bg-primary/10 transition-colors"
-                        title={t('aiChat.steerHint')}
-                      >
-                        <Reply size={12} />
-                      </button>
+                      {/* 已注入的条目没有"再插话"可言 —— 按钮会是一个点了没反应的摆设 */}
+                      {!pm.steered && (
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            handleSteerPending(pm);
+                          }}
+                          className="p-1 rounded text-primary hover:bg-primary/10 transition-colors"
+                          title={t('aiChat.steerHint')}
+                        >
+                          <Reply size={12} />
+                        </button>
+                      )}
                       <button
                         type="button"
                         onClick={() => handleEditPending(pm.id)}
@@ -4469,8 +4627,17 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
       }
       // Instant paint from timeline cache (no network) — avoids「加载中」on
       // every session tab switch when the session was viewed recently.
-      const cached = getCachedSessionTimeline(agentId, sid);
+      const cachedMeta = getCachedSessionTimelineMeta(agentId, sid);
+      const cached = cachedMeta?.entries;
       if (cached && cached.length > 0) {
+        // Seed the cursor too: a pane showing this (not necessarily current)
+        // session mirrors this bucket, so its "load earlier" runs through
+        // `loadMoreHistory(sid)` — which needs this session's own window.
+        setPagingCursor(sid, {
+          offset: cachedMeta.messageCount || cached.filter((e) => e.kind === 'message').length,
+          anchor: cachedMeta.oldestMessageId || null,
+        });
+        setPaging(sid, { hasMore: !cachedMeta.complete });
         setLiveTimelinesBySession((prev) => {
           if (
             Object.prototype.hasOwnProperty.call(prev, sid)
@@ -4521,7 +4688,13 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
             complete: !(session?.has_more ?? false),
             messageCount: session?.messages?.length || 0,
             totalMessages: session?.total_messages,
+            oldestMessageId: sessionMessageIdentity(session?.messages?.[0]) || undefined,
           });
+          setPagingCursor(sid, {
+            offset: session?.messages?.length || 0,
+            anchor: sessionMessageIdentity(session?.messages?.[0]) || null,
+          });
+          setPaging(sid, { hasMore: session?.has_more ?? false });
         } catch (err: any) {
           console.warn('[AIChatPage] ensureSessionWatched hydrate failed:', err?.message || err);
         }
@@ -4542,6 +4715,11 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
           userName={currentUser?.name || undefined}
           agentName={agentProfile?.agent_name || undefined}
           canWithdraw={!changesBusy}
+          onLoadEarlier={() => loadMoreHistory(sessionId)}
+          loadEarlierEnabled={
+            !!pagingBySid[sessionId]?.hasMore
+            && !pagingBySid[sessionId]?.loading
+          }
           onWithdrawUserMessage={(entryUid, message) =>
             requestWithdrawUserMessage(entryUid, message, sessionId)
           }
@@ -5224,13 +5402,8 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
         rolesActive={libraryView === 'roles'}
         isOpen={sessionSidebarOpen}
         sessionTitleUpdate={sessionTitleUpdate}
-        agentBusy={
-          isStreaming ||
-          agentStatus === 'working' ||
-          agentStatus === 'thinking' ||
-          (!!currentSessionId && busySessions.includes(currentSessionId))
-        }
         busySessionIds={busySessions}
+        streamingSessionIds={streamingSessionIds}
         unseenCompleteSessionIds={unseenCompleteSessionIds}
         primarySessionId={primarySessionId}
         pendingPrimarySessionId={pendingPrimarySessionId}
@@ -5434,8 +5607,8 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
         )}
         <ChatScrollHud
           scrollRef={messagesContainerRef}
-          onNearTop={loadMoreHistory}
-          nearTopEnabled={hasMoreHistory && !isLoadingMore}
+          onNearTop={() => void loadMoreHistory(currentSessionId || undefined)}
+          nearTopEnabled={!!livePaging?.hasMore && !livePaging?.loading}
           onUnpin={markUnpinnedFromBottom}
         />
         <ChatTimeline
@@ -5447,10 +5620,25 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
           columnClass={soloColumnClass}
           unpinRef={userScrolledRef}
           freezeRef={textSelectFrozenRef}
-          header={isLoadingMore ? (
+          header={livePaging?.loading ? (
             <div className="flex items-center justify-center py-3">
               <OpenSquadLoader size={18} className="mr-2" />
               <span className="text-xs text-textMuted">Loading earlier messages...</span>
+            </div>
+          ) : (
+            !!livePaging?.hasMore
+          ) ? (
+            /* A first page that fits the viewport never scrolls, so the HUD's
+               near-top trigger is unreachable — expose the same page load. */
+            <div className="flex justify-center py-2">
+              <button
+                type="button"
+                data-load-earlier="1"
+                onClick={() => void loadMoreHistory(currentSessionId || undefined)}
+                className="px-3 py-1 rounded-full border border-border/70 bg-panel text-[11px] text-textMuted hover:text-primary hover:bg-primary/10 transition-colors cursor-pointer"
+              >
+                {t('aiChat.loadEarlierMessages')}
+              </button>
             </div>
           ) : null}
           footer={(

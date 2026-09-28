@@ -1,7 +1,47 @@
 import { existsSync } from 'node:fs';
 import { describe, it, expect } from 'vitest';
 import { buildTimelineFromSession, demoteIntermediateAssistantMessages } from './aiChatTimeline';
-import { collectTurnChangedFilesBefore } from '../components/ai-chat/TurnChangedFilesCard';
+import { collectTurnChangedFilesBefore, collectTurnChangedFiles } from '../components/ai-chat/TurnChangedFilesCard';
+
+/**
+ * The card is painted per reply, and the agent writes the same file under two
+ * spellings inside one turn — absolute (`C:\...\model_cards\x.json`) and
+ * relative (`x.json`). Keying the card by the raw path painted the same file
+ * twice side by side, which is exactly the "duplicated card" the user reported
+ * (verified in session 20260928_070309_n8ls, reply@3).
+ */
+describe('turn-files card: one file, one tile', () => {
+  const write = (path: string) => ({
+    type: 'tool_call',
+    content: { name: 'filesystem__write_file', arguments: JSON.stringify({ path, content: '{}' }) },
+  });
+  const blocks = (...paths: string[]) => [
+    { completed: true, events: paths.map(write) },
+  ];
+
+  it('绝对路径 + 相对路径指向同一文件 → 只留一栏', () => {
+    const abs = 'C:\\ai_work\\pro0\\opensquad_runtime_deploy\\model_cards\\commandcode_space-bunny-alpha.json';
+    const rel = 'commandcode_space-bunny-alpha.json';
+    const files = collectTurnChangedFiles(blocks(abs, rel) as any);
+    expect(files).toHaveLength(1);
+    expect(files[0].name).toBe('commandcode_space-bunny-alpha.json');
+  });
+
+  it('反斜杠/正斜杠写法不同也算同一文件', () => {
+    const a = 'C:/ai_work/pro0/model_cards/x.json';
+    const b = 'C:\\ai_work\\pro0\\model_cards\\x.json';
+    expect(collectTurnChangedFiles(blocks(a, b) as any)).toHaveLength(1);
+  });
+
+  it('不同目录下的同名文件是两栏（别把 x.json 和 y/x.json 混为一谈）', () => {
+    const files = collectTurnChangedFiles(blocks('x.json', 'sub/x.json') as any);
+    expect(files).toHaveLength(2);
+  });
+
+  it('同目录下的不同文件仍是两栏', () => {
+    expect(collectTurnChangedFiles(blocks('a.json', 'b.json') as any)).toHaveLength(2);
+  });
+});
 
 // The two `REAL ...` cases below are probes against samples captured from a
 // running deployment, not fixtures: one is a session history from the local

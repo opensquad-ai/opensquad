@@ -26,6 +26,14 @@ const REVEAL_MAX_STAGGERED_ROWS = 12;
 const REVEAL_TOTAL_MS = REVEAL_DURATION_MS + REVEAL_STAGGER_MS * REVEAL_MAX_STAGGERED_ROWS;
 
 /**
+ * How many frames a stick-to-bottom keeps re-checking after a growth signal.
+ * Late-landing height (virtual spacer swap, an expanding fold body, a reflow)
+ * needs a few frames; the chain self-terminates and is capped so it can never
+ * become a permanent rAF loop.
+ */
+const FOLLOW_FRAMES = 12;
+
+/**
  * Scroll container that mounts only near-viewport + trailing timeline rows.
  * Off-screen gaps are two spacer divs (O(window) React nodes, not O(n)).
  */
@@ -187,19 +195,40 @@ export function ChatTimeline<T extends TimelineKeyed>({
     const el = scrollRef.current;
     const col = columnRef.current;
     if (!el || !col) return;
-    const pin = () => {
-      if (freezeRef?.current || unpinRef?.current || userScrollingRef.current) return;
-      if (isFoldAnimating()) return;
+    let raf: number | null = null;
+    let budget = 0;
+    const blocked = () =>
+      !!(freezeRef?.current || unpinRef?.current || userScrollingRef.current) || isFoldAnimating();
+    // 钉一次只能钉在"当下这个" scrollHeight 上：虚拟占位换挡、行内折叠体展开的
+    // 尾帧、字体/换行回流都是在观察者回调之后才落地的高度。没人补就会停在差一截的
+    // 位置 —— 贴底时表现为"新的工具调用让滑块突然上涨一截"。所以钉完再盯几帧，
+    // 又长了就补上；高度稳定、用户接管、折叠动画期间当场停链（帧数上限兜底）。
+    const tick = () => {
+      if (raf != null) {
+        cancelAnimationFrame(raf);
+        raf = null;
+      }
+      if (blocked()) {
+        budget = 0;
+        return;
+      }
       const gap = el.scrollHeight - el.scrollTop - el.clientHeight;
-      if (gap < 4) return;
-      el.scrollTop = el.scrollHeight;
-      lastPinTopRef.current = el.scrollTop;
+      if (gap >= 4) {
+        el.scrollTop = el.scrollHeight;
+        lastPinTopRef.current = el.scrollTop;
+      }
+      if (budget-- > 0) raf = requestAnimationFrame(tick);
     };
-    pin();
-    const ro = new ResizeObserver(pin);
+    const follow = () => {
+      budget = FOLLOW_FRAMES;
+      tick();
+    };
+    follow();
+    const ro = new ResizeObserver(follow);
     ro.observe(col);
     return () => {
       ro.disconnect();
+      if (raf != null) cancelAnimationFrame(raf);
       if (userScrollIdleRef.current) clearTimeout(userScrollIdleRef.current);
     };
   }, [scrollRef, freezeRef, unpinRef]);

@@ -9,8 +9,12 @@ import { agentSessionAPI } from '../../services/api';
 import { OpenSquadLoader } from '../OpenSquadLoader';
 import {
   buildTimelineFromSession,
+  demoteIntermediateAssistantMessages,
+  dropEntriesAlreadyPresent,
+  mergeAdjacentWorkflowEntries,
   previousRenderedEntryKind,
   rebaseTimelineUids,
+  sessionMessageIdentity,
   timelineRichness,
   type TimelineEntry,
   type WorkflowBlock,
@@ -62,6 +66,15 @@ export interface SessionChatPaneProps {
   /** Allow withdraw on user turns (same as live chatSlot). */
   canWithdraw?: boolean;
   onWithdrawUserMessage?: (entryUid: string, message: ChatMessage) => void;
+  /**
+   * Scroll-up paging for the MIRRORED (live) timeline: the parent owns that
+   * timeline, so it owns its paging too. Only supplied when the parent's paging
+   * state describes *this* session (see AIChatPage's `hasMoreHistorySid`) —
+   * without that check a scroll-up here would page another session's window.
+   * The non-live path pages itself (see `loadEarlier`).
+   */
+  onLoadEarlier?: () => void;
+  loadEarlierEnabled?: boolean;
 }
 
 export const SessionChatPane: React.FC<SessionChatPaneProps> = ({
@@ -77,6 +90,8 @@ export const SessionChatPane: React.FC<SessionChatPaneProps> = ({
   pollIntervalMs,
   canWithdraw = false,
   onWithdrawUserMessage,
+  onLoadEarlier,
+  loadEarlierEnabled = false,
 }) => {
   const [prefLevel] = useWorkflowExpandLevel();
   const expandLevel = expandLevelProp ?? prefLevel;
@@ -93,6 +108,21 @@ export const SessionChatPane: React.FC<SessionChatPaneProps> = ({
   const listRef = useRef<HTMLDivElement>(null);
   const endRef = useRef<HTMLDivElement>(null);
   const userScrolledRef = useRef(false);
+  /**
+   * Scroll-up paging for the fetched (non-mirrored) timeline — same
+   * offset+anchor scheme as AIChatPage's `loadMoreHistory`. Without it this pane
+   * could only ever paint the newest page (SESSION_HISTORY_PAGE_SIZE messages):
+   * after a refresh a long session showed its last task flow and nothing older
+   * could be reached, because the pane's scroll HUD had no near-top handler and
+   * the parent's paging refs describe the *focused* session only.
+   */
+  const [hasMoreEarlier, setHasMoreEarlier] = useState(false);
+  const [loadingEarlier, setLoadingEarlier] = useState(false);
+  const earlierOffsetRef = useRef(0);
+  const earlierAnchorRef = useRef<string | null>(null);
+  /** In-flight page belongs to this session — a switch must drop its result. */
+  const sessionIdRef = useRef(sessionId);
+  sessionIdRef.current = sessionId;
   // Empty array still counts as Array.isArray — treat it as a miss so we
   // fetch disk history instead of painting a blank pane forever.
   const useLive = Array.isArray(liveTimeline) && liveTimeline.length > 0;
@@ -112,6 +142,98 @@ export const SessionChatPane: React.FC<SessionChatPaneProps> = ({
   const markUnpinnedFromBottom = useCallback((away: boolean) => {
     userScrolledRef.current = away;
   }, []);
+
+  /**
+   * Prepend the page strictly older than the oldest message already painted.
+   *
+   * Anchored by message identity rather than a tail-relative count: the session
+   * keeps growing at the tail, so an offset would drift and re-fetch a window
+   * that overlaps what is on screen (nothing visibly changes → "之前的加载不出
+   * 来"). Mirrors AIChatPage's `loadMoreHistory` merge so a turn split across the
+   * page boundary still stitches into one interleaved block.
+   */
+  const loadEarlier = useCallback(async () => {
+    if (useLive || loadingEarlier || !hasMoreEarlier) return;
+    const sid = sessionId;
+    setLoadingEarlier(true);
+    const el = listRef.current;
+    const prevScrollHeight = el ? el.scrollHeight : 0;
+    try {
+      const resp = await agentSessionAPI.getSessionHistoryPaged(
+        agentId,
+        sid,
+        earlierOffsetRef.current,
+        SESSION_HISTORY_PAGE_SIZE,
+        earlierAnchorRef.current || undefined,
+      );
+      // Switched away while the page was in flight — its rows belong elsewhere.
+      if (sessionIdRef.current !== sid) return;
+      const session = resp.session;
+      const messages = session?.messages || [];
+      if (session && (messages.length > 0 || (session.events || []).length > 0)) {
+        const older = buildTimelineFromSession(messages, session.events || []);
+        earlierOffsetRef.current += messages.length;
+        earlierAnchorRef.current = sessionMessageIdentity(messages[0]) || earlierAnchorRef.current;
+        setFetched((prev) => {
+          const next = mergeAdjacentWorkflowEntries(
+            demoteIntermediateAssistantMessages([
+              ...dropEntriesAlreadyPresent(older, prev),
+              ...prev,
+            ]),
+          );
+          putCachedSessionTimeline(agentId, sid, next, {
+            complete: !(session.has_more ?? false),
+            messageCount: earlierOffsetRef.current,
+            totalMessages: session.total_messages,
+            oldestMessageId: earlierAnchorRef.current || undefined,
+          });
+          return next;
+        });
+        setHasMoreEarlier(session.has_more ?? false);
+      } else {
+        setHasMoreEarlier(false);
+      }
+    } catch (err: any) {
+      console.warn('[SessionChatPane] load earlier failed:', err?.message || err);
+    } finally {
+      setLoadingEarlier(false);
+      // Keep the reader on the message they were looking at.
+      requestAnimationFrame(() => {
+        if (el) el.scrollTop = el.scrollHeight - prevScrollHeight;
+      });
+    }
+  }, [
+    agentId,
+    sessionId,
+    useLive,
+    loadingEarlier,
+    hasMoreEarlier,
+  ]);
+
+  /** Mirrored timeline pages through the parent (it owns those entries). */
+  const nearTopHandler = useLive ? onLoadEarlier : loadEarlier;
+  const nearTopEnabled = useLive
+    ? (!!onLoadEarlier && loadEarlierEnabled)
+    : (hasMoreEarlier && !loadingEarlier);
+
+  /**
+   * A partial page that fits inside the viewport has nothing to scroll, so the
+   * near-top trigger can never fire and the older history is unreachable — the
+   * exact dead end after a refresh ("只能看到上一个任务流"). Keep the scroll
+   * trigger for long pages and add an explicit way in for short ones.
+   */
+  const loadEarlierButton = nearTopEnabled && nearTopHandler ? (
+    <div className="flex justify-center py-2">
+      <button
+        type="button"
+        data-load-earlier="1"
+        onClick={() => void nearTopHandler()}
+        className="px-3 py-1 rounded-full border border-border/70 bg-panel text-[11px] text-textMuted hover:text-primary hover:bg-primary/10 transition-colors cursor-pointer"
+      >
+        {t('aiChat.loadEarlierMessages')}
+      </button>
+    </div>
+  ) : null;
 
   useEffect(() => {
     // Only show a soft spinner if the first fetch for an uncached session
@@ -136,6 +258,9 @@ export const SessionChatPane: React.FC<SessionChatPaneProps> = ({
       setFetched(meta.entries);
       setLoading(false);
       setError(null);
+      setHasMoreEarlier(!meta.complete);
+      earlierOffsetRef.current = meta.messageCount || 0;
+      earlierAnchorRef.current = meta.oldestMessageId || null;
       // Cache hit: paint instantly. Only background-refresh when incomplete.
       if (meta.complete) return;
       void (async () => {
@@ -165,10 +290,14 @@ export const SessionChatPane: React.FC<SessionChatPaneProps> = ({
             session?.archived_events,
           );
           const hasMore = !!session?.has_more;
+          earlierOffsetRef.current = messages.length;
+          earlierAnchorRef.current = sessionMessageIdentity(messages[0]) || null;
+          setHasMoreEarlier(hasMore);
           putCachedSessionTimeline(agentId, sessionId, entries, {
             complete: !hasMore,
             messageCount: messages.length,
             totalMessages: session?.total_messages,
+            oldestMessageId: earlierAnchorRef.current || undefined,
           });
           setFetched((prev) => rebaseTimelineUids(prev, entries));
         } catch {
@@ -210,10 +339,14 @@ export const SessionChatPane: React.FC<SessionChatPaneProps> = ({
           session?.archived_events,
         );
         const hasMore = !!session?.has_more;
+        earlierOffsetRef.current = messages.length;
+        earlierAnchorRef.current = sessionMessageIdentity(messages[0]) || null;
+        setHasMoreEarlier(hasMore);
         putCachedSessionTimeline(agentId, sessionId, entries, {
           complete: !hasMore,
           messageCount: messages.length,
           totalMessages: session?.total_messages,
+          oldestMessageId: earlierAnchorRef.current || undefined,
         });
         setFetched(entries);
       } catch (err: any) {
@@ -263,10 +396,15 @@ export const SessionChatPane: React.FC<SessionChatPaneProps> = ({
           session?.archived_messages,
           session?.archived_events,
         );
+        // The poll re-paints page 0, so the paging cursor follows it.
+        earlierOffsetRef.current = messages.length;
+        earlierAnchorRef.current = sessionMessageIdentity(messages[0]) || null;
+        setHasMoreEarlier(!!session?.has_more);
         putCachedSessionTimeline(agentId, sessionId, entries, {
           complete: !session?.has_more,
           messageCount: messages.length,
           totalMessages: session?.total_messages,
+          oldestMessageId: earlierAnchorRef.current || undefined,
         });
         // Keep React keys stable so expand/collapse state survives the poll.
         setFetched((prev) => {
@@ -346,6 +484,8 @@ export const SessionChatPane: React.FC<SessionChatPaneProps> = ({
         )}
         <ChatScrollHud
           scrollRef={listRef}
+          onNearTop={nearTopHandler}
+          nearTopEnabled={nearTopEnabled}
           onUnpin={markUnpinnedFromBottom}
         />
         <ChatTimeline
@@ -357,17 +497,20 @@ export const SessionChatPane: React.FC<SessionChatPaneProps> = ({
           unpinRef={userScrolledRef}
           freezeRef={isFrozenRef}
           header={
-            loading && timeline.length === 0 ? (
-              showSpinner ? (
-                <div className="flex items-center justify-center text-textMuted text-xs gap-2 py-12">
-                  <OpenSquadLoader size={18} /> 加载中…
-                </div>
-              ) : (
-                <div className="py-12" />
-              )
-            ) : error && timeline.length === 0 ? (
-              <div className="px-1 py-8 text-[12px] text-rose-400 text-center">{error}</div>
-            ) : null
+            <>
+              {loadEarlierButton}
+              {loading && timeline.length === 0 ? (
+                showSpinner ? (
+                  <div className="flex items-center justify-center text-textMuted text-xs gap-2 py-12">
+                    <OpenSquadLoader size={18} /> 加载中…
+                  </div>
+                ) : (
+                  <div className="py-12" />
+                )
+              ) : error && timeline.length === 0 ? (
+                <div className="px-1 py-8 text-[12px] text-rose-400 text-center">{error}</div>
+              ) : null}
+            </>
           }
           footer={<div ref={endRef} />}
           renderEntry={(entry, i, entryKey, revealStyle) => {
