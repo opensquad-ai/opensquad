@@ -16,8 +16,9 @@
 const { execFileSync, spawnSync } = require('child_process');
 const path = require('path');
 
-// The version field is replaced at publish time by the release-npm.yml
-// workflow so it always tracks the latest tagged release.
+// The version must equal the release tag: release-npm.yml's validate job fails
+// the publish when package.json and the tag disagree, and this script then
+// pins `pip install opensquad==<that version>`.
 const PKG_VERSION = require(path.join(__dirname, '..', 'package.json')).version;
 const PYPI_PKG = 'opensquad';
 
@@ -131,8 +132,19 @@ installOpensquad(py);
 }
 }
 
-// Forward everything to the real CLI
-const res = spawnSync('opensquad', args, { stdio: 'inherit' });
+// Forward everything to the real CLI through the interpreter that owns the
+// package. Never re-resolve `opensquad` on PATH: on Windows the npm shim we are
+// running from is itself named `opensquad.cmd` (Node refuses to spawn a .cmd
+// without a shell), and `pip install --user` puts the real script in
+// %APPDATA%\Python\Python3xx\Scripts, which is normally not on PATH. Both end
+// in a failed spawn — which used to exit 1 printing nothing at all, so
+// `opensquad start` looked like it did nothing.
+const res = spawnSync(py, ['-m', 'opensquad', ...args], { stdio: 'inherit' });
+if (res.error) {
+log(`could not run the opensquad CLI with ${py}: ${res.error.message}`);
+log(`Try it directly:  ${py} -m opensquad ${args.join(' ')}`);
+process.exit(1);
+}
 process.exit(res.status === null ? 1 : res.status);
 }
 

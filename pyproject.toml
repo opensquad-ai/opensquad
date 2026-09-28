@@ -129,6 +129,7 @@ include = [
     "pymcp*",
     "collab_cards*",
     "role_cards*",
+    "prompts*",
 ]
 # Belt for the `graft` lines in MANIFEST.in. Those sweep the whole tree, and
 # setuptools' namespace-package discovery (PEP 420) happily walks into vendored
@@ -152,6 +153,10 @@ opensquad = [
     "gateway/config.json",
     "gateway/nexuschat-pro/dist/**/*",
     "gateway/plugin_registry/*.json",
+    # Distribution-name → import-name aliases used by the launcher's pip
+    # dependency checks. Without it a pip install logs "using builtin aliases
+    # only" and misjudges packages whose import name differs (bs4, cv2, fitz…).
+    "launcher/*.json",
 ]
 skills = ["**/*"]
 plugins = ["**/*"]
@@ -172,6 +177,12 @@ agents = ["coder/*", "image_bot/*", "pm/*", "qa/*"]
 pymcp = ["*.json"]
 collab_cards = ["*.md"]
 role_cards = ["*.md"]
+# System-prompt templates (`base|thought` × `fc|xml`) plus the `parts/`
+# fragments they include. Every agent boot resolves them through
+# syscfg.get_builtin_root() and raises "Base prompt not found" without them —
+# 0.8.47/0.8.48 shipped no prompt file at all, so no agent could start from a
+# pip/npm install. Recursive glob: `parts/` is a subdirectory.
+prompts = ["**/*"]
 
 # Belt for the `package_data` globs above, which bypass MANIFEST.in, and for
 # anything that reaches the wheel through the sdist manifest. Patterns are

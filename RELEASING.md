@@ -225,6 +225,13 @@ The npm package is published by `release-npm.yml` on every `v*` tag push —
 no separate `npm publish` step is needed. It runs in parallel with
 `release.yml` (Python package + Docker).
 
+The dist-tag follows the version: a test build (`-alpha` / `-beta` / `-rc`)
+is published under **`next`** (`npm install -g opensquad-ai@next`) so
+`latest` keeps pointing at the last stable release; a final version moves
+`latest`. The "is it public yet?" report asks for *that version* rather than
+reading `latest` — a test build never becomes `latest`, so a latest-based
+check would report every prerelease as staged even when it is public.
+
 Requirements for the workflow to succeed:
 
 1. The tag matches `package.json` version (the workflow's `validate` job
@@ -346,10 +353,37 @@ and on PyPI:
    git tag -a v0.X.Y-beta.1 -m "v0.X.Y-beta.1"
    git push origin release/0.X.Y --tags
    ```
-5. `release.yml` runs automatically. It detects the `-beta` suffix and:
-   - Marks the GitHub Release as **Pre-release** (de-emphasized in the UI).
-   - Publishes the package with PEP 440 numbering (`opensquad==0.X.Yb1`).
-   - Pushes a Docker image tagged `0.X.Y-beta.1` (not `latest`).
+5. `release.yml` runs automatically — **every `v*` tag runs it, test builds
+   included**. It detects the `-beta` suffix and:
+   - Publishes to PyPI with PEP 440 numbering (`opensquad==0.X.Yb1`), visible
+     only to someone who names that version or passes `--pre`.
+   - Publishes npm `opensquad-ai@0.X.Y-beta.1` under the **`next`** dist-tag.
+   - Skips the Docker image: testers install from pip/npm/the desktop
+     installers, and `:latest` must keep pointing at a stable release.
+   - Creates the GitHub Release with the **Pre-release** flag, which keeps it
+     out of `/releases/latest` — what the in-app update check reads.
+   - `build-desktop.yml` also runs on the tag and attaches the 5 desktop
+     installers to that Release.
+
+   How testers install it:
+   ```bash
+   pip install --pre "opensquad==0.X.Yb1"     # tag spelling also works: 0.X.Y-beta.1
+   npm install -g opensquad-ai@next
+   ```
+   Stable users are untouched: `pip install -U opensquad`,
+   `npm install -g opensquad-ai` and `docker pull …:latest` all keep resolving
+   to the last stable release.
+
+   **Commit the version bump before tagging** — the tag must point at a commit
+   whose `[project].version` is the pre-release being published. The first job
+   of `release.yml` validates that pair:
+   ```bash
+   python scripts/sync_version.py --check-tag v0.X.Y-beta.1
+   ```
+
+   A pre-release needs no CHANGELOG section: the Release body falls back to the
+   commits since the previous tag. If you write one, either spelling is found
+   (`## [0.X.Yb1]` or `## [0.X.Y-beta.1]`).
 
 ### Promote to the next pre-release
 
@@ -375,11 +409,30 @@ When pre-releases are stable:
 ### Why pre-releases don't leak to users
 
 - **PyPI**: `pip install opensquad` will not install a pre-release by
-  default. Users have to write `pip install opensquad==0.X.Yb1` explicitly.
-- **Docker**: pre-release images are tagged `0.X.Y-beta.1`, never
-  `latest`. `docker pull opensquad` (or any `:latest` consumer) is safe.
-- **GitHub Releases**: the Pre-release badge hides them from the main
-  Releases feed; only the final `v0.X.Y` appears prominently.
+  default. Users have to write `pip install opensquad==0.X.Yb1` explicitly (or
+  pass `--pre`).
+- **npm**: the test build is published under the `next` dist-tag, so
+  `npm install -g opensquad-ai` (which resolves `latest`) never picks it up.
+- **Docker**: test builds get no image at all — `:latest` keeps pointing at the
+  last stable release.
+- **GitHub Releases**: the Pre-release flag keeps the Release out of
+  `/releases/latest`, which is exactly what the in-app update check queries.
+  On top of that, `opensquad.utils.version_channel.should_check_for_updates()`
+  only checks on the `stable` channel, so a tester running a pre-release is not
+  nagged with "new version" hints either.
+- **The flag is the one that really matters**: a test build whose Release was
+  *not* flagged pre-release would be offered to every stable user by the update
+  check, and the desktop updater would install it. `release.yml` owns that flag
+  and `build-desktop.yml` passes it again when attaching installers, so a
+  half-failed pipeline cannot publish an alpha as "latest".
+- **The one irreversible cost**: a PyPI version can never be deleted. A broken
+  test build is superseded by `a2`/`b1`, never re-uploaded under the same
+  number.
+- **History note**: before 2026-09-28 both release workflows excluded
+  `v*alpha*` / `v*beta*` / `v*rc*` tags, so a pre-release tag only built desktop
+  installers, published nothing to PyPI/npm, and created a Release that was
+  *not* flagged pre-release. Any older pre-release tag in the history published
+  nothing — the protocol above describes what happens from 0.8.49 on.
 
 ### When NOT to cut a pre-release
 
@@ -394,9 +447,11 @@ When pre-releases are stable:
 If a beta turns out to be broken, just **don't tag the next one**. The
 broken `v0.X.Y-beta.N` tag stays in git history but no one auto-upgrades
 to it, so it's safe to leave in place. If you really need to yank it
-from PyPI (e.g. it bricks installs), use `pip yank` (yanks but doesn't
-delete — historical record preserved) and document the issue in the
-GitHub Release.
+from PyPI (e.g. it bricks installs), do it on the project page
+(pypi.org → Manage → Releases → Yank release); there is no CLI for it —
+`twine` 6.x only has `check` / `upload` / `register` — and document the issue
+in the GitHub Release. Yanking hides the version from resolvers but keeps the
+artifacts, and the version number stays burned.
 
 ## Post-release
 

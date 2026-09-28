@@ -264,9 +264,11 @@ jobs:
           retention-days: 7
 
   # ── 第三步：将桌面产物附加到 GitHub Release（仅 tag 触发时） ────────────────
-  # release.yml 负责创建 Release 并生成正文 / prerelease 标记；
-  # 本工作流仅把桌面安装包附加到同名的 Release 上，不生成正文，避免与
-  # release.yml 竞态覆盖 Release 正文。
+  # release.yml 负责创建 Release 并生成正文 / prerelease 标记（含 alpha/beta/rc
+  # 测试版）；本工作流仅把桌面安装包附加到同名的 Release 上，不生成正文，避免与
+  # release.yml 竞态覆盖 Release 正文。`prerelease` 显式传一次是兜底：万一
+  # release.yml 失败/未跑，这一步也不会把测试版发布成一个"正式 latest"——那会让
+  # 所有正式用户的更新检查看到并安装 alpha。
   attach-to-release:
     name: Attach desktop artifacts to Release
     needs: build-electron
@@ -298,5 +300,6 @@ jobs:
           files: release-files/**
           overwrite_files: true
           append_body: true
+          prerelease: ${{ contains(github.ref_name, '-alpha') || contains(github.ref_name, '-beta') || contains(github.ref_name, '-rc') }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

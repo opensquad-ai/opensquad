@@ -12,6 +12,7 @@ Updates:
 Usage:
   python scripts/sync_version.py          # write synced files
   python scripts/sync_version.py --check  # exit 1 if anything would change
+  python scripts/sync_version.py --check-tag v0.8.49-alpha.1   # release tag ↔ pyproject.toml
 """
 
 from __future__ import annotations
@@ -57,6 +58,39 @@ def pep440_to_npm(pep440: str) -> str:
         if re.fullmatch(pattern, pep440):
             return re.sub(pattern, repl, pep440)
     return pep440
+
+
+def check_tag(tag: str) -> str:
+    """Validate a release tag against pyproject.toml; return the PEP 440 version.
+
+    Tags carry the npm/semver spelling (``v0.8.49-alpha.1``) while
+    pyproject.toml carries the PEP 440 one (``0.8.49a1``) — ``pep440_to_npm``
+    above is the only mapping, so both sides are checked through it instead of
+    by string surgery. Stable tags match themselves (``v0.8.49``).
+    """
+    pep440 = read_pyproject_version()
+    expected_npm = pep440_to_npm(pep440)
+    tag_version = tag.strip().lstrip("v")
+    if tag_version != expected_npm:
+        raise SystemExit(
+            f"::error::Tag {tag!r} is version {tag_version!r}, but pyproject.toml has "
+            f"{pep440!r} (npm spelling {expected_npm!r}). Bump [project].version and run "
+            f"`python scripts/sync_version.py` before tagging."
+        )
+    print(
+        f"Tag check passed: {tag} == pyproject.toml {pep440} (npm {expected_npm}, prerelease={is_prerelease(pep440)})"
+    )
+    return pep440
+
+
+def is_prerelease(version: str) -> bool:
+    """True for the alpha/beta/rc test-build spellings, npm or PEP 440.
+
+    Covers both ``0.8.49a1`` and ``0.8.49-alpha.1``. ``.devN`` is deliberately
+    not counted: the dev branch is never tagged, and a test tag must not be
+    mistaken for one.
+    """
+    return bool(re.search(r"[-_.]?(?:alpha|beta|rc|a|b)[-_.]?\d*$", version.strip().lstrip("v").lower()))
 
 
 def read_init_version() -> str | None:
@@ -116,7 +150,16 @@ def main() -> int:
         action="store_true",
         help="Verify version files match pyproject.toml; do not write.",
     )
+    parser.add_argument(
+        "--check-tag",
+        metavar="TAG",
+        help="Verify a release tag (npm spelling, e.g. v0.8.49-alpha.1) matches pyproject.toml.",
+    )
     args = parser.parse_args()
+
+    if args.check_tag:
+        check_tag(args.check_tag)
+        return 0
 
     pep440, npm, init_content, pkg_content, nexus_content, lock_content, nexus_lock_content = compute_targets()
     init_current = INIT_PY.read_text(encoding="utf-8")

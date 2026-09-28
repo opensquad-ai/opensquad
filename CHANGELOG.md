@@ -45,6 +45,59 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 > The next cycle's notes are collected here, then moved into a dated section
 > before the tag.
 
+### Added
+
+- **Test builds (alpha / beta / rc) are now installable the way a real user
+  installs OpenSquad.** Both release workflows used to exclude those tags, so
+  tagging `v0.8.49-beta.1` only built desktop installers — nothing reached PyPI
+  or npm, and the Release that was created was *not* flagged pre-release (i.e.
+  the update check would have offered it to stable users). Every `v*` tag now
+  runs the full pipeline: the PyPI upload carries the PEP 440 spelling
+  (`0.8.49b1`, still invisible to `pip install opensquad`), npm publishes under
+  the `next` dist-tag (`npm install -g opensquad-ai@next`), Docker is skipped so
+  `:latest` cannot move, and the GitHub Release is flagged `prerelease`. Testers
+  install with `pip install --pre opensquad==0.8.49b1`; stable users keep
+  getting the last stable release from every channel. The tag↔version pair is
+  validated up front by `scripts/sync_version.py --check-tag`.
+
+### Fixed
+
+- **No agent could start from a pip or npm install: the artifacts shipped zero
+  prompt templates.** `0.8.47` and `0.8.48` contained no file under
+  `prompts/` (the published `opensquad-0.8.48` wheel has 578 entries and not one
+  of them is a prompt), so `agents_boot.build_system_prompt` raised
+  `FileNotFoundError: Base prompt not found:
+  …\site-packages\src\opensquad\prompts\thought_fc.md` on the first boot — the
+  coder crash-looped and the pm agent never bound its web port while the UI
+  showed "crashed" / "reconnecting". `prompts/` is a builtin-resource sibling of
+  the `opensquad` package, like `skills/` or `agents/`, and had been left out of
+  `packages.find.include`, `package-data` and `MANIFEST.in`. All four templates
+  and the 49 `parts/` fragments they include by name now ship, and
+  `scripts/verify_release_artifacts.py` requires `prompts/base_fc.md`,
+  `prompts/thought_fc.md` and ≥50 files under `prompts/` before a release is
+  allowed to upload.
+- **`npm install -g opensquad-ai` then `opensquad start` no longer does nothing
+  at all.** The wrapper forwarded by re-resolving `opensquad` on `PATH`, which
+  cannot work on Windows: the shim it is running from is itself `opensquad.cmd`
+  (Node refuses to spawn a `.cmd` without a shell) and `pip install --user`
+  puts the real script in `%APPDATA%\Python\Python3xx\Scripts`, which is
+  normally not on `PATH`. The failed spawn left `status` null, and the wrapper
+  dropped `res.error` and exited 1 **printing nothing** — no banner, no error,
+  indistinguishable from a hung command. It now runs the CLI through the very
+  interpreter that owns the package (`python -m opensquad …`, newly enabled by
+  `opensquad/__main__.py`) and reports the spawn failure instead of swallowing
+  it.
+- **`opensquad start` no longer dies on a machine whose SQLAlchemy predates
+  2.0.38.** The gateway passed `pool_size` / `max_overflow` / `pool_timeout` to
+  `create_async_engine` and relied on the dialect's default pool class: up to
+  2.0.37 a file-backed `sqlite+aiosqlite` engine gets `NullPool`, which rejects
+  those three arguments with `TypeError` *while the module is imported* — the
+  gateway exited 1 five times in a row and port 9555 never bound, so a
+  `pip install opensquad` on such a machine could not start at all. The pool
+  class is now pinned to `AsyncAdaptedQueuePool` (the 2.0.38+ default), which
+  keeps the intended pool on every 2.0.x. `sqlalchemy>=2.0.0` had been satisfied
+  by the older release already present, so pip never upgraded it.
+
 ## [0.8.48] — 2026-09-28
 
 > The pip channel is now a real deployment path. The PyPI wheel ships the default

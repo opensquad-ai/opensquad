@@ -8,6 +8,7 @@ graft src/agents
 graft src/pymcp
 graft src/collab_cards
 graft src/role_cards
+graft src/prompts
 
 # ── Never ship ──
 # Private plugins / skills (keep in sync with the "Private plugins / skills"

@@ -7,6 +7,7 @@ import os
 
 from sqlalchemy import event, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.pool import AsyncAdaptedQueuePool
 
 from app.models import Base
 from opensquad.system_config import syscfg
@@ -66,9 +67,17 @@ os.makedirs(os.path.dirname(_db_file), exist_ok=True)
 # Small pool instead of NullPool: WAL allows concurrent readers, and
 # per-connection PRAGMA cache_size would otherwise cold-start 16MB on
 # every request. SQLite still serializes writers — keep the pool tiny.
+#
+# poolclass is pinned rather than left to the dialect default: up to SQLAlchemy
+# 2.0.37 a file-backed aiosqlite engine gets NullPool, which rejects the tuning
+# args below with a TypeError while this module is imported — the gateway then
+# exits 1 and `opensquad start` never binds 9555. 2.0.38+ picks
+# AsyncAdaptedQueuePool anyway, and `sqlalchemy>=2.0.0` lets pip keep an older
+# 2.0.x that a machine already had, so the default cannot be relied on.
 engine = create_async_engine(
     DATABASE_URL,
     echo=DATABASE_ECHO,
+    poolclass=AsyncAdaptedQueuePool,
     pool_size=8,
     max_overflow=4,
     pool_timeout=30,

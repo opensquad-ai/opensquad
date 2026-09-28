@@ -68,12 +68,25 @@ LEAK_NAMES = (".env", ".env.local", ".env.production", ".DS_Store", "id_rsa", "c
 WHEEL_REQUIRED = (
     "opensquad/gateway/config.json",
     "opensquad/gateway/nexuschat-pro/dist/index.html",
+    "opensquad/launcher/pkg_import_map.json",
     "model_cards/deepseek-v4-flash.json",
     "pymcp/config_basic.json",
     "agents/pm/config.json",
+    # Every agent boot reads one of these (base|thought × fc|xml, picked from
+    # the model's tool-call capability); without the dir `agents_boot` raises
+    # "Base prompt not found" and no agent can start.
+    "prompts/base_fc.md",
+    "prompts/thought_fc.md",
 )
 # Minimum per-directory file counts (guards against silently shipping empty dirs).
-WHEEL_MIN_FILES = {"plugins/": 100, "skills/": 10, "model_cards/": 1, "agents/": 1}
+WHEEL_MIN_FILES = {
+    "plugins/": 100,
+    "skills/": 10,
+    "model_cards/": 1,
+    "agents/": 1,
+    # 4 templates + 49 `parts/` fragments the templates include by name.
+    "prompts/": 50,
+}
 
 # Generated at build time; not expected to be tracked by git.
 GENERATED = (

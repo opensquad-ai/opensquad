@@ -112,12 +112,16 @@ def test_completeness_requires_defaults_and_ui():
         [
             "opensquad/gateway/config.json",
             "opensquad/gateway/nexuschat-pro/dist/index.html",
+            "opensquad/launcher/pkg_import_map.json",
             "model_cards/deepseek-v4-flash.json",
             "pymcp/config_basic.json",
             "agents/pm/config.json",
+            "prompts/base_fc.md",
+            "prompts/thought_fc.md",
         ]
         + [f"plugins/p{i}/a.py" for i in range(100)]
         + [f"skills/s{i}/SKILL.md" for i in range(10)]
+        + [f"prompts/parts/p{i}.md" for i in range(50)]
     )
     assert vra._check_wheel_completeness(minimal) == []
 
@@ -125,7 +129,12 @@ def test_completeness_requires_defaults_and_ui():
 def test_completeness_flags_a_wheel_without_the_defaults():
     errors = vra._check_wheel_completeness(["opensquad/cli/main.py"])
     joined = "\n".join(errors)
-    for expected in ("model_cards/deepseek-v4-flash.json", "plugins/", "gateway/config.json"):
+    for expected in (
+        "model_cards/deepseek-v4-flash.json",
+        "plugins/",
+        "gateway/config.json",
+        "prompts/base_fc.md",
+    ):
         assert expected in joined
 
 
