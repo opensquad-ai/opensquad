@@ -221,34 +221,68 @@ opensquad run ...
 
 ### Cut a new npm release
 
-The npm package is published **automatically** by `release-npm.yml`
-on every `v*` tag push — no separate `npm publish` step is needed.
-It runs in parallel with `release.yml` (Python package + Docker).
+The npm package is published by `release-npm.yml` on every `v*` tag push —
+no separate `npm publish` step is needed. It runs in parallel with
+`release.yml` (Python package + Docker).
 
 Requirements for the workflow to succeed:
 
 1. The tag matches `package.json` version (the workflow's `validate` job
-   enforces this; bump `version` in `package.json` when bumping
-   `pyproject.toml`).
-2. The **`NPM_TOKEN` repo secret is set** (`Settings → Secrets and
-   variables → Actions → New repository secret`). Its value must be a
-   **granular access token** minted by the npm account that owns the
-   package (`opensquad`), with *Read and write* package permission for
-   `opensquad-ai`. The publish job reads this secret unconditionally —
-   there is no fallback, and an unset or revoked token fails the job
-   with `ENEEDAUTH`. (This is why every `v0.8.41`–`v0.8.45` tag failed.)
-3. The workflow has `id-token: write` permission (already set in
-   the file), currently unused — npm trusted publishing (OIDC) is
-   **not** configured for this package yet.
+   enforces this; `scripts/sync_version.py` keeps the two in sync).
+2. The **trusted publisher is configured on npmjs.com** for the package
+   (`https://www.npmjs.com/package/opensquad-ai/access` → *Trusted
+   Publisher*): Organization/user `opensquad-ai`, Repository `opensquad`,
+   Workflow filename `release-npm.yml`, Environment **empty**. There is no
+   `NPM_TOKEN` any more — the job authenticates with the OIDC token from
+   `id-token: write`. A wrong value in any of those four fields makes the
+   token exchange fail, and npm reports it as a bare `ENEEDAUTH` in the
+   CLI or a misleading `404`; a typo in the workflow name is the easy one
+   to make (`releases-npm.yml` vs `release-npm.yml`).
+3. npm CLI ≥ 11.5.1 in the job. `release-npm.yml` installs `npm@11`
+   explicitly: `npm@latest` is now npm 12, which no longer performs the
+   OIDC exchange.
 
-### Manual backfill (one-time, e.g. for v0.1.0)
+The publish step runs with `--loglevel verbose` on purpose: when the
+token exchange fails, npm logs the reason only at verbose/silly and then
+degrades silently into that `ENEEDAUTH` / `404`.
 
-If a tag was pushed before `NPM_TOKEN` was configured, publish manually:
+### Approve the staged release
+
+**A green `Release (npm)` job does not mean users can install the new
+version.** The publish lands in npm's *staging* area: trusted-publisher
+publishes may always stage, and npm routes dual-use packages (an AI
+coding agent qualifies) through staging by policy. Until a maintainer
+approves the staged version **with 2FA**, `npm install -g opensquad-ai`
+keeps resolving to the previous version.
+
+Approve either way — both prompt for 2FA:
+
+- **npmjs.com** → the package page → **Staged Packages** tab → *Approve*.
+- **CLI** → `npm login`, then `npm stage list opensquad-ai` and
+  `npm stage approve <stage-id>`. `npm stage reject <stage-id>` discards
+  a bad one.
+
+The workflow's last step reads the registry's `dist-tags` and prints a
+warning when the version is not public yet, so a staged release is never
+mistaken for a published one.
+
+### Re-publishing after a failed job
+
+Do **not** re-tag: moving the tag re-runs `release.yml`, whose PyPI upload
+of an already-published version fails. Dispatch the workflow from a ref
+that still carries the released version instead:
 
 ```bash
-npm login --registry=https://registry.npmjs.org/   # as the `opensquad` npm account
-npm publish
+gh workflow run release-npm.yml --ref <ref>
 ```
+
+`workflow_dispatch` skips the tag-name comparison and publishes the
+`package.json` version of that ref, so the ref must still carry the
+released version — `dev` is bumped to the next `.dev0` right after every
+release and will be refused as a prerelease, and the tagged commit carries
+whatever workflow file it had when it was tagged (fixes made later are not
+retroactive). A short-lived branch cut from the tag with the workflow fix
+cherry-picked onto it is the reliable form.
 
 ### Why a thin wrapper, not a real npm package?
 
@@ -378,7 +412,9 @@ After the final tag is pushed and `release.yml` completes:
   `nsis` only; see [desktop_build.md](doc_en/desktop_build.md)).
 - [ ] **Docker image is on `ghcr.io/opensquad-ai/opensquad:0.X.Y` and `:latest`** (final release only).
 - [ ] **PyPI shows the new version** at https://pypi.org/project/opensquad/#history.
-- [ ] **npm package published** (`opensquad-ai` on the public registry).
+- [ ] **npm package published *and approved*** (`opensquad-ai` on the public
+  registry). A version that is only staged is not installable — see
+  [Approve the staged release](#approve-the-staged-release).
 - [ ] **`dev` is bumped** to the next `.dev0` (per [BRANCHING.md](BRANCHING.md) cheat sheet) and pushed.
 - [ ] **`[Unreleased]` section in `CHANGELOG.md` is open on dev** for the next cycle.
 - [ ] **Release branch deleted** locally and on remote.

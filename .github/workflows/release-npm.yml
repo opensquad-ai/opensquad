@@ -95,8 +95,25 @@ jobs:
       - name: Publish to npm
         run: npm publish --registry=https://registry.npmjs.org --access public --provenance --loglevel verbose
 
+      # `npm publish` exits 0 even when the version only reaches npm's staging
+      # area: trusted publishers may always stage, and npm routes dual-use
+      # packages (an AI coding agent qualifies) through staging by policy. Read
+      # the registry afterwards so a staged release cannot pass for a published
+      # one — that mistake is invisible in the job output otherwise.
+      - name: Report whether the version is public or only staged
+        run: |
+          V="${{ needs.validate.outputs.npm_version }}"
+          LIVE="$(curl -s -m 20 https://registry.npmjs.org/-/package/opensquad-ai/dist-tags || true)"
+          echo "dist-tags: $LIVE"
+          case "$LIVE" in
+            *"\"latest\":\"$V\""*)
+              echo "::notice::opensquad-ai@$V is public — https://www.npmjs.com/package/opensquad-ai" ;;
+            *)
+              echo "::warning::opensquad-ai@$V is not public yet (almost certainly staged). Approve it with 2FA at https://www.npmjs.com/package/opensquad-ai -> Staged Packages, or run: npm stage list opensquad-ai && npm stage approve <stage-id>" ;;
+          esac
+
       - name: Summary
         run: |
-          echo "Published opensquad-ai@${{ needs.validate.outputs.npm_version }}"
+          echo "opensquad-ai@${{ needs.validate.outputs.npm_version }} pushed to npm"
           echo "Install with:  npm install -g opensquad-ai"
           echo "Try with:      npx -p opensquad-ai opensquad --version"
