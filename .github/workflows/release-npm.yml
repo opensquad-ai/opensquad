@@ -29,13 +29,21 @@ jobs:
       - name: Check tag vs package.json version
         id: check
         run: |
-          TAG_VERSION="${GITHUB_REF_NAME#v}"
           NPM_VERSION=$(node -p "require('./package.json').version")
-          echo "Tag version:     $TAG_VERSION"
-          echo "package.json:    $NPM_VERSION"
-          if [ "$TAG_VERSION" != "$NPM_VERSION" ]; then
-            echo "::error::Version mismatch! tag=$TAG_VERSION package.json=$NPM_VERSION"
-            exit 1
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            TAG_VERSION="${GITHUB_REF_NAME#v}"
+            echo "Tag version:     $TAG_VERSION"
+            echo "package.json:    $NPM_VERSION"
+            if [ "$TAG_VERSION" != "$NPM_VERSION" ]; then
+              echo "::error::Version mismatch! tag=$TAG_VERSION package.json=$NPM_VERSION"
+              exit 1
+            fi
+          else
+            # workflow_dispatch — re-publishing a tag whose job failed, or a
+            # deliberate manual publish. There is no tag name on a branch ref,
+            # so package.json is the source of truth: dispatch from the branch
+            # that carries the released version.
+            echo "Dispatch on '${GITHUB_REF_NAME}'; publishing package.json version $NPM_VERSION"
           fi
           echo "Version check passed: $NPM_VERSION"
           echo "npm_version=$NPM_VERSION" >> $GITHUB_OUTPUT
@@ -70,8 +78,15 @@ jobs:
       # No NODE_AUTH_TOKEN: the OIDC token granted by `id-token: write` is
       # exchanged for publish rights through the trusted publisher configured on
       # npmjs.com (owner opensquad-ai, repo opensquad, workflow release-npm.yml).
+      #
+      # It has to be cleared *here* though: `registry-url` above makes
+      # actions/setup-node inject a fallback credential
+      # (`NODE_AUTH_TOKEN=XXXXX-XXXXX-XXXXX-XXXXX`), and npm then prefers that
+      # over the OIDC exchange — the publish authenticates as garbage and comes
+      # back `404 Not Found - PUT https://registry.npmjs.org/<pkg>`, which reads
+      # like a missing package. See actions/setup-node#1440.
       - name: Publish to npm
-        run: npm publish --access public --provenance
+        run: NODE_AUTH_TOKEN="" npm publish --access public --provenance
 
       - name: Summary
         run: |
