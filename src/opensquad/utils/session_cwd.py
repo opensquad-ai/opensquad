@@ -38,7 +38,8 @@ def _sid_key(session_id: str) -> str:
     if not sid:
         return ""
     safe = re.sub(r"[^A-Za-z0-9._-]", "_", sid)[:40]
-    return f"{safe}-{hashlib.sha1(sid.encode('utf-8')).hexdigest()[:8]}"
+    digest = hashlib.sha1(sid.encode("utf-8"), usedforsecurity=False).hexdigest()[:8]
+    return f"{safe}-{digest}"
 
 
 def session_cwd_path(agent_dir: str, session_id: str = "") -> str:
