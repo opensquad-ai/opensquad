@@ -55,16 +55,24 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # No `registry-url`: with it, setup-node writes an .npmrc carrying
+      # `//registry.npmjs.org/:_authToken=${NODE_AUTH_TOKEN}` and exports a
+      # placeholder NODE_AUTH_TOKEN ("XXXXX-XXXXX-XXXXX-XXXXX"). npm then treats
+      # the registry as token-authenticated and never attempts the OIDC
+      # exchange — the publish fails `404 Not Found - PUT .../<pkg>` (reads like
+      # "package missing") or `ENEEDAUTH`. The registry is passed to the publish
+      # command instead, below. See actions/setup-node#1440.
       - uses: actions/setup-node@v4
         with:
           node-version: '24'
-          registry-url: 'https://registry.npmjs.org'
 
       # Trusted publishing needs npm CLI >= 11.5.1 — pin it rather than trusting
-      # whatever npm the runner image ships with.
+      # whatever npm the runner image ships with. Deliberately *not* `@latest`:
+      # npm 12 is out and no longer performs the OIDC exchange (publish then
+      # dies in `ENEEDAUTH` even though the runner exposes the OIDC vars).
       - name: Upgrade npm (trusted publishing needs >= 11.5.1)
         run: |
-          npm install -g npm@latest
+          npm install -g npm@11
           npm --version
 
       - name: Install dependencies
@@ -78,15 +86,14 @@ jobs:
       # No NODE_AUTH_TOKEN: the OIDC token granted by `id-token: write` is
       # exchanged for publish rights through the trusted publisher configured on
       # npmjs.com (owner opensquad-ai, repo opensquad, workflow release-npm.yml).
-      #
-      # It has to be cleared *here* though: `registry-url` above makes
-      # actions/setup-node inject a fallback credential
-      # (`NODE_AUTH_TOKEN=XXXXX-XXXXX-XXXXX-XXXXX`), and npm then prefers that
-      # over the OIDC exchange — the publish authenticates as garbage and comes
-      # back `404 Not Found - PUT https://registry.npmjs.org/<pkg>`, which reads
-      # like a missing package. See actions/setup-node#1440.
+      # The registry is named here because setup-node does not write an .npmrc
+      # for us any more (see its comment above).
+      # `--loglevel verbose` on purpose: when the trusted-publishing token
+      # exchange fails, npm logs the reason only at verbose/silly
+      # ("Failed token exchange request with body message: ...") and then
+      # degrades silently into a bare `ENEEDAUTH` / misleading `404`.
       - name: Publish to npm
-        run: NODE_AUTH_TOKEN="" npm publish --access public --provenance
+        run: npm publish --registry=https://registry.npmjs.org --access public --provenance --loglevel verbose
 
       - name: Summary
         run: |
