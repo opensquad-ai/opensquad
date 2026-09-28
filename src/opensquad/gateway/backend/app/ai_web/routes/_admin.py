@@ -846,7 +846,9 @@ async def admin_upload_agent_avatar(
 
     directory = _agent_avatar_dir(slug)
     os.makedirs(directory, exist_ok=True)
-    filename = f"{hashlib.sha1(blob).hexdigest()[:12]}{extension}"
+    # Content-addressed avatar filename, not an integrity check: SHA-256 so no
+    # scanner reads the digest as a security control.
+    filename = f"{hashlib.sha256(blob).hexdigest()[:12]}{extension}"
     await blocking_io.write_bytes(os.path.join(directory, filename), blob)
     _prune_agent_avatars(slug, keep=filename)
 
