@@ -62,6 +62,29 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### Fixed
 
+- **An agent boot could freeze the whole process stack, with nothing in any log
+  saying why.** `opensquad start` pipes each child's stderr and only read it
+  *after* the child exited. A pipe holds ~4 KiB on Windows; once it filled, the
+  child's next write blocked forever — and here that write was a log call made
+  while holding `logging`'s handler lock. Every thread that logs then queued
+  behind the lock, so the launcher never reached the line that starts the
+  log-forwarding thread for the agent it had just spawned, so the agent's own
+  stdout pipe was never drained, so the agent's event loop froze inside its own
+  log write: agents never registered and the UI showed "reconnecting" until the
+  tree was killed. Three independent guards now break the chain, any one of
+  which is sufficient: (1) `opensquad start` drains every child's stderr from
+  the moment it is spawned, via `StreamTail` — a daemon reader with a bounded
+  ring buffer, whose tail is what gets printed if the child dies; (2) the
+  launcher starts a child's log-forwarding thread *before* logging anything
+  about that child (agent and plugin-service paths both); (3) the console copy
+  of every logger is a bounded queue drained by a daemon thread
+  (`log_setup.nonblocking_console_handler`) whose console writes go through a
+  private duplicate of the file descriptor, so a stalled console drops records
+  instead of blocking the thread that logs — or hanging the process on its way
+  out — while the rotating file handler, now added first, still receives every
+  line. Reproduced with a child that logs 1.4 MB into a pipe nobody reads: the
+  old console handler wedges it, the new one lets it exit 0. `--verbose`
+  (inherited stdio) still avoids the pipe, but is no longer needed.
 - **No agent could start from a pip or npm install: the artifacts shipped zero
   prompt templates.** `0.8.47` and `0.8.48` contained no file under
   `prompts/` (the published `opensquad-0.8.48` wheel has 578 entries and not one

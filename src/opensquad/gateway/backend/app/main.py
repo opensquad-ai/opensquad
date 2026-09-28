@@ -41,7 +41,12 @@ from opensquad.workspace_utils import load_last_workspace
 _console_log = logging.getLogger("backend_startup")
 _console_log.setLevel(logging.DEBUG)
 if not _console_log.handlers:
-    _ch = logging.StreamHandler()
+    # Non-blocking: `opensquad start` (quiet mode) gives this process a piped
+    # stderr with no reader, so a plain StreamHandler would block inside
+    # logging once the pipe filled — freezing the gateway event loop.
+    from opensquad.log_setup import nonblocking_console_handler
+
+    _ch = nonblocking_console_handler()
     _ch.setFormatter(logging.Formatter("%(message)s"))
     _console_log.addHandler(_ch)
 

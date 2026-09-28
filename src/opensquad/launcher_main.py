@@ -930,7 +930,12 @@ def _setup_launcher_logging():
     _lh.setFormatter(logging.Formatter(syscfg.log_format(), datefmt=syscfg.log_date_format()))
     _log.handlers.clear()
     _log.addHandler(_lh)
-    _ch = logging.StreamHandler()
+    # Non-blocking console copy: the launcher runs with its stderr piped back to
+    # `opensquad start`, and a write that blocks there would wedge every thread
+    # that logs (see opensquad/log_setup.py).
+    from opensquad.log_setup import nonblocking_console_handler
+
+    _ch = nonblocking_console_handler()
     _ch.setFormatter(logging.Formatter("%(message)s"))
     _ch.setLevel(logging.INFO)
     _log.addHandler(_ch)
