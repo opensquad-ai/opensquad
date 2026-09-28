@@ -304,8 +304,12 @@ def configure_structured_logging(
             datefmt="%Y-%m-%d %H:%M:%S",
         )
 
-    # Console handler
-    ch = logging.StreamHandler(sys.stdout)
+    # Console handler — non-blocking: `opensquad start` gives children a piped
+    # stderr/stdout that nobody reads until exit, and a synchronous write would
+    # block the logging thread (and the caller) once that pipe fills.
+    from opensquad.log_setup import nonblocking_console_handler
+
+    ch = nonblocking_console_handler(sys.stdout)
     ch.setFormatter(fmt)
     root.addHandler(ch)
 

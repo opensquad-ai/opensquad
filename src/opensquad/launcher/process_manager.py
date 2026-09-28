@@ -764,6 +764,16 @@ class AgentProcess:
             creationflags=creationflags,
         )
 
+        # Drain the child's output *before* anything logs. The pipe holds only
+        # a few KiB (4 KiB on Windows); if the child fills it, its next write
+        # blocks — and when that write is a log call it blocks holding
+        # logging's handler lock, so every thread that logs stalls with it.
+        # That includes this one, which would never reach the line below: the
+        # forwarding thread must already be running for the child to be able to
+        # keep writing. (2026-09-28 freeze.)
+        self._log_thread = threading.Thread(target=self._forward_logs, daemon=True, name=f"log-{self.agent_id}")
+        self._log_thread.start()
+
         self.should_run = True
         self.restart_count = 0
         self.started_at = datetime.now().isoformat()
@@ -782,10 +792,6 @@ class AgentProcess:
         )
 
         _log.info(f"[Launcher] Started {self.agent_name} on Port {target_port} (PID: {self.process.pid})")
-
-        # Start log forwarding thread
-        self._log_thread = threading.Thread(target=self._forward_logs, daemon=True, name=f"log-{self.agent_id}")
-        self._log_thread.start()
 
         # P0-2: Start health-check monitor after a brief delay (let Agent boot its health server)
         self._stop_health.clear()
@@ -1320,6 +1326,13 @@ class PluginServiceProcess:
             creationflags=creationflags,
             **popen_kwargs,
         )
+
+        # Same ordering as AgentProcess.start: drain the child's output before
+        # any log call, or a full pipe can wedge the whole launcher. See
+        # the comment there for the full chain.
+        self._log_thread = threading.Thread(target=self._forward_logs, daemon=True, name=f"log-svc-{self.plugin_id}")
+        self._log_thread.start()
+
         self.should_run = True
         self.restart_count = 0
         self.state = "running"
@@ -1336,8 +1349,6 @@ class PluginServiceProcess:
             },
         )
         _log.info(f"[Launcher] Started plugin service {self.plugin_id} on port {self.port} (PID: {self.process.pid})")
-        self._log_thread = threading.Thread(target=self._forward_logs, daemon=True, name=f"log-svc-{self.plugin_id}")
-        self._log_thread.start()
 
         # Start health check monitor (only for services that have a port)
         if self.port > 0:

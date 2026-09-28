@@ -14,6 +14,18 @@ from opensquad.structured_log import (
 )
 
 
+def _flush_console(logger: logging.Logger) -> None:
+    """The console copy is written by a background thread; wait for it.
+
+    configure_structured_logging installs a non-blocking console handler (a
+    console write must never block the logging thread — see
+    opensquad/log_setup.py), so a record is not on the stream yet when
+    ``logger.info()`` returns.
+    """
+    for handler in logger.handlers:
+        handler.flush()
+
+
 class TestTraceContext:
     def test_get_trace_id_returns_none_by_default(self):
         assert get_trace_id() is None
@@ -153,6 +165,7 @@ class TestConfigureStructuredLogging:
         configure_structured_logging(json_mode=True, level="INFO")
         root = logging.getLogger()
         root.info("json test")
+        _flush_console(root)
         captured = capsys.readouterr()
         line = captured.out.strip()
         data = json.loads(line)
@@ -164,6 +177,7 @@ class TestConfigureStructuredLogging:
         root = logging.getLogger()
         with TraceContext(trace_id="plain_tid"):
             root.info("plain test")
+        _flush_console(root)
         captured = capsys.readouterr()
         assert "plain test" in captured.out
         assert "trace_id=plain_tid" in captured.out
