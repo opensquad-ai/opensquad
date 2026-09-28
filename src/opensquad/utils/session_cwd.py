@@ -31,14 +31,18 @@ def _sid_key(session_id: str) -> str:
     """Filename-safe, collision-resistant key for one session's signal file.
 
     Raw session ids can contain ``:`` / ``/`` (they are used in URLs and file
-    stamps), so they are sanitised — and a short hash of the *original* id is
+    stamps), so they are sanitised — and a short digest of the *original* id is
     appended so two ids that sanitise to the same string cannot share a file.
+    The digest is a name disambiguator, not an integrity check (nothing is
+    authenticated with it); SHA-256 keeps both the security scanners and a
+    future reader from mistaking it for one.
     """
     sid = (session_id or "").strip()
     if not sid:
         return ""
     safe = re.sub(r"[^A-Za-z0-9._-]", "_", sid)[:40]
-    return f"{safe}-{hashlib.sha1(sid.encode('utf-8')).hexdigest()[:8]}"
+    digest = hashlib.sha256(sid.encode("utf-8")).hexdigest()[:8]
+    return f"{safe}-{digest}"
 
 
 def session_cwd_path(agent_dir: str, session_id: str = "") -> str:

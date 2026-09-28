@@ -10,6 +10,7 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 | Version                                                                | Date       | Compare to previous                                                                    | Release page                                                                     |
 | ---------------------------------------------------------------------- | ---------- | -------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------- |
+| [0.8.48]                                                               | 2026-09-28 | [0.8.47 → 0.8.48](https://github.com/opensquad-ai/opensquad/compare/v0.8.47...v0.8.48) | [GitHub Release](https://github.com/opensquad-ai/opensquad/releases/tag/v0.8.48) |
 | [0.8.47]                                                               | 2026-09-27 | [0.8.46 → 0.8.47](https://github.com/opensquad-ai/opensquad/compare/v0.8.46...v0.8.47) | [GitHub Release](https://github.com/opensquad-ai/opensquad/releases/tag/v0.8.47) |
 | [0.8.46]                                                               | 2026-09-26 | [0.8.45 → 0.8.46](https://github.com/opensquad-ai/opensquad/compare/v0.8.45...v0.8.46) | [GitHub Release](https://github.com/opensquad-ai/opensquad/releases/tag/v0.8.46) |
 | [0.8.45]                                                               | 2026-09-09 | [0.8.44 → 0.8.45](https://github.com/opensquad-ai/opensquad/compare/v0.8.44...v0.8.45) | [GitHub Release](https://github.com/opensquad-ai/opensquad/releases/tag/v0.8.45) |
@@ -41,11 +42,18 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+> The next cycle's notes are collected here, then moved into a dated section
+> before the tag.
+
+## [0.8.48] — 2026-09-28
+
 > The pip channel is now a real deployment path. The PyPI wheel ships the default
 > resources next to the `opensquad` package, `opensquad init` seeds a usable
 > workspace from a wheel install, and `opensquad start` / `opensquad web` resolve
 > their scripts from the installed package instead of a repo-relative path.
 > Published artifacts are verified against `git ls-files` before upload.
+> Alongside that, the agent web UI stops letting one session's state stand in for
+> another's: paging, busy state and session payloads are routed per session.
 
 ### Added
 
@@ -63,6 +71,16 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   over the checkout, so a tree that a build would sweep fails in about a minute
   instead of after a full build. The `pypi` job now runs it before `python -m
   build` too.
+- **The session pane can load older messages on demand.** A session whose first
+  page fit the viewport had no way to ask for more: the near-top trigger never
+  fired and there was no affordance, so everything before the live turn was
+  unreachable after a refresh. The pane now renders an explicit "load earlier
+  messages" entry whenever the backend reports `has_more`, and the paging cursor
+  (a tail-relative offset plus a message-identity anchor) is tracked per session,
+  so a mirrored pane can page too.
+- **A tokens/sec readout on the activity row while a turn is running.** The
+  headline shows the last second's output rate — not the turn average — computed
+  from the streaming output already on screen.
 
 ### Fixed
 
@@ -137,6 +155,53 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   same name as a required step, but no such skill ships or exists. Both now
   make the inline 4-phase methodology authoritative and treat the skill as an
   optional library lookup.
+- **One session's history could be painted into another session's pane.** A paged
+  or cached payload for a session that was not the focused one went through the
+  same `setTimeline` as the focused one, so its messages, process output and
+  workflow folds appeared in the session the user was looking at — including
+  folds that never existed in that session. Non-focused payloads now land only in
+  that session's own live bucket, and a disk page never overwrites a richer live
+  bucket (the stream is ahead of the file by design).
+- **A sidebar row animated because it was selected, not because it was running.**
+  A row's busy state fell back to the agent-wide busy flag and to "is this the
+  selected session", so clicking any row started its progress animation. It now
+  reads only that row's own evidence — the backend's busy list union this client's
+  streaming set for that session — and the global streaming flag is released by
+  "is any session still streaming" rather than "was the finishing frame's session
+  the focused one", which latched it on forever after a mid-turn switch.
+- **A mid-turn steer could fire several queued messages at once.** "Send next"
+  removed the head entry and flushed it without taking the drain's in-flight lock,
+  so the drain effect immediately picked up the next entry; and an entry parked
+  before it had a session id skipped both the busy and the in-flight guards
+  outright, force-sending the whole queue into the running turn (the reported
+  screenshot: identical bubbles with collapsed folds between them). Sending one
+  queued message is now a single exit that takes the lock, dequeues, flushes and
+  re-queues at the head on failure, and the effective session id is resolved
+  (falling back to the current session) so an empty id cannot bypass the guards.
+- **Stick-to-bottom drifted when height landed late.** Pinning once only pinned
+  the `scrollHeight` observed at that moment; a virtual spacer swap, an expanding
+  fold body or a reflow adds height a frame or two later, so a new tool call made
+  the scrollbar jump up by a slice. A pin now re-checks for a bounded number of
+  frames and stops the chain on user scroll, freeze or fold animation.
+- **A single estimated turn blanked a session's cache hit rate for good.** The
+  panel gated the whole block on `usage_estimated`, a cumulative flag that turns on
+  when any turn's stream carried no usage chunk; it travels with the session
+  across model switches, so switching models made the rate unmeasurable ("the
+  model returned no usage data"). The rate is now computed over the input of the
+  turns that actually reported usage (`reported_input_tokens`); excluded turns are
+  counted and stated instead of hiding the split.
+- **The workflow detail level (`精简` / `思考` / `完整`, i.e. concise / thoughts /
+  full) did not match its definition.** Concise now opens plan and process output,
+  thoughts adds deep thinking (unconditionally — no exception for turns that also
+  have tool steps), and full adds tool calls; the choice is written on "Done"
+  only, so a bare click no longer saves it.
+- **A file written under two spellings produced two cards.** A turn that wrote the
+  same file once by absolute path and once by relative path showed two identical
+  tiles in the changed-files card. They are one tile now (two relative paths are
+  still never collapsed).
+- **A wall of identical retries.** Consecutive repeats of the same tool call with
+  the same arguments and the same error collapse into one row carrying a `×N`
+  badge at the default expand levels; "full" still lists every attempt.
 
 ### Changed
 
