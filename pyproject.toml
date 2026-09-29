@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "opensquad"
-version = "0.8.49.dev0"
+version = "0.8.49a4"
 description = "OpenSquad - Local-first Multi-Agent Collaboration Framework"
 readme = "README.md"
 license = "MIT"
@@ -163,8 +163,9 @@ plugins = ["**/*"]
 # Credential-bearing dirs use an explicit allowlist instead of `*.json`, because
 # a `*.json` glob cannot tell a tracked builtin from a local card/agent that
 # carries the operator's own api_key. Keep both lists equal to `git ls-files`
-# for those dirs — tests/test_release_artifact_includes.py enforces it.
+# for those dirs — tests/test_verify_release_artifacts.py enforces it.
 model_cards = [
+    "builtin-sensevoice-asr.json",
     "deepseek-v4-flash.json",
     "deepseek-v4-pro.json",
     "step-image-edit-2.json",

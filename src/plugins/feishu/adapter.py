@@ -43,17 +43,13 @@ warnings.filterwarnings("ignore", category=FutureWarning)
 
 import requests
 
-# Add project root to path.
-# In frozen mode, APPEND (not insert(0)): the Agent Python's site-packages
-# must win over _internal/ loose copies of third-party packages, whose
-# transitive deps (e.g. click) live only in the PYZ archive and would crash
-# with ModuleNotFoundError. See external_api/adapter.py for full rationale.
+# Add project root to path — always APPEND (see external_api/adapter.py for the
+# full rationale: in a pip install this path is a site-packages, and the service
+# runs on the bundled 3.11 Agent Python, so insert(0) would shadow its compiled
+# deps with another interpreter's binaries).
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 if ROOT_DIR not in sys.path:
-    if getattr(sys, "frozen", False):
-        sys.path.append(ROOT_DIR)
-    else:
-        sys.path.insert(0, ROOT_DIR)
+    sys.path.append(ROOT_DIR)
 
 import contextlib
 
@@ -881,7 +877,7 @@ def _spawn_bot_subprocess(cfg: FeishuBotConfig) -> subprocess.Popen | None:
     uses a ``python311._pth`` file which makes Python **ignore PYTHONPATH**.
     With ``-m``, the child cannot find the ``plugins`` package (it lives in
     the frozen ``_internal/`` dir, which is only reachable via PYTHONPATH).
-    Running by path lets the script's own ``sys.path.insert(0, ROOT_DIR)``
+    Running by path lets the script's own ``sys.path.append(ROOT_DIR)``
     set up imports correctly.
     """
     try:

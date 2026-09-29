@@ -138,7 +138,7 @@ def test_expose_ffmpeg_on_path_is_none_when_nothing_resolves(helper):
 # ── R2 ─────────────────────────────────────────────────────────────────────
 
 
-@pytest.mark.parametrize("plugin", ["sensevoice", "whisper"])
+@pytest.mark.parametrize("plugin", ["sensevoice"])
 def test_asr_plugin_declares_the_bundled_ffmpeg_dependency(plugin):
     manifest = json.loads((_ROOT / "src" / "plugins" / plugin / "plugin.json").read_text(encoding="utf-8"))
     pip_deps = manifest["dependencies"]["pip"]

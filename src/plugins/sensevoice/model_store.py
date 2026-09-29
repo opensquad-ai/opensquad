@@ -20,6 +20,9 @@ try:
     from plugins._model_downloader import (  # type: ignore[no-redef]
         force_remove_file,
         force_remove_status_file,
+        replace_with_retry,
+        status_is_stale,
+        write_status_json,
     )
 except ImportError:
     _here = os.path.dirname(os.path.abspath(__file__))
@@ -29,6 +32,9 @@ except ImportError:
     from _model_downloader import (  # type: ignore[no-redef]
         force_remove_file,
         force_remove_status_file,
+        replace_with_retry,
+        status_is_stale,
+        write_status_json,
     )
 
 logger = logging.getLogger("plugins.sensevoice.model_store")
@@ -114,35 +120,45 @@ def status_path() -> str:
 
 
 def _write_status(payload: dict[str, Any]) -> None:
-    path = status_path()
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    payload = {**payload, "updated_at": time.time()}
-    tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(payload, f, ensure_ascii=False, indent=2)
-    os.replace(tmp, path)
+    """Persist the download status. Never raises.
+
+    The status file is read by other processes (launcher, gateway, Electron)
+    while this one writes it, so the shared helper retries the atomic replace
+    and rewrites in place if the target is held open for reading.
+    """
+    write_status_json(status_path(), {**payload, "updated_at": time.time()})
 
 
 def read_status() -> dict[str, Any]:
+    """Read the persisted download status. Pure — it never mutates the file.
+
+    A reader cannot see another process's download thread, so "state ==
+    downloading with no local thread" is *not* an interruption: the download
+    may well be running in the plugin service. Only a record that stopped
+    advancing for DOWNLOAD_STALE_SECONDS is reported as interrupted.
+    """
     path = status_path()
     if not os.path.isfile(path):
         return {"state": "idle", "message": "", "progress": 0.0, "file": ""}
     try:
         with open(path, encoding="utf-8") as f:
             data = json.load(f)
-        if isinstance(data, dict):
-            # A persisted "downloading" state with no live thread means the
-            # process (or the download) was interrupted — e.g. the user closed
-            # the app mid-download. Reset it so the UI button becomes usable.
-            if data.get("state") == "downloading" and not _download_alive():
-                data["state"] = "error"
-                data["message"] = "Download interrupted — click download to retry"
-                data["progress"] = 0.0
-                _write_status(data)
-            return data
     except (OSError, ValueError):
-        pass
-    return {"state": "idle", "message": "", "progress": 0.0, "file": ""}
+        return {"state": "idle", "message": "", "progress": 0.0, "file": ""}
+    if not isinstance(data, dict):
+        return {"state": "idle", "message": "", "progress": 0.0, "file": ""}
+    if (
+        data.get("state") == "downloading"
+        and not _download_alive()
+        and status_is_stale(float(data.get("updated_at") or 0.0))
+    ):
+        return {
+            **data,
+            "state": "error",
+            "message": "Download interrupted — click download to retry",
+            "progress": 0.0,
+        }
+    return data
 
 
 def _download_alive() -> bool:
@@ -172,6 +188,13 @@ def model_file_sizes(directory: str | None = None) -> dict[str, int]:
 def get_status() -> dict[str, Any]:
     ready = model_ready()
     dl = read_status()
+    if ready and not _download_alive() and dl.get("state") != "ready":
+        # The weights are on disk, so any other persisted state is stale by
+        # definition — e.g. the download died after the last file landed, or
+        # the files were installed by hand. Self-heal so the UI stops showing
+        # a failure (and its retry button) for a model that works.
+        _write_status({"state": "ready", "message": "Model already present", "file": "", "progress": 100.0})
+        dl = read_status()
     return {
         "ready": ready,
         "model_dir": model_dir(),
@@ -209,7 +232,9 @@ def _download_one(url: str, dest: str, file_index: int, total_files: int) -> Non
                         "bytes_total": total,
                     }
                 )
-    os.replace(tmp, dest)
+    # The service may already have the previous weights open (it loads them at
+    # boot), which blocks the rename on Windows — see replace_with_retry.
+    replace_with_retry(tmp, dest)
 
 
 def _download_file(root: str, name: str, file_index: int, total_files: int) -> None:

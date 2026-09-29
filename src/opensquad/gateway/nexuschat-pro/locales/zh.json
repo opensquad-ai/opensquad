@@ -745,7 +745,15 @@
     "deleteModelFromListConfirm": "确认从列表中删除该模型？",
     "modelAdded": "已添加模型",
     "addModelToExistingProvider": "为该供应商添加模型",
-    "modelAlreadyExists": "模型卡已存在：{{name}}"
+    "modelAlreadyExists": "模型卡已存在：{{name}}",
+    "providerKeyUpdated": "已更新 {{name}} 的 {{count}} 张模型卡密钥",
+    "providerKeyUpdateFailed": "{{name}}：{{count}} 张模型卡更新失败，请重试",
+    "rotateKey": "更换 API Key",
+    "rotateKeyTitle": "更换 API Key：{{name}}",
+    "rotateKeyHint": "该供应商的 {{count}} 张模型卡将改用新密钥，模型与其它配置保持不变。",
+    "rotateKeySubmit": "保存新密钥",
+    "presetProviderCount": "{{count}} 个厂商",
+    "presetStaleHint": "数据较旧，点右上角刷新"
   },
   "logsManager": {
     "title": "日志查看",

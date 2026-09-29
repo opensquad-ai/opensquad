@@ -5,9 +5,12 @@ Workspace management tools: detect, initialize, and record recently used workspa
 """
 
 import json
+import logging
 import os
 import platform
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 # Global workspace config directory (across installation directories)
 if platform.system() == "Windows":
@@ -306,10 +309,11 @@ def persist_desktop_workspace_switch(workspace_path: str) -> None:
 
 # Builtin model cards that should always be available in workspace lists
 # (never overwrite an existing same-named file the user may have edited).
-BUILTIN_MODEL_CARD_FILES = (
-    "builtin-whisper-asr.json",
-    "builtin-sensevoice-asr.json",
-)
+# Every name here is looked up in the *installed* ``model_cards/`` dir, so each
+# one must be tracked by git and listed in MANIFEST.in + `package-data`
+# (tests/test_verify_release_artifacts.py enforces the allowlist; the missing
+# card is otherwise silent and the ASR dropdown simply has no built-in option).
+BUILTIN_MODEL_CARD_FILES = ("builtin-sensevoice-asr.json",)
 
 
 def ensure_builtin_model_cards(
@@ -333,6 +337,10 @@ def ensure_builtin_model_cards(
         dst_dir = syscfg.workspace_model_cards_dir()
 
     if not os.path.isdir(src_dir):
+        logger.warning(
+            "[workspace] built-in model cards dir is missing (%s); no built-in model card was seeded",
+            src_dir,
+        )
         return []
 
     os.makedirs(dst_dir, exist_ok=True)
@@ -340,12 +348,19 @@ def ensure_builtin_model_cards(
     for card_name in BUILTIN_MODEL_CARD_FILES:
         src = os.path.join(src_dir, card_name)
         dst = os.path.join(dst_dir, card_name)
-        if os.path.isfile(src) and not os.path.isfile(dst):
-            try:
-                shutil.copy2(src, dst)
-                copied.append(card_name)
-            except OSError:
-                pass
+        if not os.path.isfile(src):
+            # A packaging regression, not a user problem: the artifact must
+            # carry every card named above, or a fresh install has no built-in
+            # ASR (both the agent voice picker and group voice read these).
+            logger.warning("[workspace] built-in model card not shipped: %s", src)
+            continue
+        if os.path.isfile(dst):
+            continue
+        try:
+            shutil.copy2(src, dst)
+            copied.append(card_name)
+        except OSError as e:
+            logger.warning("[workspace] could not seed built-in model card %s: %s", card_name, e)
     return copied
 
 

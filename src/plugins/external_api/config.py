@@ -22,16 +22,13 @@ import secrets
 import sys
 from dataclasses import dataclass
 
-# Ensure project root is importable.
-# In frozen mode, APPEND (not insert(0)) so the Agent Python's site-packages
-# wins over _internal/ loose copies of third-party packages whose transitive
-# deps live only in the PYZ archive. See adapter.py for full rationale.
+# Ensure project root is importable — always APPEND (see adapter.py for the full
+# rationale: in a pip install this path IS a site-packages and the service runs
+# on the bundled 3.11 Agent Python, so insert(0) would let another interpreter's
+# compiled packages shadow the runtime's own).
 _root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 if _root not in sys.path:
-    if getattr(sys, "frozen", False):
-        sys.path.append(_root)
-    else:
-        sys.path.insert(0, _root)
+    sys.path.append(_root)
 # Self-contained runtime helper — does NOT import opensquad (which is not
 # available to the Agent Python that runs plugin services in frozen mode).
 from plugins._service_runtime import (

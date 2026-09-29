@@ -1,0 +1,20 @@
+{
+  "name": "builtin-sensevoice-asr",
+  "title": "系统内置 SenseVoice ASR",
+  "api_protocol": "openai_compat",
+  "asr_protocol": "openai_transcriptions",
+  "builtin_service": "sensevoice",
+  "provider": "OpenSquad",
+  "api_key": "sk-local",
+  "base_url": "http://127.0.0.1:7101/v1",
+  "model_name": "sensevoice-small",
+  "token_max": 4096,
+  "temperature": 0,
+  "is_think": false,
+  "is_image": false,
+  "is_audio": true,
+  "is_video": false,
+  "is_audio_output": false,
+  "is_image_output": false,
+  "is_builtin": true
+}

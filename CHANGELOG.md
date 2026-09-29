@@ -59,9 +59,106 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   install with `pip install --pre opensquad==0.8.49b1`; stable users keep
   getting the last stable release from every channel. The tag↔version pair is
   validated up front by `scripts/sync_version.py --check-tag`.
+- **The model-provider list can be refreshed, and a configured provider's API key
+  can be replaced.** The "connect provider" dialog offered about a dozen vendors
+  while the catalog holds 225 providers / 8292 models: a v1 `localStorage` copy
+  won over the backend, the in-memory copy had no TTL, and the refresh button had
+  been deleted (its i18n keys were still in the bundle, unused) — so a stale
+  short list could never heal. There is a refresh action again, and the dialog
+  now states the provider count, where the list came from and whether it is
+  stale. Each configured vendor gets a "change API key" action that rewrites
+  `api_key` on the vendor's existing model cards in place (merge semantics — the
+  parameters a user edited by hand survive) instead of asking them to edit JSON.
+  On the backend, a failed upstream refresh no longer quietly keeps an old disk
+  cache: after 7 days without a successful fetch the bundled catalog is preferred
+  and the response says so (`source`, `cache_age_seconds`, `cache_stale` in
+  `meta`).
+
+### Changed
+
+- **The `whisper` plugin is no longer shipped.** Its declared dependency
+  `openai-whisper` was never what provided the `whisper` import: that name came
+  from `whisper` 1.1.10, an unrelated round-robin-database package, whose import
+  raises `TypeError: argument of type 'NoneType' is not iterable`. Installing
+  `openai-whisper` on top would not have fixed it either — both distributions
+  claim the same top-level module. So the launcher's dependency self-check
+  reported the dependency missing on every start and refused to start the
+  service: a plugin nobody could use, surfacing as a service that would not run.
+  The plugin, its admin panel (`plugin-views/whisper/`) and its tests are gone.
+  The ASR surface is unchanged — sensevoice is still the built-in ASR card,
+  `services.whisper_url` and the `builtin_service: whisper` handling are
+  untouched, and a Whisper-compatible service you run yourself on that port
+  still works.
 
 ### Fixed
 
+- **Plugin services crash-looped on a pip install with `ModuleNotFoundError: No
+  module named 'pydantic_core._pydantic_core'`.** `external_api`, `feishu` and
+  `telegram` (adapter + config), the feishu/telegram `send_tools`,
+  `websearch/websearch.py` and `plugins/plugin_manager.py` put a computed project
+  root at the *front* of `sys.path`. In a pip layout that root is a
+  **site-packages** (`…/site-packages/plugins/external_api/adapter.py` → three
+  levels up), and plugin services are executed by the bundled Agent Python (3.11)
+  even when the tree was installed by 3.12 — so `insert(0)` shadowed the runtime's
+  own compiled packages with cp312 binaries, and `pydantic_core/__init__.py` then
+  could not find its own `_pydantic_core` extension. They all append now, which
+  keeps `plugins.*` / `opensquad` importable without giving them priority.
+  Reproduced against the real bundled 3.11 runtime with a 3.12-tagged
+  `pydantic_core` tree: exactly the reported error with `insert(0)`, clean import
+  with `append`.
+- **Every plugin service waited ~66s at boot because of a dependency no running
+  service used.** The startup batch answered "is this declared pip dependency
+  installed?" by *importing* it in the plugin interpreter. A cold
+  `import lark_oapi` measures 10-13s and blew the 60s probe budget under startup
+  load, and the batch is a global gate (`_plugin_deps_ready`), so one disabled
+  feishu's dependency kept websearch, sensevoice and the rest in "Starting…" while
+  the agent's calls to 127.0.0.1:9001 were refused. The batch now answers from
+  `importlib.metadata` — one cached subprocess for the whole run, an installed
+  distribution is "present" with no import — and no longer pre-installs
+  dependencies for services that are disabled or not set to auto-start; those are
+  installed on demand when the user starts the service. Measured here: 29 light
+  dependencies went from 26.3s to 3.6s with identical verdicts. The import probe
+  stays as the fallback for a dependency that is *not* installed (it fails fast),
+  and the per-service check keeps using it.
+- **The reranker weights could not finish downloading through the mirror, and a
+  stale "Download failed" outlived the download.** The legacy `huggingface_hub`
+  fallback set `HF_ENDPOINT` and `HF_HUB_DISABLE_XET` inside the download thread
+  — i.e. *after* `import huggingface_hub`, which freezes both into
+  `huggingface_hub.constants` at its own import time (verified on
+  huggingface_hub 1.26.0: they keep their old values whatever the environment
+  says later). So the download went to huggingface.co rather than hf-mirror.com,
+  and with Xet enabled the 1.19GB `model.safetensors` died at ~79% on a 401 from
+  `cas-server.xethub.hf.co`, which the mirror does not proxy. Both variables are
+  now set *before* the import. Separately, once the weights had been completed by
+  another path nothing ever cleared the persisted `state: error`, so the card kept
+  showing "Download failed: HTTP 502" for a model that was already loaded —
+  `reranker_model_store.get_status()` now reconciles a complete model to `ready`
+  instead of reporting a failure that no longer applies.
+- **Plugin services were told their dependencies were not installed when they
+  were, so websearch / sensevoice / feishu / telegram refused to start.** The
+  launcher decides by importing each declared pip dependency in the *plugin*
+  interpreter. Two things made that decision wrong. (1) The probe guessed the
+  import name from the distribution name, so `python-telegram-bot` was probed as
+  `python_telegram_bot` — a module that has never existed under any version. The
+  package was reinstalled on every startup and reported missing every time, the
+  circuit breaker opened, and the service never ran; the live launcher log shows
+  six such failures. The import name now comes from the interpreter's own
+  metadata (`importlib.metadata.packages_distributions()`, re-read after every
+  install), with the static map as an explicit override and the dash-to-underscore
+  guess only as a last resort. (2) The probe budget was 15 s and a timeout was
+  read as "missing". Cold imports are not fast — measured on the bundled Agent
+  Python, `lark_oapi` takes 10-13 s and `torch` ~4 s — and the box is busiest
+  exactly when the launcher starts a dozen services, so a healthy dependency
+  timed out and blocked its service. Probes now have 60 s, verified modules are
+  cached (a positive cannot become a negative without an uninstall), and a probe
+  that still runs out of time is reported as *inconclusive*: it is installed to
+  be safe and the service is started, with a warning, instead of being refused.
+  A real `ModuleNotFoundError` still blocks the start, as before. Separately,
+  plugin children were handed the launcher's own `PYTHONPATH` (its 3.12 package
+  tree) although they run on a different interpreter; `_build_child_process_env`
+  now takes the child's interpreter and clears `PYTHONPATH` whenever it differs
+  from the launcher's, mirroring what the frozen branch already did. Agent
+  children are unaffected — they resolve to the launcher's interpreter.
 - **An agent boot could freeze the whole process stack, with nothing in any log
   saying why.** `opensquad start` pipes each child's stderr and only read it
   *after* the child exited. A pipe holds ~4 KiB on Windows; once it filled, the
@@ -120,6 +217,45 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   class is now pinned to `AsyncAdaptedQueuePool` (the 2.0.38+ default), which
   keeps the intended pool on every 2.0.x. `sqlalchemy>=2.0.0` had been satisfied
   by the older release already present, so pip never upgraded it.
+- **`pip install opensquad` shipped no built-in ASR card, so no fresh install
+  could transcribe voice.** `ensure_builtin_model_cards()` copies
+  `builtin-sensevoice-asr.json` out of the installed `model_cards/`, and
+  `workspace_utils.BUILTIN_MODEL_CARD_FILES` names that card — but the card was
+  in no artifact (ignored by `.gitignore`, absent from `MANIFEST.in`, absent
+  from `[tool.setuptools.package-data] model_cards`), so the copy loop matched
+  nothing and returned `[]` without a word. The agent-voice ASR picker had no
+  "系统内置 SenseVoice" entry, and 1:1 voice plus group voice failed with
+  ``Agent has no ASR configured`` / "内置语音转文本不可用". The card is now
+  tracked and packaged in all four places, `ensure_builtin_model_cards()` logs a
+  warning when the install carries no such card (a packaging bug used to be
+  indistinguishable from "this deployment just has no ASR"), and a test fails if
+  any name in `BUILTIN_MODEL_CARD_FILES` is untracked — that guard was the one
+  missing. `builtin-whisper-asr.json` is deliberately *not* shipped: it points
+  at the removed whisper plugin's port 5001, so offering it would advertise a
+  service that no longer exists.
+- **A model download could abort at 0% with `[WinError 5] 拒绝访问:
+  '…\\download_status.json.tmp' -> '…\\download_status.json'`.** Status writes
+  used `tmp + os.replace`, and `os.replace` needs DELETE access to the target —
+  which Windows denies while another process holds the file open for reading,
+  and this file is read by the launcher, the gateway and the Electron UI on
+  every poll. The write also ran once per 256 KB chunk *inside* the download
+  loop, so the first collision killed the download. The SenseVoice store and the
+  shared `_model_downloader` store (reranker) now persist status through one
+  helper that serialises writers per process, retries the replace (10 attempts,
+  50 ms → 500 ms backoff) and then rewrites the target in place — a plain
+  open/write needs no DELETE access, so a reader cannot block it — and never
+  raises. The model-file rename uses the same retry, the websearch setup-status
+  write goes through the same helper, and `tests/test_plugin_model_status.py`
+  reproduces the original failure against the old form.
+- **A running download could be marked "Download interrupted" by a reader in
+  another process.** `read_status()` and `ModelStore.get_status()` treated
+  "`state == downloading` with no thread in *this* process" as an interruption
+  and *persisted* it, so the launcher reading the file while the plugin service
+  downloaded flipped the UI to a failure (and its retry button) mid-download.
+  Readers are now side-effect free, and only a record that stopped advancing for
+  150 s counts as dead — a download stalled inside one long read is still
+  "downloading". `get_status()` also reconciles the other direction: once the
+  weights are on disk, a stale `error`/`idle` becomes `ready`.
 
 ## [0.8.48] — 2026-09-28
 

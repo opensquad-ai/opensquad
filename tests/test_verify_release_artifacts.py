@@ -216,6 +216,20 @@ def test_model_card_allowlist_matches_git():
     assert set(allowlist) == tracked
 
 
+def test_builtin_model_cards_are_shipped():
+    # `ensure_builtin_model_cards()` copies out of the *installed*
+    # `model_cards/`, so a card named in BUILTIN_MODEL_CARD_FILES but not
+    # tracked (and therefore not packaged) is a silent no-op. 0.8.49-alpha.3
+    # shipped the code without the card: `pip install opensquad` produced an
+    # agent-voice ASR dropdown with no built-in option, and both 1:1 and group
+    # transcription failed with "Agent has no ASR configured".
+    from opensquad.workspace_utils import BUILTIN_MODEL_CARD_FILES
+
+    tracked = {Path(p).name for p in _tracked("src/model_cards")}
+    missing = [name for name in BUILTIN_MODEL_CARD_FILES if name not in tracked]
+    assert not missing, f"built-in model cards must be tracked (and packaged in MANIFEST.in + package-data): {missing}"
+
+
 def test_agent_allowlist_matches_git():
     allowlist = _package_data("package-data")["agents"]
     tracked_dirs = {Path(p).parts[2] for p in _tracked("src/agents")}

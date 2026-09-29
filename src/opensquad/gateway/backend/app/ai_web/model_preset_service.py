@@ -180,10 +180,19 @@ def _cache_file_path() -> str:
 
 # ── Module-level state ────────────────────────────────────────────────────────────────
 _cached_presets: dict = {"providers": []}  # Loaded from disk on startup, updated after refresh
+_cached_source: str = ""  # Where the data in _cached_presets came from (see get_presets)
 _models_dev_data: dict = {}
 _openrouter_data: list = []
 _last_models_dev_ts: float = 0.0
 _last_openrouter_ts: float = 0.0
+
+# A disk cache older than this is worse than the list bundled with this build: it was
+# written by an older version, and every refresh since then has failed (models.dev
+# unreachable from the user's network). That is how a deployment ends up showing a
+# dozen providers for months — the cache is served forever and the failure is silent.
+# Past this age the bundled list wins, so the catalog at least matches the installed
+# version instead of some earlier one.
+_STALE_CACHE_AFTER_S = 7 * 24 * 3600
 
 
 # ── Helper functions ──────────────────────────────────────────────────────────
@@ -486,6 +495,48 @@ def _load_cache_from_disk() -> dict | None:
     return None
 
 
+def _cache_age_seconds() -> float | None:
+    """Seconds since the disk cache was last written, or None when there is no cache."""
+    try:
+        return time.time() - os.path.getmtime(_cache_file_path())
+    except OSError:
+        return None
+
+
+def _bundled_presets() -> dict:
+    """The vendor/model list that ships inside this build."""
+    from copy import deepcopy
+
+    from .model_presets_static import STATIC_PRESETS
+
+    return deepcopy(STATIC_PRESETS)
+
+
+def _prefer_bundled_over_stale(cached: dict, reason: str) -> tuple[dict, bool]:
+    """Swap a stale cache for the bundled list; returns (presets, swapped).
+
+    Only when the cache has gone stale *and* is no richer than what this build
+    ships — a small, old cache is exactly the degraded case that leaves a
+    deployment stuck on a handful of providers.
+    """
+    age = _cache_age_seconds()
+    if age is None or age < _STALE_CACHE_AFTER_S:
+        return cached, False
+    bundled = _bundled_presets()
+    n_cached = len(cached.get("providers", []))
+    n_bundled = len(bundled.get("providers", []))
+    if n_bundled < n_cached:
+        logger.info(
+            f"[ModelPresets] Cache is stale ({age / 86400:.1f}d) but richer than this build ({n_cached} > {n_bundled}); keeping it"
+        )
+        return cached, False
+    logger.warning(
+        f"[ModelPresets] Cache is stale ({age / 86400:.1f}d, {reason}) and holds only {n_cached} providers; "
+        f"serving the bundled list instead ({n_bundled} providers)"
+    )
+    return bundled, True
+
+
 # ── Network requests ──────────────────────────────────────────────────────────
 
 
@@ -510,7 +561,7 @@ async def initialize() -> None:
     Loads only from disk file preset_cache.json (last refresh save), no network.
     If disk file does not exist, providers is an empty list; wait for user to trigger manual_refresh.
     """
-    global _cached_presets
+    global _cached_presets, _cached_source
 
     logger.info("[ModelPresets] Initializing (disk-only)...")
 
@@ -522,18 +573,16 @@ async def initialize() -> None:
             if not p.get("provider"):
                 vm = VENDOR_META.get(p.get("id", ""))
                 p["provider"] = vm["label"] if vm else p.get("label", "")
-        _cached_presets = disk_cache
+        _cached_presets, swapped = _prefer_bundled_over_stale(disk_cache, reason="startup")
+        _cached_source = "static_fallback" if swapped else "disk_cache"
         n_providers = len(_cached_presets["providers"])
         n_models = sum(len(p["models"]) for p in _cached_presets["providers"])
         logger.info(f"[ModelPresets] Ready from disk: {n_providers} providers, {n_models} models")
     else:
         # No persisted cache yet (e.g. a fresh offline deployment): fall back to
         # the bundled static vendor/model list so providers are still configurable.
-        from copy import deepcopy
-
-        from .model_presets_static import STATIC_PRESETS
-
-        _cached_presets = deepcopy(STATIC_PRESETS)
+        _cached_presets = _bundled_presets()
+        _cached_source = "static_fallback"
         n_providers = len(_cached_presets["providers"])
         n_models = sum(len(p["models"]) for p in _cached_presets["providers"])
         logger.info(
@@ -543,14 +592,22 @@ async def initialize() -> None:
 
 def get_presets() -> dict:
     """Return the current cached presets (for synchronous route calls). Never None."""
+    age = _cache_age_seconds()
     return {
         **_cached_presets,
         "meta": {
             "models_dev_fetched_at": _last_models_dev_ts,
             "openrouter_fetched_at": _last_openrouter_ts,
-            "source": "live"
-            if _last_models_dev_ts
-            else ("disk_cache" if os.path.exists(_cache_file_path()) else "static_fallback"),
+            "source": _cached_source
+            or (
+                "live"
+                if _last_models_dev_ts
+                else ("disk_cache" if os.path.exists(_cache_file_path()) else "static_fallback")
+            ),
+            # Lets the UI say how old the catalog is instead of quietly showing a
+            # short list — the age is what tells a user their refresh never worked.
+            "cache_age_seconds": age,
+            "cache_stale": age is not None and age >= _STALE_CACHE_AFTER_S,
         },
     }
 
@@ -561,7 +618,7 @@ async def manual_refresh() -> dict:
     On success, overwrites disk file preset_cache.json and updates in-memory cache.
     Called by the POST /api/ai-web/model-presets/refresh endpoint.
     """
-    global _cached_presets, _models_dev_data, _openrouter_data
+    global _cached_presets, _cached_source, _models_dev_data, _openrouter_data
     global _last_models_dev_ts, _last_openrouter_ts
 
     logger.info("[ModelPresets] Manual refresh triggered")
@@ -600,11 +657,18 @@ async def manual_refresh() -> dict:
     if models_dev_ok and n_models_new > 0:
         # Successfully fetched model data — update in-memory cache and overwrite disk static file
         _cached_presets = assembled
+        _cached_source = "live"
         _save_cache_to_disk(assembled)
         logger.info("[ModelPresets] Manual refresh complete, disk file updated")
     else:
         # models.dev unavailable (offline / network error) — keep existing cache,
-        # do not overwrite disk file with a degraded/partial result.
+        # do not overwrite disk file with a degraded/partial result. If that cache
+        # is also stale there is nothing worth keeping: serve the bundled list, so
+        # pressing "refresh" still moves a stuck deployment off an ancient catalog.
+        _cached_presets, swapped = _prefer_bundled_over_stale(_cached_presets, reason="refresh failed")
+        if swapped:
+            _cached_source = "static_fallback"
+            errors.append("models.dev unavailable; served the list bundled with this version")
         logger.warning("[ModelPresets] models.dev unavailable; keeping existing cache intact")
 
     n_providers = len(_cached_presets["providers"])
@@ -614,7 +678,7 @@ async def manual_refresh() -> dict:
         "errors": errors,
         "providers": n_providers,
         "models": n_models,
-        "source": "live" if _last_models_dev_ts else "disk_cache",
+        "source": _cached_source,
     }
 
 
