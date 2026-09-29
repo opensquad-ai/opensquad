@@ -10,6 +10,7 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 | Version                                                                | Date       | Compare to previous                                                                    | Release page                                                                     |
 | ---------------------------------------------------------------------- | ---------- | -------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------- |
+| [0.8.49]                                                               | 2026-09-29 | [0.8.48 → 0.8.49](https://github.com/opensquad-ai/opensquad/compare/v0.8.48...v0.8.49) | [GitHub Release](https://github.com/opensquad-ai/opensquad/releases/tag/v0.8.49) |
 | [0.8.48]                                                               | 2026-09-28 | [0.8.47 → 0.8.48](https://github.com/opensquad-ai/opensquad/compare/v0.8.47...v0.8.48) | [GitHub Release](https://github.com/opensquad-ai/opensquad/releases/tag/v0.8.48) |
 | [0.8.47]                                                               | 2026-09-27 | [0.8.46 → 0.8.47](https://github.com/opensquad-ai/opensquad/compare/v0.8.46...v0.8.47) | [GitHub Release](https://github.com/opensquad-ai/opensquad/releases/tag/v0.8.47) |
 | [0.8.46]                                                               | 2026-09-26 | [0.8.45 → 0.8.46](https://github.com/opensquad-ai/opensquad/compare/v0.8.45...v0.8.46) | [GitHub Release](https://github.com/opensquad-ai/opensquad/releases/tag/v0.8.46) |
@@ -44,6 +45,16 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 > The next cycle's notes are collected here, then moved into a dated section
 > before the tag.
+
+## [0.8.49] — 2026-09-29
+
+> Mostly a reliability cycle driven by three field reports from a pip-installed
+> deployment: plugin services that crashed or stalled at boot, a reranker whose
+> 1.2GB of weights could not be downloaded or found, model-download status files
+> that collided across processes, and a built-in ASR card that was never shipped
+> in the wheel. Two long-standing invisible-config gaps went with them — a
+> downloaded model and an edited voice setting both now reach the running
+> service/agent without a restart.
 
 ### Added
 
