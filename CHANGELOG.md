@@ -92,6 +92,48 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### Fixed
 
+- **Plugin services crash-looped on a pip install with `ModuleNotFoundError: No
+  module named 'pydantic_core._pydantic_core'`.** `external_api`, `feishu` and
+  `telegram` (adapter + config), the feishu/telegram `send_tools`,
+  `websearch/websearch.py` and `plugins/plugin_manager.py` put a computed project
+  root at the *front* of `sys.path`. In a pip layout that root is a
+  **site-packages** (`…/site-packages/plugins/external_api/adapter.py` → three
+  levels up), and plugin services are executed by the bundled Agent Python (3.11)
+  even when the tree was installed by 3.12 — so `insert(0)` shadowed the runtime's
+  own compiled packages with cp312 binaries, and `pydantic_core/__init__.py` then
+  could not find its own `_pydantic_core` extension. They all append now, which
+  keeps `plugins.*` / `opensquad` importable without giving them priority.
+  Reproduced against the real bundled 3.11 runtime with a 3.12-tagged
+  `pydantic_core` tree: exactly the reported error with `insert(0)`, clean import
+  with `append`.
+- **Every plugin service waited ~66s at boot because of a dependency no running
+  service used.** The startup batch answered "is this declared pip dependency
+  installed?" by *importing* it in the plugin interpreter. A cold
+  `import lark_oapi` measures 10-13s and blew the 60s probe budget under startup
+  load, and the batch is a global gate (`_plugin_deps_ready`), so one disabled
+  feishu's dependency kept websearch, sensevoice and the rest in "Starting…" while
+  the agent's calls to 127.0.0.1:9001 were refused. The batch now answers from
+  `importlib.metadata` — one cached subprocess for the whole run, an installed
+  distribution is "present" with no import — and no longer pre-installs
+  dependencies for services that are disabled or not set to auto-start; those are
+  installed on demand when the user starts the service. Measured here: 29 light
+  dependencies went from 26.3s to 3.6s with identical verdicts. The import probe
+  stays as the fallback for a dependency that is *not* installed (it fails fast),
+  and the per-service check keeps using it.
+- **The reranker weights could not finish downloading through the mirror, and a
+  stale "Download failed" outlived the download.** The legacy `huggingface_hub`
+  fallback set `HF_ENDPOINT` and `HF_HUB_DISABLE_XET` inside the download thread
+  — i.e. *after* `import huggingface_hub`, which freezes both into
+  `huggingface_hub.constants` at its own import time (verified on
+  huggingface_hub 1.26.0: they keep their old values whatever the environment
+  says later). So the download went to huggingface.co rather than hf-mirror.com,
+  and with Xet enabled the 1.19GB `model.safetensors` died at ~79% on a 401 from
+  `cas-server.xethub.hf.co`, which the mirror does not proxy. Both variables are
+  now set *before* the import. Separately, once the weights had been completed by
+  another path nothing ever cleared the persisted `state: error`, so the card kept
+  showing "Download failed: HTTP 502" for a model that was already loaded —
+  `reranker_model_store.get_status()` now reconciles a complete model to `ready`
+  instead of reporting a failure that no longer applies.
 - **Plugin services were told their dependencies were not installed when they
   were, so websearch / sensevoice / feishu / telegram refused to start.** The
   launcher decides by importing each declared pip dependency in the *plugin*

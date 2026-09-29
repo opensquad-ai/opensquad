@@ -35,18 +35,19 @@ import warnings
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 warnings.filterwarnings("ignore", category=FutureWarning)
 
-# Add project root to path.
-# In frozen mode, APPEND (not insert(0)): the Agent Python's site-packages
-# must win over _internal/ loose copies of uvicorn/fastapi. Otherwise
-# `import uvicorn` loads the loose copy but its transitive deps (click,
-# annotated_doc) live only in the PYZ archive and crash with
-# ModuleNotFoundError. In dev mode, insert(0) for project source priority.
+# Add project root to path — always APPEND, never insert(0).
+# APPEND keeps `plugins.*` / `opensquad` importable while letting the running
+# interpreter's OWN site-packages win. In a pip install this path IS a
+# site-packages (`.../site-packages/plugins/external_api/adapter.py` → 3 levels
+# up), and plugin services are executed by the bundled Agent Python (3.11) even
+# when that tree was installed by a 3.12 interpreter — insert(0) then shadows
+# the runtime's own compiled deps with cp312 binaries and dies on
+# `import pydantic_core` with "No module named 'pydantic_core._pydantic_core'".
+# The frozen case needed APPEND for the same reason (loose _internal/ copies
+# whose transitive deps live only in the PYZ archive).
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 if ROOT_DIR not in sys.path:
-    if getattr(sys, "frozen", False):
-        sys.path.append(ROOT_DIR)
-    else:
-        sys.path.insert(0, ROOT_DIR)
+    sys.path.append(ROOT_DIR)
 
 
 import uvicorn

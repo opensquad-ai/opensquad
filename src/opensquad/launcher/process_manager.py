@@ -2148,9 +2148,23 @@ def _plugin_python_import_status(import_name: str) -> str:
 def _plugin_python_dist_status(dep: str) -> str:
     """:func:`_plugin_python_import_status` for a pip dependency name.
 
-    ``present`` if any candidate import works; else ``unknown`` when every
-    candidate that could have worked was inconclusive, else ``missing``.
+    ``present`` if the distribution is installed or any candidate import works;
+    else ``unknown`` when every candidate that could have worked was
+    inconclusive, else ``missing``.
     """
+    target_python = _plugin_python_executable()
+
+    # Fast path — installed is answered by importlib.metadata, not by importing.
+    # The metadata table costs one cached subprocess for the whole startup batch,
+    # while an import probe spawns the interpreter once per dependency: a cold
+    # `import lark_oapi` alone measures 10-13s, and under startup load it blew
+    # the 60s budget, holding `_plugin_deps_ready` for 66s and blocking *every*
+    # service — for a dependency only a disabled plugin declared. Keep the
+    # import probe for the not-installed case (it still succeeds for a dev
+    # checkout importing from source).
+    if _normalize_dist_name(_normalize_pip_pkg(dep)) in _plugin_dist_module_map(target_python):
+        return "present"
+
     saw_unknown = False
     for name in _resolve_import_candidates(dep):
         status = _plugin_python_import_status(name)
@@ -2267,10 +2281,24 @@ def _install_builtin_plugin_deps(svc_infos: list[dict]):
     """
     try:
         all_deps: set = set()
+        skipped: list[str] = []
         for info in svc_infos:
-            deps = info.get("dependencies", {}).get("pip", [])
-            for d in deps:
+            plugin_id = info.get("plugin_id", "")
+            # Only pre-install for services that will actually boot. Deps of a
+            # disabled service are installed on demand by
+            # PluginServiceProcess._install_dependencies() when the user starts
+            # it; pre-checking them here held the whole batch (and therefore
+            # every other service's start, via `_plugin_deps_ready`) hostage to
+            # a dependency nothing was going to use — a disabled feishu alone
+            # cost 66s of startup because of `lark_oapi`.
+            if not info.get("plugin_enabled", True) or not resolve_auto_start(plugin_id, info.get("service_cfg") or {}):
+                skipped.append(plugin_id)
+                continue
+            for d in info.get("dependencies", {}).get("pip", []) or []:
                 all_deps.add(d)
+
+        if skipped:
+            _log.info(f"[Launcher] Not pre-installing dependencies for disabled service(s): {skipped}")
 
         if not all_deps:
             _plugin_deps_ready.set()
