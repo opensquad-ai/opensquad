@@ -1839,7 +1839,7 @@ wheels = [
 
 [[package]]
 name = "opensquad"
-version = "0.8.49a2"
+version = "0.8.49a3"
 source = { editable = "." }
 dependencies = [
     { name = "aiosqlite" },
