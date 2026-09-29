@@ -283,6 +283,27 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   first. It appends now, like the ten modules fixed in this class last cycle,
   and it is covered by the `_PATH_FIXED` guard in
   `tests/test_plugin_runtime_paths.py`.
+- **A model downloaded after its service had started stayed invisible to that
+  service.** Both plugin services resolve their model at boot: websearch decides
+  whether to spawn the reranker sidecar, and sensevoice opens its ONNX session —
+  so weights fetched later from the admin UI were never picked up (search kept
+  Bing order, transcription kept failing) until the user restarted the service by
+  hand. A plugin's download action now reports the status file it writes
+  (`download_status_path`) and the launcher watches it: when the weights become
+  ready it restarts the owning service (the plugin itself), and it leaves a
+  service the user stopped alone. A failed or cancelled download ends the watch
+  without a restart. This complements the sidecar's own fallback to the store's
+  active snapshot, which covers the auto-download-at-boot path.
+- **Voice settings changed in the UI did not reach a running agent.**
+  `PUT /api/agents/{name}/config` writes the new `voice.*` cards to config.json,
+  but the agent's config hot-reload only carried `tools` / `tool_levels` /
+  `model`, so a running agent kept the boot-time voice cards and the ASR/TTS
+  tools kept calling the previous endpoint until a restart. The mtime poll now
+  also applies a `voice` change to the agent runtime context and the injected
+  ASR/TTS tool config — the same two calls the WebSocket `set_voice_config`
+  path already made, so an edit from either surface takes effect the same way.
+  An unchanged voice is not re-applied, and a failure in one half does not stop
+  the other.
 
 ## [0.8.48] — 2026-09-28
 

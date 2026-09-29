@@ -115,6 +115,15 @@ def _status_path() -> str:
     return os.path.join(_plugin_data_dir(), "reranker_model_status.json")
 
 
+def status_path() -> str:
+    """Path of the persisted download-status file.
+
+    Public so the launcher can watch a download it started and restart the
+    service once the weights land (``query.handle_action`` reports it).
+    """
+    return _status_path()
+
+
 # ── Store singleton ───────────────────────────────────────────────────
 
 _store: ModelStore | None = None

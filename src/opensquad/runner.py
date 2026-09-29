@@ -389,6 +389,7 @@ class AgentRunner:
             except Exception as e:
                 logger.warning(f"[Runner] Failed to load config from {config_path}: {e}")
         self._model_config: dict = _tool_strategy_config.get("model", {})
+        self._voice_config: dict = _tool_strategy_config.get("voice", {})
         self.tool_call_strategy = ToolCallStrategySelector.select(_tool_strategy_config, tool_registry)
         logger.info(f"[Runner] Tool call strategy: {self.tool_call_strategy.get_strategy_name()}")
 

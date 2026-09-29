@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import threading
 import time
 
 from opensquad.launcher.process_manager import (
@@ -37,6 +38,28 @@ from opensquad.system_config import syscfg
 # Must live in THIS module: ``global`` in the mixin binds here, not launcher_main.
 _runtime_list_cache_at: float = 0.0
 _runtime_list_cache_result: dict | None = None
+
+# A model download started from the UI runs for minutes; the launcher watches
+# the plugin's status file and restarts the owning service once the weights are
+# usable. The thread is a daemon doing one stat+read per poll.
+DOWNLOAD_WATCH_POLL_S = 5.0
+DOWNLOAD_WATCH_MAX_S = 12 * 3600.0
+
+
+def download_watch_action(state: str | None, *, seen_downloading: bool) -> str:
+    """What a download watcher should do after reading one status sample.
+
+    ``"restart"`` — the weights are ready, restart the service so it loads them.
+    ``"stop"`` — failed or cancelled; the model will not become usable.
+    ``"wait"`` — still in flight (or the status file has not been written yet).
+    """
+    if state == "ready":
+        return "restart"
+    if state == "error":
+        return "stop"
+    if state == "idle" and seen_downloading:
+        return "stop"  # cancelled from the UI
+    return "wait"
 
 
 class PluginServicesMixin:
@@ -282,12 +305,11 @@ class PluginServicesMixin:
                     pass
         return self._send_json({"message": f"Shutdown: {stopped} processes stopped", "ok": True})
 
-    def _handle_plugin_service_restart(self, plugin_id: str):
-        """POST /api/plugin-services/{id}/restart — Restart a plugin service"""
+    def _restart_plugin_service(self, plugin_id: str) -> bool:
+        """Stop (if running) and start a plugin service. False when unknown."""
         psp = ensure_plugin_service_registered(plugin_id)
         if psp is None:
-            return self._send_json({"error": f"Plugin service '{plugin_id}' not found"}, 404)
-        # Stop if running
+            return False
         if psp.is_alive():
             psp.stop()
             # Wait up to 5s for the process to exit
@@ -299,8 +321,79 @@ class PluginServicesMixin:
         psp.port = psp._resolve_port()
         psp.should_run = True
         psp.start()
+        return True
+
+    def _handle_plugin_service_restart(self, plugin_id: str):
+        """POST /api/plugin-services/{id}/restart — Restart a plugin service"""
+        psp = ensure_plugin_service_registered(plugin_id)
+        if psp is None:
+            return self._send_json({"error": f"Plugin service '{plugin_id}' not found"}, 404)
+        self._restart_plugin_service(plugin_id)
         pid_val = psp.process.pid if psp.process else None
         return self._send_json({"message": f"{plugin_id} restarted", "pid": pid_val, "port": psp.port})
+
+    def _maybe_restart_service_after_download(self, plugin_id: str, result: object) -> None:
+        """Restart a plugin's service once a model download it just started lands.
+
+        Some services resolve their model at boot and degrade quietly without it
+        — websearch keeps Bing order, sensevoice cannot transcribe — so a model
+        fetched *after* the service started stays invisible to it until a
+        restart. A plugin opts in by returning ``download_status_path`` (the
+        status file its download writes) alongside ``started``; the service to
+        restart is the plugin itself.
+        """
+        if not isinstance(result, dict) or not result.get("started"):
+            return
+        status_path = str(result.get("download_status_path") or "").strip()
+        if not status_path:
+            return
+        threading.Thread(
+            target=self._watch_download_then_restart,
+            args=(plugin_id, status_path),
+            name=f"restart-on-download-{plugin_id}",
+            daemon=True,
+        ).start()
+
+    def _watch_download_then_restart(self, plugin_id: str, status_path: str) -> None:
+        """Poll ``status_path`` until the download resolves, then restart the service."""
+        deadline = time.time() + DOWNLOAD_WATCH_MAX_S
+        seen_downloading = False
+        while time.time() < deadline:
+            time.sleep(DOWNLOAD_WATCH_POLL_S)
+            state: str | None = None
+            try:
+                with open(status_path, encoding="utf-8") as handle:
+                    payload = json.load(handle)
+                if isinstance(payload, dict):
+                    state = payload.get("state")
+            except (OSError, ValueError):
+                continue  # not written yet / mid-swap: try again next tick
+            action = download_watch_action(state, seen_downloading=seen_downloading)
+            if action == "restart":
+                _log.info("[Launcher] %s model ready; restarting the service to load it", plugin_id)
+                self._restart_service_if_running(plugin_id)
+                return
+            if action == "stop":
+                _log.info("[Launcher] %s download ended (%s); not restarting the service", plugin_id, state)
+                return
+            if state == "downloading":
+                seen_downloading = True
+        _log.info("[Launcher] Gave up watching the %s download after %.0fs", plugin_id, DOWNLOAD_WATCH_MAX_S)
+
+    def _restart_service_if_running(self, plugin_id: str) -> bool:
+        """Restart a plugin service only if it is meant to be running.
+
+        A service the user stopped (``should_run`` False) is left alone;
+        one that is alive — or was meant to be and is crash-looping toward a
+        missing model — is restarted so it can pick the model up.
+        """
+        psp = ensure_plugin_service_registered(plugin_id)
+        if psp is None:
+            return False
+        if not (psp.is_alive() or psp.should_run):
+            _log.info("[Launcher] %s is stopped; not restarting it for the model", plugin_id)
+            return False
+        return self._restart_plugin_service(plugin_id)
 
     def _handle_plugin_service_logs(self, plugin_id: str, lines: int):
         """GET /api/plugin-services/{id}/logs — Retrieve plugin service logs"""
