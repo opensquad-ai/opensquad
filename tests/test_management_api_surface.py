@@ -84,7 +84,13 @@ EXPECTED_METHODS_PER_MODULE = {
     "_agents": 17,
     "_filesystem": 19,
     "_plugins": 15,
-    "_plugin_services": 10,
+    # 14 = 10 + the model-download watcher: ``_restart_plugin_service`` (the
+    # stop-then-start body, shared with the restart endpoint),
+    # ``_maybe_restart_service_after_download`` (arms the watcher from a plugin
+    # action result), ``_watch_download_then_restart`` (polls the status file)
+    # and ``_restart_service_if_running``. A service that resolved its model at
+    # boot cannot see weights fetched later, so the launcher restarts it.
+    "_plugin_services": 14,
     "_sessions": 10,
     "_mcp": 6,
     "_skills": 2,
@@ -97,7 +103,7 @@ EXPECTED_METHODS_PER_MODULE = {
     "_cards": 18,
     "_workspace": 6,
 }
-EXPECTED_TOTAL_MIXIN_METHODS = 121
+EXPECTED_TOTAL_MIXIN_METHODS = 125
 
 # ``_do_*_impl`` if/elif chain lengths -- the URL surface of each verb.
 EXPECTED_DISPATCH_BRANCHES = {

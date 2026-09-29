@@ -879,6 +879,10 @@ class PluginsMixin:
             action = body.get("action", "")
             data = body.get("data", {})
             result = mod.handle_action(PROJECT_ROOT, action, data)
+            # A download action may report the status file it writes; the service
+            # that loads that model is the plugin itself, and it must be
+            # restarted once the weights land (it resolved the model at boot).
+            self._maybe_restart_service_after_download(name, result)
             return self._send_json(result)
         except Exception as e:
             return self._send_json({"error": f"Action failed: {e}"}, 500)

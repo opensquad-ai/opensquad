@@ -256,6 +256,54 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   150 s counts as dead — a download stalled inside one long read is still
   "downloading". `get_status()` also reconciles the other direction: once the
   weights are on disk, a stale `error`/`idle` becomes `ready`.
+- **A reranker model that had been downloaded could never be loaded, and an
+  upgrade could cost a fresh 1.2GB download.** Two halves of the same path
+  disagreement. The store downloads the Qwen3-Reranker weights into the
+  *workspace* (`{workspace}/data/plugins/websearch/reranker`) — user data that
+  survives an upgrade — while the sidecar resolved its model directory as
+  `plugins/websearch/service/reranker/models/…`, inside the installed tree.
+  (1) A model the store fetched was therefore never found: the spawn printed
+  "model missing at …; auto-downloading", returned without starting anything,
+  and search silently kept Bing order while the UI reported the model as ready.
+  The sidecar now falls back to the store's active snapshot. (2) A deployment
+  that followed the old manual deploy (weights in the plugin tree — the only
+  path the sidecar looked at) had to re-fetch 1.2GB after every reinstall, which
+  replaces that tree. The store now carries an install-dir copy into the
+  workspace once per process: a rename when both are on one volume, a background
+  copy otherwise (the install-dir copy is never deleted on the copy path), and a
+  no-op whenever the workspace already has the weights.
+- **A loaded websearch model store could make the telegram plugin unimportable
+  in the same process.** `plugins/websearch/reranker_model_store.py` put the
+  plugin tree at the *front* of `sys.path` so it could import
+  `_model_downloader`. That tree contains a `telegram/` package, so any later
+  `import telegram` in the process resolved to the plugin directory instead of
+  the installed `python-telegram-bot` and raised `ImportError` — and the launcher
+  imports plugin modules in-process for its status routes, so the telegram
+  plugin could be reported unavailable depending on which module was imported
+  first. It appends now, like the ten modules fixed in this class last cycle,
+  and it is covered by the `_PATH_FIXED` guard in
+  `tests/test_plugin_runtime_paths.py`.
+- **A model downloaded after its service had started stayed invisible to that
+  service.** Both plugin services resolve their model at boot: websearch decides
+  whether to spawn the reranker sidecar, and sensevoice opens its ONNX session —
+  so weights fetched later from the admin UI were never picked up (search kept
+  Bing order, transcription kept failing) until the user restarted the service by
+  hand. A plugin's download action now reports the status file it writes
+  (`download_status_path`) and the launcher watches it: when the weights become
+  ready it restarts the owning service (the plugin itself), and it leaves a
+  service the user stopped alone. A failed or cancelled download ends the watch
+  without a restart. This complements the sidecar's own fallback to the store's
+  active snapshot, which covers the auto-download-at-boot path.
+- **Voice settings changed in the UI did not reach a running agent.**
+  `PUT /api/agents/{name}/config` writes the new `voice.*` cards to config.json,
+  but the agent's config hot-reload only carried `tools` / `tool_levels` /
+  `model`, so a running agent kept the boot-time voice cards and the ASR/TTS
+  tools kept calling the previous endpoint until a restart. The mtime poll now
+  also applies a `voice` change to the agent runtime context and the injected
+  ASR/TTS tool config — the same two calls the WebSocket `set_voice_config`
+  path already made, so an edit from either surface takes effect the same way.
+  An unchanged voice is not re-applied, and a failure in one half does not stop
+  the other.
 
 ## [0.8.48] — 2026-09-28
 
