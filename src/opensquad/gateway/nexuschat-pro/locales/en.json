@@ -745,7 +745,15 @@
     "deleteModelFromListConfirm": "Remove this model from the list?",
     "modelAdded": "Model added",
     "addModelToExistingProvider": "Add model to this provider",
-    "modelAlreadyExists": "Model card already exists: {{name}}"
+    "modelAlreadyExists": "Model card already exists: {{name}}",
+    "providerKeyUpdated": "Updated the API key on {{count}} card(s) of {{name}}",
+    "providerKeyUpdateFailed": "{{name}}: {{count}} card(s) failed to update — try again",
+    "rotateKey": "Change API key",
+    "rotateKeyTitle": "Change API key: {{name}}",
+    "rotateKeyHint": "All {{count}} model card(s) of this provider will use the new key. Models and other settings stay as they are.",
+    "rotateKeySubmit": "Save new key",
+    "presetProviderCount": "{{count}} vendors",
+    "presetStaleHint": "Data is old — refresh from the top right"
   },
   "logsManager": {
     "title": "Log Viewer",

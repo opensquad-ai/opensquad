@@ -59,6 +59,20 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   install with `pip install --pre opensquad==0.8.49b1`; stable users keep
   getting the last stable release from every channel. The tag↔version pair is
   validated up front by `scripts/sync_version.py --check-tag`.
+- **The model-provider list can be refreshed, and a configured provider's API key
+  can be replaced.** The "connect provider" dialog offered about a dozen vendors
+  while the catalog holds 225 providers / 8292 models: a v1 `localStorage` copy
+  won over the backend, the in-memory copy had no TTL, and the refresh button had
+  been deleted (its i18n keys were still in the bundle, unused) — so a stale
+  short list could never heal. There is a refresh action again, and the dialog
+  now states the provider count, where the list came from and whether it is
+  stale. Each configured vendor gets a "change API key" action that rewrites
+  `api_key` on the vendor's existing model cards in place (merge semantics — the
+  parameters a user edited by hand survive) instead of asking them to edit JSON.
+  On the backend, a failed upstream refresh no longer quietly keeps an old disk
+  cache: after 7 days without a successful fetch the bundled catalog is preferred
+  and the response says so (`source`, `cache_age_seconds`, `cache_stale` in
+  `meta`).
 
 ### Fixed
 
