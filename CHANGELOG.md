@@ -256,6 +256,33 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   150 s counts as dead — a download stalled inside one long read is still
   "downloading". `get_status()` also reconciles the other direction: once the
   weights are on disk, a stale `error`/`idle` becomes `ready`.
+- **A reranker model that had been downloaded could never be loaded, and an
+  upgrade could cost a fresh 1.2GB download.** Two halves of the same path
+  disagreement. The store downloads the Qwen3-Reranker weights into the
+  *workspace* (`{workspace}/data/plugins/websearch/reranker`) — user data that
+  survives an upgrade — while the sidecar resolved its model directory as
+  `plugins/websearch/service/reranker/models/…`, inside the installed tree.
+  (1) A model the store fetched was therefore never found: the spawn printed
+  "model missing at …; auto-downloading", returned without starting anything,
+  and search silently kept Bing order while the UI reported the model as ready.
+  The sidecar now falls back to the store's active snapshot. (2) A deployment
+  that followed the old manual deploy (weights in the plugin tree — the only
+  path the sidecar looked at) had to re-fetch 1.2GB after every reinstall, which
+  replaces that tree. The store now carries an install-dir copy into the
+  workspace once per process: a rename when both are on one volume, a background
+  copy otherwise (the install-dir copy is never deleted on the copy path), and a
+  no-op whenever the workspace already has the weights.
+- **A loaded websearch model store could make the telegram plugin unimportable
+  in the same process.** `plugins/websearch/reranker_model_store.py` put the
+  plugin tree at the *front* of `sys.path` so it could import
+  `_model_downloader`. That tree contains a `telegram/` package, so any later
+  `import telegram` in the process resolved to the plugin directory instead of
+  the installed `python-telegram-bot` and raised `ImportError` — and the launcher
+  imports plugin modules in-process for its status routes, so the telegram
+  plugin could be reported unavailable depending on which module was imported
+  first. It appends now, like the ten modules fixed in this class last cycle,
+  and it is covered by the `_PATH_FIXED` guard in
+  `tests/test_plugin_runtime_paths.py`.
 
 ## [0.8.48] — 2026-09-28
 

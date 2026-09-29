@@ -64,10 +64,15 @@ def _health_ok(timeout: float = 1.0) -> bool:
         return False
 
 
-def _model_path() -> str:
-    override = os.environ.get("WEBSEARCH_RERANKER_MODEL_PATH", "").strip()
-    if override:
-        return override
+def _install_dir_snapshot() -> str:
+    """The manual-deploy snapshot inside the plugin tree.
+
+    ``plugins/websearch/service/reranker/models/models--Qwen--.../snapshots/<rev>``
+    — where a hand-deployed (or locally bundled) copy of the weights lives. It
+    is *inside the installed tree*, so a reinstall can take it away; the store
+    keeps a copy in the workspace for that reason (see
+    ``reranker_model_store.migrate_legacy_snapshot``).
+    """
     here = os.path.dirname(os.path.abspath(__file__))
     return os.path.join(
         here,
@@ -77,6 +82,35 @@ def _model_path() -> str:
         "snapshots",
         "e61197ed45024b0ed8a2d74b80b4d909f1255473",
     )
+
+
+def _model_path() -> str:
+    """The snapshot dir the sidecar should load.
+
+    Precedence: an explicit ``WEBSEARCH_RERANKER_MODEL_PATH`` override, then the
+    manual-deploy copy (so such a deployment keeps loading what it has), then
+    the store's active snapshot. That last fallback was missing: the store only
+    ever downloads into the *workspace*, so a model downloaded by the admin UI
+    or the auto-download was never found, the spawn printed "model missing …
+    auto-downloading", and the reranker silently never started.
+    """
+    override = os.environ.get("WEBSEARCH_RERANKER_MODEL_PATH", "").strip()
+    if override:
+        return override
+    install_dir = _install_dir_snapshot()
+    if os.path.isdir(install_dir):
+        return install_dir
+    store = _store_module()
+    if store is not None:
+        try:
+            active = store.active_snapshot_dir()
+        except Exception as e:  # pragma: no cover - defensive: never block a spawn
+            print(f"[WebSearch] Reranker active-snapshot lookup failed: {e}")
+            active = ""
+        if active and os.path.isdir(active):
+            return active
+    # Nothing on disk: the caller's "model missing" hint names this path.
+    return install_dir
 
 
 # ── Model auto-download ────────────────────────────────────────────────
@@ -96,18 +130,26 @@ _MODEL_REVISION = "e61197ed45024b0ed8a2d74b80b4d909f1255473"
 
 # Imported lazily so this module still loads on frozen Agent Python
 # builds that don't include the model store (defensive).
-def _model_store():
+def _store_module():
+    """The reranker model store module, or None on a build without it."""
     try:
-        from plugins.websearch.reranker_model_store import is_complete, start_download
+        from plugins.websearch import reranker_model_store as store
 
-        return is_complete, start_download
+        return store
     except ImportError:
         try:
-            from reranker_model_store import is_complete, start_download  # type: ignore[no-redef]
+            import reranker_model_store as store  # type: ignore[no-redef]
 
-            return is_complete, start_download
+            return store
         except ImportError:
-            return None, None
+            return None
+
+
+def _model_store():
+    store = _store_module()
+    if store is None:
+        return None, None
+    return store.is_complete, store.start_download
 
 
 _download_started = False
@@ -237,6 +279,26 @@ def _auto_download_model(model_dir: str) -> bool:
     return True
 
 
+def _migrate_legacy_weights_once() -> None:
+    """One-time: bring weights that live in the install dir into the workspace.
+
+    The workspace is user data and survives an upgrade; the manual-deploy copy
+    sits inside the installed tree, which a reinstall replaces. Renames when it
+    can, copies in the background otherwise, and is a no-op when the workspace
+    already has the weights (the normal case).
+    """
+    store = _store_module()
+    if store is None:
+        return
+    try:
+        note = store.migrate_legacy_snapshot()
+    except Exception as e:  # pragma: no cover - defensive: never block a spawn
+        print(f"[WebSearch] Reranker legacy-weight migration skipped: {e}")
+        return
+    if note:
+        print(f"[WebSearch] Reranker {note}")
+
+
 def start_reranker_sidecar() -> None:
     """Spawn the local reranker and return without waiting for model load.
 
@@ -244,6 +306,8 @@ def start_reranker_sidecar() -> None:
     guardian polls /health and owns late readiness / restart handling.
     """
     global _reranker_proc
+
+    _migrate_legacy_weights_once()
 
     if not _env_truthy("WEBSEARCH_RERANKER_ENABLED", "1"):
         print("[WebSearch] Reranker sidecar disabled (WEBSEARCH_RERANKER_ENABLED=0)")
@@ -266,6 +330,8 @@ def start_reranker_sidecar() -> None:
         _start_guardian()
         return
 
+    # Wherever the weights ended up: the manual-deploy copy, the workspace copy
+    # the store downloads into, or the env override.
     model = _model_path()
     if not os.path.isdir(model):
         print(f"[WebSearch] Reranker model missing at {model}; auto-downloading…")
