@@ -200,8 +200,19 @@ def missing_files(snap: str | None = None) -> list[str]:
 
 def get_status() -> dict[str, Any]:
     active = _active_snapshot_dir()
+    ready = is_complete()
+    store = _get_store()
+    download = store.get_status()
+    if ready and download.get("state") == "error":
+        # The weights are complete — a previous UI download failed, and the
+        # files were filled in afterwards by another path (manual copy, a
+        # direct HF fetch, a resumed download). Nothing else ever clears that
+        # persisted error, so the card showed "Download failed: HTTP 502" for
+        # a model that was already loaded. Reconcile it here, once.
+        store.mark_ready()
+        download = store.get_status()
     return {
-        "ready": is_complete(),
+        "ready": ready,
         "model_dir": model_dir(),
         "snapshot_dir": active,
         "legacy_snapshot_dir": _legacy_snapshot_dir(),
@@ -209,7 +220,7 @@ def get_status() -> dict[str, Any]:
         "missing": missing_files(active),
         "repo_id": REPO_ID,
         "revision": SNAPSHOT_REV,
-        "download": _get_store().get_status(),
+        "download": download,
     }
 
 

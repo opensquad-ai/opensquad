@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "opensquad"
-version = "0.8.49.dev0"
+version = "0.8.49a4"
 description = "OpenSquad - Local-first Multi-Agent Collaboration Framework"
 readme = "README.md"
 license = "MIT"
@@ -129,6 +129,7 @@ include = [
     "pymcp*",
     "collab_cards*",
     "role_cards*",
+    "prompts*",
 ]
 # Belt for the `graft` lines in MANIFEST.in. Those sweep the whole tree, and
 # setuptools' namespace-package discovery (PEP 420) happily walks into vendored
@@ -152,14 +153,19 @@ opensquad = [
     "gateway/config.json",
     "gateway/nexuschat-pro/dist/**/*",
     "gateway/plugin_registry/*.json",
+    # Distribution-name → import-name aliases used by the launcher's pip
+    # dependency checks. Without it a pip install logs "using builtin aliases
+    # only" and misjudges packages whose import name differs (bs4, cv2, fitz…).
+    "launcher/*.json",
 ]
 skills = ["**/*"]
 plugins = ["**/*"]
 # Credential-bearing dirs use an explicit allowlist instead of `*.json`, because
 # a `*.json` glob cannot tell a tracked builtin from a local card/agent that
 # carries the operator's own api_key. Keep both lists equal to `git ls-files`
-# for those dirs — tests/test_release_artifact_includes.py enforces it.
+# for those dirs — tests/test_verify_release_artifacts.py enforces it.
 model_cards = [
+    "builtin-sensevoice-asr.json",
     "deepseek-v4-flash.json",
     "deepseek-v4-pro.json",
     "step-image-edit-2.json",
@@ -172,6 +178,12 @@ agents = ["coder/*", "image_bot/*", "pm/*", "qa/*"]
 pymcp = ["*.json"]
 collab_cards = ["*.md"]
 role_cards = ["*.md"]
+# System-prompt templates (`base|thought` × `fc|xml`) plus the `parts/`
+# fragments they include. Every agent boot resolves them through
+# syscfg.get_builtin_root() and raises "Base prompt not found" without them —
+# 0.8.47/0.8.48 shipped no prompt file at all, so no agent could start from a
+# pip/npm install. Recursive glob: `parts/` is a subdirectory.
+prompts = ["**/*"]
 
 # Belt for the `package_data` globs above, which bypass MANIFEST.in, and for
 # anything that reaches the wheel through the sdist manifest. Patterns are

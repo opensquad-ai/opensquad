@@ -103,7 +103,15 @@ test_agent_e2e.py
 src/model_cards/*
 !src/model_cards/deepseek-v4-flash.json
 !src/model_cards/deepseek-v4-pro.json
+# Built-in local ASR: read by BUILTIN_MODEL_CARD_FILES and copied into every
+# workspace. It carries `sk-local` (a loopback service needs no real key), so it
+# is safe to publish — and a deployment without it has no ASR at all.
+!src/model_cards/builtin-sensevoice-asr.json
+# Every other model_cards dir (build outputs, scratch checkouts) stays ignored…
 model_cards/
+# …but not the source tree itself: a directory exclusion hides the negation
+# list above, so a card there could not be `git add`-ed at all.
+!src/model_cards/
 
 # ── Claude code editor local settings (contain auth tokens) ──
 .claude/

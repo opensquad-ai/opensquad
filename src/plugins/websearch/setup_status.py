@@ -211,15 +211,36 @@ def get_setup_status() -> dict[str, Any]:
     }
 
 
-def write_plugin_status(status: dict[str, Any] | None = None) -> str:
-    """Write launcher-readable status.json (P1.4 plugin_status)."""
-    payload = status or get_setup_status()
-    path = _status_path()
+def _write_status_json(path: str, payload: dict[str, Any]) -> None:
+    """Persist ``payload`` at ``path`` through the shared, never-raising writer.
+
+    This file is written by the plugin service while the launcher polls it, so
+    the bare ``tmp + os.replace`` form can fail with ``[WinError 5]`` when the
+    reader has the file open. Fall back to it only if the shared helper — which
+    lives next to the other plugin modules — is not importable.
+    """
+    try:
+        from plugins._model_downloader import write_status_json
+    except ImportError:
+        try:
+            from _model_downloader import write_status_json
+        except ImportError:
+            write_status_json = None  # type: ignore[assignment]
+    if write_status_json is not None:
+        write_status_json(path, payload)
+        return
     os.makedirs(os.path.dirname(path), exist_ok=True)
     tmp = path + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(payload, f, ensure_ascii=False, indent=2)
     os.replace(tmp, path)
+
+
+def write_plugin_status(status: dict[str, Any] | None = None) -> str:
+    """Write launcher-readable status.json (P1.4 plugin_status)."""
+    payload = status or get_setup_status()
+    path = _status_path()
+    _write_status_json(path, payload)
     return path
 
 

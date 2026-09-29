@@ -1,48 +1,64 @@
 name: Release
 
+# Publishes every `v*` tag, test builds included.
+#
+# Test builds (alpha / beta / rc) are opt-in everywhere and land in exactly the
+# same artifact channels as a stable release, so a tester can install them the
+# way a user would:
+#   pip install --pre opensquad==0.8.49a1        # pip skips prereleases by default
+#   npm install -g opensquad-ai@next             # npm keeps `latest` untouched
+# Stable users are unaffected: `pip install opensquad` and
+# `npm install -g opensquad-ai` still resolve to the last stable release, the
+# Docker `:latest` tag is not moved, and the GitHub Release is flagged
+# `prerelease`, which keeps it out of `/releases/latest` (what the in-app
+# update check reads). Note the one irreversible cost: a PyPI version cannot be
+# deleted, only yanked — a bad test build is superseded by a2/b1, never reused.
+#
+# Tag spelling is the npm one (`v0.8.49-alpha.1`); pyproject.toml carries the
+# PEP 440 one (`0.8.49a1`). scripts/sync_version.py owns that mapping and
+# validates the pair (`--check-tag`).
+
 on:
   push:
     tags:
       - 'v*'
-      - '!v*beta*'   # beta tags only trigger Build Desktop App (test builds)
-      - '!v*rc*'     # same for release candidates
-      - '!v*alpha*'  # and alpha prereleases
 
 jobs:
-  # ── Step 1: Validate version matches pyproject.toml ──
+  # ── Step 1: Validate the tag against pyproject.toml ──
   validate:
     name: Validate version
     runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.check.outputs.version }}
+      prerelease: ${{ steps.check.outputs.prerelease }}
     steps:
       - uses: actions/checkout@v4
 
+      # The tag spelling is the npm/semver one (`v0.8.49-alpha.1`), pyproject.toml
+      # holds the PEP 440 one (`0.8.49a1`). scripts/sync_version.py owns that
+      # mapping and compares both sides through it — the previous "delete every
+      # hyphen" comparison only ever matched a `-alpha1` tag and would have
+      # rejected `-alpha.1`.
       - name: Check tag matches pyproject.toml version
+        id: check
         run: |
-          TAG_VERSION="${GITHUB_REF_NAME#v}"
-          PYPROJECT_VERSION=$(python3 -c "
-          with open('pyproject.toml') as f:
-              for line in f:
-                  if line.strip().startswith('version'):
-                      print(line.split('=',1)[1].strip().strip('\"').strip(\"'\"))
-                      break
-          ")
-          # Tag uses human-friendly prerelease suffix (-rc1, -beta1, -alpha1)
-          # but PEP 440 requires no hyphen in the version itself. Normalize
-          # both sides by stripping hyphens before comparing.
-          TAG_NORM=$(echo "$TAG_VERSION" | tr -d '-')
-          PYPROJECT_NORM=$(echo "$PYPROJECT_VERSION" | tr -d '-')
-          echo "Tag version: $TAG_VERSION (normalized: $TAG_NORM)"
-          echo "pyproject.toml version: $PYPROJECT_VERSION (normalized: $PYPROJECT_NORM)"
-          if [ "$TAG_NORM" != "$PYPROJECT_NORM" ]; then
-            echo "::error::Version mismatch! Tag=$TAG_VERSION, pyproject.toml=$PYPROJECT_VERSION"
-            exit 1
-          fi
-          echo "Version check passed: $TAG_VERSION"
+          python3 scripts/sync_version.py --check-tag "${GITHUB_REF_NAME}"
+          VERSION="${GITHUB_REF_NAME#v}"
+          case "$VERSION" in
+            *-alpha*|*-beta*|*-rc*) PRERELEASE=true ;;
+            *)                      PRERELEASE=false ;;
+          esac
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "prerelease=$PRERELEASE" >> "$GITHUB_OUTPUT"
+          echo "Releasing $VERSION (prerelease=$PRERELEASE)"
 
-  # ── Step 2: Build & push Docker image ──
+  # ── Step 2: Build & push Docker image (stable tags only) ──
+  # A test build gets no image: testers install from pip/npm/the desktop
+  # installers, and the `:latest` tag must keep pointing at a stable release.
   docker:
     name: Build Docker image
     needs: validate
+    if: needs.validate.outputs.prerelease != 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -76,18 +92,16 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-  # ── Step 3: Publish to PyPI ──
-  # Skipped for prerelease tags (rc / beta / alpha) — those would pollute
-  # the production PyPI index and show up as candidate Latest for users
-  # running `pip install opensquad`. Add TestPyPI trusted-publishing config
-  # to a separate job if rc/beta/alpha artifacts are wanted externally.
+  # ── Step 3: Publish to PyPI (every tag, test builds included) ──
+  # A prerelease on PyPI is invisible to `pip install opensquad`: pip skips
+  # prereleases unless they are named (`opensquad==0.8.49a1`) or `--pre` is
+  # passed, and `pip install -U opensquad` keeps resolving to the last stable
+  # release. (The earlier note here claimed a prerelease "would show up as
+  # candidate Latest" — it does not.) What *is* true: an uploaded version can
+  # never be deleted, only yanked, so a broken test build is replaced by a2/b1.
   pypi:
     name: Publish to PyPI
     needs: validate
-    if: |
-      !contains(github.ref_name, '-rc') &&
-      !contains(github.ref_name, '-beta') &&
-      !contains(github.ref_name, '-alpha')
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -165,6 +179,8 @@ jobs:
       # checkout `git tag --sort=-v:refname | head -2 | tail -1` resolves to the
       # tag being released, so `git log <tag>..HEAD` had nothing in it and both
       # v0.8.46 and v0.8.47 shipped a blank "Changes since …" body.
+      # A test build may head its section with either spelling, so look for the
+      # tag form (`0.8.49-alpha.1`) and the PEP 440 form (`0.8.49a1`).
       - name: Build release body from CHANGELOG.md
         id: notes
         env:
@@ -178,12 +194,25 @@ jobs:
           prerelease = any(s in tag for s in ("-rc", "-beta", "-alpha"))
 
           text = pathlib.Path("CHANGELOG.md").read_text(encoding="utf-8")
-          match = re.search(
-              rf"^## \[{re.escape(version)}\][^\n]*\n(.*?)(?=^## \[|\Z)",
-              text,
-              re.S | re.M,
+          headings = [version]
+          pep440 = re.sub(
+              r"-(alpha|beta|rc)\.?(\d*)$",
+              lambda m: {"alpha": "a", "beta": "b", "rc": "rc"}[m.group(1)] + m.group(2),
+              version,
           )
-          body = match.group(1).strip() if match else ""
+          if pep440 != version:
+              headings.append(pep440)
+
+          body = ""
+          for heading in headings:
+              match = re.search(
+                  rf"^## \[{re.escape(heading)}\][^\n]*\n(.*?)(?=^## \[|\Z)",
+                  text,
+                  re.S | re.M,
+              )
+              if match and match.group(1).strip():
+                  body = match.group(1).strip()
+                  break
 
           if not body and not prerelease:
               sys.exit(f"CHANGELOG.md has no '## [{version}]' section - write it before tagging {tag}")
@@ -210,6 +239,9 @@ jobs:
           body: ${{ steps.notes.outputs.body }}
           # Appends GitHub's own "What's Changed" + compare link under the curated notes.
           generate_release_notes: true
-          prerelease: ${{ contains(github.ref_name, '-rc') || contains(github.ref_name, '-beta') || contains(github.ref_name, '-alpha') }}
+          # `prerelease` keeps the Release out of `/releases/latest`, which is
+          # what the in-app update check reads — a test build must never be
+          # offered to stable users. See the validate job for the source of truth.
+          prerelease: ${{ needs.validate.outputs.prerelease }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

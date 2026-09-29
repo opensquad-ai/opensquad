@@ -5,7 +5,10 @@ import sys
 
 import requests
 
-sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))))
+# APPEND, never insert(0): in a pip install this path is a site-packages, and
+# putting it first would shadow the running interpreter's own compiled packages
+# (see plugins/external_api/adapter.py for the full rationale).
+sys.path.append(_os.path.dirname(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))))
 
 from opensquad.system_config import syscfg
 

@@ -16,8 +16,11 @@ Usage:
 
 import contextlib
 import logging
+import logging.handlers
 import os
+import queue
 import sys
+import threading
 import warnings
 
 from opensquad.safe_rotating_handler import SafeRotatingFileHandler
@@ -30,6 +33,118 @@ try:
     from opensquad.system_config import syscfg
 except ImportError:
     syscfg = None
+
+
+# ── Console output must never block the thread that logs ────────────────────
+# A plain StreamHandler writes to sys.stderr synchronously. When this process
+# was started by `opensquad start` (quiet mode) its stderr is a pipe nobody
+# reads, so once that pipe fills — 4 KiB on Windows, 64 KiB elsewhere, i.e. ~50
+# log lines — every write blocks forever, and a blocking write made from an
+# asyncio event loop, or while the logging lock is held, freezes the whole
+# process. That is how the launcher froze and took the agents with it (see
+# opensquad/child_output.py for the full chain). So the console copy goes
+# through a bounded queue drained by a daemon thread: if the pipe stalls, the
+# queue fills up and records are dropped instead of blocking the caller. The
+# file handler still receives every record.
+_CONSOLE_QUEUE_MAX = 1000
+
+
+class _DroppingQueueHandler(logging.handlers.QueueHandler):
+    """QueueHandler that drops a record instead of raising when the queue is full."""
+
+    def __init__(self, record_queue: "queue.Queue[logging.LogRecord]", *, flush_timeout: float = 2.0) -> None:
+        super().__init__(record_queue)
+        self._flush_timeout = flush_timeout
+
+    def enqueue(self, record: logging.LogRecord) -> None:
+        try:
+            self.queue.put_nowait(record)
+        except queue.Full:
+            pass
+
+    def flush(self) -> None:
+        """Wait (bounded) until the pump has written what is queued.
+
+        ``logging.shutdown()`` calls this at interpreter exit, so the last lines
+        do not vanish with the daemon pump; it is also what lets a test observe
+        the console copy without sleeping.
+        """
+        waiter = threading.Thread(target=self.queue.join, daemon=True, name="opensquad-console-flush")
+        waiter.start()
+        waiter.join(self._flush_timeout)
+
+
+def _console_pump(record_queue: "queue.Queue[logging.LogRecord]", stream) -> None:
+    """Write queued records to *stream*, one at a time, on a thread of our own.
+
+    The stream is written to directly rather than through a ``StreamHandler``:
+    a Handler registers itself with ``logging``, and then ``logging.shutdown()``
+    would flush it on the way out — blocking the exiting process on the very
+    pipe this thread exists to absorb.
+    """
+    while True:
+        record = record_queue.get()
+        try:
+            stream.write(record.getMessage() + "\n")
+            stream.flush()
+        except Exception:
+            pass  # a dead console must not kill the pump or the caller
+        finally:
+            record_queue.task_done()  # unblocks flush()
+
+
+def _console_writer(stream):
+    """Return the object the pump should write to for *stream*.
+
+    A console writes through Python's own stream object: a terminal always
+    drains itself, and only Python's console writer encodes correctly for the
+    Windows console. Everything else — a pipe, a redirected file — gets a
+    private duplicate of the file descriptor. That matters at exit: blocked in a
+    write, the pump would hold the *shared* buffer, and then the interpreter's
+    own "flush sys.stderr" on the way out would wait on it, hanging a process
+    that should just exit. A duplicate has its own buffer, so the exit flush
+    finds nothing to write and returns immediately.
+    """
+    try:
+        if stream.isatty():
+            return stream
+        fd = stream.fileno()
+    except (AttributeError, OSError, ValueError):
+        return stream  # not a real file (e.g. StringIO) or not a tty-capable stream
+    try:
+        return os.fdopen(
+            os.dup(fd),
+            "w",
+            encoding=getattr(stream, "encoding", None) or "utf-8",
+            errors="replace",
+        )
+    except OSError:
+        return stream
+
+
+def nonblocking_console_handler(
+    stream=None,
+    formatter: logging.Formatter | None = None,
+    *,
+    max_queue: int = _CONSOLE_QUEUE_MAX,
+) -> logging.Handler:
+    """Return a console handler that never blocks the thread that logs.
+
+    ``stream`` defaults to ``sys.stderr``. Records are formatted by the returned
+    handler (in the logging thread) and written by a dedicated daemon thread, so
+    callers only ever pay for a ``queue.put_nowait``.
+    """
+    record_queue: queue.Queue[logging.LogRecord] = queue.Queue(maxsize=max_queue)
+    threading.Thread(
+        target=_console_pump,
+        args=(record_queue, _console_writer(stream if stream is not None else sys.stderr)),
+        daemon=True,
+        name="opensquad-console-log",
+    ).start()
+    handler = _DroppingQueueHandler(record_queue)
+    if formatter is not None:
+        handler.setFormatter(formatter)
+    return handler
 
 
 def _ensure_utf8_console() -> None:
@@ -115,13 +230,10 @@ def setup_logging(
     if logger.hasHandlers():
         logger.handlers.clear()
 
-    # Console handler
-    if console:
-        ch = logging.StreamHandler()
-        ch.setFormatter(formatter)
-        logger.addHandler(ch)
-
-    # Rotating file handler (use SafeRotatingFileHandler to avoid Windows multi-process file lock issues)
+    # Rotating file handler first: it is the durable record, and it must not sit
+    # behind the console copy in the handler chain (a console that blocks would
+    # otherwise keep the line out of the file).
+    # SafeRotatingFileHandler avoids Windows multi-process file lock issues.
     try:
         os.makedirs(actual_log_dir, exist_ok=True)
         log_path = os.path.join(actual_log_dir, log_filename)
@@ -137,6 +249,10 @@ def setup_logging(
     except Exception as e:
         # If file handler fails, at least console still works
         logger.error(f"Failed to configure file logging to {actual_log_dir}/{log_filename}: {e}")
+
+    # Console handler — non-blocking, see nonblocking_console_handler().
+    if console:
+        logger.addHandler(nonblocking_console_handler(formatter=formatter))
 
     logger.setLevel(log_level)
 

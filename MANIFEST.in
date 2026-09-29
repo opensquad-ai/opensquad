@@ -8,6 +8,7 @@ graft src/agents
 graft src/pymcp
 graft src/collab_cards
 graft src/role_cards
+graft src/prompts
 
 # ── Never ship ──
 # Private plugins / skills (keep in sync with the "Private plugins / skills"
@@ -45,9 +46,10 @@ prune src/agents/agent301
 
 # Local model cards are the operator's own cards and carry their own
 # `api_key`. Only the tracked builtin set ships — keep this list equal to
-# `git ls-files src/model_cards` (tests/test_release_artifact_includes.py
+# `git ls-files src/model_cards` (tests/test_verify_release_artifacts.py
 # enforces that, so a new card cannot silently drop out).
 prune src/model_cards
+include src/model_cards/builtin-sensevoice-asr.json
 include src/model_cards/deepseek-v4-flash.json
 include src/model_cards/deepseek-v4-pro.json
 include src/model_cards/step-image-edit-2.json

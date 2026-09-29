@@ -255,23 +255,40 @@ async function preloadVendorIcons(presets: ProviderPreset[]): Promise<void> {
 //   2. localStorage 持久化缓存（有效期 1 小时）
 //   3. 页面加载时优先读缓存，有效则不请求后台
 //   4. 手动刷新时强制清除缓存并重新拉取
-
-const PRESETS_CACHE_KEY = 'model_presets_cache_v1';
+//
+// v1 → v2：v1 里可能留着旧版本写入的短清单（整份目录只有十来个厂商），而
+// 「有缓存就不请求后台」会让它一直生效——用户看到的就是一个永远长不大的列表。
+// 升版本号让这些旧缓存立即作废。
+const PRESETS_CACHE_KEY = 'model_presets_cache_v2';
 const CACHE_EXPIRY_MS = 60 * 60 * 1000; // 1 小时
 
-// 模块级内存缓存（同一 session 内多次打开 ModelsPage 直接用内存缓存）
-let _presetsMemoryCache: ProviderPreset[] | null = null;
+// 内存缓存必须带时间戳：SPA 不刷新页面时它不会过期，之前只存数组，
+// 于是同一个会话里列表永远停在首次加载那份数据上。
+let _presetsMemoryCache: { presets: ProviderPreset[]; timestamp: number } | null = null;
 
 interface PresetsCacheData {
   presets: ProviderPreset[];
   timestamp: number;
 }
 
+/** 后台 /api/ai-web/model-presets 返回的 meta（数据来自实时、磁盘还是内置清单） */
+export interface PresetMeta {
+  source?: 'live' | 'disk_cache' | 'static_fallback' | string;
+  models_dev_fetched_at?: number | null;
+  cache_age_seconds?: number | null;
+  cache_stale?: boolean;
+}
+
 function loadPresetsFromCache(): ProviderPreset[] | null {
-  // 1. 优先用内存缓存（零开销）
+  // 1. 优先用内存缓存（零开销，但仍然受 1 小时有效期约束）
   if (_presetsMemoryCache) {
-    console.log('[Presets] 使用内存缓存（session 内复用）');
-    return _presetsMemoryCache;
+    const memAge = Date.now() - _presetsMemoryCache.timestamp;
+    if (memAge < CACHE_EXPIRY_MS) {
+      console.log('[Presets] 使用内存缓存（session 内复用）');
+      return _presetsMemoryCache.presets;
+    }
+    console.log('[Presets] 内存缓存已过期，将重新拉取');
+    _presetsMemoryCache = null;
   }
 
   // 2. 读取 localStorage 缓存
@@ -284,7 +301,7 @@ function loadPresetsFromCache(): ProviderPreset[] | null {
 
     if (age < CACHE_EXPIRY_MS) {
       console.log(`[Presets] 使用 localStorage 缓存（已缓存 ${Math.round(age / 1000)}s）`);
-      _presetsMemoryCache = data.presets; // 写入内存缓存
+      _presetsMemoryCache = { presets: data.presets, timestamp: data.timestamp };
       return data.presets;
     } else {
       console.log('[Presets] localStorage 缓存已过期，将重新拉取');
@@ -299,12 +316,10 @@ function loadPresetsFromCache(): ProviderPreset[] | null {
 
 function savePresetsToCache(presets: ProviderPreset[]): void {
   // 同时更新内存缓存和 localStorage
-  _presetsMemoryCache = presets;
+  const timestamp = Date.now();
+  _presetsMemoryCache = { presets, timestamp };
   try {
-    const data: PresetsCacheData = {
-      presets,
-      timestamp: Date.now(),
-    };
+    const data: PresetsCacheData = { presets, timestamp };
     localStorage.setItem(PRESETS_CACHE_KEY, JSON.stringify(data));
     console.log(`[Presets] 已缓存到 localStorage（${presets.length} 个厂商）`);
   } catch (e) {
@@ -332,6 +347,9 @@ const ModelsPage: React.FC<ModelsPageProps> = ({ onBack }) => {
 
   // presets (used by the Connect Provider modal's vendor list)
   const [providerPresets, setProviderPresets] = useState<ProviderPreset[]>([]);
+  // 目录数据从哪来、有多旧（后端 meta）——列表短的时候，用户需要看到原因
+  const [presetMeta, setPresetMeta] = useState<PresetMeta | null>(null);
+  const [presetsRefreshing, setPresetsRefreshing] = useState(false);
 
   // filter / search
   const [filter, setFilter]   = useState<'all' | 'starred'>('all');
@@ -387,6 +405,12 @@ const ModelsPage: React.FC<ModelsPageProps> = ({ onBack }) => {
   const [connectShowKey, setConnectShowKey] = useState(false);
   const [connectSearch, setConnectSearch] = useState('');
   const [connecting, setConnecting]      = useState(false);
+
+  // 更换已配置供应商的 API Key：只改已有卡片的 key，不新增/删除模型卡。
+  const [rotateProvider, setRotateProvider] = useState<string | null>(null);
+  const [rotateKey, setRotateKey]           = useState('');
+  const [rotateShowKey, setRotateShowKey]   = useState(false);
+  const [rotating, setRotating]             = useState(false);
 
   const [toast, setToast] = useState<{ msg: string; ok: boolean } | null>(null);
 
@@ -455,7 +479,7 @@ const ModelsPage: React.FC<ModelsPageProps> = ({ onBack }) => {
   useEffect(() => {
     const cached = loadPresetsFromCache();
     if (cached && cached.length > 0) {
-      // 有有效缓存，直接使用，不请求后台
+      // 有有效缓存，直接使用，不请求后台（用户可随时在弹窗里手动刷新）
       setProviderPresets(cached);
       // 预加载图标（若已缓存则跳过）
       preloadVendorIcons(cached).catch(e =>
@@ -466,21 +490,73 @@ const ModelsPage: React.FC<ModelsPageProps> = ({ onBack }) => {
 
     // 无缓存或已过期，从后台拉取
     console.log('[Presets] 无缓存，从后台加载...');
-    fetch('/api/ai-web/model-presets')
-      .then(r => r.json())
-      .then(data => {
-        const presets = data.providers ?? [];
-        setProviderPresets(presets);
-        savePresetsToCache(presets); // 缓存到 localStorage + 内存
-        // 预加载所有厂商图标到 localStorage（后台静默）
-        if (presets.length > 0) {
-          preloadVendorIcons(presets).catch(e =>
-            console.warn('[VendorIcon] 预加载失败:', e)
-          );
-        }
-      })
-      .catch(() => {});
+    void loadPresetsFromBackend();
   }, []);
+
+  /** GET 目录（不触发上游刷新），并写入缓存 + meta。 */
+  const loadPresetsFromBackend = async () => {
+    try {
+      const data = await (await fetch('/api/ai-web/model-presets')).json();
+      const presets: ProviderPreset[] = data.providers ?? [];
+      setProviderPresets(presets);
+      setPresetMeta(data.meta ?? null);
+      savePresetsToCache(presets); // 缓存到 localStorage + 内存
+      // 预加载所有厂商图标到 localStorage（后台静默）
+      if (presets.length > 0) {
+        preloadVendorIcons(presets).catch(e => console.warn('[VendorIcon] 预加载失败:', e));
+      }
+    } catch { /* 静默：面板继续用已有列表 */ }
+  };
+
+  /**
+   * 重新拉取最新供应商目录：清缓存 → POST refresh（后端去上游抓 models.dev /
+   * OpenRouter）→ 再 GET → 替换列表并缓存。
+   *
+   * 这条路径必须由用户可见地反馈结果：上游抓不到时（网络受限）后端会退回内置
+   * 清单，只有把「数据源 + 厂商数 + 模型数」或错误原样告诉用户，才不会再出现
+   * 「列表一直是十来个，也没人知道为什么」。
+   */
+  const refreshPresets = async () => {
+    setPresetsRefreshing(true);
+    clearPresetsCache(); // 手动刷新：强制击穿缓存
+    try {
+      const postRes = await fetch('/api/ai-web/model-presets/refresh', { method: 'POST' });
+      const postData = postRes.ok ? await postRes.json() : null;
+
+      const data = await (await fetch('/api/ai-web/model-presets')).json();
+      const presets: ProviderPreset[] = data.providers ?? [];
+      setProviderPresets(presets);
+      setPresetMeta(data.meta ?? null);
+      savePresetsToCache(presets);
+      if (presets.length > 0) {
+        preloadVendorIcons(presets).catch(e => console.warn('[VendorIcon] 刷新后预加载失败:', e));
+      }
+
+      if (!postData) {
+        showToast(t('modelsPage.presetRefreshFailed'), false);
+        return;
+      }
+      const source = postData.source === 'live' ? t('modelsPage.presetLive') : t('modelsPage.presetStatic');
+      const failed = Boolean(postData.errors?.length) || postData.ok === false;
+      const msg = postData.errors?.length
+        ? t('modelsPage.presetRefreshPartial', {
+            source,
+            providers: postData.providers,
+            models: postData.models,
+            errors: postData.errors.join('; '),
+          })
+        : t('modelsPage.presetRefreshSuccess', {
+            source,
+            providers: postData.providers,
+            models: postData.models,
+          });
+      showToast(msg, !failed);
+    } catch (e: any) {
+      showToast(t('modelsPage.presetRefreshError', { error: e?.message ?? e }), false);
+    } finally {
+      setPresetsRefreshing(false);
+    }
+  };
 
   /** Only toggle capability flags — url / model / key come from the model card itself. */
   const applyVoiceRoleFlags = (role: 'asr' | 'tts' | 'realtime') => {
@@ -793,6 +869,44 @@ const ModelsPage: React.FC<ModelsPageProps> = ({ onBack }) => {
     [cards],
   );
 
+  // ── 更换 API Key（已配置的供应商） ─────────────────────────────────────────
+  // 只更新该供应商**已有**模型卡的 api_key：不新增模型卡、不删除、不动其它字段
+  // （saveCard 是合并语义，这里只提交 api_key）。重连路径 `createAllProviderCards`
+  // 做不到这点——它会顺带补建预设里新增的模型。
+  const openRotateKey = (provider: string) => {
+    setRotateProvider(provider);
+    setRotateKey('');
+    setRotateShowKey(false);
+  };
+  const closeRotateKey = () => setRotateProvider(null);
+
+  const submitRotateKey = async () => {
+    if (!rotateProvider || !rotateKey.trim()) return;
+    const newKey = rotateKey.trim();
+    const list = cardsOfProvider(rotateProvider);
+    setRotating(true);
+    let updated = 0;
+    const failed: string[] = [];
+    for (const c of list) {
+      try {
+        const full = await modelCardAPI.getCard(c.name);
+        await modelCardAPI.saveCard(c.name, { ...full.card, api_key: newKey });
+        updated++;
+      } catch {
+        failed.push(c.name);
+      }
+    }
+    setRotating(false);
+    if (failed.length > 0) {
+      // 部分失败：留在弹窗里，用户可以重试，不会以为已经换好了。
+      showToast(t('modelsPage.providerKeyUpdateFailed', { name: rotateProvider, count: failed.length }), false);
+    } else {
+      showToast(t('modelsPage.providerKeyUpdated', { name: rotateProvider, count: updated }));
+      closeRotateKey();
+    }
+    await loadCards();
+  };
+
   // Selecting a vendor chip in the top filter also auto-expands that provider.
   const selectVendor = (v: string) => {
     if (activeVendor === v) {
@@ -998,7 +1112,10 @@ const ModelsPage: React.FC<ModelsPageProps> = ({ onBack }) => {
   // Create a card for EVERY model in the provider's model list (no aggregate
   // `prov-{id}` card). If the provider already has cards, only their api_key is
   // updated (the user's other settings are left untouched); cards for any newly
-  // appearing models are added. Returns how many NEW model cards were created.
+  // appearing models are added. Returns what actually happened, so the caller can
+  // tell "connected" from "rotated the key" — it used to return only the count of
+  // newly created cards, so re-connecting an existing provider reported the
+  // misleading "该厂商暂无模型".
   const createAllProviderCards = async (vendor: ProviderPreset, apiKey: string) => {
     const vnd = (vendor.provider ?? vendor.label ?? '').trim();
     const vndLower = vnd.toLowerCase();
@@ -1007,14 +1124,19 @@ const ModelsPage: React.FC<ModelsPageProps> = ({ onBack }) => {
       return p === vndLower;
     });
     const existingModels = new Set<string>();
+    let updated = 0;
+    const failed: string[] = [];
     for (const c of existing) {
       existingModels.add(c.model_name);
       try {
         const full = await modelCardAPI.getCard(c.name);
         if (full.card && full.card.api_key !== apiKey.trim()) {
           await modelCardAPI.saveCard(c.name, { ...full.card, api_key: apiKey.trim() });
+          updated++;
         }
-      } catch { /* keep going */ }
+      } catch {
+        failed.push(c.name); // 不再静默吞掉：换 Key 失败要能在提示里体现
+      }
     }
     let created = 0;
     for (const m of vendor.models || []) {
@@ -1023,7 +1145,7 @@ const ModelsPage: React.FC<ModelsPageProps> = ({ onBack }) => {
       await modelCardAPI.saveCard(name, mCard);
       created++;
     }
-    return created;
+    return { created, updated, failed };
   };
 
   // Header "Connect Provider" dialog.
@@ -1173,9 +1295,14 @@ const ModelsPage: React.FC<ModelsPageProps> = ({ onBack }) => {
     if (!connectProvider || !connectKey.trim()) return;
     setConnecting(true);
     try {
-      const count = await createAllProviderCards(connectProvider, connectKey);
-      if (count > 0) {
-        showToast(t('modelsPage.providerCreatedCards', { name: connectProvider.label, count }));
+      const { created, updated, failed } = await createAllProviderCards(connectProvider, connectKey);
+      if (failed.length > 0) {
+        showToast(t('modelsPage.providerKeyUpdateFailed', { name: connectProvider.label, count: failed.length }), false);
+      } else if (created > 0) {
+        showToast(t('modelsPage.providerCreatedCards', { name: connectProvider.label, count: created }));
+      } else if (updated > 0) {
+        // 供应商已连接、预设也没有新增模型 —— 这其实是「换了 Key」，不是失败。
+        showToast(t('modelsPage.providerKeyUpdated', { name: connectProvider.label, count: updated }));
       } else {
         showToast(t('modelsPage.providerNoModels', { name: connectProvider.label }), false);
       }
@@ -1402,6 +1529,14 @@ const ModelsPage: React.FC<ModelsPageProps> = ({ onBack }) => {
                           className="p-1.5 rounded-lg text-textMuted hover:bg-primary/10 hover:text-primary transition-colors flex-shrink-0"
                         >
                           <Plus size={14} />
+                        </button>
+                        <button
+                          type="button"
+                          onClick={(e) => { e.stopPropagation(); openRotateKey(provider); }}
+                          title={t('modelsPage.rotateKey')}
+                          className="p-1.5 rounded-lg text-textMuted hover:bg-primary/10 hover:text-primary transition-colors flex-shrink-0"
+                        >
+                          <KeyRound size={14} />
                         </button>
                         {findPresetForProvider(provider) && (
                           <button
@@ -1925,9 +2060,21 @@ const ModelsPage: React.FC<ModelsPageProps> = ({ onBack }) => {
                   {/* Header */}
                   <div className="flex items-center justify-between px-5 py-3.5 border-b border-border shrink-0">
                     <h2 className="text-base font-semibold text-textMain">{t('modelsPage.providerConnect')}</h2>
-                    <button onClick={closeConnect} className="p-1.5 rounded-lg text-textMuted hover:bg-hover transition-colors">
-                      <X size={18} />
-                    </button>
+                    <div className="flex items-center gap-0.5">
+                      <button
+                        type="button"
+                        onClick={() => void refreshPresets()}
+                        disabled={presetsRefreshing}
+                        title={t('modelsPage.presetRefreshBtn')}
+                        aria-label={t('modelsPage.presetRefreshBtn')}
+                        className="p-1.5 rounded-lg text-textMuted hover:bg-hover disabled:opacity-40 transition-colors"
+                      >
+                        <RefreshCw size={16} className={presetsRefreshing ? 'animate-spin' : ''} />
+                      </button>
+                      <button onClick={closeConnect} className="p-1.5 rounded-lg text-textMuted hover:bg-hover transition-colors">
+                        <X size={18} />
+                      </button>
+                    </div>
                   </div>
                   {/* Search */}
                   <div className="px-5 pt-3 pb-2 shrink-0">
@@ -1941,6 +2088,22 @@ const ModelsPage: React.FC<ModelsPageProps> = ({ onBack }) => {
                         className="w-full pl-9 pr-3 py-2 text-sm rounded-lg bg-bgLight border border-border text-textMain placeholder-textMuted focus:outline-none focus:border-primary/50"
                       />
                     </div>
+                  </div>
+                  {/* 数据来源：厂商数 + 是否内置清单 / 是否陈旧。列表短的时候这是唯一的线索。 */}
+                  <div className="px-5 pb-1 flex items-center gap-1.5 text-[11px] text-textMuted shrink-0">
+                    <span>{t('modelsPage.presetProviderCount', { count: connectList.length })}</span>
+                    {presetMeta?.source === 'static_fallback' && (
+                      <>
+                        <span className="opacity-50">·</span>
+                        <span>{t('modelsPage.presetStatic')}</span>
+                      </>
+                    )}
+                    {presetMeta?.cache_stale && (
+                      <>
+                        <span className="opacity-50">·</span>
+                        <span className="text-amber-500">{t('modelsPage.presetStaleHint')}</span>
+                      </>
+                    )}
                   </div>
                   {/* Vendor list */}
                   <div className="flex-1 overflow-y-auto pb-3">
@@ -2055,6 +2218,68 @@ const ModelsPage: React.FC<ModelsPageProps> = ({ onBack }) => {
       )}
 
       {/* Update Provider dialog：按预设对齐该厂商的本地卡片（增 / 删 / 可选刷新参数） */}
+      {/* Replace API key dialog for an already-configured provider */}
+      {rotateProvider && (
+        <>
+          <div className="fixed inset-0 bg-black/30 z-40 backdrop-blur-sm" onClick={closeRotateKey} />
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+            <div className="w-full max-w-sm bg-panel border border-border rounded-2xl shadow-2xl flex flex-col overflow-hidden">
+              <div className="flex items-center justify-between px-5 py-3.5 border-b border-border shrink-0">
+                <h2 className="text-base font-semibold text-textMain truncate">
+                  {t('modelsPage.rotateKeyTitle', { name: rotateProvider })}
+                </h2>
+                <button
+                  onClick={closeRotateKey}
+                  className="p-1.5 rounded-lg text-textMuted hover:bg-hover transition-colors"
+                  title={t('common.close', { defaultValue: 'Close' })}
+                  aria-label={t('common.close', { defaultValue: 'Close' })}
+                >
+                  <X size={18} />
+                </button>
+              </div>
+              <div className="px-5 py-4 flex flex-col gap-3">
+                <p className="text-xs text-textMuted leading-relaxed">
+                  {t('modelsPage.rotateKeyHint', { count: cardsOfProvider(rotateProvider).length })}
+                </p>
+                <div className="relative">
+                  <input
+                    className={`${inputCls} pr-9`}
+                    type={rotateShowKey ? 'text' : 'password'}
+                    value={rotateKey}
+                    onChange={e => setRotateKey(e.target.value)}
+                    placeholder={t('modelsPage.connectApiKeyPlaceholder')}
+                    autoFocus
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setRotateShowKey(v => !v)}
+                    className="absolute right-2.5 top-1/2 -translate-y-1/2 text-textMuted hover:text-textMain"
+                  >
+                    {rotateShowKey ? <EyeOff size={14} /> : <Eye size={14} />}
+                  </button>
+                </div>
+                <div className="flex gap-2">
+                  <button
+                    onClick={closeRotateKey}
+                    className="flex-1 text-sm px-3 py-2 rounded-lg border border-border text-textMain hover:bg-hover transition-colors"
+                  >
+                    {t('common.cancel')}
+                  </button>
+                  <button
+                    onClick={() => void submitRotateKey()}
+                    disabled={rotating || !rotateKey.trim()}
+                    className="flex-1 text-sm px-3 py-2 bg-primary text-white rounded-lg hover:opacity-90 disabled:opacity-50 transition-all flex items-center justify-center gap-1.5"
+                  >
+                    {rotating ? <OpenSquadLoader size={16} /> : null}
+                    {t('modelsPage.rotateKeySubmit')}
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </>
+      )}
+
       {syncProvider && syncVendor && (
         <>
           <div className="fixed inset-0 bg-black/30 z-40 backdrop-blur-sm" onClick={closeVendorSync} />

@@ -185,6 +185,21 @@ def _auto_download_model(model_dir: str) -> bool:
 
         # Legacy fallback: best-effort single-mirror download. Kept
         # around for frozen builds that don't bundle the model store.
+        #
+        # These two variables must be set BEFORE huggingface_hub is imported:
+        # it freezes both into ``huggingface_hub.constants`` at import time, so
+        # setting them afterwards (as this used to, inside the thread) is
+        # silently a no-op — verified on huggingface_hub 1.26.0, where
+        # ``constants.HF_HUB_DISABLE_XET`` stays False and ``constants.ENDPOINT``
+        # stays huggingface.co whatever the environment says later.
+        #   HF_ENDPOINT            — go through the CN mirror (huggingface.co is
+        #                            unreachable from this box);
+        #   HF_HUB_DISABLE_XET=1   — the mirror does not proxy Xet, so a large
+        #                            LFS shard rebuilt via cas-server.xethub.hf.co
+        #                            401s and the 1.2GB safetensors never lands.
+        #                            Use classic HTTP LFS instead.
+        os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
+        os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
         try:
             import huggingface_hub
         except ImportError:
@@ -195,7 +210,6 @@ def _auto_download_model(model_dir: str) -> bool:
             try:
                 os.makedirs(model_dir, exist_ok=True)
                 print(f"[WebSearch] Downloading {_MODEL_REPO_ID}@{_MODEL_REVISION[:8]} → {model_dir} (1.2GB)…")
-                os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
                 huggingface_hub.snapshot_download(
                     repo_id=_MODEL_REPO_ID,
                     revision=_MODEL_REVISION,

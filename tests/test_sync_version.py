@@ -72,3 +72,65 @@ def test_sync_version_check_passes_from_repo_root():
         check=False,
     )
     assert result.returncode == 0, result.stderr or result.stdout
+
+
+# ── release tags ────────────────────────────────────────────────────────────
+# release.yml publishes every `v*` tag, test builds (alpha/beta/rc) included, and
+# validates the tag through `--check-tag`. The tag carries the npm spelling
+# (`v0.8.49-alpha.1`) while pyproject.toml carries the PEP 440 one (`0.8.49a1`).
+@pytest.mark.parametrize(
+    ("pep440", "tag"),
+    [
+        ("0.8.49", "v0.8.49"),
+        ("0.8.49a1", "v0.8.49-alpha.1"),
+        ("0.8.49b2", "v0.8.49-beta.2"),
+        ("0.8.49rc1", "v0.8.49-rc.1"),
+    ],
+)
+def test_check_tag_accepts_the_matching_tag(sync_version, monkeypatch, pep440, tag):
+    monkeypatch.setattr(sync_version, "read_pyproject_version", lambda: pep440)
+    assert sync_version.check_tag(tag) == pep440
+
+
+@pytest.mark.parametrize(
+    "tag",
+    [
+        "v0.8.48",  # one release behind
+        "v0.8.49-alpha.2",  # wrong counter
+        "v0.8.49alpha1",  # PEP 440 spelling in the tag
+    ],
+)
+def test_check_tag_rejects_a_mismatch(sync_version, monkeypatch, tag):
+    monkeypatch.setattr(sync_version, "read_pyproject_version", lambda: "0.8.49a1")
+    with pytest.raises(SystemExit):
+        sync_version.check_tag(tag)
+
+
+@pytest.mark.parametrize(
+    ("version", "expected"),
+    [
+        ("0.8.49", False),
+        ("0.8.49a1", True),
+        ("0.8.49-alpha.1", True),
+        ("0.8.49b2", True),
+        ("0.8.49rc1", True),
+        ("0.8.49.dev0", False),  # the dev branch is never tagged
+        ("0.8.49-dev.0", False),
+    ],
+)
+def test_is_prerelease(sync_version, version, expected):
+    assert sync_version.is_prerelease(version) is expected
+
+
+def test_check_tag_cli_rejects_a_stale_tag():
+    import subprocess
+
+    result = subprocess.run(
+        [sys.executable, str(_SCRIPT), "--check-tag", "v0.0.1"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 1
+    assert "does not match" in result.stderr or "::error::Tag" in result.stderr

@@ -39,8 +39,12 @@ def _ensure_bot_map():
         import os
         import sys
 
+        # APPEND, never insert(0): in a pip install this "root" is a
+        # site-packages, and putting it first would shadow the running
+        # interpreter's own compiled packages (see external_api/adapter.py).
         root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-        sys.path.insert(0, root)
+        if root not in sys.path:
+            sys.path.append(root)
         from opensquad.system_config import syscfg
 
         bots = syscfg.get("feishu", "bots", [])

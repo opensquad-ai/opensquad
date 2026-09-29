@@ -1,16 +1,21 @@
 name: Release (npm)
 
-# Publishes the opensquad-ai npm package on every `v*` tag.
+# Publishes the opensquad-ai npm package on every `v*` tag — test builds
+# (alpha / beta / rc) included, so a tester can install them the way a user
+# would: `npm install -g opensquad-ai@next`.
 # The package is a thin Node.js wrapper that installs the Python
 # `opensquad` CLI and proxies commands to it. See bin/opensquad.js.
+#
+# A test build is published under the `next` dist-tag instead of `latest`, so
+# `npm install -g opensquad-ai` keeps resolving to the last stable release.
+# The wrapper pins `pip install opensquad==<npm version>`; the dashed npm
+# spelling (`0.8.49-alpha.1`) is the same PEP 440 version as the PyPI one
+# (`0.8.49a1`), which pip normalizes for comparison.
 
 on:
   push:
     tags:
       - 'v*'
-      - '!v*beta*'   # beta tags only trigger Build Desktop App (test builds)
-      - '!v*rc*'     # same for release candidates
-      - '!v*alpha*'  # and alpha prereleases
   workflow_dispatch:
 
 permissions:
@@ -23,6 +28,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       npm_version: ${{ steps.check.outputs.npm_version }}
+      dist_tag: ${{ steps.check.outputs.dist_tag }}
     steps:
       - uses: actions/checkout@v4
 
@@ -45,8 +51,17 @@ jobs:
             # that carries the released version.
             echo "Dispatch on '${GITHUB_REF_NAME}'; publishing package.json version $NPM_VERSION"
           fi
-          echo "Version check passed: $NPM_VERSION"
+          # Test builds go to `next` so `npm install -g opensquad-ai` (which
+          # resolves `latest`) keeps handing out the stable release. `-dev`
+          # covers a `workflow_dispatch` from the dev branch: a snapshot must
+          # never be able to take the `latest` tag either.
+          case "$NPM_VERSION" in
+            *-alpha*|*-beta*|*-rc*|*-dev*) DIST_TAG=next ;;
+            *)                             DIST_TAG=latest ;;
+          esac
+          echo "Version check passed: $NPM_VERSION (dist-tag: $DIST_TAG)"
           echo "npm_version=$NPM_VERSION" >> $GITHUB_OUTPUT
+          echo "dist_tag=$DIST_TAG" >> $GITHUB_OUTPUT
 
   publish:
     name: Publish to npm
@@ -88,32 +103,46 @@ jobs:
       # npmjs.com (owner opensquad-ai, repo opensquad, workflow release-npm.yml).
       # The registry is named here because setup-node does not write an .npmrc
       # for us any more (see its comment above).
+      # `--tag next` for a test build: npm would otherwise refuse to move
+      # `latest` onto a prerelease anyway, but naming the tag makes the intent
+      # explicit and gives testers a stable handle (`-ai@next`). Stable tags
+      # keep npm's default (`latest`).
       # `--loglevel verbose` on purpose: when the trusted-publishing token
       # exchange fails, npm logs the reason only at verbose/silly
       # ("Failed token exchange request with body message: ...") and then
       # degrades silently into a bare `ENEEDAUTH` / misleading `404`.
       - name: Publish to npm
-        run: npm publish --registry=https://registry.npmjs.org --access public --provenance --loglevel verbose
+        run: |
+          npm publish --registry=https://registry.npmjs.org --access public --provenance \
+            --tag "${{ needs.validate.outputs.dist_tag }}" --loglevel verbose
 
       # `npm publish` exits 0 even when the version only reaches npm's staging
       # area: trusted publishers may always stage, and npm routes dual-use
       # packages (an AI coding agent qualifies) through staging by policy. Read
       # the registry afterwards so a staged release cannot pass for a published
       # one — that mistake is invisible in the job output otherwise.
+      # The check asks for *this version* rather than reading `latest`: a test
+      # build never becomes `latest`, so a latest-based check would report every
+      # prerelease as staged even when it is public.
       - name: Report whether the version is public or only staged
         run: |
           V="${{ needs.validate.outputs.npm_version }}"
-          LIVE="$(curl -s -m 20 https://registry.npmjs.org/-/package/opensquad-ai/dist-tags || true)"
-          echo "dist-tags: $LIVE"
-          case "$LIVE" in
-            *"\"latest\":\"$V\""*)
-              echo "::notice::opensquad-ai@$V is public — https://www.npmjs.com/package/opensquad-ai" ;;
-            *)
-              echo "::warning::opensquad-ai@$V is not public yet (almost certainly staged). Approve it with 2FA at https://www.npmjs.com/package/opensquad-ai -> Staged Packages, or run: npm stage list opensquad-ai && npm stage approve <stage-id>" ;;
-          esac
+          echo "dist-tags: $(curl -s -m 20 https://registry.npmjs.org/-/package/opensquad-ai/dist-tags || true)"
+          if npm view "opensquad-ai@$V" version --registry=https://registry.npmjs.org > /dev/null 2>&1; then
+            echo "::notice::opensquad-ai@$V is public — https://www.npmjs.com/package/opensquad-ai"
+          else
+            echo "::warning::opensquad-ai@$V is not public yet (almost certainly staged). Approve it with 2FA at https://www.npmjs.com/package/opensquad-ai -> Staged Packages, or run: npm stage list opensquad-ai && npm stage approve <stage-id>"
+          fi
 
       - name: Summary
         run: |
-          echo "opensquad-ai@${{ needs.validate.outputs.npm_version }} pushed to npm"
-          echo "Install with:  npm install -g opensquad-ai"
+          V="${{ needs.validate.outputs.npm_version }}"
+          T="${{ needs.validate.outputs.dist_tag }}"
+          echo "opensquad-ai@$V pushed to npm (dist-tag: $T)"
+          if [ "$T" = "next" ]; then
+            echo "Test build — install with:  npm install -g opensquad-ai@next"
+            echo "Stable users keep:          npm install -g opensquad-ai"
+          else
+            echo "Install with:  npm install -g opensquad-ai"
+          fi
           echo "Try with:      npx -p opensquad-ai opensquad --version"

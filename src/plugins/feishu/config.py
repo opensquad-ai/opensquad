@@ -20,16 +20,11 @@ import os
 import sys
 from dataclasses import asdict, dataclass
 
-# plugins/feishu/ -> plugins/ -> project root.
-# In frozen mode, APPEND (not insert(0)) so the Agent Python's site-packages
-# wins over _internal/ loose copies of third-party packages whose transitive
-# deps live only in the PYZ archive. See external_api/adapter.py for rationale.
+# plugins/feishu/ -> plugins/ -> project root — always APPEND (see
+# external_api/adapter.py for the full rationale).
 _root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 if _root not in sys.path:
-    if getattr(sys, "frozen", False):
-        sys.path.append(_root)
-    else:
-        sys.path.insert(0, _root)
+    sys.path.append(_root)
 # Self-contained runtime helper — does NOT import opensquad (which is not
 # available to the Agent Python that runs plugin services in frozen mode).
 from plugins._service_runtime import (

@@ -11,7 +11,8 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 
-from opensquad.proc_text import native_text_kwargs, to_text, utf8_text_kwargs
+from opensquad.child_output import StreamTail
+from opensquad.proc_text import native_text_kwargs, utf8_text_kwargs
 
 # Default Vite dev server port; can be overridden by system_config.json ports.frontend
 _DEFAULT_VITE_PORT = 5173
@@ -612,8 +613,24 @@ def run_start(args):
         except Exception as exc:
             print(f"[start] Warning: Windows job object unavailable: {exc}")
 
+    # Piped stderr must be drained from the moment the child starts, not read
+    # after it exits: a full pipe buffer (4 KiB on Windows) blocks the child's
+    # next write, and a child blocking inside a log call freezes every thread
+    # that logs — including the agent's, which is how the whole stack
+    # deadlocked once.
+    stderr_tails: dict[str, StreamTail] = {}
+
+    def _start_drain(name: str, proc: subprocess.Popen) -> StreamTail | None:
+        stream = getattr(proc, "stderr", None)
+        if stream is None:  # --verbose inherits the console; nothing to drain
+            return None
+        tail = StreamTail(stream, name=f"opensquad-stderr-{name}")
+        stderr_tails[name] = tail
+        return tail
+
     def _track(name: str, proc: subprocess.Popen) -> None:
         _ACTIVE_PROCESSES.append((name, proc))
+        _start_drain(name, proc)
         if _ACTIVE_JOB is not None:
             if not _ACTIVE_JOB.add(proc):
                 print(f"[start] Warning: could not bind {name} (PID {proc.pid}) to kill-on-close job")
@@ -823,17 +840,13 @@ def run_start(args):
                 rc = p.poll()
                 if rc is not None:
                     failures[name] = failures.get(name, 0) + 1
-                    # Capture stderr to show the real startup error
+                    # Capture stderr to show the real startup error. The drain
+                    # thread consumed the pipe, so report what it buffered.
                     stderr_text = ""
-                    try:
-                        if hasattr(p, "stderr") and p.stderr:
-                            # Children run with PYTHONUTF8=1 → stderr is UTF-8.
-                            # to_text() also copes with the bytes-mode processes
-                            # (gateway/registry/launcher), which previously made
-                            # this read raise AttributeError and hide the crash.
-                            stderr_text = to_text(p.stderr.read(), encoding="utf-8").strip()
-                    except Exception:
-                        pass
+                    tail = stderr_tails.get(name)
+                    if tail is not None:
+                        tail.join(timeout=1.0)
+                        stderr_text = "\n".join(tail.tail(0)).strip()
                     print(f"[start] {name} (PID {p.pid}) exited with code {rc}")
                     if stderr_text:
                         # Show last 5 lines of stderr (the key error is usually at the end)
@@ -864,6 +877,7 @@ def run_start(args):
                                 for i, (n, _) in enumerate(processes):
                                     if n == name:
                                         processes[i] = (name, new_p)
+                                        _start_drain(name, new_p)
                                         if _ACTIVE_JOB is not None and not _ACTIVE_JOB.add(new_p):
                                             print(
                                                 f"[start] Warning: could not bind restarted {name} "

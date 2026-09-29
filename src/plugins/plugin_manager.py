@@ -17,10 +17,14 @@ import os
 import sys
 from typing import Any
 
-# Add opensquad to sys.path if needed
+# Add opensquad to sys.path if needed — APPEND, never insert(0). This module is
+# always imported from a tree that is reachable on sys.path already, so the
+# append only guarantees `opensquad` resolves; putting it first would shadow the
+# running interpreter's own site-packages when this path IS one (pip layout) or
+# loose bundle copies (frozen layout). See plugins/external_api/adapter.py.
 _root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if _root not in sys.path:
-    sys.path.insert(0, _root)
+    sys.path.append(_root)
 
 import contextlib
 

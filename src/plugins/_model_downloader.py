@@ -62,6 +62,29 @@ from typing import Any, Callable, Iterable, Sequence
 
 logger = logging.getLogger("plugins.model_downloader")
 
+# ── Status I/O policy ───────────────────────────────────────────────────
+# The status file is shared *between processes* (the plugin service writes it;
+# the gateway, the launcher and Electron read it) and is polled on every UI
+# tick, so two rules apply:
+#
+#   * a write must never raise and never lose the update. On Windows
+#     ``os.replace`` is atomic but needs DELETE access to the target, which the
+#     OS denies while another process holds the file open for reading
+#     (``open()`` shares read/write but not delete) — that is the
+#     ``[WinError 5] … download_status.json.tmp -> download_status.json``
+#     failure a download hit at 0%. Retry, then rewrite the target in place,
+#     which only needs write access.
+#   * a reader must be side-effect free: "downloading with no thread in *my*
+#     process" is not evidence of an interruption (every other process has no
+#     such thread either). Only a record that stopped advancing for
+#     ``DOWNLOAD_STALE_SECONDS`` counts as dead.
+_STATUS_WRITE_LOCK = threading.Lock()
+_STATUS_REPLACE_ATTEMPTS = 10
+_STATUS_REPLACE_BACKOFF_S = 0.05
+_STATUS_REPLACE_BACKOFF_MAX_S = 0.5
+
+DOWNLOAD_STALE_SECONDS = 150.0
+
 
 class DownloadCancelled(Exception):  # noqa: N818  (kept for backward-compat references)
     """Raised when a download is cancelled (uninstall or force re-download).
@@ -197,15 +220,78 @@ def _read_json(path: Path) -> dict[str, Any]:
         return {}
 
 
-def _write_json(path: Path, payload: dict[str, Any]) -> None:
+def replace_with_retry(
+    src: str | os.PathLike[str],
+    dst: str | os.PathLike[str],
+) -> None:
+    """Move ``src`` onto ``dst``, tolerating a target that is open for reading.
+
+    Retries ``os.replace`` with exponential backoff (50 ms → 500 ms), then
+    falls back to copying into the target in place — that needs only write
+    access, which readers do share, so it succeeds where the rename cannot.
+
+    Raises the last ``OSError`` when every strategy failed. Callers that must
+    not fail (status writes) wrap it.
+    """
+    src_p, dst_p = Path(src), Path(dst)
+    delay = _STATUS_REPLACE_BACKOFF_S
+    last: OSError | None = None
+    for attempt in range(_STATUS_REPLACE_ATTEMPTS):
+        try:
+            os.replace(src_p, dst_p)
+            return
+        except OSError as e:
+            last = e
+            if attempt + 1 < _STATUS_REPLACE_ATTEMPTS:
+                time.sleep(delay)
+                delay = min(delay * 2, _STATUS_REPLACE_BACKOFF_MAX_S)
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_suffix(path.suffix + ".tmp")
-        with tmp.open("w", encoding="utf-8") as f:
-            json.dump(payload, f, ensure_ascii=False, indent=2)
-        os.replace(tmp, path)
+        import shutil
+
+        with open(src_p, "rb") as handle, open(dst_p, "wb") as out:
+            shutil.copyfileobj(handle, out)
+        os.remove(src_p)
+        logger.debug("[model_downloader] rewrote %s in place (rename kept failing: %s)", dst_p, last)
     except OSError as e:
-        logger.warning("[model_downloader] status write failed: %s", e)
+        raise (last or e) from e
+
+
+def write_status_json(path: str | os.PathLike[str], payload: dict[str, Any]) -> None:
+    """Persist a download-status payload as JSON. Never raises.
+
+    Serialised per process (``_STATUS_WRITE_LOCK``) so concurrent writers
+    cannot interleave, and written through :func:`replace_with_retry` so a
+    reader holding the file open cannot turn a status update into an exception.
+    """
+    p = Path(path)
+    try:
+        p.parent.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        logger.warning("[model_downloader] status dir create failed for %s: %s", p, e)
+        return
+    data = json.dumps(payload, ensure_ascii=False, indent=2)
+    with _STATUS_WRITE_LOCK:
+        tmp = p.with_suffix(p.suffix + ".tmp")
+        try:
+            tmp.write_text(data, encoding="utf-8")
+            replace_with_retry(tmp, p)
+        except OSError as e:
+            logger.warning("[model_downloader] status write failed for %s: %s", p, e)
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+
+def status_is_stale(updated_at: float) -> bool:
+    """True when a persisted status stopped advancing DOWNLOAD_STALE_SECONDS ago.
+
+    A missing/zero timestamp cannot be verified as live, so it counts as stale
+    (that keeps the UI's retry button usable instead of spinning forever).
+    """
+    if not updated_at:
+        return True
+    return time.time() - updated_at > DOWNLOAD_STALE_SECONDS
 
 
 # ── Model store ─────────────────────────────────────────────────────────
@@ -252,11 +338,13 @@ class ModelStore:
         if not payload:
             return DownloadStatus().to_dict()
         st = DownloadStatus.from_dict(payload)
-        # A persisted "downloading" state with no live thread means the
-        # process (or the download) was interrupted — e.g. the user closed
-        # the app mid-download. Reset it so the UI doesn't sit on a forever
-        # spinner and the download button becomes actionable again.
-        if st.state == "downloading" and not self.is_running():
+        # A persisted "downloading" state with no *local* thread is not by
+        # itself an interruption: the store is shared between processes, and a
+        # reader cannot see the owning process's thread. Only a record that
+        # stopped advancing for DOWNLOAD_STALE_SECONDS is dead (e.g. the user
+        # closed the app mid-download); reset it so the UI doesn't sit on a
+        # forever spinner and the download button becomes actionable again.
+        if st.state == "downloading" and not self.is_running() and status_is_stale(st.updated_at):
             st.state = "error"
             st.error = "Previous download was interrupted"
             st.message = "Download interrupted — click download to retry"
@@ -266,7 +354,7 @@ class ModelStore:
 
     def _persist(self, st: DownloadStatus) -> None:
         st.updated_at = time.time()
-        _write_json(self.status_path, st.to_dict())
+        write_status_json(self.status_path, st.to_dict())
 
     def is_running(self) -> bool:
         with self._lock:
@@ -535,7 +623,9 @@ def _http_stream_to_file(
         except OSError:
             pass
         raise
-    os.replace(tmp, dest)
+    # The service may hold the previous weights open (it loads them at boot),
+    # which blocks the rename on Windows — see replace_with_retry.
+    replace_with_retry(tmp, dest)
     return written
 
 
@@ -958,6 +1048,7 @@ def force_remove_status_file(path: str) -> None:
 
 
 __all__ = [
+    "DOWNLOAD_STALE_SECONDS",
     "DownloadCancelled",
     "DownloadStatus",
     "FileMirror",
@@ -972,4 +1063,7 @@ __all__ = [
     "hf_hub_file_via_hub",
     "hf_snapshot_via_hub",
     "huggingface_mirror",
+    "replace_with_retry",
+    "status_is_stale",
+    "write_status_json",
 ]
