@@ -46,6 +46,9 @@ from reranker_model_store import (
     start_download as reranker_start_download,
 )
 from reranker_model_store import (
+    status_path as reranker_status_path,
+)
+from reranker_model_store import (
     uninstall as reranker_uninstall,
 )
 from setup_status import (  # noqa: E402
@@ -87,7 +90,10 @@ def handle_action(project_root: str, action: str, data: dict | None = None) -> d
     # ── Reranker model actions ───────────────────────────────────────
     if action in ("download_reranker", "download_reranker_model", "reranker_download"):
         result = reranker_start_download(force=bool(data.get("force", False)))
-        return {"ok": True, "action": action, **result}
+        # The launcher watches this path and restarts the websearch service once
+        # the weights land: the sidecar resolves the model at boot, so a model
+        # fetched afterwards is invisible to the running service.
+        return {"ok": True, "action": action, **result, "download_status_path": reranker_status_path()}
 
     if action in ("reranker_status", "reranker_refresh"):
         return {"ok": True, "action": action, **reranker_status()}

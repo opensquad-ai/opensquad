@@ -223,8 +223,38 @@ class StateMachine:
                         new_model = _new_cfg.get("model", {})
                         if new_model != runner._model_config:
                             await self._apply_model_reload(runner, new_model)
+                        # Voice hot-reload: a settings PUT (or the WS
+                        # set_voice_config) rewrites voice.* on disk; without
+                        # this the running agent kept the boot-time cards and
+                        # the ASR/TTS tools kept talking to the old endpoint.
+                        new_voice = _new_cfg.get("voice", {})
+                        if new_voice != runner._voice_config:
+                            self._apply_voice_reload(runner, _new_cfg)
                 except Exception as _e:
                     logger.warning("[StateMachine] Config reload error: %s", _e)
+
+    def _apply_voice_reload(self, runner: Any, new_cfg: dict) -> None:
+        """Apply ``voice`` changes from a reloaded config.json.
+
+        The ASR/TTS tools and the realtime manager read the voice cards out of
+        the agent runtime context (and the injected tool config) on each use, so
+        refreshing both is what makes a new card take effect with no restart —
+        the same two calls ``gateway_adapter``'s ``set_voice_config`` makes.
+        """
+        logger.info("[StateMachine] Voice config changed, hot-reloading...")
+        runner._voice_config = new_cfg.get("voice", {}) or {}
+        try:
+            from opensquad import agent_runtime_context as arc
+
+            arc.set_context(config=new_cfg)
+        except Exception as _e:
+            logger.warning("[StateMachine] Voice config reload (context) failed: %s", _e)
+        try:
+            from plugins.step_voice import step_voice_tools as _sv_tools
+
+            _sv_tools.set_agent_config(new_cfg)
+        except Exception as _e:
+            logger.warning("[StateMachine] Voice config reload (tools) failed: %s", _e)
 
     def _apply_config_tools_reload(self, runner: Any, new_cfg: dict) -> None:
         """Apply tool-level changes from a reloaded config.json."""

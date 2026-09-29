@@ -21,7 +21,9 @@ from __future__ import annotations
 
 import logging
 import os
+import shutil
 import sys
+import threading
 from typing import Any
 
 # Always import ``_model_downloader`` as a top-level module so the launcher's
@@ -29,12 +31,16 @@ from typing import Any
 # spec_from_file_location) share ONE module instance — and therefore one
 # ``ModelStore`` singleton.  A shared singleton is what lets the UI see a
 # running download thread across requests.  Put the plugins root (where
-# ``_model_downloader.py`` lives) on sys.path so it resolves everywhere.
+# ``_model_downloader.py`` lives) on sys.path so it resolves everywhere —
+# APPENDED, never first: the plugins tree also contains packages whose names
+# collide with installed ones (``plugins/telegram/`` vs the PyPI ``telegram``),
+# and putting the tree in front made any later ``import telegram`` resolve to
+# the plugin directory and die with ImportError.
 _here = os.path.dirname(os.path.abspath(__file__))
 _plugins_root = os.path.abspath(os.path.join(_here, ".."))
 for _p in (_plugins_root, _here):
     if _p not in sys.path:
-        sys.path.insert(0, _p)
+        sys.path.append(_p)
 
 from _model_downloader import (  # noqa: E402
     FileMirror,
@@ -109,6 +115,15 @@ def _status_path() -> str:
     return os.path.join(_plugin_data_dir(), "reranker_model_status.json")
 
 
+def status_path() -> str:
+    """Path of the persisted download-status file.
+
+    Public so the launcher can watch a download it started and restart the
+    service once the weights land (``query.handle_action`` reports it).
+    """
+    return _status_path()
+
+
 # ── Store singleton ───────────────────────────────────────────────────
 
 _store: ModelStore | None = None
@@ -161,8 +176,13 @@ def _snapshot_flat_complete(snap: str) -> bool:
     return any(any(f.endswith(ext) for ext in WEIGHT_GLOBS) for f in os.listdir(snap))
 
 
-def _active_snapshot_dir() -> str:
-    """Return the snapshot dir that actually holds the weights (workspace first)."""
+def active_snapshot_dir() -> str:
+    """Return the snapshot dir that actually holds the weights (workspace first).
+
+    Public because the sidecar resolves the directory it loads from here: the
+    store only ever *downloads* into the workspace, so a caller that hardcoded
+    the install-dir path could never see a downloaded model.
+    """
     if _snapshot_flat_complete(_snapshot_dir()):
         return _snapshot_dir()
     if _snapshot_flat_complete(_legacy_snapshot_dir()):
@@ -174,6 +194,85 @@ def is_complete() -> bool:
     """Check that the model is present in the workspace path or the legacy
     ``service/reranker/models`` deploy path."""
     return _snapshot_flat_complete(_snapshot_dir()) or _snapshot_flat_complete(_legacy_snapshot_dir())
+
+
+# ── One-time migration out of the install dir ──────────────────────────
+# The workspace is user data and survives an upgrade; the legacy
+# ``service/reranker/models`` tree lives *inside* the installed plugin tree,
+# which a reinstall replaces — taking the 1.2GB of weights with it. Bringing
+# them into the workspace once means the next upgrade has nothing to fetch.
+_migration_lock = threading.Lock()
+_migration_done = False
+
+
+def migrate_legacy_snapshot() -> str:
+    """Bring install-dir weights into the workspace, once per process.
+
+    Returns "" when there is nothing to do — the usual case, since the store's
+    own downloads already land in the workspace — or a short clause for the log.
+
+    Same volume: a rename, which is instant. Otherwise the copy runs on a daemon
+    thread (a 1.2GB copy must not delay a websearch boot) and the install-dir
+    copy is left in place, so a sidecar that is already reading it keeps working.
+    Never raises, and deletes nothing unless the rename itself succeeded.
+    """
+    global _migration_done
+    with _migration_lock:
+        if _migration_done:
+            return ""
+        _migration_done = True
+
+    target, legacy = _snapshot_dir(), _legacy_snapshot_dir()
+    if _snapshot_flat_complete(target) or not _snapshot_flat_complete(legacy):
+        return ""
+    if _get_store().is_running():
+        return ""  # a download is already filling the workspace
+
+    try:
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+        os.replace(legacy, target)
+    except OSError as e:
+        logger.info(
+            "[reranker] cannot rename %s out of the install dir (%s); copying it into the workspace instead",
+            legacy,
+            e,
+        )
+        threading.Thread(
+            target=_copy_snapshot_tree,
+            args=(legacy, target),
+            name="reranker-migrate-legacy",
+            daemon=True,
+        ).start()
+        return "is copying existing install-dir weights into the workspace in the background"
+
+    _prune_empty_dirs(os.path.dirname(legacy))
+    logger.info("[reranker] moved existing weights into the workspace: %s", target)
+    return "moved existing install-dir weights into the workspace"
+
+
+def _copy_snapshot_tree(src: str, dst: str) -> None:
+    """Copy a snapshot dir into the workspace. Best effort, never raises."""
+    try:
+        os.makedirs(dst, exist_ok=True)
+        for name in os.listdir(src):
+            s, d = os.path.join(src, name), os.path.join(dst, name)
+            if os.path.isdir(s):
+                shutil.copytree(s, d, dirs_exist_ok=True)
+            else:
+                shutil.copy2(s, d)
+        logger.info("[reranker] copied existing weights into the workspace: %s", dst)
+    except OSError as e:
+        logger.warning("[reranker] could not copy the install-dir weights into the workspace: %s", e)
+
+
+def _prune_empty_dirs(path: str) -> None:
+    """Drop the empty parents a rename leaves behind (best effort)."""
+    while path and os.path.isdir(path):
+        try:
+            os.rmdir(path)
+        except OSError:
+            return
+        path = os.path.dirname(path)
 
 
 def file_sizes(snap: str | None = None) -> dict[str, int]:
@@ -199,7 +298,7 @@ def missing_files(snap: str | None = None) -> list[str]:
 
 
 def get_status() -> dict[str, Any]:
-    active = _active_snapshot_dir()
+    active = active_snapshot_dir()
     ready = is_complete()
     store = _get_store()
     download = store.get_status()

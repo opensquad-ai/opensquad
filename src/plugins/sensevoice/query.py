@@ -11,7 +11,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from plugins.sensevoice.model_store import get_status, start_download, uninstall
+from plugins.sensevoice.model_store import get_status, start_download, status_path, uninstall
 
 logger = logging.getLogger("plugins.sensevoice.query")
 
@@ -43,7 +43,10 @@ def handle_action(project_root: str, action: str, data: dict | None = None) -> d
     if action in ("download_model", "download"):
         force = bool(data.get("force", False))
         result = start_download(force=force)
-        return {"ok": True, "action": action, **result}
+        # The launcher watches this path and restarts the SenseVoice service once
+        # the weights land: the service loads its ONNX session at boot and cannot
+        # see a model that arrived later.
+        return {"ok": True, "action": action, **result, "download_status_path": status_path()}
 
     if action in ("uninstall_model", "uninstall"):
         result = uninstall()

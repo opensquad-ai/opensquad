@@ -46,6 +46,11 @@ _PATH_FIXED = (
     "telegram/send_tools.py",
     "websearch/websearch.py",
     "plugin_manager.py",
+    # Added later the same day: its insert(0) put the plugins tree in front, and
+    # the tree contains `telegram/` — so a later `import telegram` in the same
+    # process (plugins/telegram/adapter.py) resolved to the plugin directory
+    # instead of the installed python-telegram-bot and raised ImportError.
+    "websearch/reranker_model_store.py",
 )
 
 
@@ -252,7 +257,7 @@ class TestStatusReconciliation:
 
         monkeypatch.setattr(m, "is_complete", lambda: True)
         monkeypatch.setattr(m, "_get_store", lambda: _Store())
-        monkeypatch.setattr(m, "_active_snapshot_dir", lambda: "")
+        monkeypatch.setattr(m, "active_snapshot_dir", lambda: "")
         monkeypatch.setattr(m, "_legacy_snapshot_dir", lambda: "")
         monkeypatch.setattr(m, "model_dir", lambda: "")
         monkeypatch.setattr(m, "file_sizes", lambda *_a: {})
@@ -275,7 +280,7 @@ class TestStatusReconciliation:
 
         monkeypatch.setattr(m, "is_complete", lambda: False)
         monkeypatch.setattr(m, "_get_store", lambda: _Store())
-        monkeypatch.setattr(m, "_active_snapshot_dir", lambda: "")
+        monkeypatch.setattr(m, "active_snapshot_dir", lambda: "")
         monkeypatch.setattr(m, "_legacy_snapshot_dir", lambda: "")
         monkeypatch.setattr(m, "model_dir", lambda: "")
         monkeypatch.setattr(m, "file_sizes", lambda *_a: {})
