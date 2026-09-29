@@ -139,6 +139,13 @@ def _resolve_packaged_python_executable() -> str | None:
     return None
 
 
+def _same_interpreter(a: str | None, b: str | None) -> bool:
+    """True when both paths name the same interpreter executable."""
+    if not a or not b:
+        return False
+    return os.path.normcase(os.path.abspath(a)) == os.path.normcase(os.path.abspath(b))
+
+
 def _child_python_executable() -> str | None:
     """Python interpreter for agent/plugin child processes.
 
@@ -153,12 +160,25 @@ def _child_python_executable() -> str | None:
     return _resolve_packaged_python_executable()
 
 
-def _build_child_process_env(extra: dict[str, str] | None = None) -> dict[str, str]:
+def _build_child_process_env(
+    extra: dict[str, str] | None = None,
+    *,
+    python_exe: str | None = None,
+) -> dict[str, str]:
     """Environment for agent/plugin subprocesses.
 
     Strip PyInstaller ``_internal`` dirs from PATH on Windows so a system Python
     (e.g. 3.13) does not load ``python311.dll`` from the bundled backend and crash
     with ``Module use of python311.dll conflicts with this version of Python``.
+
+    ``python_exe`` is the interpreter the child will actually run.  When it is a
+    *different* interpreter than this launcher, PYTHONPATH is cleared instead of
+    being seeded with the launcher's own package tree: those entries were
+    compiled for/installed in the launcher's interpreter (3.12 site-packages,
+    its own ``opensquad`` checkout), and a child on another interpreter either
+    ignores them or loads ABI-incompatible copies of packages it has installed
+    itself.  Omit ``python_exe`` (or pass this process's interpreter) to keep the
+    historical behaviour agents rely on.
     """
     child_env = os.environ.copy()
     if getattr(sys, "frozen", False):
@@ -217,7 +237,18 @@ def _build_child_process_env(extra: dict[str, str] | None = None) -> dict[str, s
             child_env.setdefault("OPENSQUAD_USER_DATA", ws_abs)
 
         existing_pp = child_env.get("PYTHONPATH", "")
-        child_env["PYTHONPATH"] = (install_dir + os.pathsep + existing_pp) if existing_pp else install_dir
+        if python_exe and not _same_interpreter(python_exe, sys.executable):
+            # Foreign interpreter — see the docstring. This launcher's paths
+            # mean nothing to it (see the frozen branch above for the same
+            # reasoning) and can shadow its own installed packages.
+            child_env["PYTHONPATH"] = ""
+            _log.debug(
+                "[Launcher] Clearing PYTHONPATH for child interpreter %s (launcher runs %s)",
+                python_exe,
+                sys.executable,
+            )
+        else:
+            child_env["PYTHONPATH"] = (install_dir + os.pathsep + existing_pp) if existing_pp else install_dir
 
     if extra:
         child_env.update(extra)
@@ -745,7 +776,8 @@ class AgentProcess:
                 # Private model cards / agents data live in the workspace — never src/.
                 "OPENSQUAD_WORKSPACE": syscfg.get_workspace(),
                 "OPENSQUAD_USER_DATA": syscfg.get_workspace(),
-            }
+            },
+            python_exe=python_exe,
         )
         creationflags = 0
         if sys.platform == "win32":
@@ -1165,31 +1197,32 @@ class PluginServiceProcess:
         if not pip_deps:
             return True
 
-        pkg_import_map = _pkg_import_map()
-
-        def _check_all() -> list[str]:
-            """Return list of deps still missing (not importable in plugin Python)."""
-            still_missing = []
-            for dep in pip_deps:
-                pkg = _normalize_pip_pkg(dep)
-                import_name = pkg_import_map.get(pkg, pkg.replace("-", "_"))
-                if not _plugin_python_has_module(import_name):
-                    still_missing.append(dep)
-            return still_missing
+        def _check_all() -> tuple[list[str], list[str]]:
+            """``(deps missing, deps the probe could not decide on)``."""
+            return _classify_plugin_deps(pip_deps)
 
         try:
-            missing = _check_all()
+            missing, unknown = _check_all()
+            if unknown:
+                _log.warning(
+                    f"[Launcher] {self.plugin_id}: dependency probe inconclusive for {unknown} — not treated as missing"
+                )
             if missing:
                 _log.info(f"[Launcher] Installing dependencies for {self.plugin_id}: {missing}")
                 _ensure_pip_and_install(missing, label=self.plugin_id)
                 # Verify: pip may have failed silently or partially installed
-                still_missing = _check_all()
+                still_missing, unknown = _check_all()
                 if still_missing:
                     _log.error(
                         f"[Launcher] {self.plugin_id}: dependencies still missing after install: {still_missing}"
                     )
                     self._circuit_last_failure_reason = f"Dependencies not installed: {still_missing}"
                     return False
+                if unknown:
+                    _log.warning(
+                        f"[Launcher] {self.plugin_id}: could not verify {unknown} after install — "
+                        "starting anyway (the service reports its own import errors)"
+                    )
 
             # Playwright Chromium is ~150MB — never block service start on download.
             # Schedule a background install; first search may wait/fail until ready.
@@ -1243,6 +1276,10 @@ class PluginServiceProcess:
 
         cmd_str = self.service_cfg.get("cmd", "")
         entry = self.service_cfg.get("entry", "")
+        # The interpreter this service will actually run on. Plugin services are
+        # spawned with the Agent Python runtime, which is usually a *different*
+        # interpreter than this launcher (see _plugin_python_executable).
+        plugin_python = _plugin_python_executable()
 
         if cmd_str:
             # Shell command mode: supports npx / node / any executable command
@@ -1254,7 +1291,7 @@ class PluginServiceProcess:
                 _log.info(f"[Launcher] Plugin service entry not found: {abs_entry}")
                 self.state = "error"
                 return False
-            popen_args = [_plugin_python_executable(), abs_entry]
+            popen_args = [plugin_python, abs_entry]
             popen_kwargs = {}
         else:
             _log.info(f"[Launcher] Plugin service {self.plugin_id}: neither 'cmd' nor 'entry' defined")
@@ -1304,7 +1341,8 @@ class PluginServiceProcess:
                 "OPENSQUAD_WORKSPACE": syscfg.get_workspace(),
                 "PORT": str(self.port),
                 **self.service_cfg.get("env", {}),
-            }
+            },
+            python_exe=plugin_python,
         )
         creationflags = 0
         if sys.platform == "win32":
@@ -1775,7 +1813,13 @@ def _ensure_pip_and_install(packages: list, label: str = "") -> bool:
         return True
 
     with _pip_install_lock:
-        return _ensure_pip_and_install_unlocked(packages, label=label)
+        ok = _ensure_pip_and_install_unlocked(packages, label=label)
+    if ok:
+        # The dist → import-name snapshot was taken before these packages
+        # existed; re-read it so verification resolves them from metadata
+        # instead of guessing dash-to-underscore.
+        _invalidate_plugin_dist_module_map()
+    return ok
 
 
 def _ensure_pip_and_install_unlocked(packages: list, label: str = "") -> bool:
@@ -1791,7 +1835,7 @@ def _ensure_pip_and_install_unlocked(packages: list, label: str = "") -> bool:
     # Build the clean env once — used by both uv and pip paths below.
     # Sanitizes PYTHONHOME/PYTHONPATH so the launcher's frozen-bundle env
     # does not leak into the Agent Python embed.
-    clean_env = _build_child_process_env()
+    clean_env = _build_child_process_env(python_exe=target_python)
 
     # ── Prefer uv when available ──────────────────────────────────────────
     # uv doesn't need pip to be bootstrapped in the target Python, so it
@@ -1952,44 +1996,196 @@ def _ensure_pip_and_install_unlocked(packages: list, label: str = "") -> bool:
         return False
 
 
-def _plugin_python_has_module(import_name: str) -> bool:
-    """Check if a module is importable in the *plugin service Python*.
+# ── Plugin dependency probing ───────────────────────────────────────────────
+# A probe spawns the plugin interpreter and imports one module. Cold imports of
+# real plugin deps are not instant (measured on the bundled Agent Python:
+# lark_oapi ~10s, torch ~4s, transformers ~2.4s) and the box is usually busy
+# while the launcher starts a dozen services, so the budget has to be generous:
+# a probe that merely ran out of time must never be read as "dependency is not
+# installed" — that is what used to open the circuit breaker and refuse to start
+# perfectly healthy services.
+_PLUGIN_MODULE_PROBE_TIMEOUT_S = 60.0
 
-    Uses a subprocess instead of in-process ``importlib.import_module`` because
-    the launcher process (frozen ``run.exe``) has its own bundled copy of
-    fastapi/uvicorn/click/etc. in ``_internal/``; importing them in-process
-    would always succeed and hide the fact that the Agent Python runtime is
-    missing them, leading to ``ModuleNotFoundError`` when the service actually
-    starts.
+# Modules verified present. Only positives are cached: a positive cannot become
+# a negative without an uninstall, and caching them removes the repeated cold
+# import cost (deps are probed per service *and* in the startup batch).
+_plugin_module_present: set[str] = set()
+_plugin_module_lock = threading.Lock()
 
-    Uses ``_build_child_process_env()`` for the subprocess env (same as
-    ``PluginServiceProcess.start()``) to ensure PYTHONHOME/PYTHONPATH are
-    sanitized — without this the launcher's frozen-bundle env can leak into
-    the Agent Python embed and cause false negatives (module appears missing
-    even though it's installed in site-packages).
+# {normalized interpreter path: {normalized distribution name: [module names]}}
+_plugin_dist_module_map_cache: dict[str, dict[str, list[str]]] = {}
+
+# Read ``{dist: [top-level module, ...]}`` from the interpreter's own metadata.
+_METADATA_PROBE_SRC = (
+    "import importlib.metadata as m, json\n"
+    "rev = {}\n"
+    "for mod, dists in m.packages_distributions().items():\n"
+    "    for dist in dists:\n"
+    "        rev.setdefault(dist.lower().replace('_', '-'), []).append(mod)\n"
+    "print(json.dumps(rev))\n"
+)
+
+
+def _normalize_dist_name(name: str) -> str:
+    """PEP 503-ish normalization so ``python-telegram-bot`` == ``Python_Telegram_Bot``."""
+    return name.strip().lower().replace("_", "-")
+
+
+def _plugin_dist_module_map(target_python: str) -> dict[str, list[str]]:
+    """``{distribution: [import names]}`` per the *plugin* interpreter's metadata.
+
+    A hand-maintained name map rots: ``python-telegram-bot`` imports as
+    ``telegram``, and the launcher spent every startup reinstalling it and then
+    reporting it missing.  ``importlib.metadata`` knows the real answer for the
+    packages that are installed, so ask the interpreter that runs the plugins.
+
+    Empty when metadata is unavailable (source .venv, exotic runtimes) — callers
+    fall back to the static map and the dash-to-underscore guess.
     """
+    key = os.path.normcase(os.path.abspath(target_python))
+    cached = _plugin_dist_module_map_cache.get(key)
+    if cached is not None:
+        return cached
+
+    snapshot: dict[str, list[str]] = {}
+    try:
+        r = subprocess.run(
+            [target_python, "-c", _METADATA_PROBE_SRC],
+            capture_output=True,
+            check=False,
+            timeout=_PLUGIN_MODULE_PROBE_TIMEOUT_S,
+            env=_build_child_process_env(python_exe=target_python),
+        )
+        if r.returncode == 0 and r.stdout:
+            loaded = json.loads(to_text(r.stdout, encoding="utf-8"))
+            if isinstance(loaded, dict):
+                snapshot = {str(k): [str(m) for m in v] for k, v in loaded.items() if isinstance(v, list)}
+    except Exception as e:  # noqa: BLE001
+        _log.debug(f"[Launcher] distribution metadata probe failed for {target_python}: {e}")
+
+    _plugin_dist_module_map_cache[key] = snapshot
+    return snapshot
+
+
+def _invalidate_plugin_dist_module_map() -> None:
+    """Drop the metadata snapshot so a fresh install resolves its import names."""
+    _plugin_dist_module_map_cache.clear()
+
+
+def _resolve_import_candidates(dep: str) -> list[str]:
+    """Import names to try for a declared pip dependency, most likely first.
+
+    Order: explicit map entry → real metadata for the installed distribution →
+    ``dash → underscore`` guess.  The map stays first because it is the only
+    source that can name the import of a distribution that is *not installed
+    yet* (the guess is wrong for e.g. ``pillow``/``PIL``, but the post-install
+    re-check resolves it from metadata).
+    """
+    pkg = _normalize_pip_pkg(dep)
+    candidates: list[str] = []
+
+    mapped = _pkg_import_map().get(pkg)
+    if mapped:
+        candidates.append(mapped)
+
+    modules = _plugin_dist_module_map(_plugin_python_executable()).get(_normalize_dist_name(pkg), [])
+    # Prefer public names: pyyaml reports both ``_yaml`` and ``yaml``.
+    candidates.extend(sorted(modules, key=lambda n: (n.startswith("_"), n)))
+
+    candidates.append(pkg.replace("-", "_"))
+
+    seen: set[str] = set()
+    return [c for c in candidates if c and not (c in seen or seen.add(c))]
+
+
+def _plugin_python_import_status(import_name: str) -> str:
+    """``"present"`` / ``"missing"`` / ``"unknown"`` for one import name.
+
+    Runs the import in a subprocess rather than in-process: the launcher may be
+    a frozen ``run.exe`` carrying its own bundled fastapi/uvicorn/click, so an
+    in-process import would succeed even when the plugin runtime lacks them.
+
+    ``"unknown"`` means the probe could not decide within the timeout.  Treat it
+    as *not* a missing dependency — see _PLUGIN_MODULE_PROBE_TIMEOUT_S.
+    """
+    with _plugin_module_lock:
+        if import_name in _plugin_module_present:
+            return "present"
+
     target_python = _plugin_python_executable()
     try:
         r = subprocess.run(
             [target_python, "-c", f"import {import_name}"],
             capture_output=True,
             check=False,
-            timeout=15,
-            env=_build_child_process_env(),
+            timeout=_PLUGIN_MODULE_PROBE_TIMEOUT_S,
+            # Clean env for a foreign interpreter: the launcher's PYTHONPATH
+            # entries belong to the launcher's own Python.
+            env=_build_child_process_env(python_exe=target_python),
         )
-        if r.returncode != 0:
-            stderr = to_text(r.stderr, encoding="utf-8")[:200] if r.stderr else ""
-            _log.debug(
-                f"[Launcher] _plugin_python_has_module('{import_name}') -> False "
-                f"(exit={r.returncode}, stderr={stderr!r})"
-            )
-        return r.returncode == 0
     except subprocess.TimeoutExpired:
-        _log.warning(f"[Launcher] _plugin_python_has_module('{import_name}') -> timeout (15s)")
-        return False
-    except Exception as e:
+        _log.warning(
+            f"[Launcher] _plugin_python_has_module('{import_name}') -> inconclusive "
+            f"(no answer in {_PLUGIN_MODULE_PROBE_TIMEOUT_S:.0f}s)"
+        )
+        return "unknown"
+    except Exception as e:  # noqa: BLE001
         _log.warning(f"[Launcher] _plugin_python_has_module('{import_name}') -> exception: {e}")
-        return False
+        return "unknown"
+
+    if r.returncode == 0:
+        with _plugin_module_lock:
+            _plugin_module_present.add(import_name)
+        return "present"
+
+    stderr = to_text(r.stderr, encoding="utf-8")[:200] if r.stderr else ""
+    _log.debug(
+        f"[Launcher] _plugin_python_has_module('{import_name}') -> False (exit={r.returncode}, stderr={stderr!r})"
+    )
+    return "missing"
+
+
+def _plugin_python_dist_status(dep: str) -> str:
+    """:func:`_plugin_python_import_status` for a pip dependency name.
+
+    ``present`` if any candidate import works; else ``unknown`` when every
+    candidate that could have worked was inconclusive, else ``missing``.
+    """
+    saw_unknown = False
+    for name in _resolve_import_candidates(dep):
+        status = _plugin_python_import_status(name)
+        if status == "present":
+            return "present"
+        if status == "unknown":
+            saw_unknown = True
+    return "unknown" if saw_unknown else "missing"
+
+
+def _classify_plugin_deps(deps: list[str]) -> tuple[list[str], list[str]]:
+    """Split declared pip deps into ``(missing, inconclusive)``.
+
+    A dependency whose probe timed out is *inconclusive*, not missing.  Callers
+    install both, but only ``missing`` justifies refusing to start a service.
+    """
+    missing: list[str] = []
+    inconclusive: list[str] = []
+    for dep in deps:
+        status = _plugin_python_dist_status(dep)
+        if status == "unknown":
+            inconclusive.append(dep)
+        elif status == "missing":
+            missing.append(dep)
+    return missing, inconclusive
+
+
+def _plugin_python_has_module(import_name: str) -> bool:
+    """True when ``import_name`` imports cleanly in the plugin service Python.
+
+    Thin boolean wrapper over :func:`_plugin_python_import_status`; callers that
+    gate a service start on the answer should use the tri-state version so an
+    inconclusive probe is not mistaken for a missing dependency.
+    """
+    return _plugin_python_import_status(import_name) == "present"
 
 
 def _ensure_playwright_browser() -> bool:
@@ -2035,7 +2231,7 @@ def _ensure_playwright_browser() -> bool:
             capture_output=True,
             check=False,
             timeout=300,
-            env=_build_child_process_env(),
+            env=_build_child_process_env(python_exe=target_python),
         )
         if r.returncode == 0:
             # Write sentinel so we don't re-download on next start
@@ -2087,18 +2283,21 @@ def _install_builtin_plugin_deps(svc_infos: list[dict]):
         # Without this, `pip install openai-whisper` (which pulls torch) can take
         # 10+ minutes and every PluginServiceProcess.start() waits on
         # _plugin_deps_ready, making websearch/external_api unstartable.
-        pkg_import_map = _pkg_import_map()
-
         missing = []
         skipped_heavy = []
+        to_check = []
         for dep in sorted(all_deps):
-            pkg = _normalize_pip_pkg(dep)
-            if pkg in _HEAVY_PACKAGES:
+            if _normalize_pip_pkg(dep) in _HEAVY_PACKAGES:
                 skipped_heavy.append(dep)
-                continue
-            import_name = pkg_import_map.get(pkg, pkg.replace("-", "_"))
-            if not _plugin_python_has_module(import_name):
-                missing.append(dep)
+            else:
+                to_check.append(dep)
+
+        missing, inconclusive = _classify_plugin_deps(to_check)
+        if inconclusive:
+            # Install anyway (a no-op when already present) but never report it
+            # as a missing dependency.
+            _log.info(f"[Launcher] Dependency probe inconclusive, installing to be safe: {inconclusive}")
+            missing.extend(inconclusive)
 
         if skipped_heavy:
             _log.info(

@@ -62,6 +62,31 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### Fixed
 
+- **Plugin services were told their dependencies were not installed when they
+  were, so websearch / sensevoice / feishu / telegram refused to start.** The
+  launcher decides by importing each declared pip dependency in the *plugin*
+  interpreter. Two things made that decision wrong. (1) The probe guessed the
+  import name from the distribution name, so `python-telegram-bot` was probed as
+  `python_telegram_bot` — a module that has never existed under any version. The
+  package was reinstalled on every startup and reported missing every time, the
+  circuit breaker opened, and the service never ran; the live launcher log shows
+  six such failures. The import name now comes from the interpreter's own
+  metadata (`importlib.metadata.packages_distributions()`, re-read after every
+  install), with the static map as an explicit override and the dash-to-underscore
+  guess only as a last resort. (2) The probe budget was 15 s and a timeout was
+  read as "missing". Cold imports are not fast — measured on the bundled Agent
+  Python, `lark_oapi` takes 10-13 s and `torch` ~4 s — and the box is busiest
+  exactly when the launcher starts a dozen services, so a healthy dependency
+  timed out and blocked its service. Probes now have 60 s, verified modules are
+  cached (a positive cannot become a negative without an uninstall), and a probe
+  that still runs out of time is reported as *inconclusive*: it is installed to
+  be safe and the service is started, with a warning, instead of being refused.
+  A real `ModuleNotFoundError` still blocks the start, as before. Separately,
+  plugin children were handed the launcher's own `PYTHONPATH` (its 3.12 package
+  tree) although they run on a different interpreter; `_build_child_process_env`
+  now takes the child's interpreter and clears `PYTHONPATH` whenever it differs
+  from the launcher's, mirroring what the frozen branch already did. Agent
+  children are unaffected — they resolve to the launcher's interpreter.
 - **An agent boot could freeze the whole process stack, with nothing in any log
   saying why.** `opensquad start` pipes each child's stderr and only read it
   *after* the child exited. A pipe holds ~4 KiB on Windows; once it filled, the
