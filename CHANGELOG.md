@@ -74,6 +74,20 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   and the response says so (`source`, `cache_age_seconds`, `cache_stale` in
   `meta`).
 
+### Changed
+
+- **The `whisper` plugin is no longer shipped.** It declared `openai-whisper`,
+  but the package that ended up installed under that name was a different
+  distribution publishing a top-level `whisper` module that raises
+  `TypeError: argument of type 'NoneType' is not iterable` on import. So the
+  launcher's dependency self-check reported the dependency missing on every
+  start and refused to start the service — a plugin nobody could use, surfacing
+  as a service that would not run. The plugin, its admin panel
+  (`plugin-views/whisper/`) and its tests are gone. The ASR surface is
+  unchanged: sensevoice is still the built-in ASR card, and a
+  Whisper-compatible service you run yourself is still reachable through
+  `services.whisper_url` and the built-in Whisper model card.
+
 ### Fixed
 
 - **Plugin services were told their dependencies were not installed when they

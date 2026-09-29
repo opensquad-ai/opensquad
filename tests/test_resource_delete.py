@@ -63,11 +63,24 @@ def _patch_uninstalled(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
     return path
 
 
-def test_resolve_plugin_dir_name_whisper_transcribe():
-    from opensquad.resource_uninstall import resolve_plugin_dir_name
+def test_resolve_plugin_dir_name_whisper_transcribe(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """A plugin.json ``name`` that differs from its on-disk dir must resolve."""
+    from opensquad import resource_uninstall
 
-    assert resolve_plugin_dir_name("whisper_transcribe") == "whisper"
-    assert resolve_plugin_dir_name("whisper") == "whisper"
+    workspace = tmp_path / "ws_plugins"
+    builtin = tmp_path / "builtin_plugins"
+    workspace.mkdir()
+    _write_plugin(builtin, "whisper", "whisper_transcribe")
+    monkeypatch.setattr(
+        resource_uninstall,
+        "resource_search_dirs",
+        lambda _kind: [str(builtin), str(workspace)],
+    )
+    _patch_plugin_trees(monkeypatch, workspace, builtin)
+
+    assert resource_uninstall.resolve_plugin_dir_name("whisper_transcribe") == "whisper"
+    assert resource_uninstall.resolve_plugin_dir_name("whisper") == "whisper"
+
     plugin_dir, dir_name = lm._resolve_plugin_dir("whisper_transcribe")
     assert dir_name == "whisper"
     assert plugin_dir is not None
@@ -212,10 +225,10 @@ def test_hide_plugin_tombstones_json_name_and_dir(tmp_path: Path, monkeypatch: p
 def test_collect_plugin_dirs_skips_locally_uninstalled(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     _patch_uninstalled(monkeypatch, tmp_path)
     found = collect_plugin_dirs()
-    assert "whisper" in found
-    ws.mark_locally_uninstalled("plugins", "whisper")
+    assert "sensevoice" in found
+    ws.mark_locally_uninstalled("plugins", "sensevoice")
     found = collect_plugin_dirs()
-    assert "whisper" not in found
-    ws.clear_locally_uninstalled("plugins", "whisper")
+    assert "sensevoice" not in found
+    ws.clear_locally_uninstalled("plugins", "sensevoice")
     found = collect_plugin_dirs()
-    assert "whisper" in found
+    assert "sensevoice" in found
