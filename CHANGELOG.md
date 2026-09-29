@@ -217,6 +217,45 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   class is now pinned to `AsyncAdaptedQueuePool` (the 2.0.38+ default), which
   keeps the intended pool on every 2.0.x. `sqlalchemy>=2.0.0` had been satisfied
   by the older release already present, so pip never upgraded it.
+- **`pip install opensquad` shipped no built-in ASR card, so no fresh install
+  could transcribe voice.** `ensure_builtin_model_cards()` copies
+  `builtin-sensevoice-asr.json` out of the installed `model_cards/`, and
+  `workspace_utils.BUILTIN_MODEL_CARD_FILES` names that card — but the card was
+  in no artifact (ignored by `.gitignore`, absent from `MANIFEST.in`, absent
+  from `[tool.setuptools.package-data] model_cards`), so the copy loop matched
+  nothing and returned `[]` without a word. The agent-voice ASR picker had no
+  "系统内置 SenseVoice" entry, and 1:1 voice plus group voice failed with
+  ``Agent has no ASR configured`` / "内置语音转文本不可用". The card is now
+  tracked and packaged in all four places, `ensure_builtin_model_cards()` logs a
+  warning when the install carries no such card (a packaging bug used to be
+  indistinguishable from "this deployment just has no ASR"), and a test fails if
+  any name in `BUILTIN_MODEL_CARD_FILES` is untracked — that guard was the one
+  missing. `builtin-whisper-asr.json` is deliberately *not* shipped: it points
+  at the removed whisper plugin's port 5001, so offering it would advertise a
+  service that no longer exists.
+- **A model download could abort at 0% with `[WinError 5] 拒绝访问:
+  '…\\download_status.json.tmp' -> '…\\download_status.json'`.** Status writes
+  used `tmp + os.replace`, and `os.replace` needs DELETE access to the target —
+  which Windows denies while another process holds the file open for reading,
+  and this file is read by the launcher, the gateway and the Electron UI on
+  every poll. The write also ran once per 256 KB chunk *inside* the download
+  loop, so the first collision killed the download. The SenseVoice store and the
+  shared `_model_downloader` store (reranker) now persist status through one
+  helper that serialises writers per process, retries the replace (10 attempts,
+  50 ms → 500 ms backoff) and then rewrites the target in place — a plain
+  open/write needs no DELETE access, so a reader cannot block it — and never
+  raises. The model-file rename uses the same retry, the websearch setup-status
+  write goes through the same helper, and `tests/test_plugin_model_status.py`
+  reproduces the original failure against the old form.
+- **A running download could be marked "Download interrupted" by a reader in
+  another process.** `read_status()` and `ModelStore.get_status()` treated
+  "`state == downloading` with no thread in *this* process" as an interruption
+  and *persisted* it, so the launcher reading the file while the plugin service
+  downloaded flipped the UI to a failure (and its retry button) mid-download.
+  Readers are now side-effect free, and only a record that stopped advancing for
+  150 s counts as dead — a download stalled inside one long read is still
+  "downloading". `get_status()` also reconciles the other direction: once the
+  weights are on disk, a stale `error`/`idle` becomes `ready`.
 
 ## [0.8.48] — 2026-09-28
 

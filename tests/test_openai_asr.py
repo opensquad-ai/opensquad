@@ -164,11 +164,11 @@ def test_ensure_builtin_model_cards(tmp_path):
     src = install / "model_cards"
     src.mkdir(parents=True)
     for name in BUILTIN_MODEL_CARD_FILES:
-        (src / name).write_text('{"name": "builtin-whisper-asr"}', encoding="utf-8")
+        (src / name).write_text('{"name": "builtin-sensevoice-asr"}', encoding="utf-8")
 
     copied = ensure_builtin_model_cards(workspace_path=str(ws), install_dir=str(install))
     assert copied == list(BUILTIN_MODEL_CARD_FILES)
-    dst = ws / "model_cards" / "builtin-whisper-asr.json"
+    dst = ws / "model_cards" / "builtin-sensevoice-asr.json"
     assert dst.is_file()
 
     # Second call must not overwrite / re-copy
@@ -176,6 +176,30 @@ def test_ensure_builtin_model_cards(tmp_path):
     copied2 = ensure_builtin_model_cards(workspace_path=str(ws), install_dir=str(install))
     assert copied2 == []
     assert '"user-edited"' in dst.read_text(encoding="utf-8")
+
+
+def test_ensure_builtin_model_cards_warns_when_the_card_is_not_installed(tmp_path, caplog):
+    # 0.8.49-alpha.3 shipped no built-in ASR card at all and said nothing: the
+    # copy loop silently skipped it and the ASR dropdown had no built-in entry.
+    from opensquad.workspace_utils import ensure_builtin_model_cards
+
+    install = tmp_path / "install"
+    (install / "model_cards").mkdir(parents=True)
+    with caplog.at_level("WARNING"):
+        copied = ensure_builtin_model_cards(workspace_path=str(tmp_path / "ws"), install_dir=str(install))
+
+    assert copied == []
+    assert any("not shipped" in r.message for r in caplog.records)
+
+
+def test_ensure_builtin_model_cards_warns_when_the_dir_is_not_installed(tmp_path, caplog):
+    from opensquad.workspace_utils import ensure_builtin_model_cards
+
+    with caplog.at_level("WARNING"):
+        copied = ensure_builtin_model_cards(workspace_path=str(tmp_path / "ws"), install_dir=str(tmp_path / "nope"))
+
+    assert copied == []
+    assert any("is missing" in r.message for r in caplog.records)
 
 
 # ---------------------------------------------------------------------------
