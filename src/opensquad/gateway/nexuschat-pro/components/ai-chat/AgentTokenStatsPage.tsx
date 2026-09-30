@@ -11,7 +11,7 @@ import {
   YAxis,
 } from 'recharts';
 import type { TooltipContentProps } from 'recharts';
-import { OpenSquadLoader } from './OpenSquadLoader';
+import { OpenSquadLoader } from '../OpenSquadLoader';
 import { tokenStatsAPI, type AgentTokenStats, type AgentTokenTimelinePoint } from '../../services/api';
 import { formatTokenCount, formatTokenExact } from '../../utils/usageFormat';
 import {
@@ -21,7 +21,7 @@ import {
   adminHeaderIconBox,
   adminHeaderSubtitle,
   adminHeaderTitle,
-} from './admin/adminShellStyles';
+} from '../admin/adminShellStyles';
 
 interface AgentTokenStatsPageProps {
   /** Canonical agent id (config `agent_id`) — matches the analytics DB column. */
