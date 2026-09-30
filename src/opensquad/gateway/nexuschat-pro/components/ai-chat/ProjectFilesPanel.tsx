@@ -2259,7 +2259,7 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
                         type="button"
                         className="flex-1 min-w-0 text-left truncate font-mono text-[11px]"
                         title={e.path}
-                        onClick={() => void toggleChangedExpand(e.path)}
+                        onClick={() => void openFileOrDiff(e.path)}
                       >
                         <span
                           className={
