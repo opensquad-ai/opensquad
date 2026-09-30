@@ -2356,6 +2356,258 @@ export const modelCardAPI = {
     apiRequest<{ ok: boolean }>(`/ai-web/admin/agents/${agentName}/model-card`, { method: 'DELETE' }),
 };
 
+// ---------------------------------------------------------------------------
+// Git — the user's own click path (the agent has separate `git.*` tools)
+// ---------------------------------------------------------------------------
+
+export interface GitFileEntry {
+  path: string;
+  /** Index or worktree column from porcelain v2: M/A/D/R/U/?… */
+  status: string;
+  orig_path?: string | null;
+}
+
+export interface GitCounts {
+  staged: number;
+  unstaged: number;
+  untracked: number;
+  conflicts: number;
+  /** Every path that differs from HEAD, counted once. */
+  total: number;
+}
+
+export interface GitStatus {
+  is_repo: boolean;
+  cwd?: string;
+  repo_root?: string | null;
+  name?: string;
+  branch?: string | null;
+  detached?: boolean;
+  /** The branch has no commits yet (`branch.oid (initial)`). */
+  initial?: boolean;
+  head_sha?: string;
+  upstream?: string | null;
+  ahead?: number;
+  behind?: number;
+  staged?: GitFileEntry[];
+  unstaged?: GitFileEntry[];
+  untracked?: GitFileEntry[];
+  conflicts?: GitFileEntry[];
+  counts?: GitCounts;
+  stash_count?: number;
+  in_progress?: { merge: boolean; rebase: boolean; cherry_pick: boolean; revert: boolean };
+  remotes?: Array<{ name: string; url: string }>;
+  error?: string;
+}
+
+export interface GitBranch {
+  name: string;
+  sha: string;
+  /** Committer date in seconds — the picker localizes the relative time. */
+  ts: number;
+  author?: string;
+  subject?: string;
+  upstream?: string | null;
+  ahead?: number;
+  behind?: number;
+  /** The upstream is gone (deleted on the remote). */
+  gone?: boolean;
+  current?: boolean;
+  remote?: string;
+}
+
+export interface GitBranchList {
+  ok?: boolean;
+  code?: string;
+  error?: string;
+  repo_root?: string;
+  current: string | null;
+  default_branch: string | null;
+  local: GitBranch[];
+  remote: GitBranch[];
+}
+
+export interface GitDiffLine {
+  type: 'context' | 'insert' | 'delete' | 'collapse';
+  old_lineno?: number | null;
+  new_lineno?: number | null;
+  text: string;
+  count?: number;
+  hidden?: unknown[];
+}
+
+export interface GitDiff {
+  path: string;
+  status: string;
+  additions: number;
+  deletions: number;
+  oversized?: boolean;
+  lines: GitDiffLine[];
+  error?: string;
+}
+
+/**
+ * Result of a git command. A refusal is not an HTTP error: `code` is what the UI
+ * branches on (`dirty_worktree` → offer to stash, `non_fast_forward` → offer a
+ * pull, `locked` → retry), and `hint` names the suggested next step.
+ */
+export interface GitResult {
+  ok: boolean;
+  code?: string;
+  error?: string;
+  hint?: string;
+  stashed?: boolean;
+  unstashed?: boolean;
+  branch?: string;
+  sha?: string;
+  conflicts?: string[];
+  via?: 'merge' | 'autostash';
+  paths?: string[];
+  removed?: string[];
+  restored?: string[];
+  counts?: GitCounts;
+}
+
+export interface GitSyncTask {
+  ok: boolean;
+  task_id: string;
+  op: 'fetch' | 'pull' | 'push';
+  status: 'pending' | 'running' | 'completed' | 'failed';
+  code?: string;
+  error?: string;
+  hint?: string;
+  mode?: 'fast_forward' | 'merge' | 'up_to_date';
+  conflicts?: string[];
+  via?: 'merge' | 'autostash';
+  ahead?: number;
+  behind?: number;
+  /** True when this answers a second click while the same op was still running. */
+  reused?: boolean;
+}
+
+const _rootQuery = (root?: string) => (root ? `?root=${encodeURIComponent(root)}` : '');
+
+/** Answer of the mode-switch worktree prepare (one stable worktree per root). */
+export interface GitWorktreePrepared extends GitResult {
+  id?: string;
+  created?: boolean;
+  worktree_path?: string;
+  base_ref?: string;
+}
+
+export const gitAPI = {
+  /** Branch, upstream, ahead/behind and uncommitted counts for the status bar. */
+  status: (name: string, root?: string) =>
+    apiRequest<GitStatus>(`/ai-web/admin/agents/${encodeURIComponent(name)}/git/status${_rootQuery(root)}`),
+
+  /** Local + remote branches with their last commit, for the branch picker. */
+  branches: (name: string, root?: string) =>
+    apiRequest<GitBranchList>(`/ai-web/admin/agents/${encodeURIComponent(name)}/git/branches${_rootQuery(root)}`),
+
+  /** One file's diff; same `lines[]` shape as `fs/session-diff` (same viewer). */
+  diff: (name: string, path: string, root?: string, opts?: { mode?: 'worktree' | 'staged'; collapse?: boolean }) => {
+    const q = encodeURIComponent(path || '');
+    const r = root ? `&root=${encodeURIComponent(root)}` : '';
+    const m = `&mode=${encodeURIComponent(opts?.mode || 'worktree')}`;
+    const c = opts?.collapse === false ? '&collapse=0' : '';
+    return apiRequest<GitDiff>(`/ai-web/admin/agents/${encodeURIComponent(name)}/git/diff?path=${q}${r}${m}${c}`);
+  },
+
+  /** Initialise a repository where the workspace has none. */
+  init: (name: string, root?: string) =>
+    apiRequest<GitResult>(`/ai-web/admin/agents/${encodeURIComponent(name)}/git/init`, {
+      method: 'POST',
+      body: JSON.stringify({ root }),
+    }),
+
+  /** Prepare (create or reuse) the Local/Worktree mode-switch worktree for a root. */
+  prepareWorktree: (name: string, root: string) =>
+    apiRequest<GitWorktreePrepared>(`/ai-web/admin/agents/${encodeURIComponent(name)}/git/worktree`, {
+      method: 'POST',
+      body: JSON.stringify({ root }),
+    }),
+
+  /** Switch branch; `stash_dirty` is the user's answer to a `dirty_worktree` refusal. */
+  checkout: (
+    name: string,
+    body: { branch: string; root?: string; create?: boolean; base?: string; stash_dirty?: boolean },
+  ) =>
+    apiRequest<GitResult>(`/ai-web/admin/agents/${encodeURIComponent(name)}/git/checkout`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+
+  deleteBranch: (name: string, branch: string, root?: string, force?: boolean) =>
+    apiRequest<GitResult>(`/ai-web/admin/agents/${encodeURIComponent(name)}/git/branch/delete`, {
+      method: 'POST',
+      body: JSON.stringify({ branch, root, force }),
+    }),
+
+  stage: (name: string, paths: string[], root?: string) =>
+    apiRequest<GitResult>(`/ai-web/admin/agents/${encodeURIComponent(name)}/git/stage`, {
+      method: 'POST',
+      body: JSON.stringify({ paths, root }),
+    }),
+
+  unstage: (name: string, paths: string[], root?: string) =>
+    apiRequest<GitResult>(`/ai-web/admin/agents/${encodeURIComponent(name)}/git/unstage`, {
+      method: 'POST',
+      body: JSON.stringify({ paths, root }),
+    }),
+
+  /** Throw away local changes; `confirm_untracked` is required to delete new files. */
+  discard: (name: string, paths: string[], root?: string, confirmUntracked?: boolean) =>
+    apiRequest<GitResult>(`/ai-web/admin/agents/${encodeURIComponent(name)}/git/discard`, {
+      method: 'POST',
+      body: JSON.stringify({ paths, root, confirm_untracked: confirmUntracked }),
+    }),
+
+  commit: (name: string, title: string, description: string, root?: string) =>
+    apiRequest<GitResult>(`/ai-web/admin/agents/${encodeURIComponent(name)}/git/commit`, {
+      method: 'POST',
+      body: JSON.stringify({ title, description, root }),
+    }),
+
+  /** Undo the last commit when it has not reached a remote. */
+  undoCommit: (name: string, root?: string) =>
+    apiRequest<GitResult>(`/ai-web/admin/agents/${encodeURIComponent(name)}/git/undo-commit`, {
+      method: 'POST',
+      body: JSON.stringify({ root }),
+    }),
+
+  /** `git merge --abort` — the way out of a conflicted pull. */
+  mergeAbort: (name: string, root?: string) =>
+    apiRequest<GitResult>(`/ai-web/admin/agents/${encodeURIComponent(name)}/git/merge/abort`, {
+      method: 'POST',
+      body: JSON.stringify({ root }),
+    }),
+
+  // The three network ops answer immediately with a task; poll `syncStatus`.
+  fetch: (name: string, body: { root?: string; remote?: string } = {}) =>
+    apiRequest<GitSyncTask>(`/ai-web/admin/agents/${encodeURIComponent(name)}/git/fetch`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+
+  pull: (name: string, body: { root?: string; remote?: string; branch?: string; autostash?: boolean } = {}) =>
+    apiRequest<GitSyncTask>(`/ai-web/admin/agents/${encodeURIComponent(name)}/git/pull`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+
+  push: (
+    name: string,
+    body: { root?: string; remote?: string; branch?: string; set_upstream?: boolean; force_with_lease?: boolean } = {},
+  ) =>
+    apiRequest<GitSyncTask>(`/ai-web/admin/agents/${encodeURIComponent(name)}/git/push`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+
+  syncStatus: (taskId: string) =>
+    apiRequest<GitSyncTask>(`/ai-web/admin/git/sync/status?task_id=${encodeURIComponent(taskId)}`),
+};
+
 export interface AgentSession {
   id: string;
   title: string;

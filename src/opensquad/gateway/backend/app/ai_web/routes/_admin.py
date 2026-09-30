@@ -77,6 +77,18 @@ _PROXY_GET_CACHEABLE_PREFIXES = (
     "/api/workspace/list",
     "/api/agents/",  # fs/tree, fs/list, fs/changed, fs/session-changes ...
 )
+# Sub-paths of a cacheable prefix that must never be cached. The git routes live
+# under `/api/agents/` but are polled by the status bar while the user then
+# switches branch, stages or commits: a 5s-stale answer looks like the click did
+# nothing, and the next poll would paper over the real state.
+_PROXY_GET_UNCACHEABLE_SUBSTRINGS = ("/git/",)
+
+
+def _proxy_cacheable(path: str) -> bool:
+    """Whether this GET path may be served from the short-TTL cache."""
+    if not path.startswith(_PROXY_GET_CACHEABLE_PREFIXES):
+        return False
+    return not any(fragment in path for fragment in _PROXY_GET_UNCACHEABLE_SUBSTRINGS)
 
 
 def _proxy_cache_key(path: str, params: dict | None) -> str:
@@ -88,7 +100,7 @@ def _proxy_cache_key(path: str, params: dict | None) -> str:
 
 
 def _proxy_cache_get(path: str, params: dict | None) -> dict | None:
-    if not path.startswith(_PROXY_GET_CACHEABLE_PREFIXES):
+    if not _proxy_cacheable(path):
         return None
     key = _proxy_cache_key(path, params)
     entry = _PROXY_GET_CACHE.get(key)
@@ -102,7 +114,7 @@ def _proxy_cache_get(path: str, params: dict | None) -> dict | None:
 
 
 def _proxy_cache_set(path: str, params: dict | None, result: dict) -> None:
-    if not path.startswith(_PROXY_GET_CACHEABLE_PREFIXES):
+    if not _proxy_cacheable(path):
         return
     if len(_PROXY_GET_CACHE) >= _PROXY_GET_CACHE_MAX:
         now = time.monotonic()
@@ -588,6 +600,146 @@ async def admin_fs_session_revert(
 @admin_router.post("/admin/agents/{name}/fs/write")
 async def admin_fs_write(name: str, body: dict = Body(...), current_user: User = Depends(get_current_user_dep)):
     return await _proxy_post(f"/api/agents/{name}/fs/write", body or {}, timeout=30.0)
+
+
+# ---------------------------------------------------------------------------
+# Git (the user's click path; the agent has its own git.* tools)
+# ---------------------------------------------------------------------------
+#
+# Read-only routes are never cached at the gateway (`/git/` is in
+# `_PROXY_GET_UNCACHEABLE_SUBSTRINGS`): the status bar polls them and then the
+# user acts on what it shows.
+#
+# The command routes answer 200 with `{"ok": false, "code": ...}` from the
+# launcher rather than a 4xx, because `_proxy_*` collapses any non-2xx body into
+# one message string — which would throw away the code the UI branches on
+# (`dirty_worktree`, `non_fast_forward`, `locked`).
+
+
+@admin_router.get("/admin/agents/{name}/git/status")
+async def admin_git_status(name: str, root: str = "", current_user: User = Depends(get_current_user_dep)):
+    """Branch, upstream, ahead/behind and uncommitted counts."""
+    from urllib.parse import quote
+
+    r = f"?root={quote(root, safe='')}" if root else ""
+    return await _proxy_get(f"/api/agents/{name}/git/status{r}", http_only=True)
+
+
+@admin_router.get("/admin/agents/{name}/git/branches")
+async def admin_git_branches(name: str, root: str = "", current_user: User = Depends(get_current_user_dep)):
+    """Local + remote branches with their last commit, for the branch picker."""
+    from urllib.parse import quote
+
+    r = f"?root={quote(root, safe='')}" if root else ""
+    return await _proxy_get(f"/api/agents/{name}/git/branches{r}", http_only=True)
+
+
+@admin_router.get("/admin/agents/{name}/git/diff")
+async def admin_git_diff(
+    name: str,
+    path: str = "",
+    root: str = "",
+    mode: str = "worktree",
+    collapse: str = "1",
+    current_user: User = Depends(get_current_user_dep),
+):
+    """Unified diff for one file, shaped like `fs/session-diff` (same viewer)."""
+    from urllib.parse import quote
+
+    q = quote(path or "", safe="")
+    r = f"&root={quote(root, safe='')}" if root else ""
+    m = f"&mode={quote(mode or 'worktree', safe='')}"
+    c = f"&collapse={quote(collapse or '1', safe='')}"
+    return await _proxy_get(f"/api/agents/{name}/git/diff?path={q}{r}{m}{c}", http_only=True, timeout=30.0)
+
+
+@admin_router.get("/admin/git/sync/status")
+async def admin_git_sync_status(task_id: str = "", current_user: User = Depends(get_current_user_dep)):
+    """Poll a fetch/pull/push task started by the routes below."""
+    from urllib.parse import quote
+
+    return await _proxy_get(f"/api/git/sync/status?task_id={quote(task_id, safe='')}", http_only=True)
+
+
+@admin_router.post("/admin/agents/{name}/git/init")
+async def admin_git_init(name: str, body: dict = Body(...), current_user: User = Depends(get_current_user_dep)):
+    """Initialise a repository in a workspace that is not one yet."""
+    return await _proxy_post(f"/api/agents/{name}/git/init", body or {}, timeout=30.0)
+
+
+@admin_router.post("/admin/agents/{name}/git/checkout")
+async def admin_git_checkout(name: str, body: dict = Body(...), current_user: User = Depends(get_current_user_dep)):
+    """Switch branch (optionally creating it / stashing first)."""
+    return await _proxy_post(f"/api/agents/{name}/git/checkout", body or {}, timeout=60.0)
+
+
+@admin_router.post("/admin/agents/{name}/git/branch/delete")
+async def admin_git_branch_delete(
+    name: str, body: dict = Body(...), current_user: User = Depends(get_current_user_dep)
+):
+    return await _proxy_post(f"/api/agents/{name}/git/branch/delete", body or {}, timeout=30.0)
+
+
+@admin_router.post("/admin/agents/{name}/git/stage")
+async def admin_git_stage(name: str, body: dict = Body(...), current_user: User = Depends(get_current_user_dep)):
+    return await _proxy_post(f"/api/agents/{name}/git/stage", body or {}, timeout=30.0)
+
+
+@admin_router.post("/admin/agents/{name}/git/unstage")
+async def admin_git_unstage(name: str, body: dict = Body(...), current_user: User = Depends(get_current_user_dep)):
+    return await _proxy_post(f"/api/agents/{name}/git/unstage", body or {}, timeout=30.0)
+
+
+@admin_router.post("/admin/agents/{name}/git/discard")
+async def admin_git_discard(name: str, body: dict = Body(...), current_user: User = Depends(get_current_user_dep)):
+    """Throw away local changes (untracked files need `confirm_untracked`)."""
+    return await _proxy_post(f"/api/agents/{name}/git/discard", body or {}, timeout=30.0)
+
+
+@admin_router.post("/admin/agents/{name}/git/commit")
+async def admin_git_commit(name: str, body: dict = Body(...), current_user: User = Depends(get_current_user_dep)):
+    """Commit the staged index (hooks run)."""
+    return await _proxy_post(f"/api/agents/{name}/git/commit", body or {}, timeout=60.0)
+
+
+@admin_router.post("/admin/agents/{name}/git/undo-commit")
+async def admin_git_undo_commit(name: str, body: dict = Body(...), current_user: User = Depends(get_current_user_dep)):
+    """Undo the last commit when it has not reached a remote."""
+    return await _proxy_post(f"/api/agents/{name}/git/undo-commit", body or {}, timeout=30.0)
+
+
+@admin_router.post("/admin/agents/{name}/git/merge/abort")
+async def admin_git_merge_abort(name: str, body: dict = Body(...), current_user: User = Depends(get_current_user_dep)):
+    """`git merge --abort` — the way out of a conflicted pull."""
+    return await _proxy_post(f"/api/agents/{name}/git/merge/abort", body or {}, timeout=30.0)
+
+
+@admin_router.post("/admin/agents/{name}/git/fetch")
+async def admin_git_fetch(name: str, body: dict = Body(...), current_user: User = Depends(get_current_user_dep)):
+    """Start a fetch task; poll `/admin/git/sync/status`."""
+    return await _proxy_post(f"/api/agents/{name}/git/fetch", body or {}, timeout=15.0)
+
+
+@admin_router.post("/admin/agents/{name}/git/pull")
+async def admin_git_pull(name: str, body: dict = Body(...), current_user: User = Depends(get_current_user_dep)):
+    """Start a pull task (divergence is merged; conflicts are reported)."""
+    return await _proxy_post(f"/api/agents/{name}/git/pull", body or {}, timeout=15.0)
+
+
+@admin_router.post("/admin/agents/{name}/git/push")
+async def admin_git_push(name: str, body: dict = Body(...), current_user: User = Depends(get_current_user_dep)):
+    """Start a push task. Force is only ever `--force-with-lease`."""
+    return await _proxy_post(f"/api/agents/{name}/git/push", body or {}, timeout=15.0)
+
+
+@admin_router.post("/admin/agents/{name}/git/worktree")
+async def admin_git_worktree(name: str, body: dict = Body(...), current_user: User = Depends(get_current_user_dep)):
+    """Prepare (create or reuse) the workspace's mode-switch worktree.
+
+    `git worktree add` on a large repo can take a while — hence the generous
+    timeout versus the instant sync starters above.
+    """
+    return await _proxy_post(f"/api/agents/{name}/git/worktree", body or {}, timeout=120.0)
 
 
 @admin_router.post("/admin/agents/{name}/fs/mkdir")

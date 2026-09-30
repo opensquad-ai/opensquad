@@ -20,6 +20,7 @@ from ._agents import AgentsMixin
 from ._base import BaseHandlerMixin
 from ._cards import CardsMixin
 from ._filesystem import FilesystemMixin
+from ._git import GitMixin
 from ._mcp import McpMixin
 from ._plugin_services import PluginServicesMixin
 from ._plugins import PluginsMixin
@@ -35,6 +36,7 @@ class ManagementHandler(
     BaseHandlerMixin,
     AgentsMixin,
     FilesystemMixin,
+    GitMixin,
     PluginsMixin,
     PluginServicesMixin,
     SessionsMixin,

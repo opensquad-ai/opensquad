@@ -80,6 +80,8 @@ interface SoloContextFooterProps {
   onExportContext?: SoloExportContextHandler;
   /** Controls after folder (e.g. Mode) */
   children?: React.ReactNode;
+  /** Git branch chip, rendered right after the folder */
+  repoStatusBar?: React.ReactNode;
   /** Controls immediately before the token ring (e.g. Model / Effort) */
   trailing?: React.ReactNode;
 }
@@ -173,6 +175,7 @@ export const SoloContextFooter: React.FC<SoloContextFooterProps> = ({
   compressDisabled = false,
   onExportContext,
   children,
+  repoStatusBar,
   trailing,
 }) => {
   const { t } = useTranslation();
@@ -712,6 +715,10 @@ export const SoloContextFooter: React.FC<SoloContextFooterProps> = ({
             </div>
           )}
         </div>
+
+        {repoStatusBar ? (
+          <div className="flex items-center min-w-0 shrink-0">{repoStatusBar}</div>
+        ) : null}
 
         {children ? (
           <div className="flex items-center gap-1.5 min-w-0 shrink-0">{children}</div>

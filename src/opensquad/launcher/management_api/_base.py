@@ -189,6 +189,28 @@ class BaseHandlerMixin:
             collapse_raw = (qs.get("collapse") or ["1"])[0].strip().lower()
             collapse = collapse_raw not in ("0", "false", "no", "off")
             return self._handle_fs_session_diff(name, rel, root, collapse=collapse)
+        elif path.startswith("/api/agents/") and path.endswith("/git/status"):
+            # GET /api/agents/{name}/git/status?root=
+            name = path.split("/")[3]
+            root = (qs.get("root") or [""])[0]
+            return self._handle_git_status(name, root)
+        elif path.startswith("/api/agents/") and path.endswith("/git/branches"):
+            # GET /api/agents/{name}/git/branches?root=
+            name = path.split("/")[3]
+            root = (qs.get("root") or [""])[0]
+            return self._handle_git_branches(name, root)
+        elif path.startswith("/api/agents/") and path.endswith("/git/diff"):
+            # GET /api/agents/{name}/git/diff?path=&root=&mode=worktree|staged&collapse=0|1
+            name = path.split("/")[3]
+            rel = (qs.get("path") or [""])[0]
+            root = (qs.get("root") or [""])[0]
+            mode = ((qs.get("mode") or ["worktree"])[0] or "worktree").strip().lower()
+            collapse_raw = (qs.get("collapse") or ["1"])[0].strip().lower()
+            collapse = collapse_raw not in ("0", "false", "no", "off")
+            return self._handle_git_diff(name, rel, root, mode=mode, collapse=collapse)
+        elif path == "/api/git/sync/status":
+            # GET /api/git/sync/status?task_id= -- poll a fetch/pull/push task
+            return self._handle_git_sync_status((qs.get("task_id") or [""])[0])
         elif path.startswith("/api/agents/") and path.endswith("/role"):
             name = path.split("/")[3]
             return self._handle_get_role(name)
@@ -371,6 +393,58 @@ class BaseHandlerMixin:
             name = path.split("/")[3]
             body = self._read_body() or {}
             return self._handle_fs_session_revert(name, body)
+        elif path.startswith("/api/agents/") and path.endswith("/git/init"):
+            name = path.split("/")[3]
+            body = self._read_body() or {}
+            return self._handle_git_init(name, body)
+        elif path.startswith("/api/agents/") and path.endswith("/git/checkout"):
+            name = path.split("/")[3]
+            body = self._read_body() or {}
+            return self._handle_git_checkout(name, body)
+        elif path.startswith("/api/agents/") and path.endswith("/git/branch/delete"):
+            name = path.split("/")[3]
+            body = self._read_body() or {}
+            return self._handle_git_branch_delete(name, body)
+        elif path.startswith("/api/agents/") and path.endswith("/git/stage"):
+            name = path.split("/")[3]
+            body = self._read_body() or {}
+            return self._handle_git_stage(name, body)
+        elif path.startswith("/api/agents/") and path.endswith("/git/unstage"):
+            name = path.split("/")[3]
+            body = self._read_body() or {}
+            return self._handle_git_unstage(name, body)
+        elif path.startswith("/api/agents/") and path.endswith("/git/discard"):
+            name = path.split("/")[3]
+            body = self._read_body() or {}
+            return self._handle_git_discard(name, body)
+        elif path.startswith("/api/agents/") and path.endswith("/git/commit"):
+            name = path.split("/")[3]
+            body = self._read_body() or {}
+            return self._handle_git_commit(name, body)
+        elif path.startswith("/api/agents/") and path.endswith("/git/undo-commit"):
+            name = path.split("/")[3]
+            body = self._read_body() or {}
+            return self._handle_git_undo_commit(name, body)
+        elif path.startswith("/api/agents/") and path.endswith("/git/merge/abort"):
+            name = path.split("/")[3]
+            body = self._read_body() or {}
+            return self._handle_git_merge_abort(name, body)
+        elif path.startswith("/api/agents/") and path.endswith("/git/fetch"):
+            name = path.split("/")[3]
+            body = self._read_body() or {}
+            return self._handle_git_sync(name, body, "fetch")
+        elif path.startswith("/api/agents/") and path.endswith("/git/pull"):
+            name = path.split("/")[3]
+            body = self._read_body() or {}
+            return self._handle_git_sync(name, body, "pull")
+        elif path.startswith("/api/agents/") and path.endswith("/git/push"):
+            name = path.split("/")[3]
+            body = self._read_body() or {}
+            return self._handle_git_sync(name, body, "push")
+        elif path.startswith("/api/agents/") and path.endswith("/git/worktree"):
+            name = path.split("/")[3]
+            body = self._read_body() or {}
+            return self._handle_git_worktree(name, body)
         elif path == "/api/agents/create":
             body = self._read_body()
             return self._handle_create(body)

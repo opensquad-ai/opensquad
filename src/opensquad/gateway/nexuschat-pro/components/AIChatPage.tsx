@@ -27,7 +27,7 @@ import {
 
 import { useTranslation } from 'react-i18next';
 import { getAiWsService, AIWebSocketStatus } from '../services/aiWebSocket';
-import { agentSessionAPI, authAPI, adminAPI, AdminAgent, modelCardAPI, ModelCardInfo, skillAPI, SkillInfo } from '../services/api';
+import { agentSessionAPI, authAPI, adminAPI, gitAPI, AdminAgent, modelCardAPI, ModelCardInfo, skillAPI, SkillInfo } from '../services/api';
 import type { AgentSession } from '../services/api';
 import { resolveChatAvatar, toAbsoluteMediaUrl } from '../utils/image';
 import { OpenSquadLoader } from './OpenSquadLoader';
@@ -152,6 +152,7 @@ import {
 import { ProjectFilesPanel, type ProjectFileOpenRequest } from './ai-chat/ProjectFilesPanel';
 import { TurnChangedFilesCard, collectTurnChangedFilesBefore } from './ai-chat/TurnChangedFilesCard';
 import { SessionChangesBar, COMMIT_PUSH_MESSAGE, type SessionChangesSummary } from './ai-chat/SessionChangesBar';
+import { GitRepoBar } from './ai-chat/GitRepoBar';
 import { RestoreCheckpointModal } from './ai-chat/RestoreCheckpointModal';
 import { WorkspaceTabBar } from './ai-chat/WorkspaceTabBar';
 import { CloseWorkspaceModal } from './ai-chat/CloseWorkspaceModal';
@@ -552,6 +553,18 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
   const onSessionChangesStable = useCallback((summary: SessionChangesSummary) => {
     setSessionChanges(summary);
   }, []);
+  /** Reveal the files panel on the Changes view. Shared by the session-changes
+   *  bar and the repo status bar so both land on the same tab. */
+  const revealChangesPanel = useCallback(() => {
+    setFilesPanelOpen(true);
+    if (isCompactLayout) setSessionSidebarOpen(false);
+    try {
+      localStorage.setItem('opensquad.filesPanel.open', 'true');
+    } catch {
+      /* ignore */
+    }
+    setFocusChangedNonce(Date.now());
+  }, [isCompactLayout]);
   const openProjectFile = useCallback((path: string) => {
     const p = (path || '').trim().replace(/\\/g, '/');
     if (!p) return;
@@ -769,6 +782,8 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
   const [defaultCwd, setDefaultCwd] = useState<string | null>(null);
   /** Path chosen for the in-progress new session before sid is known. */
   const pendingProjectPathRef = useRef<string | null>(null);
+  /** cwd to restore when a draft leaves Worktree mode (mode is per-draft only). */
+  const [preWorktreeCwd, setPreWorktreeCwd] = useState<string | null>(null);
   /** Provisional title from first user message, applied once sid is known. */
   const pendingSessionTitleRef = useRef<string | null>(null);
   /** Count of user messages in the current timeline (for first-message title). */
@@ -2253,8 +2268,13 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
       const pathToLock = (agentCwd || defaultCwd || '').trim();
       if (pathToLock) {
         const sid = targetSessionId || currentSessionIdRef.current;
+        // 会话级 cwd 一并钉住：本地会话不得在别的草稿切到 Worktree 模式（改了
+        // agent 级 cwd）后被牵连改道，反之亦然。此后该会话的 cwd 不再跟随
+        // agent 级兜底值。
+        const lockDirName = agentProfile?.dir_name || agentId;
         if (sid) {
           setSessionProjectPath(agentId, sid, pathToLock);
+          void adminAPI.setWorkingDirectory(lockDirName, pathToLock, sid).catch(() => {});
           pendingProjectPathRef.current = null;
         } else {
           pendingProjectPathRef.current = pathToLock;
@@ -3860,6 +3880,44 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     return wsSnap.workspaces.find((w) => w.id === id) || null;
   }, [wsSnap]);
 
+  // ── 本地 / Worktree 模式切换（仅草稿会话可切）────────────────────────────
+  // 页面拥有 agentCwd：切模式 = 准备 worktree（每个目录稳定复用同一个）+ 把
+  // 工作目录绑过去。首条消息发送时 send 流程用 agentCwd 锁定会话 cwd，此后
+  // 模式随会话固定，chip 转只读。
+  const handleGitModeChange = useCallback(
+    async (next: 'local' | 'worktree'): Promise<{ ok: boolean; error?: string }> => {
+      const dirName = agentProfile?.dir_name;
+      if (!dirName) return { ok: false, error: 'agent is not ready' };
+      if (next === 'worktree') {
+        const root = (agentCwd || defaultCwd || '').trim();
+        if (!root) return { ok: false, error: 'no working directory' };
+        try {
+          const res = await gitAPI.prepareWorktree(dirName, root);
+          if (!res?.ok || !res.worktree_path) {
+            return { ok: false, error: res?.error || res?.code || 'worktree prepare failed' };
+          }
+          setPreWorktreeCwd(root);
+          setAgentCwd(res.worktree_path);
+          void adminAPI.setWorkingDirectory(dirName, res.worktree_path).catch((err: any) => {
+            console.error('[AIChatPage] Failed to rebind cwd to worktree:', err);
+          });
+          return { ok: true };
+        } catch (err: any) {
+          return { ok: false, error: (err as Error)?.message || 'worktree prepare failed' };
+        }
+      }
+      const restore = (preWorktreeCwd || activeWorkspace?.rootPath || defaultCwd || '').trim();
+      if (!restore) return { ok: false, error: 'no root to restore' };
+      setPreWorktreeCwd(null);
+      setAgentCwd(restore);
+      void adminAPI.setWorkingDirectory(dirName, restore).catch((err: any) => {
+        console.error('[AIChatPage] Failed to restore cwd from worktree:', err);
+      });
+      return { ok: true };
+    },
+    [agentProfile?.dir_name, agentCwd, defaultCwd, preWorktreeCwd, activeWorkspace?.rootPath],
+  );
+
   const workspaceLayout: SplitNode | null = useMemo(() => {
     if (!activeWorkspace) return null;
     return wsSnap.chrome.layoutByWorkspace?.[activeWorkspace.id] || null;
@@ -4912,17 +4970,18 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
             ? sessionChanges
             : null
         }
+        repoStatusBar={
+          isSolo && focusedPaneId === paneId && currentSessionId === sessionId ? (
+            <GitRepoBar
+              agentId={agentId}
+              cwd={agentCwd || defaultCwd || undefined}
+              modeEditable={!isLoadingSession && !isStreaming && timeline.length === 0}
+              onModeChange={handleGitModeChange}
+            />
+          ) : null
+        }
         changesBusy={changesBusy}
-        onOpenChanges={() => {
-          setFilesPanelOpen(true);
-          if (isCompactLayout) setSessionSidebarOpen(false);
-          try {
-            localStorage.setItem('opensquad.filesPanel.open', 'true');
-          } catch {
-            /* ignore */
-          }
-          setFocusChangedNonce(Date.now());
-        }}
+        onOpenChanges={revealChangesPanel}
         onCommitPush={async () => {
           const root = projectRoot;
           const dirName = fsAgentName;

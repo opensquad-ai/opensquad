@@ -132,6 +132,8 @@ export interface AgentWebComposerProps {
   approvalPanel?: React.ReactNode;
   /** Background-terminals indicator bar — topmost slot above the composer */
   terminalsPanel?: React.ReactNode;
+  /** Repository status row (branch / ahead-behind / uncommitted) — above Changes */
+  repoStatusBar?: React.ReactNode;
   availableSkills: SkillInfo[];
   skillsLoading?: boolean;
   /** Prefetch / open skill list (also used when typing `/skill `). */
@@ -202,6 +204,7 @@ export const AgentWebComposer = forwardRef<AgentWebComposerHandle, AgentWebCompo
     pendingPanel = null,
     approvalPanel = null,
     terminalsPanel = null,
+    repoStatusBar = null,
     availableSkills,
     skillsLoading = false,
     onOpenSkills,
@@ -746,7 +749,8 @@ export const AgentWebComposer = forwardRef<AgentWebComposerHandle, AgentWebCompo
         </div>
       ) : null}
 
-      {/* Order: terminals → Changes → approvals → pending → Plan (behind) overlapping input (front) */}
+      {/* Order: repo status → Changes → terminals → approvals → pending → Plan
+          (behind) overlapping input (front) */}
       {terminalsPanel ? (
         <div className="px-2 sm:px-4 pt-2 flex-shrink-0">
           <div className={columnClass}>{terminalsPanel}</div>
@@ -1156,6 +1160,7 @@ export const AgentWebComposer = forwardRef<AgentWebComposerHandle, AgentWebCompo
             cwd={cwd}
             tokenStats={tokenStats}
             locked
+            repoStatusBar={repoStatusBar || undefined}
             onViewReport={onViewReport}
             onCompressContext={onCompressContext}
             compressing={compressing}

@@ -32,6 +32,7 @@ import { getLangForFile, highlightLine, HLJS_THEME_CSS } from '../../utils/codeH
 import { FILE_MARKDOWN_CLASS, renderFencedMarkdown } from '../../utils/fencedMarkdown';
 import { FileIndentGuides } from './FileIndentGuides';
 import { UnifiedDiffView, type DiffLine } from './UnifiedDiffView';
+import { GitChangesPanel } from './GitChangesPanel';
 import { fillDiffCollapseHidden, flattenDiffCollapses } from './fillDiffCollapseHidden';
 import { SOFT_PRESENCE_MS, useSoftPresence } from '../../utils/useSoftPresence';
 import { OpenSquadLoader } from '../OpenSquadLoader';
@@ -530,6 +531,10 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
   const [showSearch, setShowSearch] = useState(false);
 
   const [tab, setTab] = useState<ListTab>('all');
+  /** 改动 view: this conversation's files (session snapshot) or everything git
+   *  reports as uncommitted. Defaults to the snapshot, which is what the tab has
+   *  always meant. */
+  const [changedScope, setChangedScope] = useState<'session' | 'all'>('session');
   const [changedEntries, setChangedEntries] = useState<ChangedEntry[]>([]);
   const [changedLoading, setChangedLoading] = useState(false);
   const [changedError, setChangedError] = useState<string | null>(null);
@@ -2177,6 +2182,25 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
             ) : null}
           </button>
         ))}
+        {tab === 'changed' && rootPath ? (
+          <div className="flex items-center gap-1 ml-auto pr-0.5" data-testid="changed-scope-chips">
+            {(['session', 'all'] as const).map((id) => (
+              <button
+                key={id}
+                type="button"
+                data-testid={`changed-scope-${id}`}
+                onClick={() => setChangedScope(id)}
+                className={`px-2 py-0.5 rounded-full text-[10px] transition-colors ${
+                  changedScope === id
+                    ? 'bg-black/[0.07] dark:bg-white/[0.10] text-textMain font-medium'
+                    : 'text-textMuted/55 hover:text-textMuted'
+                }`}
+              >
+                {t(id === 'session' ? 'git.changes.scopeSession' : 'git.changes.scopeAll')}
+              </button>
+            ))}
+          </div>
+        ) : null}
       </div>
 
       {/* Tree status — all-files only */}
@@ -2208,6 +2232,26 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
         {!rootPath ? (
           <div className="px-3 py-4 text-[11px] text-textMuted leading-relaxed" data-fs-empty="1">
             {t('aiChat.chooseProjectFolderHint')}
+          </div>
+        ) : tab === 'changed' && changedScope === 'all' ? (
+          // The git view owns its own list, selection and commit form. `h-full`
+          // gives its internal scroller a height inside this scroll container.
+          <div className="h-full flex flex-col">
+            <GitChangesPanel
+              agentId={agentId}
+              rootPath={rootPath}
+              sessionRows={changedEntries.map((e) => ({
+                name: e.name,
+                path: e.path,
+                status: e.status,
+                additions: e.additions,
+                deletions: e.deletions,
+                oversized: e.oversized,
+                missing: e.missing,
+              }))}
+              onChanged={() => void loadChanged({ silent: true })}
+              hideScopeChips
+            />
           </div>
         ) : tab === 'changed' ? (
           changedLoading && filteredChanged.length === 0 ? (

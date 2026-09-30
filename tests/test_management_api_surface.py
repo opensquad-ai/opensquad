@@ -15,7 +15,7 @@ would stay invisible until a launcher actually tried to bind port 9600.
 This file closes that hole.  It pins, in order of increasing strength:
 
 1. the package imports and exports what callers import,
-2. the handler is composed from all ten domain mixins (and nothing shadows
+2. the handler is composed from all eleven domain mixins (and nothing shadows
    ``__init__``),
 3. every extracted method is still present, and the four dispatch tables
    still expose the same number of branches,
@@ -45,11 +45,12 @@ from opensquad.utils.local_http import open_local
 
 PKG_DIR = pathlib.Path(management_api.__file__).parent
 
-# The ten per-domain mixins, in the order ``__init__`` composes them.
+# The eleven per-domain mixins, in the order ``__init__`` composes them.
 MIXIN_MODULE_NAMES = [
     "_base",
     "_agents",
     "_filesystem",
+    "_git",
     "_plugins",
     "_plugin_services",
     "_sessions",
@@ -65,6 +66,7 @@ EXPECTED_MIXIN_CLASSES = [
     "BaseHandlerMixin",
     "AgentsMixin",
     "FilesystemMixin",
+    "GitMixin",
     "PluginsMixin",
     "PluginServicesMixin",
     "SessionsMixin",
@@ -83,6 +85,12 @@ EXPECTED_METHODS_PER_MODULE = {
     # which backs the custom-agent-avatar upload.
     "_agents": 17,
     "_filesystem": 19,
+    # 18 = the repo status/branch/changes/sync handlers + ``_handle_git_worktree``
+    # (the mode-switch prepare).  ``_git_send`` is the one non-``_handle_*``
+    # helper: every git reply goes out as HTTP 200 with an ``{ok, code}`` body,
+    # because the gateway proxy flattens 4xx into a single message and the UI
+    # needs the code to pick its own wording.
+    "_git": 18,
     "_plugins": 15,
     # 14 = 10 + the model-download watcher: ``_restart_plugin_service`` (the
     # stop-then-start body, shared with the restart endpoint),
@@ -103,12 +111,16 @@ EXPECTED_METHODS_PER_MODULE = {
     "_cards": 18,
     "_workspace": 6,
 }
-EXPECTED_TOTAL_MIXIN_METHODS = 125
+EXPECTED_TOTAL_MIXIN_METHODS = 143
 
 # ``_do_*_impl`` if/elif chain lengths -- the URL surface of each verb.
 EXPECTED_DISPATCH_BRANCHES = {
-    "_do_get_impl": 43,
-    "_do_post_impl": 31,
+    # 47 = 43 + the four ``/git/*`` GETs (status, branches, diff, sync/status).
+    "_do_get_impl": 47,
+    # 44 = 31 + the thirteen ``/git/*`` POSTs (init, checkout, delete, stage,
+    # unstage, discard, commit, undo-commit, merge/abort, fetch, pull, push,
+    # worktree).
+    "_do_post_impl": 44,
     # 18 = 17 + the ``/api/agents/{name}/profile`` PUT branch.
     "_do_put_impl": 18,
     "_do_delete_impl": 7,
