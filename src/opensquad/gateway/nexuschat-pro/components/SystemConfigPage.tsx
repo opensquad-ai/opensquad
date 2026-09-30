@@ -9,8 +9,7 @@ import { systemConfigAPI, versionAPI } from '../services/api';
 import { getSystemConfigCached, peekSystemConfig, setSystemConfigCache } from '../services/configCache';
 import { APP_VERSION } from '../utils/appVersion';
 import {
-  beginDesktopUpdate,
-  failDesktopUpdate,
+  offerDesktopUpdate,
 } from '../services/desktopUpdateOverlay';
 import WorkspaceManager from './WorkspaceManager';
 import { OpenSquadLoader } from './OpenSquadLoader';
@@ -438,7 +437,6 @@ interface VersionInfoState {
 const AboutTab: React.FC = () => {
   const { t } = useTranslation();
   const isDesktopApp = Boolean(window.electronEnv?.isElectron) && !import.meta.env.DEV;
-  const [updateBusy, setUpdateBusy] = useState(false);
   const [versionInfo, setVersionInfo] = useState<VersionInfoState>(() => {
     try {
       const cached = sessionStorage.getItem(VERSION_CHECK_CACHE_KEY);
@@ -485,43 +483,21 @@ const AboutTab: React.FC = () => {
     }
   });
 
-  const runDesktopUpdate = useCallback(async (downloadUrl: string, downloadName: string, version: string | null) => {
-    const updater = window.electronEnv?.downloadAndInstallUpdate;
-    if (!updater) {
-      setError(t('systemConfig.about.desktopUpdateUnavailable'));
-      return;
-    }
-
-    setError(null);
-    setUpdateBusy(true);
-    beginDesktopUpdate(version);
-
-    try {
-      const result = await updater({ url: downloadUrl, fileName: downloadName });
-      if (!result.ok) {
-        setError(result.error || t('systemConfig.about.desktopUpdateFailed'));
-        failDesktopUpdate(result.error || t('systemConfig.about.desktopUpdateFailed'));
-        setUpdateBusy(false);
-      }
-    } catch (e: any) {
-      const message = e?.message || t('systemConfig.about.desktopUpdateFailed');
-      setError(message);
-      failDesktopUpdate(message);
-      setUpdateBusy(false);
-    }
-  }, [t]);
-
+  // Hand the manual "update available" result to the shared update UI: it opens
+  // the changelog popup and the progress notification (background download;
+  // install only on the user's confirmation). No window.confirm here.
   const promptAndInstallUpdate = useCallback(async (info: VersionInfoState) => {
     if (!info.download_url || !info.download_name) {
       setError(t('systemConfig.about.desktopUpdateAssetMissing'));
       return;
     }
-    const confirmed = window.confirm(
-      t('systemConfig.about.desktopUpdateConfirm', { version: info.latest ?? '' }),
-    );
-    if (!confirmed) return;
-    await runDesktopUpdate(info.download_url, info.download_name, info.latest);
-  }, [runDesktopUpdate, t]);
+    offerDesktopUpdate({
+      version: info.latest ?? '',
+      releaseUrl: info.url ?? undefined,
+      downloadUrl: info.download_url,
+      fileName: info.download_name,
+    });
+  }, [t]);
 
   const handleCheck = async () => {
     if (versionInfo.check_skipped) {
@@ -634,7 +610,7 @@ const AboutTab: React.FC = () => {
         <p className="text-xs font-bold text-textMuted uppercase mb-4">{t('systemConfig.about.versionCheck')}</p>
         <button
           onClick={handleCheck}
-          disabled={checking || versionInfo.check_skipped || updateBusy}
+          disabled={checking || versionInfo.check_skipped}
           className="w-full py-2.5 bg-primary/10 text-primary rounded-lg font-medium hover:bg-primary/20 transition-colors flex items-center justify-center gap-2 disabled:opacity-60 disabled:cursor-not-allowed"
         >
           {checking ? <OpenSquadLoader size={16} /> : <RefreshCw size={16} />}
@@ -686,7 +662,7 @@ const AboutTab: React.FC = () => {
                   {t('systemConfig.about.newVersion', { version: versionInfo.latest })}
                 </div>
                 <p className="text-xs text-amber-600">{t('systemConfig.about.updateHint')}</p>
-                {isDesktopApp && versionInfo.download_url && versionInfo.download_name && !updateBusy && (
+                {isDesktopApp && versionInfo.download_url && versionInfo.download_name && (
                   <button
                     type="button"
                     onClick={() => promptAndInstallUpdate(versionInfo)}

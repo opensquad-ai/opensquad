@@ -104,6 +104,7 @@ def dispatch_task_op(scheduler, op: str, params: dict | None = None) -> dict:
                 use_worktree=bool(params.get("use_worktree", True)),
                 kind=kind,
                 plan=_plan_for_submit(kind, params),
+                model_card=str(params.get("model_card") or ""),
             )
             return {"ok": True, "task": task}
 

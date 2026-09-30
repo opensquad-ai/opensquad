@@ -41,8 +41,18 @@ declare global {
         url: string
         fileName: string
       }) => Promise<{ ok: true } | { ok: false; error: string }>
+      /** Background download only — resolves when the installer is on disk. */
+      downloadUpdate?: (payload: {
+        url: string
+        fileName: string
+        version?: string
+      }) => Promise<{ ok: true } | { ok: false; error: string }>
+      /** Relaunch the installer and quit. */
+      installUpdate?: () => Promise<{ ok: true } | { ok: false; error: string }>
+      /** Whether a downloaded installer is waiting to be installed. */
+      hasPendingUpdate?: () => Promise<{ pending: boolean; version?: string | null }>
       onUpdateStatus?: (callback: (status: {
-        phase: 'downloading' | 'preparing' | 'launching' | 'shutting-down'
+        phase: 'downloading' | 'downloaded' | 'preparing' | 'launching' | 'shutting-down'
         percent?: number
         transferred?: number
         total?: number

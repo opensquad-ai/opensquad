@@ -1,30 +1,21 @@
+/**
+ * DesktopUpdateOverlay — full-screen install-time overlay.
+ *
+ * The download no longer blocks (see `UpdateNotification`); this overlay only
+ * appears for the brief window where the installer is being launched and the
+ * app is about to quit, so the user understands the window is closing on
+ * purpose.
+ */
 import React, { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { OpenSquadLoader } from './OpenSquadLoader';
 import {
   subscribeDesktopUpdateOverlay,
-  setDesktopUpdatePhase,
-  setDesktopUpdateProgress,
   type DesktopUpdateOverlayState,
-  type DesktopUpdatePhase,
 } from '../services/desktopUpdateOverlay';
 
-function formatBytes(bytes: number): string {
-  if (!bytes || bytes <= 0) return '0 B';
-  const units = ['B', 'KB', 'MB', 'GB'];
-  let value = bytes;
-  let unit = 0;
-  while (value >= 1024 && unit < units.length - 1) {
-    value /= 1024;
-    unit += 1;
-  }
-  return `${value.toFixed(unit === 0 ? 0 : 1)} ${units[unit]}`;
-}
-
-function phaseTitleKey(phase: DesktopUpdatePhase): string {
+function phaseTitleKey(phase: DesktopUpdateOverlayState['phase']): string {
   switch (phase) {
-    case 'downloading':
-      return 'systemConfig.about.desktopUpdateOverlayDownloading';
     case 'preparing':
       return 'systemConfig.about.desktopUpdateOverlayPreparing';
     case 'launching':
@@ -32,14 +23,12 @@ function phaseTitleKey(phase: DesktopUpdatePhase): string {
     case 'shutting-down':
       return 'systemConfig.about.desktopUpdateOverlayShuttingDown';
     default:
-      return 'systemConfig.about.desktopUpdateOverlayDownloading';
+      return 'systemConfig.about.desktopUpdateOverlayPreparing';
   }
 }
 
-function phaseHintKey(phase: DesktopUpdatePhase): string {
+function phaseHintKey(phase: DesktopUpdateOverlayState['phase']): string {
   switch (phase) {
-    case 'downloading':
-      return 'systemConfig.about.desktopUpdateOverlayDownloadingHint';
     case 'preparing':
       return 'systemConfig.about.desktopUpdateOverlayPreparingHint';
     case 'launching':
@@ -47,49 +36,23 @@ function phaseHintKey(phase: DesktopUpdatePhase): string {
     case 'shutting-down':
       return 'systemConfig.about.desktopUpdateOverlayShuttingDownHint';
     default:
-      return 'systemConfig.about.desktopUpdateOverlayDownloadingHint';
+      return 'systemConfig.about.desktopUpdateOverlayPreparingHint';
   }
 }
 
+const INSTALL_PHASES = new Set(['preparing', 'launching', 'shutting-down']);
+
 export const DesktopUpdateOverlay: React.FC = () => {
   const { t } = useTranslation();
-  const [overlay, setOverlay] = useState<DesktopUpdateOverlayState>(() => ({
-    phase: 'idle',
-    progress: { percent: 0, transferred: 0, total: 0 },
-    error: null,
-    version: null,
-  }));
+  const [overlay, setOverlay] = useState<DesktopUpdateOverlayState | null>(null);
 
   useEffect(() => subscribeDesktopUpdateOverlay(setOverlay), []);
 
-  useEffect(() => {
-    const env = window.electronEnv;
-    if (!env?.onUpdateStatus) return;
-
-    return env.onUpdateStatus((status) => {
-      if (status.phase === 'downloading') {
-        setDesktopUpdateProgress({
-          percent: status.percent ?? 0,
-          transferred: status.transferred ?? 0,
-          total: status.total ?? 0,
-        });
-        return;
-      }
-      setDesktopUpdatePhase(status.phase);
-    });
-  }, []);
-
-  if (overlay.phase === 'idle') {
+  if (!overlay || !INSTALL_PHASES.has(overlay.phase)) {
     return null;
   }
 
-  const { phase, progress, version } = overlay;
-  const showDeterminate = phase === 'downloading' && progress.total > 0;
-  const barWidth = showDeterminate
-    ? Math.max(progress.percent, 4)
-    : phase === 'downloading' && progress.transferred > 0
-      ? Math.min(96, 8 + (progress.transferred % 20))
-      : undefined;
+  const { phase, version } = overlay;
 
   return (
     <div
@@ -118,33 +81,8 @@ export const DesktopUpdateOverlay: React.FC = () => {
           {t(phaseHintKey(phase))}
         </p>
 
-        <div className="space-y-2">
-          <div className="h-2 overflow-hidden rounded-full bg-slate-800">
-            {barWidth !== undefined ? (
-              <div
-                className="h-full rounded-full bg-primary transition-all duration-300 ease-out"
-                style={{ width: `${barWidth}%` }}
-              />
-            ) : (
-              <div className="h-full w-1/3 rounded-full bg-primary animate-[desktopUpdateIndeterminate_1.4s_ease-in-out_infinite]" />
-            )}
-          </div>
-
-          {phase === 'downloading' && (
-            <div className="text-xs text-slate-400 tabular-nums">
-              {showDeterminate
-                ? t('systemConfig.about.desktopUpdateOverlayProgress', {
-                    percent: Math.round(progress.percent),
-                    transferred: formatBytes(progress.transferred),
-                    total: formatBytes(progress.total),
-                  })
-                : progress.transferred > 0
-                  ? t('systemConfig.about.desktopUpdateOverlayTransferred', {
-                      transferred: formatBytes(progress.transferred),
-                    })
-                  : t('systemConfig.about.desktopUpdateOverlayStarting')}
-            </div>
-          )}
+        <div className="h-2 overflow-hidden rounded-full bg-slate-800">
+          <div className="h-full w-1/3 rounded-full bg-primary animate-[desktopUpdateIndeterminate_1.4s_ease-in-out_infinite]" />
         </div>
       </div>
 

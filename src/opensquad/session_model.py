@@ -201,6 +201,17 @@ async def bind_for_turn(
     else:
         desired = preferred or get(runner, sid)
     if not desired:
+        # No agent card and no per-session override → fall back to the
+        # workspace default card (Model Cards UI marks one as default). Without
+        # this the turn ran on a client with an empty ``model_name`` and only
+        # failed once the LLM request was actually sent.
+        try:
+            from opensquad.model_switch import default_model_card
+
+            desired = default_model_card()
+        except Exception:
+            logger.debug("[session_model] default card lookup failed", exc_info=True)
+    if not desired:
         return api
 
     if current_api_card(api) == desired:

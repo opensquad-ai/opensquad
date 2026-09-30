@@ -949,6 +949,23 @@ const ModelsPage: React.FC<ModelsPageProps> = ({ onBack }) => {
     }
   };
 
+  // Mark / unmark a card as the workspace default model. The admin PUT keeps
+  // the flag unique (setting one clears the rest), so a reload reflects truth.
+  const handleToggleDefault = async (name: string, isDefault: boolean) => {
+    if (!name || togglingCard === name) return;
+    setTogglingCard(name);
+    try {
+      const full = await modelCardAPI.getCard(name);
+      await modelCardAPI.saveCard(name, { ...full.card, is_default: isDefault });
+      await loadCards();
+    } catch (err: any) {
+      console.warn(`[ModelsPage] set default ${name} → ${isDefault} failed:`, err?.message || err);
+      showToast(t('modelsPage.saveFailed'), false);
+    } finally {
+      setTogglingCard(null);
+    }
+  };
+
   // Delete every model card of a provider (used to reconfigure its key: delete
   // the provider, then re-connect with a new key). 删除前需在行内点 ✓ 二次确认。
   const handleDeleteProvider = async (providerName: string, names: string[]) => {
@@ -1604,6 +1621,20 @@ const ModelsPage: React.FC<ModelsPageProps> = ({ onBack }) => {
                                 )}
                               </p>
                             </div>
+                            <button
+                              type="button"
+                              disabled={togglingCard === card.name}
+                              onClick={(e) => { e.stopPropagation(); void handleToggleDefault(card.name, !card.is_default); }}
+                              title={card.is_default ? t('modelsPage.defaultModelOn') : t('modelsPage.defaultModelOff')}
+                              className={`shrink-0 inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md border transition-colors ml-2 ${
+                                card.is_default
+                                  ? 'border-primary/40 bg-primary/10 text-primary'
+                                  : 'border-border text-textMuted hover:text-textMain hover:bg-black/[0.04] dark:hover:bg-white/[0.06]'
+                              } ${togglingCard === card.name ? 'opacity-50 cursor-wait' : ''}`}
+                            >
+                              <Star size={11} className={card.is_default ? 'fill-primary' : ''} />
+                              <span className="text-[10px] font-medium">{t('modelsPage.defaultBadge')}</span>
+                            </button>
                             <button
                               type="button"
                               disabled={togglingCard === card.name}

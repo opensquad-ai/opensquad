@@ -4,7 +4,7 @@
 import { contextBridge, ipcRenderer } from 'electron'
 
 export type PreloadUpdateStatus = {
-  phase: 'downloading' | 'preparing' | 'launching' | 'shutting-down'
+  phase: 'downloading' | 'downloaded' | 'preparing' | 'launching' | 'shutting-down'
   percent?: number
   transferred?: number
   total?: number
@@ -28,6 +28,22 @@ contextBridge.exposeInMainWorld('electronEnv', {
     ipcRenderer.invoke('electron:download-and-install-update', payload) as Promise<
       { ok: true } | { ok: false; error: string }
     >,
+  /** Background download only — no quit; progress arrives on `onUpdateStatus`. */
+  downloadUpdate: (payload: { url: string; fileName: string; version?: string }) =>
+    ipcRenderer.invoke('electron:download-update', payload) as Promise<
+      { ok: true } | { ok: false; error: string }
+    >,
+  /** Relaunch the installer and quit (call after warning about active work). */
+  installUpdate: () =>
+    ipcRenderer.invoke('electron:install-update') as Promise<
+      { ok: true } | { ok: false; error: string }
+    >,
+  /** Whether a downloaded installer is waiting to be installed. */
+  hasPendingUpdate: () =>
+    ipcRenderer.invoke('electron:has-pending-update') as Promise<{
+      pending: boolean
+      version?: string | null
+    }>,
   onUpdateStatus: (callback: (status: PreloadUpdateStatus) => void) => {
     const listener = (_event: Electron.IpcRendererEvent, status: PreloadUpdateStatus) => callback(status)
     ipcRenderer.on('electron:update-status', listener)

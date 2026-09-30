@@ -315,6 +315,7 @@ const EXPECTED_SITES: Record<string, number> = {
   'components/RightPanel.tsx': 1,
   'components/RolesPage.tsx': 1,
   'components/SkillManagerPage.tsx': 2,
+  'components/UpdateChangelogDialog.tsx': 1,
   'components/ai-chat/FileDiffBlock.tsx': 3,
   'components/ai-chat/FileDocumentEditor.tsx': 3,
   'components/ai-chat/MarkdownScrollBody.tsx': 1,

@@ -62,9 +62,40 @@ _MODEL_CARD_DEFAULTS: dict[str, object] = {
     "auto_asr": False,
     "render_mode": "strict",
     "enabled": True,  # false = hidden from Agent Web switcher
+    # Workspace-level default model. Exactly one card may carry this flag; it is
+    # the fallback for an agent that has no model card of its own (see
+    # ``model_switch.default_model_card``). Never propagated into agent configs.
+    "is_default": False,
     "tool_call_mode": "auto",
     "enable_repetition_check": False,
 }
+
+
+def _clear_other_default_cards(keep: str) -> None:
+    """Drop ``is_default`` from every model card except *keep*.
+
+    The workspace default is a single card. Kept as a module helper (not a
+    ``CardsMixin`` method) so the mixin's method surface stays byte-identical to
+    the extraction it was carved from — see ``test_management_api_surface``.
+    """
+    if not os.path.isdir(MODEL_CARDS_DIR):
+        return
+    for fname in sorted(os.listdir(MODEL_CARDS_DIR)):
+        if not fname.endswith(".json") or fname[:-5] == keep:
+            continue
+        fpath = os.path.join(MODEL_CARDS_DIR, fname)
+        try:
+            with open(fpath, encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception:
+            continue
+        if isinstance(data, dict) and data.get("is_default"):
+            data["is_default"] = False
+            try:
+                with open(fpath, "w", encoding="utf-8") as f:
+                    json.dump(data, f, ensure_ascii=False, indent=2)
+            except Exception:
+                pass
 
 
 class CardsMixin:
@@ -256,6 +287,7 @@ class CardsMixin:
                     "auto_asr": bool(data.get("auto_asr", False)),
                     "render_mode": data.get("render_mode", "strict"),  # full | strict (Default: strict)
                     "enabled": bool(data.get("enabled", True)),  # false = hidden from Agent Web switcher
+                    "is_default": bool(data.get("is_default", False)),  # workspace default fallback card
                 }
             )
         return self._send_json({"cards": cards})
@@ -309,6 +341,11 @@ class CardsMixin:
         card["title"] = card["title"] or card_name
         with open(fpath, "w", encoding="utf-8") as f:
             json.dump(card, f, ensure_ascii=False, indent=2)
+        # The workspace default is unique: turning this card into the default
+        # clears the flag on every other card, so ``default_model_card`` never
+        # has to break a tie.
+        if card.get("is_default"):
+            _clear_other_default_cards(card_name)
         # A card is a template: each agent keeps its own copy of the model block, so
         # a switch flipped (or an endpoint moved) here used to change nothing for the
         # agents that use it.

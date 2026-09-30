@@ -18,15 +18,19 @@ import {
   ListTodo, ListTree, Loader2, PauseCircle, Plus, RotateCcw, Target, Trash2, X, XCircle,
 } from 'lucide-react';
 import {
+  modelCardAPI,
   taskAPI,
+  type ModelCardInfo,
   type ParallelTask,
   type TaskMilestone,
   type WorktreeReport,
 } from '../../services/api';
 import { OpenSquadLoader } from '../OpenSquadLoader';
+import { SoloModelPicker } from './SoloModelPicker';
 import { getAiWsService, type AIWSMessage } from '../../services/aiWebSocket';
 import { useIsMobileViewport } from '../../hooks/useMatchMedia';
 import { normalizeTaskPlan } from '../../utils/taskPlan';
+import { setRunningTaskCount } from '../../utils/agentActivity';
 import { openSessionTab } from '../../utils/uiEvents';
 
 interface Props {
@@ -47,6 +51,8 @@ export interface TaskFormState {
   prompt: string;
   use_worktree: boolean;
   kind: 'task' | 'goal';
+  /** Model card the task must run on. Empty → agent default, then workspace default. */
+  model_card: string;
   /** One milestone per line; blank lines are ignored. */
   milestones: string;
   maxTokens: string;
@@ -55,7 +61,7 @@ export interface TaskFormState {
 }
 
 export const EMPTY_TASK_FORM: TaskFormState = {
-  title: '', prompt: '', use_worktree: true, kind: 'task',
+  title: '', prompt: '', use_worktree: true, kind: 'task', model_card: '',
   milestones: '', maxTokens: '', maxSeconds: '', maxAttempts: '',
 };
 
@@ -68,6 +74,8 @@ export interface TaskSubmitPayload {
   title: string;
   prompt: string;
   use_worktree: boolean;
+  /** Pin the task to a model card; omitted/empty → agent default. */
+  model_card?: string;
   kind?: 'goal';
   goal?: string;
   milestones?: string[];
@@ -87,11 +95,15 @@ export const buildSubmitPayload = (form: TaskFormState): TaskSubmitPayload => {
     const n = Number.parseInt(raw, 10);
     return Number.isFinite(n) && n > 0 ? n : 0;
   };
-  const payload = {
+  const payload: TaskSubmitPayload = {
     title: form.title.trim(),
     prompt: form.prompt.trim(),
     use_worktree: form.use_worktree,
   };
+  // Only send model_card when pinned, so a plain task keeps the exact wire
+  // shape it had before (empty → agent default, resolved backend-side).
+  const card = form.model_card.trim();
+  if (card) payload.model_card = card;
   if (form.kind !== 'goal') return payload;
   const milestones = form.milestones
     .split('\n')
@@ -120,6 +132,16 @@ export const TaskPanelPage: React.FC<Props> = ({ agentName, rootPath }) => {
   const [submitting, setSubmitting] = useState(false);
   const [form, setForm] = useState<TaskFormState>(EMPTY_TASK_FORM);
   const [mobileDetail, setMobileDetail] = useState(false);
+  // Model cards for the submit form's picker (pin a task to a model).
+  const [cards, setCards] = useState<ModelCardInfo[]>([]);
+
+  const loadCards = useCallback(() => {
+    modelCardAPI.getCards().then((r) => setCards(r.cards || [])).catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    if (showForm) loadCards();
+  }, [showForm, loadCards]);
 
   const reload = useCallback(async (opts?: { quiet?: boolean }) => {
     if (!opts?.quiet) setLoading(true);
@@ -184,6 +206,12 @@ export const TaskPanelPage: React.FC<Props> = ({ agentName, rootPath }) => {
 
   // Slow fallback poll — WS task_update is the primary path.
   const watchingActive = tasks.some((x) => !TERMINAL.has(x.status));
+
+  // Publish the non-terminal task count so the desktop-update flow can warn
+  // before quitting to install (warn-only; see utils/agentActivity).
+  useEffect(() => {
+    setRunningTaskCount(tasks.filter((x) => !TERMINAL.has(x.status)).length);
+  }, [tasks]);
   useEffect(() => {
     const ms = watchingActive ? 4000 : 15000;
     const id = setInterval(() => { void reload({ quiet: true }); }, ms);
@@ -330,10 +358,12 @@ export const TaskPanelPage: React.FC<Props> = ({ agentName, rootPath }) => {
         {showForm ? (
           <TaskSubmitForm
             form={form}
+            cards={cards}
             submitting={submitting}
             onChange={setForm}
             onCancel={() => { setShowForm(false); if (isMobile) setMobileDetail(false); }}
             onSubmit={handleSubmit}
+            onRefreshCards={loadCards}
           />
         ) : selected ? (
           <TaskDetail
@@ -498,11 +528,13 @@ const MilestoneRow: React.FC<{ ms: TaskMilestone; index: number }> = ({ ms, inde
 
 const TaskSubmitForm: React.FC<{
   form: TaskFormState;
+  cards: ModelCardInfo[];
   submitting: boolean;
   onChange: (v: TaskFormState) => void;
   onCancel: () => void;
   onSubmit: () => void;
-}> = ({ form, submitting, onChange, onCancel, onSubmit }) => {
+  onRefreshCards?: () => void;
+}> = ({ form, cards, submitting, onChange, onCancel, onSubmit, onRefreshCards }) => {
   const { t } = useTranslation();
   const isGoal = form.kind === 'goal';
   return (
@@ -602,6 +634,33 @@ const TaskSubmitForm: React.FC<{
               </div>
             </>
           )}
+        </div>
+
+        {/* Execution model — pin this task to a model card (two-level picker). */}
+        <div>
+          <label className="block text-[10px] font-bold text-textMuted uppercase mb-1">{t('taskPanel.fModel')}</label>
+          <div className="flex items-center gap-2">
+            <SoloModelPicker
+              cards={cards}
+              currentCardName={form.model_card || null}
+              modelName={null}
+              fallbackLabel={t('taskPanel.fModelDefault')}
+              placement="down"
+              onSelect={(name) => onChange({ ...form, model_card: name })}
+              onWillOpen={onRefreshCards}
+              onAddModels={() => window.dispatchEvent(new CustomEvent('switchView', { detail: 'models' }))}
+            />
+            {form.model_card && (
+              <button
+                type="button"
+                onClick={() => onChange({ ...form, model_card: '' })}
+                className="inline-flex items-center gap-1 px-2 py-1 rounded-lg text-[11px] text-textMuted hover:text-textMain hover:bg-black/5 dark:hover:bg-white/10 border border-border"
+                title={t('taskPanel.fModelDefault')}
+              >
+                <RotateCcw size={11} /> {t('taskPanel.fModelDefault')}
+              </button>
+            )}
+          </div>
         </div>
 
         <label className="flex items-center gap-2 cursor-pointer select-none">

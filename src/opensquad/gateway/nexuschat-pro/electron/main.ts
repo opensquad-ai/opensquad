@@ -6,7 +6,7 @@ import http from 'http'
 import fs from 'fs'
 import { buildElectronPopupMenus, isElectronMenuId } from './electron-menus'
 import { resolveDesktopWorkspace, writeDesktopWorkspace } from './desktop-workspace'
-import { runDesktopUpdate, type UpdateStatus } from './desktop-updater'
+import { runDesktopUpdate, downloadUpdate, installUpdate, type UpdateStatus } from './desktop-updater'
 import { checkForUpdates, type UpdateChannel } from './update-checker'
 import { agentPythonForBackendEnv, isAgentRuntimeReady } from './agent-runtime'
 import { runSetupWizard } from './setup-window'
@@ -153,6 +153,49 @@ function resolvePackagedAsset(name: string): string {
   return fs.existsSync(extraPath) ? extraPath : devPath
 }
 
+// ── Pending update (download ⇄ install hand-off) ─────────────────────────────
+// The download runs in the background and finishes long before the user picks
+// "restart & install". Persisting the installer path means an install click
+// after an app restart (or a renderer reload) still finds the file, instead of
+// failing with "installer not found" and forcing a re-download.
+const PENDING_UPDATE_FILE = 'pending-update.json'
+
+interface PendingUpdate {
+  path: string
+  fileName: string
+  version?: string
+}
+
+function writePendingUpdate(info: PendingUpdate): void {
+  try {
+    fs.writeFileSync(
+      path.join(app.getPath('userData'), PENDING_UPDATE_FILE),
+      JSON.stringify(info),
+    )
+  } catch (err) {
+    console.warn('[electron] failed to persist pending update:', err)
+  }
+}
+
+function readPendingUpdate(): PendingUpdate | null {
+  try {
+    const raw = fs.readFileSync(path.join(app.getPath('userData'), PENDING_UPDATE_FILE), 'utf-8')
+    const data = JSON.parse(raw) as PendingUpdate
+    if (data && typeof data.path === 'string' && fs.existsSync(data.path)) return data
+  } catch {
+    /* none pending */
+  }
+  return null
+}
+
+function clearPendingUpdate(): void {
+  try {
+    fs.rmSync(path.join(app.getPath('userData'), PENDING_UPDATE_FILE), { force: true })
+  } catch {
+    /* ignore */
+  }
+}
+
 // Application icon — Windows expects an .ico, other platforms accept PNG.
 const APP_ICON_PATH = process.platform === 'win32'
   ? resolvePackagedAsset('icon.ico')
@@ -227,6 +270,56 @@ function registerElectronIpc(): void {
       }
     },
   )
+
+  // Background download: streams progress, resolves when the installer is on
+  // disk. Does NOT quit — the user keeps using the app and installs later.
+  ipcMain.handle(
+    'electron:download-update',
+    async (event, payload: { url: string; fileName: string; version?: string }) => {
+      const win = BrowserWindow.fromWebContents(event.sender)
+      const sendStatus = (status: UpdateStatus) => {
+        win?.webContents.send('electron:update-status', status)
+      }
+      try {
+        const installerPath = await downloadUpdate(payload.url, payload.fileName, sendStatus)
+        writePendingUpdate({
+          path: installerPath,
+          fileName: payload.fileName,
+          version: payload.version,
+        })
+        return { ok: true as const }
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err)
+        return { ok: false as const, error: message }
+      }
+    },
+  )
+
+  // Install: relaunch the installer and quit. The renderer warns (warn-only)
+  // about in-flight agent work before calling this.
+  ipcMain.handle('electron:install-update', async (event) => {
+    const win = BrowserWindow.fromWebContents(event.sender)
+    const sendStatus = (status: UpdateStatus) => {
+      win?.webContents.send('electron:update-status', status)
+    }
+    const pending = readPendingUpdate()
+    if (!pending) {
+      return { ok: false as const, error: 'No downloaded update is ready to install' }
+    }
+    try {
+      await installUpdate(pending.path, sendStatus)
+      clearPendingUpdate()
+      return { ok: true as const }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err)
+      return { ok: false as const, error: message }
+    }
+  })
+
+  ipcMain.handle('electron:has-pending-update', async () => {
+    const pending = readPendingUpdate()
+    return pending ? { pending: true, version: pending.version ?? null } : { pending: false }
+  })
 
   // Manual update check (frontend "Check for updates" button).
   // Returns UpdateInfo; the frontend decides whether to prompt the user

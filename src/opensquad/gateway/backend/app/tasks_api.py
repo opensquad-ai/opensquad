@@ -52,6 +52,8 @@ class SubmitTaskRequest(BaseModel):
     agent_id: str = ""
     base_dir: str = ""
     use_worktree: bool = True
+    # Model card the task must run on. Empty → agent default, then workspace default.
+    model_card: str = ""
     # M3 — "task" (one turn) or "goal" (budgeted, resumable milestone run).
     kind: str = "task"
     # Goal only. ``goal`` defaults to ``prompt`` downstream.
@@ -208,6 +210,7 @@ async def submit_task(body: SubmitTaskRequest):
             "origin": "manual",
             "base_dir": body.base_dir,
             "use_worktree": body.use_worktree,
+            "model_card": body.model_card,
             "kind": body.kind,
             "goal": body.goal,
             "milestones": body.milestones,

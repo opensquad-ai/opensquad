@@ -9,12 +9,22 @@ import { AuthScreen } from './components/AuthScreen';
 import { LanguageSelectScreen } from './components/LanguageSelectScreen';
 import { ElectronShell } from './components/ElectronShell';
 import { DesktopUpdateOverlay } from './components/DesktopUpdateOverlay';
+import { UpdateNotification } from './components/UpdateNotification';
+import { UpdateChangelogDialog } from './components/UpdateChangelogDialog';
 import { SoftOverlay } from './components/SoftOverlay';
 import { ChatState, Message, MessageType, Attachment, Group, User } from './types';
 import { authAPI, userAPI, groupAPI, messageAPI, uploadAPI, getAuthToken, directMessageAPI, adminAPI } from './services/api';
 import { preloadSystemConfig } from './services/configCache';
 import { wsService } from './services/websocket';
-import { beginDesktopUpdate, failDesktopUpdate } from './services/desktopUpdateOverlay';
+import {
+  offerDesktopUpdate,
+  openDesktopUpdateChangelog,
+  closeDesktopUpdateChangelog,
+  dismissDesktopUpdateOverlay,
+  subscribeDesktopUpdateOverlay,
+  type DesktopUpdateOverlayState,
+} from './services/desktopUpdateOverlay';
+import { useDesktopUpdate } from './hooks/useDesktopUpdate';
 import { AvatarImg } from './components/AvatarImg';
 import { OpenSquadLoader } from './components/OpenSquadLoader';
 import { setLanguage } from './i18n';
@@ -311,11 +321,14 @@ const App: React.FC = () => {
   // ─── Desktop 自动更新 ──────────────────────────────────────────────
   // main.ts 的 startAutoUpdateChecker 在启动 30s 后 + 每 1h 轮询 GitHub
   // releases，发现新版本即向所有窗口广播 electron:update-available。
-  // 这里弹确认框询问用户；接受后走与手动检查相同的下载安装流程。安装器
-  // （installer.nsh）在文件复制前已 kill 旧 App 与后端 run.exe，端口
-  // 9555/9600 在重启前已释放，新实例启动不会端口冲突。
-  // 已处理过的版本在会话内去重（ref），避免 1h 轮询重复弹窗；重启后
-  // 若新版本仍未安装，会再提示一次，不会永久静默。
+  // 这里只「上架」更新：弹更新日志小弹窗 + 常驻更新通知（其下带进度 UI），
+  // 由用户点「后台下载」；下载在后台进行，不阻塞使用。安装由用户在下载完成后
+  // 主动确认（安装前会提醒正在运行的 Agent 任务，但不强制拦截）。
+  // 已处理过的版本在会话内去重（ref），避免 1h 轮询重复弹窗。
+  const { startBackgroundDownload, installNow } = useDesktopUpdate();
+  const [updateOverlay, setUpdateOverlay] = useState<DesktopUpdateOverlayState | null>(null);
+  useEffect(() => subscribeDesktopUpdateOverlay(setUpdateOverlay), []);
+
   const handledUpdateVersionsRef = useRef<Set<string>>(new Set());
   useEffect(() => {
     const env = window.electronEnv;
@@ -323,31 +336,20 @@ const App: React.FC = () => {
 
     return env.onUpdateAvailable((info) => {
       if (!info.hasUpdate) return;
-      if (handledUpdateVersionsRef.current.has(info.latestVersion)) return;
       if (!info.downloadUrl || !info.fileName) return;
+      if (handledUpdateVersionsRef.current.has(info.latestVersion)) return;
 
       handledUpdateVersionsRef.current.add(info.latestVersion);
-      const confirmed = window.confirm(
-        t('systemConfig.about.desktopUpdateConfirm', { version: info.latestVersion }),
-      );
-      if (!confirmed) return;
-
-      beginDesktopUpdate(info.latestVersion);
-      void env
-        .downloadAndInstallUpdate?.({ url: info.downloadUrl, fileName: info.fileName })
-        .then((result) => {
-          if (!result.ok) {
-            failDesktopUpdate(result.error);
-            window.alert(result.error || t('systemConfig.about.desktopUpdateFailed'));
-          }
-        })
-        .catch((e: any) => {
-          const message = e?.message || t('systemConfig.about.desktopUpdateFailed');
-          failDesktopUpdate(message);
-          window.alert(message);
-        });
+      offerDesktopUpdate({
+        version: info.latestVersion,
+        releaseNotes: info.releaseNotes,
+        releaseUrl: info.releaseUrl,
+        isBeta: info.isBeta,
+        downloadUrl: info.downloadUrl,
+        fileName: info.fileName,
+      });
     });
-  }, [t]);
+  }, []);
 
   const [editName, setEditName] = useState('');
   const [editAvatar, setEditAvatar] = useState('');
@@ -1689,6 +1691,22 @@ const App: React.FC = () => {
       </SoftOverlay>
 
       <DesktopUpdateOverlay />
+      <UpdateNotification
+        onDownloadBackground={startBackgroundDownload}
+        onInstallNow={installNow}
+        onOpenChangelog={openDesktopUpdateChangelog}
+        onDismiss={dismissDesktopUpdateOverlay}
+      />
+      {updateOverlay?.changelogOpen && updateOverlay.phase !== 'idle' && (
+        <UpdateChangelogDialog
+          version={updateOverlay.version}
+          releaseNotes={updateOverlay.releaseNotes}
+          releaseUrl={updateOverlay.releaseUrl}
+          isBeta={updateOverlay.isBeta}
+          onDownloadBackground={startBackgroundDownload}
+          onLater={closeDesktopUpdateChangelog}
+        />
+      )}
     </div>
     </ElectronShell>
   );

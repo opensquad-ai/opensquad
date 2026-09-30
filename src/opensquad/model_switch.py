@@ -138,6 +138,37 @@ def _resolve_card(card_name: str) -> dict:
 resolve_card = _resolve_card
 
 
+def default_model_card() -> str | None:
+    """Workspace-level default model card name, or ``None``.
+
+    The Model Cards UI marks exactly one card ``is_default: true`` (the admin
+    PUT enforces uniqueness). It is the fallback for an agent that has no model
+    of its own — without it a turn would build a client with an empty
+    ``model_name`` and only fail at request time.
+
+    Scans the workspace ``model_cards/`` directory (cards hold private
+    credentials and live there, never under ``src/``). A missing or malformed
+    directory yields ``None`` so the caller can degrade to "no model bound".
+    """
+    try:
+        cards_dir = syscfg.workspace_model_cards_dir()
+    except Exception:
+        return None
+    if not os.path.isdir(cards_dir):
+        return None
+    for fname in sorted(os.listdir(cards_dir)):
+        if not fname.endswith(".json"):
+            continue
+        try:
+            with open(os.path.join(cards_dir, fname), encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception:
+            continue
+        if isinstance(data, dict) and data.get("is_default"):
+            return fname[:-5]
+    return None
+
+
 def is_ready() -> bool:
     """True when switch/bind may run (runner wired)."""
     return _ensure_runner() is not None

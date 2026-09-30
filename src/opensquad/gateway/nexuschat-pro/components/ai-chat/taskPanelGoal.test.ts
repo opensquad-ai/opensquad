@@ -84,6 +84,11 @@ describe('buildSubmitPayload — plain task', () => {
       expect(key in p).toBe(false);
     }
   });
+
+  it('carries a pinned model card, trimmed, and omits it when unset', () => {
+    expect(buildSubmitPayload(form({ model_card: '  deepseek-v4  ' })).model_card).toBe('deepseek-v4');
+    expect('model_card' in buildSubmitPayload(form({ model_card: '   ' }))).toBe(false);
+  });
 });
 
 describe('buildSubmitPayload — goal', () => {
@@ -179,6 +184,7 @@ describe('EMPTY_TASK_FORM', () => {
       prompt: '',
       use_worktree: true,
       kind: 'task',
+      model_card: '',
       milestones: '',
       maxTokens: '',
       maxSeconds: '',

@@ -2331,6 +2331,11 @@ export interface ModelCardInfo {
   enable_repetition_check?: boolean;
   /** When false, the model is hidden from the Agent Web model switcher. */
   enabled?: boolean;
+  /**
+   * Workspace default model card. Exactly one card carries this flag; it is the
+   * fallback for an agent that has no model card of its own (chat & parallel tasks).
+   */
+  is_default?: boolean;
 }
 
 export interface ModelCardDetail extends ModelCardInfo {

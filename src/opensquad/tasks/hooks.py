@@ -198,7 +198,9 @@ async def run_session_turn(session_id: str, content: str, task: Task | None = No
         "channel": "web",
         "user_id": f"{_TASK_USER_PREFIX}{getattr(task, 'task_id', '') or session_id}",
         "session_id": session_id,
-        "model_card": "",
+        # A task may pin its own model; empty falls through to the agent
+        # default and then the workspace default card (session_model.bind_for_turn).
+        "model_card": (getattr(task, "model_card", "") or ""),
     }
 
     before = _usage_snapshot(runner, session_id)

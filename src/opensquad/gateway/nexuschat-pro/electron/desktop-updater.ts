@@ -9,7 +9,12 @@ export interface DownloadProgress {
   total: number
 }
 
-export type UpdateStatusPhase = 'downloading' | 'preparing' | 'launching' | 'shutting-down'
+export type UpdateStatusPhase =
+  | 'downloading'
+  | 'downloaded'
+  | 'preparing'
+  | 'launching'
+  | 'shutting-down'
 
 export interface UpdateStatus extends Partial<DownloadProgress> {
   phase: UpdateStatusPhase
@@ -174,6 +179,20 @@ export async function runDesktopUpdate(
   fileName: string,
   onStatus: (status: UpdateStatus) => void,
 ): Promise<void> {
+  const installerPath = await downloadUpdate(url, fileName, onStatus)
+  await installUpdate(installerPath, onStatus)
+}
+
+/**
+ * Background download step. Streams progress via ``onStatus`` and resolves with
+ * the installer path once the file is fully on disk. Never touches the window
+ * or quits — the user keeps working while it runs.
+ */
+export async function downloadUpdate(
+  url: string,
+  fileName: string,
+  onStatus: (status: UpdateStatus) => void,
+): Promise<string> {
   logUpdate(`start downloading ${fileName}`)
   onStatus({ phase: 'downloading', percent: 0, transferred: 0, total: 0 })
 
@@ -187,6 +206,22 @@ export async function runDesktopUpdate(
     throw err
   }
   logUpdate(`downloaded -> ${installerPath}`)
+  onStatus({ phase: 'downloaded', percent: 100 })
+  return installerPath
+}
+
+/**
+ * Install step: launch the already-downloaded installer and quit so it can
+ * replace files. Split from the download so the app can be safely quit only
+ * after the user (or the UI) confirms no work is in flight.
+ */
+export async function installUpdate(
+  installerPath: string,
+  onStatus: (status: UpdateStatus) => void,
+): Promise<void> {
+  if (!installerPath || !fs.existsSync(installerPath)) {
+    throw new Error('Installer file not found')
+  }
 
   onStatus({ phase: 'preparing' })
   await delay(UI_SETTLE_MS)

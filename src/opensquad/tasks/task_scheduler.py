@@ -86,6 +86,10 @@ class Task:
         "status",
         "origin",
         "prompt",
+        # Model card this task must run on. Empty means "fall back to the
+        # agent's own default, then the workspace default card" — the same
+        # precedence a chat pane uses.
+        "model_card",
         "created_at",
         "started_at",
         "finished_at",
@@ -113,6 +117,7 @@ class Task:
         self.status = kw.get("status", STATUS_QUEUED)
         self.origin = kw.get("origin", "manual")
         self.prompt = kw.get("prompt", "")
+        self.model_card = str(kw.get("model_card") or "")
         self.created_at = float(kw.get("created_at", time.time()))
         self.started_at = kw.get("started_at")
         self.finished_at = kw.get("finished_at")
@@ -138,6 +143,7 @@ class Task:
             "status": self.status,
             "origin": self.origin,
             "prompt": self.prompt,
+            "model_card": self.model_card,
             "created_at": self.created_at,
             "started_at": self.started_at,
             "finished_at": self.finished_at,
@@ -297,6 +303,7 @@ class TaskScheduler:
         use_worktree: bool = True,
         kind: str = KIND_TASK,
         plan: dict | None = None,
+        model_card: str = "",
         on_event=None,
     ) -> dict:
         """Queue a new parallel task. Returns the task dict or raises."""

@@ -191,6 +191,8 @@ class TestDispatchTaskOp:
             # M3 additions — a plain submission carries no goal plan.
             "kind": "task",
             "plan": {},
+            # Task-level model pin — empty means "agent default".
+            "model_card": "",
         }
 
     def test_submit_defaults_are_stable(self):

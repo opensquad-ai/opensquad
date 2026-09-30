@@ -87,6 +87,7 @@ import {
   type UploadedFile,
 } from '../utils/agentWebChatHelpers';
 import { loadLastModelPick, saveLastModelPick } from '../utils/agentWebModelPick';
+import { setBusySessionCount } from '../utils/agentActivity';
 import {
   setSessionProjectPath,
   setSessionWorkspaceId,
@@ -924,6 +925,9 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
   }, [pendingPrimarySessionId]);
   useEffect(() => { pendingMessagesRef.current = pendingMessages; }, [pendingMessages]);
   useEffect(() => { busySessionsRef.current = busySessions; }, [busySessions]);
+  // Publish the in-flight turn count so the desktop-update flow can warn before
+  // quitting to install (warn-only; see utils/agentActivity).
+  useEffect(() => { setBusySessionCount(busySessions.length); }, [busySessions]);
 
   /** Optimistically release one session's busy/streaming state after stop/new-chat. */
   const clearSessionRunState = useCallback((sid?: string | null) => {
