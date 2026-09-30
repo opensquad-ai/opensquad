@@ -97,7 +97,7 @@ deltas AS (
     MAX(0, COALESCE(cumul_cache_creation_tokens
              - LAG(cumul_cache_creation_tokens) OVER (PARTITION BY agent_id ORDER BY id),
              cumul_cache_creation_tokens)) AS delta_cache_creation
-  FROM token_snapshots
+  FROM token_snapshots{source_filter}
 )"""
 
 
@@ -114,18 +114,37 @@ def query_data(project_root: str, params: dict) -> dict:
         agent_id  - filter to one agent
         metric    - total (default) / cache_read / cache_creation
                     controls SUM(column) used in timeline / by_model / by_agent
+        view      - "agent_tokens" switches to the per-agent cache-hit / cache-miss
+                    / output breakdown used by the in-chat Statistics page
+                    (see query_agent_tokens); other params apply there too and a
+                    "model" param filters to a single model.
 
     Returns JSON-serializable dict.
     """
+    if params.get("view") == "agent_tokens":
+        return query_agent_tokens(
+            _resolve_db_path(project_root),
+            time_range=params.get("range", "24h"),
+            agent_id=params.get("agent_id") or "",
+            model=(params.get("model") or None),
+        )
+
     time_range = params.get("range", "24h")
     agent_id = params.get("agent_id") or None
     metric = params.get("metric", "total")
     if metric not in _METRIC_DELTA_COLS:
         metric = "total"
 
-    # Resolve DB path: use workspace, not install dir
-    # Launcher passes PROJECT_ROOT which is often the install dir (deploy_test/src/).
-    # Agent writes data to the workspace (runtime_deploy/). Detect and correct.
+    db_path = _resolve_db_path(project_root)
+    return query_dashboard(db_path, time_range=time_range, agent_id=agent_id, metric=metric)
+
+
+def _resolve_db_path(project_root: str) -> str:
+    """Resolve the shared analytics DB path.
+
+    Launcher passes PROJECT_ROOT which is often the install dir (deploy_test/src/).
+    Agent writes data to the workspace (runtime_deploy/). Detect and correct.
+    """
     ws_root = os.environ.get("OPENSQUAD_WORKSPACE", "")
     actual_root = ws_root if ws_root and os.path.isdir(ws_root) else project_root
 
@@ -139,8 +158,7 @@ def query_data(project_root: str, params: dict) -> dict:
         except Exception:
             pass
 
-    db_path = os.path.join(actual_root, db_rel)
-    return query_dashboard(db_path, time_range=time_range, agent_id=agent_id, metric=metric)
+    return os.path.join(actual_root, db_rel)
 
 
 # ── Internal helpers ──
@@ -248,7 +266,7 @@ def query_dashboard(
 
     try:
         bucket_expr, bucket_label = _bucket_expr(time_range)
-        deltas_cte = _DELTAS_CTE_TEMPLATE.format(bucket_expr=bucket_expr)
+        deltas_cte = _DELTAS_CTE_TEMPLATE.format(bucket_expr=bucket_expr, source_filter="")
         # Materialize per-call deltas ONCE. Previously each of summary /
         # timeline / by_model / by_agent rebuilt the window-function CTE over
         # the full token_snapshots table (~5× cost → Gateway 5s proxy 502).
@@ -286,6 +304,184 @@ def query_dashboard(
             "metric": metric,
         },
     }
+
+
+def query_agent_tokens(
+    db_path: str, time_range: str = "24h", agent_id: str = "", model: str | None = None
+) -> dict[str, Any]:
+    """Per-agent token usage split into cache-hit input, cache-miss input and
+    output, bucketed by time range. Backs the in-chat Statistics page.
+
+    ``cache_read`` is a subset of ``input`` for every provider, so
+    ``cache_miss = max(0, input - cache_read)``. Anthropic cache-creation
+    tokens fall into the cache-miss bucket (the UI shows only three series,
+    matching the reference design).
+
+    Args:
+        agent_id: canonical agent id (config ``agent_id``) to filter on.
+        model:    optional single-model filter; None means all models.
+
+    Returns:
+        {
+            "summary": {input, output, cache_read, cache_miss, total, requests},
+            "timeline": [{bucket, input_hit, input_miss, output}, ...],
+            "by_model": [{model, input, output, cache_read, cache_miss,
+                          total, requests}, ...],
+            "models": [model, ...],
+            "meta": {db_path, time_range, agent_id, model},
+        }
+    """
+    conn = _connect(db_path, query_only=False)
+    if conn is None or not agent_id:
+        return _empty_agent_tokens(db_path, time_range, agent_id, model)
+
+    cutoff = _range_to_cutoff(time_range)
+    params: list[Any] = [cutoff, agent_id]
+    model_filter = ""
+    if model:
+        model_filter = " AND model = ?"
+        params.append(model)
+
+    # Lower id bound: the last snapshot written before the window. Including it
+    # lets LAG() compute the first in-window row's delta correctly (the outer
+    # time filter then drops it). Without it the window function would have to
+    # run over the agent's entire history — for a busy agent that is >1M rows
+    # and ~15s even for a 24h view. Resolved via the (agent_id, timestamp)
+    # index. Insert order matches timestamp order (single writer, buffered
+    # flush), so the newest pre-window row is also the highest pre-window id.
+    prev = conn.execute(
+        "SELECT id FROM token_snapshots WHERE agent_id = ? AND timestamp < ? ORDER BY timestamp DESC, id DESC LIMIT 1",
+        (agent_id, cutoff),
+    ).fetchone()
+    lower_id = prev[0] if prev else 0
+
+    try:
+        bucket_expr, _bucket_label = _bucket_expr(time_range)
+        # Restrict the window-function source to this agent's rows from the
+        # lookback row onward. Safe because LAG() is PARTITION BY agent_id.
+        deltas_cte = _DELTAS_CTE_TEMPLATE.format(
+            bucket_expr=bucket_expr, source_filter=" WHERE agent_id = ? AND id >= ?"
+        )
+        conn.execute("DROP TABLE IF EXISTS _ta_deltas")
+        conn.execute(
+            f"CREATE TEMP TABLE _ta_deltas AS WITH {deltas_cte} SELECT * FROM deltas",
+            (agent_id, lower_id),
+        )
+        conn.execute("CREATE INDEX IF NOT EXISTS _ta_deltas_ts ON _ta_deltas(timestamp)")
+        conn.execute("CREATE INDEX IF NOT EXISTS _ta_deltas_agent ON _ta_deltas(agent_id)")
+
+        summary = _query_agent_summary(conn, params, model_filter)
+        timeline = _query_agent_timeline(conn, params, model_filter)
+        by_model = _query_agent_by_model(conn, params, model_filter)
+    finally:
+        conn.close()
+
+    return {
+        "summary": summary,
+        "timeline": timeline,
+        "by_model": by_model,
+        "models": [r["model"] for r in by_model],
+        "meta": {
+            "db_path": db_path,
+            "time_range": time_range,
+            "agent_id": agent_id,
+            "model": model or "",
+        },
+    }
+
+
+def _empty_agent_tokens(db_path: str, time_range: str, agent_id: str, model: str | None) -> dict[str, Any]:
+    return {
+        "summary": {"input": 0, "output": 0, "cache_read": 0, "cache_miss": 0, "total": 0, "requests": 0},
+        "timeline": [],
+        "by_model": [],
+        "models": [],
+        "meta": {
+            "db_path": db_path,
+            "time_range": time_range,
+            "agent_id": agent_id,
+            "model": model or "",
+        },
+    }
+
+
+def _query_agent_summary(conn: sqlite3.Connection, params: list, model_filter: str) -> dict[str, Any]:
+    sql = f"""
+        SELECT
+            COALESCE(SUM(delta_input), 0) AS input,
+            COALESCE(SUM(delta_output), 0) AS output,
+            COALESCE(SUM(delta_cache_read), 0) AS cache_read,
+            COUNT(*) AS requests
+        FROM _ta_deltas
+        WHERE timestamp >= ? AND agent_id = ?{model_filter}
+    """
+    row = conn.execute(sql, params).fetchone()
+    if not row:
+        return {"input": 0, "output": 0, "cache_read": 0, "cache_miss": 0, "total": 0, "requests": 0}
+    input_tokens = row["input"]
+    cache_read = row["cache_read"]
+    return {
+        "input": input_tokens,
+        "output": row["output"],
+        "cache_read": cache_read,
+        "cache_miss": max(0, input_tokens - cache_read),
+        "total": input_tokens + row["output"],
+        "requests": row["requests"],
+    }
+
+
+def _query_agent_timeline(conn: sqlite3.Connection, params: list, model_filter: str) -> list[dict[str, Any]]:
+    """Per-bucket cache-hit input / cache-miss input / output for stacked bars."""
+    sql = f"""
+        SELECT
+            bucket,
+            COALESCE(SUM(delta_cache_read), 0) AS input_hit,
+            MAX(0, COALESCE(SUM(delta_input), 0) - COALESCE(SUM(delta_cache_read), 0)) AS input_miss,
+            COALESCE(SUM(delta_output), 0) AS output
+        FROM _ta_deltas
+        WHERE timestamp >= ? AND agent_id = ?{model_filter}
+        GROUP BY bucket
+        ORDER BY bucket ASC
+        LIMIT 500
+    """
+    rows = conn.execute(sql, params).fetchall()
+    return [
+        {"bucket": r["bucket"], "input_hit": r["input_hit"], "input_miss": r["input_miss"], "output": r["output"]}
+        for r in rows
+    ]
+
+
+def _query_agent_by_model(conn: sqlite3.Connection, params: list, model_filter: str) -> list[dict[str, Any]]:
+    sql = f"""
+        SELECT
+            model,
+            COALESCE(SUM(delta_input), 0) AS input,
+            COALESCE(SUM(delta_output), 0) AS output,
+            COALESCE(SUM(delta_cache_read), 0) AS cache_read,
+            COUNT(*) AS requests
+        FROM _ta_deltas
+        WHERE timestamp >= ? AND agent_id = ?{model_filter}
+        GROUP BY model
+        ORDER BY (SUM(delta_input) + SUM(delta_output)) DESC
+        LIMIT 50
+    """
+    rows = conn.execute(sql, params).fetchall()
+    result = []
+    for r in rows:
+        input_tokens = r["input"]
+        cache_read = r["cache_read"]
+        result.append(
+            {
+                "model": r["model"],
+                "input": input_tokens,
+                "output": r["output"],
+                "cache_read": cache_read,
+                "cache_miss": max(0, input_tokens - cache_read),
+                "total": input_tokens + r["output"],
+                "requests": r["requests"],
+            }
+        )
+    return result
 
 
 def _empty_summary() -> dict[str, Any]:

@@ -202,16 +202,37 @@ export default defineConfig(({ mode }) => {
               if (id.includes('node_modules/lucide-react')) {
                 return undefined;
               }
-              // Mermaid + its whole dependency tree (cytoscape, d3, dagre,
-              // katex, dompurify, …). mermaidHydrate already loads mermaid via
-              // dynamic import; grouping it here keeps the huge graph libraries
-              // out of vendor-other so they are only fetched when a chat
-              // message actually contains a mermaid block.
+              // Recharts (token statistics charts) + its d3 / victory / redux
+              // runtime. MUST come before the mermaid branch: that branch
+              // matches `node_modules/d3` and would otherwise pull recharts'
+              // d3 helpers into the deferred vendor-mermaid chunk. Keeping the
+              // whole set in one chunk means the lazy stats page pulls only
+              // this, and mermaid pulls d3 from here rather than the reverse.
+              if (
+                id.includes('node_modules/recharts')
+                || id.includes('node_modules/victory-vendor')
+                || id.includes('node_modules/react-is')
+                || id.includes('node_modules/d3')
+                || id.includes('node_modules/es-toolkit')
+                || id.includes('node_modules/decimal.js-light')
+                || id.includes('node_modules/@reduxjs')
+                || id.includes('node_modules/redux')
+                || id.includes('node_modules/immer')
+                || id.includes('node_modules/reselect')
+              ) {
+                return 'vendor-charts';
+              }
+              // Mermaid + its whole dependency tree (cytoscape, dagre,
+              // katex, dompurify, …). The d3 family it shares with recharts is
+              // claimed by the vendor-charts branch above. mermaidHydrate
+              // already loads mermaid via dynamic import; grouping it here
+              // keeps the huge graph libraries out of vendor-other so they are
+              // only fetched when a chat message actually contains a mermaid
+              // block.
               if (
                 id.includes('node_modules/mermaid')
                 || id.includes('node_modules/@mermaid-js')
                 || id.includes('node_modules/cytoscape')
-                || id.includes('node_modules/d3')
                 || id.includes('node_modules/dagre')
                 || id.includes('node_modules/dompurify')
                 || id.includes('node_modules/katex')

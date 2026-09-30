@@ -1588,6 +1588,57 @@ export const pluginAPI = {
 };
 
 // ============================================================
+// Agent Token Statistics API (单 Agent Token 消耗统计)
+// ============================================================
+
+export interface AgentTokenTimelinePoint {
+  bucket: string;
+  /** Input tokens served from prompt cache. */
+  input_hit: number;
+  /** Input tokens not served from cache (input − cache read). */
+  input_miss: number;
+  output: number;
+}
+
+export interface AgentTokenModelRow {
+  model: string;
+  input: number;
+  output: number;
+  cache_read: number;
+  cache_miss: number;
+  total: number;
+  requests: number;
+}
+
+export interface AgentTokenStats {
+  summary: {
+    input: number;
+    output: number;
+    cache_read: number;
+    cache_miss: number;
+    total: number;
+    requests: number;
+  };
+  timeline: AgentTokenTimelinePoint[];
+  by_model: AgentTokenModelRow[];
+  models: string[];
+  meta: Record<string, unknown>;
+}
+
+export const tokenStatsAPI = {
+  /** Per-agent token usage split into cache-hit input / cache-miss input / output. */
+  getAgentTokens: (params: { agentId: string; range: string; model?: string }) => {
+    const q = new URLSearchParams({
+      view: 'agent_tokens',
+      agent_id: params.agentId,
+      range: params.range,
+    });
+    if (params.model) q.set('model', params.model);
+    return apiRequest<AgentTokenStats>(`/ai-web/admin/plugins/token_analytics/data?${q.toString()}`);
+  },
+};
+
+// ============================================================
 // Plugin Service API (插件内嵌 HTTP 服务管理)
 // ============================================================
 

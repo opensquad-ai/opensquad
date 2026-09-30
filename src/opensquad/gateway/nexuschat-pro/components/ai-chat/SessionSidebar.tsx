@@ -19,15 +19,14 @@ import {
   UserCircle,
   Archive,
   ChevronRight,
-  BookOpen,
   Bot,
-  Code2,
   MessageCircle,
   LayoutGrid,
   Clock,
   ListTodo,
   Search,
   FileDown,
+  BarChart3,
 } from 'lucide-react';
 import { agentSessionAPI, AgentSession } from '../../services/api';
 import { exportSessionToMarkdown } from '../../utils/sessionExport';
@@ -63,6 +62,7 @@ import { SOFT_PRESENCE_MS, useSoftPresence } from '../../utils/useSoftPresence';
 import { formatRelativeAge } from '../../utils/time';
 import { isSessionRowBusy } from '../../utils/sessionBusy';
 import { PulseDotsOrbit } from './PulseDotsStatus';
+import { UiModeSwitch, type UiMode } from './UiModeSwitch';
 import { AccountRailFooter, type AccountUser } from '../AccountRailFooter';
 import { AgentNavShortcutAvatars } from '../AgentNavShortcutAvatars';
 import { navigateAppView } from '../../utils/appNavItems';
@@ -84,6 +84,7 @@ interface SessionSidebarProps {
   onOpenRoles?: () => void;
   onOpenScheduledTasks?: () => void;
   onOpenTasks?: () => void;
+  onOpenStats?: () => void;
   onOpenAgents?: () => void;
   onOpenSearch?: () => void;
   /** Highlight Skill 库 when the in-chat skills panel is open. */
@@ -92,6 +93,8 @@ interface SessionSidebarProps {
   pluginsActive?: boolean;
   /** Highlight 角色 when the in-chat roles panel is open. */
   rolesActive?: boolean;
+  /** Highlight 统计 when the in-chat token statistics page is open. */
+  statsActive?: boolean;
   /** Highlight 智能体 while the agent switcher dialog is open. */
   agentsActive?: boolean;
   isOpen: boolean;
@@ -109,9 +112,9 @@ interface SessionSidebarProps {
   onSetPrimarySession?: (sessionId: string) => void;
   /** Notify parent when the session list (titles) changes — used for L2 tab labels. */
   onSessionsChange?: (sessions: AgentSession[], complete?: boolean) => void;
-  /** Chat layout mode: classic (Work) | solo (Code). */
-  uiMode?: 'classic' | 'solo';
-  onUiModeChange?: (mode: 'classic' | 'solo') => void;
+  /** Chat layout mode: classic (Work) | solo (Code) | chat (user/messenger). */
+  uiMode?: UiMode;
+  onUiModeChange?: (mode: UiMode) => void;
   currentUser?: AccountUser;
   onOpenProfile?: () => void;
   onOpenSettings?: () => void;
@@ -213,11 +216,13 @@ const SessionSidebarInner: React.FC<SessionSidebarProps> = ({
   onOpenRoles,
   onOpenScheduledTasks,
   onOpenTasks,
+  onOpenStats,
   onOpenAgents,
   onOpenSearch,
   skillsActive = false,
   pluginsActive = false,
   rolesActive = false,
+  statsActive = false,
   agentsActive = false,
   isOpen,
   sessionTitleUpdate,
@@ -994,46 +999,7 @@ const SessionSidebarInner: React.FC<SessionSidebarProps> = ({
         className="absolute right-0 top-0 bottom-0 w-1.5 translate-x-1/2 cursor-col-resize z-10 hover:bg-primary/30"
       />
       <div className="h-11 px-2 border-b border-border box-border flex items-center shrink-0">
-        <div
-          className="flex min-w-0 flex-1 items-center rounded-xl bg-black/[0.055] p-[3px] dark:bg-white/[0.08]"
-          role="tablist"
-          aria-label={t('aiChat.uiModeLabel')}
-        >
-          <button
-            type="button"
-            role="tab"
-            aria-selected={uiMode === 'classic'}
-            onClick={() => onUiModeChange?.('classic')}
-            title={t('aiChat.uiModeClassicHint')}
-            className={`flex min-w-0 flex-1 items-center justify-center gap-1 rounded-[9px] px-1.5 py-[5px] text-[11px] font-medium transition-all duration-150 ${
-              uiMode === 'classic'
-                ? 'bg-white text-textMain shadow-[0_1px_2px_rgba(0,0,0,0.08)] dark:bg-panel dark:shadow-[0_1px_2px_rgba(0,0,0,0.35)]'
-                : 'text-textMuted hover:text-textMain'
-            }`}
-          >
-            {uiMode === 'classic' ? (
-              <BookOpen size={13} strokeWidth={1.75} className="shrink-0 opacity-80" />
-            ) : null}
-            <span className="truncate">{t('aiChat.uiModeClassic')}</span>
-          </button>
-          <button
-            type="button"
-            role="tab"
-            aria-selected={uiMode === 'solo'}
-            onClick={() => onUiModeChange?.('solo')}
-            title={t('aiChat.uiModeSoloHint')}
-            className={`flex min-w-0 flex-1 items-center justify-center gap-1 rounded-[9px] px-1.5 py-[5px] text-[11px] font-medium transition-all duration-150 ${
-              uiMode === 'solo'
-                ? 'bg-white text-textMain shadow-[0_1px_2px_rgba(0,0,0,0.08)] dark:bg-panel dark:shadow-[0_1px_2px_rgba(0,0,0,0.35)]'
-                : 'text-textMuted hover:text-textMain'
-            }`}
-          >
-            {uiMode === 'solo' ? (
-              <Code2 size={13} strokeWidth={1.75} className="shrink-0 opacity-80" />
-            ) : null}
-            <span className="truncate">{t('aiChat.uiModeSolo')}</span>
-          </button>
-        </div>
+        <UiModeSwitch uiMode={uiMode} onUiModeChange={onUiModeChange} />
       </div>
 
       <div className="px-2 py-2 space-y-1 border-b border-border/60 shrink-0">
@@ -1075,6 +1041,18 @@ const SessionSidebarInner: React.FC<SessionSidebarProps> = ({
         >
           <ListTodo size={16} className="text-textMuted/70" />
           {t('taskPanel.title')}
+        </button>
+        <button
+          type="button"
+          onClick={() => onOpenStats?.()}
+          className={`w-full flex items-center gap-2 px-2 py-1.5 rounded-lg text-[14px] font-normal os-interactive ${
+            statsActive
+              ? 'bg-primary/10 text-primary'
+              : 'text-textMain'
+          }`}
+        >
+          <BarChart3 size={16} className={statsActive ? 'text-primary' : 'text-textMuted/70'} />
+          {t('agentTokenStats.menuLabel')}
         </button>
         <button
           type="button"

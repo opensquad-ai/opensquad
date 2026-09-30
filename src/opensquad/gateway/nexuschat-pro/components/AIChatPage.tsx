@@ -29,7 +29,7 @@ import { useTranslation } from 'react-i18next';
 import { getAiWsService, AIWebSocketStatus } from '../services/aiWebSocket';
 import { agentSessionAPI, authAPI, adminAPI, gitAPI, AdminAgent, modelCardAPI, ModelCardInfo, skillAPI, SkillInfo } from '../services/api';
 import type { AgentSession } from '../services/api';
-import { resolveChatAvatar, toAbsoluteMediaUrl } from '../utils/image';
+import { getLocalAvatarFallback, resolveChatAvatar, toAbsoluteMediaUrl } from '../utils/image';
 import { OpenSquadLoader } from './OpenSquadLoader';
 import {
   appendUserSteerToTimeline,
@@ -202,6 +202,10 @@ import { SoloContextFooter } from './ai-chat/SoloContextFooter';
 import { PlanBlock, PlanStep, parsePlanContent } from './ai-chat/PlanBlock';
 import { StatusBadge, AgentStatus } from './ai-chat/StatusBadge';
 import { SessionSidebar } from './ai-chat/SessionSidebar';
+import { ChatModeSidebar } from './ai-chat/ChatModeSidebar';
+import { ChatDetailDrawer } from './ai-chat/ChatDetailDrawer';
+import { type UiMode } from './ai-chat/UiModeSwitch';
+import { agentStatusOf } from '../utils/agentStatus';
 import { AgentSwitcherDialog } from './ai-chat/AgentSwitcherDialog';
 import { SessionSearchModal } from './ai-chat/SessionSearchModal';
 import { ContextViewer, ContextEntry } from './ai-chat/ContextViewer';
@@ -213,6 +217,7 @@ const PluginManagerPage = React.lazy(() =>
   import('./PluginManagerPage').then((m) => ({ default: m.PluginManagerPage })),
 );
 const RolesPage = React.lazy(() => import('./RolesPage'));
+const AgentTokenStatsPage = React.lazy(() => import('./ai-chat/AgentTokenStatsPage'));
 import {
   rebuildShellStreamsFromTimeline,
   collectRunningShellJobs,
@@ -493,8 +498,8 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
   /** 左侧菜单「智能体」：切换对话对象 / 管理其运行状态。 */
   const [agentSwitcherOpen, setAgentSwitcherOpen] = useState(false);
   const closeAgentSwitcher = useCallback(() => setAgentSwitcherOpen(false), []);
-  /** In-chat Skill 库 / 插件：keep SessionSidebar, replace center + files. */
-  const [libraryView, setLibraryView] = useState<null | 'skills' | 'plugins' | 'roles'>(null);
+  /** In-chat Skill 库 / 插件 / 角色 / 统计：keep SessionSidebar, replace center + files. */
+  const [libraryView, setLibraryView] = useState<null | 'skills' | 'plugins' | 'roles' | 'stats'>(null);
   const [filesPanelOpen, setFilesPanelOpen] = useState(() => {
     try {
       if (typeof window !== 'undefined' && window.matchMedia('(max-width: 767px)').matches) {
@@ -1113,17 +1118,24 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     [displayTimeline, shellStreams],
   );
 
-  // UI render mode: classic (user bubble + agent document) | solo (document stream). Global preference.
-  type AiChatUiMode = 'classic' | 'solo';
+  // UI render mode: classic (Work) | solo (Code) | chat (user/messenger).
+  // Global preference — host-persisted so both the Vite and the packaged
+  // origin agree (see utils/hostUiPrefs).
+  type AiChatUiMode = UiMode;
   const [uiMode, setUiMode] = useState<AiChatUiMode>(() => {
     try {
       const stored = localStorage.getItem('ai_chat_ui_mode');
-      return stored === 'solo' ? 'solo' : 'classic';
+      return stored === 'solo' || stored === 'chat' ? stored : 'classic';
     } catch {
       return 'classic';
     }
   });
   const isSolo = uiMode === 'solo';
+  /** 聊天模式：messenger layout — contact rail, plain bubbles, detail drawer. */
+  const isChat = uiMode === 'chat';
+  /** 详细抽屉（聊天模式右键栏）：文件 + 历史搜索。 */
+  const [chatDetailOpen, setChatDetailOpen] = useState(false);
+  const [chatDetailWidth, setChatDetailWidth] = useState(360);
   // Both render modes put visualization iframes below the reply — solo used to
   // skip the index entirely, which silently dropped every HTML embed there.
   const htmlEmbedsByAssistantIndex = useMemo(
@@ -1133,8 +1145,21 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
   const setUiModePersisted = useCallback((mode: AiChatUiMode) => {
     setUiMode(mode);
     try { localStorage.setItem('ai_chat_ui_mode', mode); } catch {}
+    // App 镜像这个模式来决定 Agent 管理页的形态（通讯录 / 工作台）。
+    window.dispatchEvent(new CustomEvent('opensquad-ui-mode-changed', { detail: { uiMode: mode } }));
     void import('../utils/hostUiPrefs').then((m) => m.schedulePushHostUiPrefs()).catch(() => undefined);
   }, []);
+
+  // 聊天模式没有工作区/资料库那一套：切进来时收起右栏与内嵌管理页，
+  // 切走时收起「详细」抽屉。否则从 Code 切过去会带着一个 project rail。
+  useEffect(() => {
+    if (isChat) {
+      setFilesPanelOpen(false);
+      setLibraryView(null);
+    } else {
+      setChatDetailOpen(false);
+    }
+  }, [isChat]);
 
   // Document column for both classic + solo (classic: user bubble + agent doc stream)
   const soloColumnClass = CHAT_DOCUMENT_COLUMN_CLASS;
@@ -4817,8 +4842,9 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
         landing={isSessionComposerLanding(sessionId)}
         disabled={isLoadingSession || (!sessionBootstrapped && !composerLandingSessionsRef.current.has(sessionId))}
         busy={isSessionBusy(sessionId)}
+        simple={isChat}
         terminalsPanel={
-          runningShellJobs.length > 0 ? (
+          !isChat && runningShellJobs.length > 0 ? (
             <ShellTerminalsBar
               jobs={runningShellJobs}
               onStopJob={(job) => {
@@ -4838,7 +4864,8 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
           wsServiceRef.current?.setAgentMode(mode, undefined, sessionId);
         }}
         approvalPanel={(() => {
-          if (focusedPaneId !== paneId) return null;
+          // 聊天模式不弹工程师审批卡（模式切换 / 选项）：那是 Work/Code 的交互。
+          if (isChat || focusedPaneId !== paneId) return null;
           const pendingModes = modeApprovals.filter((a) => a.status === 'pending');
           const pendingOptions = optionsProposals.filter((p) => p.status === 'pending');
           if (pendingModes.length === 0 && pendingOptions.length === 0) {
@@ -5053,7 +5080,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
         onMouthpieceUtterance={handleMouthpieceUtterance}
         onForceAskAgentChange={handleForceAskAgentChange}
         planPanel={
-          sessionId === currentSessionId && effectivePlanSteps.length > 0 ? (
+          !isChat && sessionId === currentSessionId && effectivePlanSteps.length > 0 ? (
             <PlanBlock
               steps={effectivePlanSteps}
               defaultOpen={false}
@@ -5102,6 +5129,17 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
   const handleOpenRoles = () => {
     setLibraryView((cur) => {
       const next = cur === 'roles' ? null : 'roles';
+      if (next) {
+        setSessionSidebarOpen(true);
+        if (isCompactLayout) setFilesPanelOpen(false);
+      }
+      return next;
+    });
+  };
+
+  const handleOpenStats = () => {
+    setLibraryView((cur) => {
+      const next = cur === 'stats' ? null : 'stats';
       if (next) {
         setSessionSidebarOpen(true);
         if (isCompactLayout) setFilesPanelOpen(false);
@@ -5456,6 +5494,23 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
             : 'relative z-0 h-full flex-shrink-0'
         }
       >
+      {isChat ? (
+      <ChatModeSidebar
+        agentId={agentId}
+        currentSessionId={sidebarSelectedSessionId}
+        onViewSession={handleSidebarViewSession}
+        uiMode={uiMode}
+        onUiModeChange={setUiModePersisted}
+        isOpen={sessionSidebarOpen}
+        busySessionIds={busySessions}
+        streamingSessionIds={streamingSessionIds}
+        unseenCompleteSessionIds={unseenCompleteSessionIds}
+        currentUser={currentUser}
+        onOpenProfile={onOpenProfile}
+        onOpenSettings={onOpenSettings}
+        onOpenDetail={() => setChatDetailOpen(true)}
+      />
+      ) : (
       <SessionSidebar
         agentId={agentId}
         currentSessionId={sidebarSelectedSessionId}
@@ -5470,11 +5525,13 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
         onOpenRoles={handleOpenRoles}
         onOpenScheduledTasks={handleOpenScheduledTasks}
         onOpenTasks={handleOpenTasks}
+        onOpenStats={handleOpenStats}
         onOpenAgents={handleOpenAgents}
         onOpenSearch={openSessionSearch}
         skillsActive={libraryView === 'skills'}
         pluginsActive={libraryView === 'plugins'}
         rolesActive={libraryView === 'roles'}
+        statsActive={libraryView === 'stats'}
         agentsActive={agentSwitcherOpen}
         isOpen={sessionSidebarOpen}
         sessionTitleUpdate={sessionTitleUpdate}
@@ -5495,6 +5552,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
         onOpenProfile={onOpenProfile}
         onOpenSettings={onOpenSettings}
       />
+      )}
       </div>
 
       <SessionSearchModal
@@ -5537,7 +5595,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
         />
       )}
 
-      {libraryView === 'skills' || libraryView === 'plugins' || libraryView === 'roles' ? (
+      {libraryView === 'skills' || libraryView === 'plugins' || libraryView === 'roles' || libraryView === 'stats' ? (
         <div className="flex-1 min-w-0 min-h-0 overflow-hidden flex flex-col os-depth-panel relative z-0">
           <Suspense
             fallback={
@@ -5558,9 +5616,14 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
                 initialAgentId={agentProfile?.dir_name || agentId}
                 onBack={() => setLibraryView(null)}
               />
-            ) : (
+            ) : libraryView === 'roles' ? (
               <RolesPage
                 embedded
+                onBack={() => setLibraryView(null)}
+              />
+            ) : (
+              <AgentTokenStatsPage
+                agentId={agentId}
                 onBack={() => setLibraryView(null)}
               />
             )}
@@ -5585,7 +5648,21 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
                   <PanelLeftOpen size={16} className="text-textMuted" />
                 )}
               </button>
-              <div className="flex min-w-0 max-w-[120px] sm:max-w-[180px] items-center gap-1.5">
+              <div className={`flex min-w-0 items-center gap-1.5 ${isChat ? 'max-w-[240px] sm:max-w-[320px]' : 'max-w-[120px] sm:max-w-[180px]'}`}>
+                {isChat ? (
+                  <img
+                    src={resolveChatAvatar(agentProfile?.chat_profile) || getLocalAvatarFallback(agentId, agentProfile?.agent_name || agentId)}
+                    alt=""
+                    className="h-7 w-7 shrink-0 rounded-full object-cover bg-border"
+                    loading="lazy"
+                    onError={(e) => {
+                      const img = e.currentTarget;
+                      if (img.dataset.fallbackApplied) return;
+                      img.dataset.fallbackApplied = '1';
+                      img.src = getLocalAvatarFallback(agentId, agentProfile?.agent_name || agentId);
+                    }}
+                  />
+                ) : null}
                 <StatusBadge status={agentStatus} />
                 <h2 className="min-w-0 truncate text-sm font-bold leading-none text-textMain">
                   {agentProfile?.agent_name || modelName || agentId}
@@ -5599,35 +5676,50 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
             </div>
 
             <div className="flex-1 min-w-0 overflow-visible self-stretch flex items-end">
-              <WorkspaceTabBar
-                workspaces={wsSnap.workspaces}
-                openIds={wsSnap.chrome.openWorkspaceIds}
-                activeId={wsSnap.chrome.activeWorkspaceId}
-                onSelect={handleSelectWorkspace}
-                onRequestClose={(id) => {
-                  const ws = wsSnap.workspaces.find((w) => w.id === id);
-                  if (ws) setCloseWorkspaceTarget(ws);
-                }}
-                onOpenExisting={handleOpenExistingWorkspace}
-                onCreateNew={() => setCreateWorkspaceOpen(true)}
-              />
+              {!isChat ? (
+                <WorkspaceTabBar
+                  workspaces={wsSnap.workspaces}
+                  openIds={wsSnap.chrome.openWorkspaceIds}
+                  activeId={wsSnap.chrome.activeWorkspaceId}
+                  onSelect={handleSelectWorkspace}
+                  onRequestClose={(id) => {
+                    const ws = wsSnap.workspaces.find((w) => w.id === id);
+                    if (ws) setCloseWorkspaceTarget(ws);
+                  }}
+                  onOpenExisting={handleOpenExistingWorkspace}
+                  onCreateNew={() => setCreateWorkspaceOpen(true)}
+                />
+              ) : null}
             </div>
 
             <div className="flex h-8 items-center gap-0.5 sm:gap-1 shrink-0">
-              <button
-                type="button"
-                onClick={toggleFilesPanel}
-                className={`p-1 sm:p-1.5 rounded-lg transition-colors flex-shrink-0 ${
-                  filesPanelOpen ? 'bg-primary/15 hover:bg-primary/20' : 'hover:bg-primary/10'
-                }`}
-                title={filesPanelOpen ? 'Hide project files' : 'Show project files'}
-              >
-                {filesPanelOpen ? (
-                  <PanelRightClose size={16} className="text-primary" />
-                ) : (
-                  <PanelRightOpen size={16} className="text-textMuted" />
-                )}
-              </button>
+              {isChat ? (
+                <button
+                  type="button"
+                  onClick={() => setChatDetailOpen((v) => !v)}
+                  className={`px-2 py-1 rounded-lg text-[12px] transition-colors flex-shrink-0 ${
+                    chatDetailOpen ? 'bg-primary/15 text-primary' : 'text-textMuted hover:bg-primary/10 hover:text-textMain'
+                  }`}
+                  title={t('aiChat.chat.detailHint')}
+                >
+                  {t('aiChat.chat.detail')}
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  onClick={toggleFilesPanel}
+                  className={`p-1 sm:p-1.5 rounded-lg transition-colors flex-shrink-0 ${
+                    filesPanelOpen ? 'bg-primary/15 hover:bg-primary/20' : 'hover:bg-primary/10'
+                  }`}
+                  title={filesPanelOpen ? 'Hide project files' : 'Show project files'}
+                >
+                  {filesPanelOpen ? (
+                    <PanelRightClose size={16} className="text-primary" />
+                  ) : (
+                    <PanelRightOpen size={16} className="text-textMuted" />
+                  )}
+                </button>
+              )}
             </div>
           </div>
         </div>
@@ -5772,6 +5864,9 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
             </>
           )}
           renderEntry={(entry, i, entryKey, revealStyle) => {
+            // 聊天模式只画对话本身：工具流、状态提示、计划、任务折叠全部收起。
+            // 这是「像通讯软件一样聊天」的核心 —— 过程属于 Work/Code。
+            if (isChat && entry.kind !== 'message') return null;
             const lockLayout =
               i >= displayTimeline.length - 8
               || (entry.kind === 'workflow' && !entry.data.completed);
@@ -5788,7 +5883,8 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
                 // 中间的 `prompt` 条目渲染为 null，判定要跨过它们，否则刷新后
                 // [workflow][prompt][message] 会在同一条回复上方出现第二个名字。
                 hideSenderLabel:
-                  entry.data.role === 'assistant'
+                  !isChat
+                  && entry.data.role === 'assistant'
                   && previousRenderedEntryKind(displayTimeline, i) === 'workflow',
                 senderAvatar:
                   entry.data.role === 'user'
@@ -5804,15 +5900,16 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
                     : undefined,
               };
               // Files created/modified by the workflow that produced this reply
-              // (shown below the reply once the turn completes).
+              // (shown below the reply once the turn completes). 聊天模式没有
+              // 工作流，也就没有「本次改动」卡片。
               const turnChangedFiles =
-                entry.data.role === 'assistant'
+                !isChat && entry.data.role === 'assistant'
                   ? collectTurnChangedFilesBefore(displayTimeline, i)
                   : [];
               // Visualization iframes sit below the reply (the tool stream keeps
               // the normal tool_call row only) — in classic *and* solo.
               const replyEmbeds: HtmlEmbedPayload[] =
-                entry.data.role === 'assistant'
+                !isChat && entry.data.role === 'assistant'
                   ? (htmlEmbedsByAssistantIndex?.get(i) ?? [])
                   : [];
               const turnFilesCard =
@@ -6175,6 +6272,23 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
       </div>
       </div>
 
+      {isChat ? (
+        <ChatDetailDrawer
+          open={chatDetailOpen}
+          onClose={() => setChatDetailOpen(false)}
+          agentId={agentId}
+          fsAgentId={agentProfile?.dir_name || agentId}
+          agentName={agentProfile?.agent_name || agentId}
+          avatar={resolveChatAvatar(agentProfile?.chat_profile)}
+          status={agentProfile ? agentStatusOf(agentProfile) : (agentStatus as string)}
+          dirName={agentProfile?.dir_name}
+          rootPath={(activeWorkspace?.rootPath || agentCwd || defaultCwd || '').trim()}
+          width={chatDetailWidth}
+          onWidthChange={setChatDetailWidth}
+          onOpenFile={handleOpenFileInTab}
+          onViewSession={handleSidebarViewSession}
+        />
+      ) : (
       <div
         className={
           isCompactLayout
@@ -6212,9 +6326,10 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
         onSessionChanges={onSessionChangesStable}
         treeOnly
         onOpenFile={handleOpenFileInTab}
-        uiMode={uiMode}
+        uiMode={uiMode === 'solo' ? 'solo' : 'classic'}
       />
       </div>
+      )}
       </>
       )}
       </div>
