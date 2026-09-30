@@ -9,7 +9,7 @@ import {
 import { marked } from 'marked';
 import { sanitizeHtml, escapeHtml } from '../utils/safeHtml';
 import { adminAPI, AdminAgent, TokenStats, ChatProfile, userAPI, pluginAPI, PluginInfo, modelCardAPI, ModelCardInfo, ModelCardDetail } from '../services/api';
-import { resolveChatAvatar, resolveChatName, isUploadedAvatar } from '../utils/image';
+import { resolveChatAvatar, resolveChatName, isUploadedAvatar, getLocalAvatarFallback } from '../utils/image';
 import { useTranslation, Trans } from 'react-i18next';
 import { OpenSquadLoader } from './OpenSquadLoader';
 import {
@@ -32,6 +32,12 @@ interface AgentManagerPageProps {
   onOpenGroupChat?: () => void;
   /** Open the System Config (settings) overlay. */
   onOpenSettings?: () => void;
+  /**
+   * 聊天（用户）模式下，这个页面不再是运维工作台，而是通讯录里的联系人列表：
+   * 头像 + 名字 + 状态点，一个「聊天」入口。config / role / logs / 删除等工程
+   * 能力留在 full 变体里 —— 对用户来说那是不该出现的按钮。
+   */
+  variant?: 'full' | 'contacts';
 }
 
 const LAYOUT_KEY = 'agent_manager_layout';
@@ -235,7 +241,7 @@ function fmtTokens(n: number): string {
 
 // ---- 主组件 ----
 
-export const AgentManagerPage: React.FC<AgentManagerPageProps> = ({ onBack, onChat, onOpenGroupChat, onOpenSettings }) => {
+export const AgentManagerPage: React.FC<AgentManagerPageProps> = ({ onBack, onChat, onOpenGroupChat, onOpenSettings, variant = 'full' }) => {
   const { t, i18n } = useTranslation();
   const [agents, setAgents] = useState<AdminAgent[]>([]);
   const [loading, setLoading] = useState(true);
@@ -1179,6 +1185,146 @@ export const AgentManagerPage: React.FC<AgentManagerPageProps> = ({ onBack, onCh
       </div>
     );
   };
+
+  // ---- 渲染：通讯录变体（聊天模式） ----
+  // 放在全部 hooks 之后早退，和 full 变体共用同一份 agents / doAction。
+  if (variant === 'contacts') {
+    const contactBuckets = (() => {
+      const map = new Map<string, AdminAgent[]>();
+      for (const a of agents) {
+        const label = a.agent_name || resolveChatName(a.chat_profile) || getAgentKey(a);
+        const first = (label.trim()[0] || '').toUpperCase();
+        const letter = /[A-Z]/.test(first) ? first : '#';
+        const list = map.get(letter);
+        if (list) list.push(a);
+        else map.set(letter, [a]);
+      }
+      return [...map.entries()]
+        .sort(([x], [y]) => (x === '#' ? 1 : y === '#' ? -1 : x.localeCompare(y)))
+        .map(([letter, list]) => ({
+          letter,
+          list: [...list].sort((a, b) =>
+            (a.agent_name || '').localeCompare(b.agent_name || '')),
+        }));
+    })();
+
+    return (
+      <div className="flex-1 bg-bgLight flex flex-col overflow-hidden">
+        <div className={`${adminHeaderBar} justify-between`}>
+          <div className="flex items-center gap-2 md:gap-2.5">
+            <button
+              type="button"
+              onClick={onBack}
+              className={adminHeaderNavBtn}
+              title={t('common.back', { defaultValue: 'Back' })}
+              aria-label={t('common.back', { defaultValue: 'Back' })}
+            >
+              <ArrowLeft size={16} />
+            </button>
+            <div className={`hidden md:flex ${adminHeaderIconBox}`}>
+              <Bot size={14} className={adminHeaderIcon} />
+            </div>
+            <div className="flex items-baseline gap-1.5 shrink-0">
+              <h2 className={adminHeaderTitle}>{t('aiChat.chat.contacts')}</h2>
+              <p className={adminHeaderSubtitle}>{agents.length}</p>
+            </div>
+          </div>
+          <div className="flex items-center gap-1.5">
+            <button
+              type="button"
+              onClick={() => {
+                setLoading(true);
+                void fetchAgents();
+              }}
+              className={adminHeaderGhostBtn}
+              title={t('aiChat.agentRefresh')}
+              aria-label={t('aiChat.agentRefresh')}
+            >
+              <RefreshCw size={14} />
+            </button>
+          </div>
+        </div>
+
+        <div className="flex-1 overflow-y-auto py-1">
+          {loading && agents.length === 0 ? (
+            <div className="flex items-center justify-center h-40 text-textMuted">
+              <OpenSquadLoader size={36} />
+            </div>
+          ) : agents.length === 0 ? (
+            <div className="flex flex-col items-center justify-center h-40 text-textMuted">
+              <Bot size={36} className="mb-3 opacity-30" />
+              <p className="text-[13px]">{t('aiChat.agentEmpty')}</p>
+            </div>
+          ) : (
+            contactBuckets.map(({ letter, list }) => (
+              <div key={`contacts-${letter}`}>
+                <div className="sticky top-0 z-10 bg-bgLight/95 px-4 py-0.5 text-[10px] font-semibold text-textMuted backdrop-blur">
+                  {letter}
+                </div>
+                {list.map((a) => {
+                  const key = getAgentKey(a);
+                  const busy = !!actionLoading[key];
+                  const ready = isAgentReady(a);
+                  const starting = isAgentStarting(a);
+                  const displayName = a.agent_name || resolveChatName(a.chat_profile) || key;
+                  const avatarUrl = resolveChatAvatar(a.chat_profile);
+                  return (
+                    <div
+                      key={`contact-${key}`}
+                      data-testid="agent-manager-contact-row"
+                      className="flex items-center gap-3 px-4 py-2.5 hover:bg-black/[0.03] dark:hover:bg-white/[0.05]"
+                    >
+                      <img
+                        src={avatarUrl || getLocalAvatarFallback(key, displayName)}
+                        alt=""
+                        className="h-10 w-10 shrink-0 rounded-full object-cover bg-border"
+                        loading="lazy"
+                        onError={(e) => {
+                          const img = e.currentTarget;
+                          if (img.dataset.fallbackApplied) return;
+                          img.dataset.fallbackApplied = '1';
+                          img.src = getLocalAvatarFallback(key, displayName);
+                        }}
+                      />
+                      <div className="min-w-0 flex-1">
+                        <div className="truncate text-[13px] text-textMain">{displayName}</div>
+                        <div className="mt-0.5 flex items-center gap-1.5 text-[11px] text-textMuted">
+                          <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${STATUS_COLORS[starting ? 'starting' : a.process_status] || 'bg-gray-400'}`} />
+                          <span className="truncate">
+                            {starting
+                              ? t('agentManager.statusStarting')
+                              : t(STATUS_LABELS[a.process_status] || 'agentManager.statusStopped')}
+                          </span>
+                        </div>
+                      </div>
+                      {ready && onChat ? (
+                        <button
+                          type="button"
+                          onClick={() => onChat(a.agent_id)}
+                          className="shrink-0 rounded-md px-2.5 py-1 text-[11px] font-medium bg-primary/10 text-primary hover:bg-primary/20"
+                        >
+                          {t('agentManager.chat')}
+                        </button>
+                      ) : a.process_status !== 'external' ? (
+                        <button
+                          type="button"
+                          disabled={busy}
+                          onClick={() => void doAction(a, starting || a.process_status === 'running' ? 'restart' : 'start')}
+                          className="shrink-0 rounded-md px-2.5 py-1 text-[11px] font-medium bg-black/[0.05] text-textMuted hover:bg-black/[0.09] disabled:opacity-40 dark:bg-white/[0.08] dark:hover:bg-white/[0.14]"
+                        >
+                          {busy ? <OpenSquadLoader size={12} /> : starting ? t('agentManager.restart') : t('agentManager.start')}
+                        </button>
+                      ) : null}
+                    </div>
+                  );
+                })}
+              </div>
+            ))
+          )}
+        </div>
+      </div>
+    );
+  }
 
   // ---- 渲染 ----
 

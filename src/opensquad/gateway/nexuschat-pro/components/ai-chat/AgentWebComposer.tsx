@@ -34,6 +34,7 @@ import {
   filterSlashCommands,
   parseGoalSendQuery,
   parseSlashInput,
+  SLASH_COMMANDS,
   slashCommandTriggerText,
   type GoalSubcommandDef,
   type SlashCommandDef,
@@ -134,6 +135,13 @@ export interface AgentWebComposerProps {
   terminalsPanel?: React.ReactNode;
   /** Repository status row (branch / ahead-behind / uncommitted) — above Changes */
   repoStatusBar?: React.ReactNode;
+  /**
+   * 聊天 (user) mode: a messenger input bar. Keeps the text field, attach and
+   * send; drops the developer chrome (mode / model / effort pickers and the
+   * context footer with cwd + token ring). The Agent Web is a tool there, not
+   * a control panel.
+   */
+  simple?: boolean;
   availableSkills: SkillInfo[];
   skillsLoading?: boolean;
   /** Prefetch / open skill list (also used when typing `/skill `). */
@@ -205,6 +213,7 @@ export const AgentWebComposer = forwardRef<AgentWebComposerHandle, AgentWebCompo
     approvalPanel = null,
     terminalsPanel = null,
     repoStatusBar = null,
+    simple = false,
     availableSkills,
     skillsLoading = false,
     onOpenSkills,
@@ -431,6 +440,12 @@ export const AgentWebComposer = forwardRef<AgentWebComposerHandle, AgentWebCompo
     },
     [focusInputEnd],
   );
+
+  /** "+" menu → 目标模式: same entry point as typing `/goal ` by hand. */
+  const enterGoalMode = useCallback(() => {
+    const goal = SLASH_COMMANDS.find((cmd) => cmd.id === 'goal');
+    if (goal) selectSlashCommand(goal);
+  }, [selectSlashCommand]);
 
   const selectSkillFromSlash = useCallback(
     (skill: SkillInfo) => {
@@ -1008,6 +1023,7 @@ export const AgentWebComposer = forwardRef<AgentWebComposerHandle, AgentWebCompo
                   skills={availableSkills}
                   skillsLoading={skillsLoading}
                   onOpenSkills={onOpenSkills}
+                  onGoalMode={enterGoalMode}
                   autoSpeechEnabled={autoSpeechEnabled}
                   onToggleAutoSpeech={onToggleAutoSpeech}
                   voiceEnabled={voiceEnabled}
@@ -1060,30 +1076,34 @@ export const AgentWebComposer = forwardRef<AgentWebComposerHandle, AgentWebCompo
                 </button>
                 {/* Desktop-only from here down: on narrow viewports these three
                     settings live in MobileComposerMenu. */}
-                <div className="max-md:hidden">
-                  <ModePicker mode={agentMode} disabled={disabled} onSelect={onModeChange} />
-                </div>
+                {!simple ? (
+                  <div className="max-md:hidden">
+                    <ModePicker mode={agentMode} disabled={disabled} onSelect={onModeChange} />
+                  </div>
+                ) : null}
               </div>
 
               <div className="flex-1 min-w-0" />
 
               <div className="flex items-center gap-1.5 shrink-0">
-                <div className="max-md:hidden">
-                  <SoloModelPicker
-                    cards={modelCards}
-                    currentCardName={currentCardName}
-                    modelName={modelName}
-                    fallbackLabel={fallbackLabel}
-                    switching={switchingModel}
-                    disabled={disabled}
-                    onSelect={onSelectModel}
-                    onWillOpen={onRefreshModelCards}
-                    onAddModels={() => {
-                      window.dispatchEvent(new CustomEvent('switchView', { detail: 'models' }));
-                    }}
-                  />
-                </div>
-                {showEffort ? (
+                {!simple ? (
+                  <div className="max-md:hidden">
+                    <SoloModelPicker
+                      cards={modelCards}
+                      currentCardName={currentCardName}
+                      modelName={modelName}
+                      fallbackLabel={fallbackLabel}
+                      switching={switchingModel}
+                      disabled={disabled}
+                      onSelect={onSelectModel}
+                      onWillOpen={onRefreshModelCards}
+                      onAddModels={() => {
+                        window.dispatchEvent(new CustomEvent('switchView', { detail: 'models' }));
+                      }}
+                    />
+                  </div>
+                ) : null}
+                {!simple && showEffort ? (
                   <div className="max-md:hidden">
                     <EffortPicker
                       effort={reasoningEffort}
@@ -1094,25 +1114,27 @@ export const AgentWebComposer = forwardRef<AgentWebComposerHandle, AgentWebCompo
                   </div>
                 ) : null}
                 {/* Narrow viewport only: Mode + Model + Effort, folded away. */}
-                <MobileComposerMenu
-                  className="md:hidden"
-                  disabled={disabled}
-                  mode={agentMode}
-                  onModeChange={onModeChange}
-                  modelCards={modelCards}
-                  currentCardName={currentCardName}
-                  modelName={modelName}
-                  switchingModel={switchingModel}
-                  onSelectModel={onSelectModel}
-                  onWillOpen={onRefreshModelCards}
-                  onAddModels={() => {
-                    window.dispatchEvent(new CustomEvent('switchView', { detail: 'models' }));
-                  }}
-                  effort={reasoningEffort}
-                  onEffortChange={onEffortChange}
-                  showEffort={showEffort}
-                  deepseekStyle={effortDeepseekish}
-                />
+                {!simple ? (
+                  <MobileComposerMenu
+                    className="md:hidden"
+                    disabled={disabled}
+                    mode={agentMode}
+                    onModeChange={onModeChange}
+                    modelCards={modelCards}
+                    currentCardName={currentCardName}
+                    modelName={modelName}
+                    switchingModel={switchingModel}
+                    onSelectModel={onSelectModel}
+                    onWillOpen={onRefreshModelCards}
+                    onAddModels={() => {
+                      window.dispatchEvent(new CustomEvent('switchView', { detail: 'models' }));
+                    }}
+                    effort={reasoningEffort}
+                    onEffortChange={onEffortChange}
+                    showEffort={showEffort}
+                    deepseekStyle={effortDeepseekish}
+                  />
+                ) : null}
                 {voiceEnabled && (voiceCapture.recording || sttDictating) ? (
                   <VoiceRecordPill
                     durationSec={voiceCapture.durationSec}
@@ -1156,17 +1178,19 @@ export const AgentWebComposer = forwardRef<AgentWebComposerHandle, AgentWebCompo
           </div>
           </div>
 
-          <SoloContextFooter
-            cwd={cwd}
-            tokenStats={tokenStats}
-            locked
-            repoStatusBar={repoStatusBar || undefined}
-            onViewReport={onViewReport}
-            onCompressContext={onCompressContext}
-            compressing={compressing}
-            compressDisabled={compressDisabled}
-            onExportContext={onExportContext}
-          />
+          {!simple ? (
+            <SoloContextFooter
+              cwd={cwd}
+              tokenStats={tokenStats}
+              locked
+              repoStatusBar={repoStatusBar || undefined}
+              onViewReport={onViewReport}
+              onCompressContext={onCompressContext}
+              compressing={compressing}
+              compressDisabled={compressDisabled}
+              onExportContext={onExportContext}
+            />
+          ) : null}
         </div>
       </div>
 

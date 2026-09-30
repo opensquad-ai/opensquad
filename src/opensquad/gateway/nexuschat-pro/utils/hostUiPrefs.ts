@@ -73,7 +73,7 @@ export function pickHydratePrefs(host: HostUiPrefs | null, local: HostUiPrefs): 
   const out: HostUiPrefs = { ...local, savedAt: Number(host.savedAt) || local.savedAt };
   if (host.theme && typeof host.theme === 'object') out.theme = host.theme;
   if (host.lang === 'zh' || host.lang === 'en') out.lang = host.lang;
-  if (host.uiMode === 'classic' || host.uiMode === 'solo') out.uiMode = host.uiMode;
+  if (host.uiMode === 'classic' || host.uiMode === 'solo' || host.uiMode === 'chat') out.uiMode = host.uiMode;
   if (typeof host.selectedAgent === 'string' && host.selectedAgent.trim()) {
     out.selectedAgent = host.selectedAgent.trim();
   }
@@ -92,7 +92,7 @@ function writeLocalPrefs(prefs: HostUiPrefs): void {
       localStorage.setItem(LANG_KEY, prefs.lang);
       void i18n.changeLanguage(prefs.lang);
     }
-    if (prefs.uiMode === 'classic' || prefs.uiMode === 'solo') {
+    if (prefs.uiMode === 'classic' || prefs.uiMode === 'solo' || prefs.uiMode === 'chat') {
       localStorage.setItem(UI_MODE_KEY, prefs.uiMode);
     }
     if (typeof prefs.selectedAgent === 'string' && prefs.selectedAgent.trim()) {

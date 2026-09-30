@@ -86,7 +86,11 @@ describe('L3 Work 模式变动区 = 产物', () => {
   });
 
   it('AIChatPage 把当前模式透传给右栏', () => {
-    expect(PAGE).toMatch(/<ProjectFilesPanel[\s\S]{0,2500}?uiMode=\{uiMode\}/);
+    // 聊天模式下右栏整块换成「详细」抽屉（见 chatModeParity），因此这里只锁
+    // 剩下的两种模式：只有 solo 才是 git 变更视图，classic/chat 都是产物语义。
+    expect(PAGE).toMatch(
+      /<ProjectFilesPanel[\s\S]{0,2500}?uiMode=\{uiMode === 'solo' \? 'solo' : 'classic'\}/,
+    );
   });
 });
 

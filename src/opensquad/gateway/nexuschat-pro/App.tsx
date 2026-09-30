@@ -146,6 +146,25 @@ const App: React.FC = () => {
     return saved ? [saved] : [];
   });
 
+  // 聊天（用户）模式：Agent 管理页在这一模式下是通讯录而不是运维工作台。
+  // AIChatPage 是模式的唯一所有者（localStorage + host prefs），这里只镜像它
+  // 通过事件广播出来的值。
+  const [chatUiMode, setChatUiMode] = useState<string>(() => {
+    try {
+      return localStorage.getItem('ai_chat_ui_mode') || 'classic';
+    } catch {
+      return 'classic';
+    }
+  });
+  useEffect(() => {
+    const onUiMode = (e: any) => {
+      const mode = e?.detail?.uiMode;
+      if (typeof mode === 'string' && mode) setChatUiMode(mode);
+    };
+    window.addEventListener('opensquad-ui-mode-changed', onUiMode as EventListener);
+    return () => window.removeEventListener('opensquad-ui-mode-changed', onUiMode as EventListener);
+  }, []);
+
   const openAgentChat = useCallback((agentId: string) => {
     const raw = (agentId || '').trim();
     if (!raw) return;
@@ -1075,6 +1094,21 @@ const App: React.FC = () => {
     }
   }, [loadGroupDetails, hasCachedMessages, scheduleDeferredRefresh, loadMessages]);
 
+  // 聊天模式的通讯录点「群聊」：选中该群并切到群聊视图。声明在
+  // handleSelectGroup 之后 —— 那个函数依赖群列表/加载逻辑，提前注册会在它的
+  // 定义之前引用（TDZ）。
+  useEffect(() => {
+    const onSelectGroup = (e: any) => {
+      const groupId = e?.detail?.groupId;
+      if (typeof groupId === 'string' && groupId.trim()) {
+        void handleSelectGroup(groupId);
+        setCurrentView('chat');
+      }
+    };
+    window.addEventListener('opensquad-select-group', onSelectGroup as EventListener);
+    return () => window.removeEventListener('opensquad-select-group', onSelectGroup as EventListener);
+  }, [handleSelectGroup]);
+
   // Hover-prefetch a group's messages in the background. By the time the user
   // actually clicks, the messages are already in state and the click renders
   // instantly with no skeleton flash.
@@ -1566,6 +1600,7 @@ const App: React.FC = () => {
               onChat={openAgentChat}
               onOpenGroupChat={() => setCurrentView('chat')}
               onOpenSettings={() => setIsSettingsOpen(true)}
+              variant={chatUiMode === 'chat' ? 'contacts' : 'full'}
             />
           </Suspense>
         </div>
