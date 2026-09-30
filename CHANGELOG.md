@@ -46,6 +46,90 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 > The next cycle's notes are collected here, then moved into a dated section
 > before the tag.
 
+### Added
+
+- **Agent Web: a scheduled task's detail pane now lists its run history.**
+  The pane showed `Run count 90` with nowhere to see any of those 90 runs — the
+  history only existed in the 执行 tab, mixed across every task. The detail now
+  shows that task's runs in a bounded, scrollable box (max 320px) split by local
+  day (9/24, 9/22, …), each row carrying status, start time, 手动 marker, error
+  and duration, and each row opens that run's workflow. Because the store keeps a
+  window (≤200) while `run_count` keeps counting, the header says
+  `显示最近 49 次，共 90 次` rather than passing either number off as the other.
+  While there, the pane's labels/statuses/schedule summary follow the UI language
+  (`common.enabled`, `scheduledTasks.info.*`, `scheduledTasks.status.*`) instead
+  of the hardcoded English the same screenshot showed.
+- **Agent Web: goal mode is reachable from the "+" attach menu.** It existed only
+  as a hand-typed `/goal `, so it stayed invisible to anyone who never guessed the
+  command. The new 目标模式 row inserts that exact text and focuses the composer
+  rather than adding a second implementation: the existing parser still opens the
+  subcommand picker (pause / resume / clear), the objective hint and the send path.
+- **Agent Web: a branch chip and a Local/Worktree mode switch in the composer
+  footer.** Up to now the only way to see or change git state from the app was
+  to ask the agent to run `git` for you. Two compact chips sit next to the
+  folder. The branch chip names the current branch and opens a menu grouped by
+  recently used, with remote branches and their last-commit age, and supports
+  create / switch / delete — a dirty worktree is offered a stash first, an
+  unmerged branch a confirmed force delete. The mode chip switches a draft
+  session between 本地 and a per-folder Worktree (one stable worktree under
+  `.os-worktrees/` per root), and turns read-only once the session's first
+  message pins its cwd, so a running conversation never changes ground under
+  itself; the session-level cwd is pinned at that moment so local and worktree
+  sessions cannot drag each other along. A directory without a repository
+  renders both chips grey and inert (非 Git 仓库) instead of hiding them. The
+  launcher gained the matching `/git/*` routes (`status` / `branches` / `diff`,
+  the write + network operations, and the worktree prepare), which run each
+  repository's updates under a cross-process lock and run fetch/pull/push as
+  pollable background tasks.
+- **Agent Web: committing from the file panel's 改动 view.** The view listed what
+  the conversation had touched; it now also answers "what is uncommitted in git"
+  and acts on it. A 本对话 / 全部 switch chooses between the two lists — `本对话`
+  keeps its existing meaning (the session baseline) and `全部` adds everything
+  else git reports, marked with which files the conversation also touched. Rows
+  carry git's state and can be checked, and the footer stages, unstages, discards
+  and commits: a discarded selection asks first, and asks again about deleting
+  files git does not track yet; the commit form names what is missing (a title,
+  then a non-empty index) rather than letting the refusal come back from the
+  server; and 撤销上次提交 appears only while the last commit can still be local
+  (no upstream, or commits ahead of one) and asks before running. Each row's diff
+  comes from the same viewer as the rest of the panel, read from the worktree or
+  the index depending on where the row actually is.
+
+### Fixed
+
+- **CLI: `opensquad web` reported "Frontend port 5173 not ready" instead of the
+  reason.** The dev server is spawned without a console, and `detach_popen_kwargs()`
+  sends its stdout/stderr to `DEVNULL`. On a machine where npm's own shim cannot
+  find a node to run it — which is what `Roaming\npm\npm.cmd` does when no
+  `node.exe` sits beside it and `node` is not on PATH — the child exited in the
+  first millisecond and its error had nowhere to go; the CLI then waited out the
+  entire 90-second timeout before falling back to the Gateway static UI, leaving no
+  trace of what to fix. It now (a) checks that npm can actually run *before*
+  spawning and names the missing program and where npm resolved to, (b) sends the
+  child's output to `{workspace}/data/logs/frontend.log` and prints that path when
+  the port still does not open, and (c) reuses the daemon stack's fail-fast poll, so
+  a child that dies stops the wait instead of stretching it to the timeout.
+- **Agent Web: the "+" attach menu ignored the UI language.** Every row was a
+  string literal ("Upload files" / "Upload folder" / "Upload images" /
+  "Auto speech" / "Skills") and the header read "Add agents, context, tools…",
+  so the ZH interface showed a half-translated popup — the 语音 row translated,
+  everything around it English. The labels now come from `aiChat.attach.*`
+  (with the Skills row on the shared `nav.skills`), and `utils/attachMenuI18n.scan.test.ts`
+  fails if a label goes back to being hardcoded, if a key is used without being
+  added to both locales, or if zh.json gets the English text copied into it.
+- **Agent Web: 深度思考 durations survived nothing but the live stream.** The
+  recorded `thought_ms` was written by `turn_result_handler.parse_and_persist_tags`,
+  a module a refactor had already replaced with `_runner/_turn_loop.py`: the
+  clock recorded the value, the UI read it, and no live code path ever persisted
+  it. Refreshing a session therefore fell back to guessing from ISO-second
+  timestamps — on a real 97-round session 80 of 95 rows showed no time at all
+  and the survivors (up to 57s) had swallowed whole tool executions. The round's
+  persist site now writes the value via `thought_clock.thought_event_data()`,
+  guarded so a round that never closed its own phase cannot inherit the previous
+  round's number; sub-agent thought rows are persisted the same way. The reload
+  merge also keeps the newest recorded value instead of dropping it. Sessions
+  recorded before this change still show no number — it was never written down.
+
 ## [0.8.49] — 2026-09-29
 
 > Mostly a reliability cycle driven by three field reports from a pip-installed

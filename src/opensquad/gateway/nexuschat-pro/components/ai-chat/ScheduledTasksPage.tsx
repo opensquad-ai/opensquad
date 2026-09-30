@@ -25,6 +25,7 @@ import {
 } from './ScheduledTaskForm';
 import { ExecWorkflowView } from './ExecWorkflowView';
 import { formatDayLabel, groupByLocalDay } from '../../utils/time';
+import { formatElapsed } from '../../utils/formatElapsed';
 import type { PaneSessionBridge } from './WorkspacePaneShell';
 
 type SubTab = 'new' | 'execution' | 'task';
@@ -119,6 +120,11 @@ export const ScheduledTasksPage: React.FC<Props> = ({ agentName, rootPath, sessi
   const selectedExec = useMemo(
     () => executions.find(e => e.id === selExecId) || null,
     [executions, selExecId],
+  );
+  /** This task's runs, newest first — the detail pane's execution history. */
+  const selectedTaskRuns = useMemo(
+    () => (selectedTask ? executions.filter(e => e.task_id === selectedTask.id) : []),
+    [executions, selectedTask],
   );
 
   // 执行列表按本地自然日分组：今天 / 昨天 / M/D（跨年 YYYY/M/D），最新一天在最上面。
@@ -355,6 +361,8 @@ export const ScheduledTasksPage: React.FC<Props> = ({ agentName, rootPath, sessi
           />
         ) : sub === 'task' && selectedTask ? (
           <TaskDetail task={selectedTask}
+            runs={selectedTaskRuns}
+            onOpenRun={(id) => { setSelExecId(id); setSub('execution'); setMobileDetail(true); }}
             onEdit={() => startEdit(selectedTask)}
             onRun={() => handleRun(selectedTask)}
             onDelete={() => handleDelete(selectedTask)}
@@ -374,6 +382,7 @@ const EmptyHint: React.FC<{ text: string }> = ({ text }) => (
 );
 
 const StatusBadge: React.FC<{ status: string }> = ({ status }) => {
+  const { t } = useTranslation();
   const map: Record<string, { c: string; Icon: React.FC<any> }> = {
     running: { c: 'bg-primary/15 text-primary', Icon: OpenSquadLoader },
     success: { c: 'bg-emerald-500/15 text-emerald-600', Icon: CheckCircle2 },
@@ -386,7 +395,7 @@ const StatusBadge: React.FC<{ status: string }> = ({ status }) => {
   return (
     <span className={`inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[9px] font-medium ${m.c}`}>
       <Icon size={10} />
-      {status}
+      {t(`scheduledTasks.status.${status}`, { defaultValue: status })}
     </span>
   );
 };
@@ -398,12 +407,15 @@ const fmtDateTime = (ts: number | null) => {
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
 };
 
-const scheduleSummary = (task: ScheduledTask): string => {
+const scheduleSummary = (
+  task: ScheduledTask,
+  t: (key: string, options?: Record<string, unknown>) => string,
+): string => {
   const s = task.schedule || ({} as any);
-  if (s.type === 'once') return 'once';
-  if (s.type === 'daily') return `daily ${s.time || '09:00'}`;
-  if (s.type === 'weekly') return `weekly ${s.time || '09:00'} (${s.weekdays || ''})`;
-  if (s.type === 'interval') return `every ${s.total_seconds || 0}s`;
+  if (s.type === 'once') return t('scheduledTasks.repeat.once');
+  if (s.type === 'daily') return `${t('scheduledTasks.repeat.daily')} ${s.time || '09:00'}`;
+  if (s.type === 'weekly') return `${t('scheduledTasks.repeat.weekly')} ${s.time || '09:00'} (${s.weekdays || ''})`;
+  if (s.type === 'interval') return `${t('scheduledTasks.repeat.interval')} ${s.total_seconds || 0}s`;
   return s.type || '';
 };
 
@@ -473,13 +485,15 @@ const ExecRow: React.FC<{
       </div>
       <div className="mt-0.5 flex items-center gap-1.5">
         <StatusBadge status={exec.status} />
-        {exec.manual && <span className="text-[9px] text-textMuted">manual</span>}
+        {exec.manual && <span className="text-[9px] text-textMuted">{t('scheduledTasks.manual')}</span>}
       </div>
     </div>
   );
 };
 
-const TaskRow: React.FC<{ task: ScheduledTask; active: boolean; onClick: () => void; onToggle: (en: boolean) => void }> = ({ task, active, onClick, onToggle }) => (
+const TaskRow: React.FC<{ task: ScheduledTask; active: boolean; onClick: () => void; onToggle: (en: boolean) => void }> = ({ task, active, onClick, onToggle }) => {
+  const { t } = useTranslation();
+  return (
   <div
     onClick={onClick}
     className={`group px-2 py-1.5 rounded-lg cursor-pointer transition-colors ${active ? 'bg-primary/10' : 'hover:bg-black/[0.04] dark:hover:bg-white/[0.05]'}`}
@@ -490,14 +504,15 @@ const TaskRow: React.FC<{ task: ScheduledTask; active: boolean; onClick: () => v
         type="button"
         onClick={(e) => { e.stopPropagation(); onToggle(!task.enabled); }}
         className={`relative w-7 h-4 rounded-full transition-colors shrink-0 ${task.enabled ? 'bg-primary' : 'bg-black/15 dark:bg-white/20'}`}
-        title={task.enabled ? 'enabled' : 'disabled'}
+        title={task.enabled ? t('common.enabled') : t('common.disabled')}
       >
         <span className={`absolute top-0.5 left-0.5 w-3 h-3 rounded-full bg-white shadow transition-transform ${task.enabled ? 'translate-x-3' : ''}`} />
       </button>
     </div>
-    <div className="mt-0.5 text-[10px] text-textMuted truncate">{scheduleSummary(task)} · {relTime(task.next_run_ts)}</div>
+    <div className="mt-0.5 text-[10px] text-textMuted truncate">{scheduleSummary(task, t)} · {relTime(task.next_run_ts)}</div>
   </div>
-);
+  );
+};
 
 const InfoCell: React.FC<{ label: string; value: React.ReactNode }> = ({ label, value }) => (
   <div className="space-y-0.5">
@@ -506,28 +521,45 @@ const InfoCell: React.FC<{ label: string; value: React.ReactNode }> = ({ label, 
   </div>
 );
 
-const TaskDetail: React.FC<{ task: ScheduledTask; onEdit: () => void; onRun: () => void; onDelete: () => void; onToggle: (en: boolean) => void }> = ({ task, onEdit, onRun, onDelete, onToggle }) => (
+const TaskDetail: React.FC<{
+  task: ScheduledTask;
+  runs: ScheduledExecution[];
+  onOpenRun: (id: string) => void;
+  onEdit: () => void;
+  onRun: () => void;
+  onDelete: () => void;
+  onToggle: (en: boolean) => void;
+}> = ({ task, runs, onOpenRun, onEdit, onRun, onDelete, onToggle }) => {
+  const { t, i18n } = useTranslation();
+  // Day dividers inside the history box, newest day first; unknown timestamps
+  // share a trailing keyless group so a row can never vanish from the list.
+  const runDayGroups = useMemo(
+    () => groupByLocalDay(runs, (e) => e.started_at),
+    [runs],
+  );
+  const dayLabelLocale: 'zh' | 'en' = String(i18n.language || '').startsWith('en') ? 'en' : 'zh';
+  return (
   <div className="flex flex-col h-full min-h-0">
     <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between px-3 sm:px-4 py-3 border-b border-border shrink-0">
       <div className="min-w-0">
         <div className="flex items-center gap-2 flex-wrap">
           <h3 className="text-sm font-semibold truncate max-w-full">{task.name}</h3>
           <span className={`px-1.5 py-0.5 rounded text-[9px] font-medium shrink-0 ${task.enabled ? 'bg-emerald-500/15 text-emerald-600' : 'bg-black/10 text-textMuted'}`}>
-            {task.enabled ? 'enabled' : 'disabled'}
+            {task.enabled ? t('common.enabled') : t('common.disabled')}
           </span>
         </div>
-        <div className="mt-0.5 text-[10px] text-textMuted truncate">{scheduleSummary(task)} · {task.workspace || '--'}</div>
+        <div className="mt-0.5 text-[10px] text-textMuted truncate">{scheduleSummary(task, t)} · {task.workspace || '--'}</div>
       </div>
       <div className="flex items-center gap-1.5 shrink-0 flex-wrap">
-        <button type="button" onClick={onRun} title="Run now"
+        <button type="button" onClick={onRun} title={t('scheduledTasks.runNow')}
           className="inline-flex items-center gap-1 px-2 py-1 rounded-lg text-[11px] font-medium border border-border hover:bg-black/5 dark:hover:bg-white/10">
-          <Zap size={11} className="text-amber-500" /> Run now
+          <Zap size={11} className="text-amber-500" /> {t('scheduledTasks.runNow')}
         </button>
-        <button type="button" onClick={onEdit} title="Edit"
+        <button type="button" onClick={onEdit} title={t('scheduledTasks.edit')}
           className="inline-flex items-center gap-1 px-2 py-1 rounded-lg text-[11px] font-medium border border-border hover:bg-black/5 dark:hover:bg-white/10">
-          <Pencil size={11} /> Edit
+          <Pencil size={11} /> {t('scheduledTasks.edit')}
         </button>
-        <button type="button" onClick={onDelete} title="Delete"
+        <button type="button" onClick={onDelete} title={t('common.delete')}
           className="inline-flex items-center gap-1 px-2 py-1 rounded-lg text-[11px] font-medium border border-rose-500/40 text-rose-600 hover:bg-rose-500/10">
           <Trash2 size={11} />
         </button>
@@ -539,16 +571,52 @@ const TaskDetail: React.FC<{ task: ScheduledTask; onEdit: () => void; onRun: () 
     </div>
     <div className="flex-1 min-h-0 overflow-y-auto p-4 space-y-4 text-[12px]">
       <div className="grid grid-cols-2 gap-3 rounded-lg bg-black/[0.02] dark:bg-white/[0.03] p-3">
-        <InfoCell label="Schedule" value={scheduleSummary(task)} />
-        <InfoCell label="Next run" value={relTime(task.next_run_ts)} />
-        <InfoCell label="Last run" value={fmtDateTime(task.last_run_ts)} />
-        <InfoCell label="Run count" value={task.run_count} />
-        <InfoCell label="Delegate agent" value={task.delegate_agent || '--'} />
-        <InfoCell label="Model" value={task.model_card || 'default'} />
+        <InfoCell label={t('scheduledTasks.info.schedule')} value={scheduleSummary(task, t)} />
+        <InfoCell label={t('scheduledTasks.info.nextRun')} value={relTime(task.next_run_ts)} />
+        <InfoCell label={t('scheduledTasks.info.lastRun')} value={fmtDateTime(task.last_run_ts)} />
+        <InfoCell label={t('scheduledTasks.info.runCount')} value={task.run_count} />
+        <InfoCell label={t('scheduledTasks.fDelegate')} value={task.delegate_agent || '--'} />
+        <InfoCell label={t('scheduledTasks.fModel')} value={task.model_card || t('scheduledTasks.fModelDefault')} />
+      </div>
+      <div>
+        <div className="flex items-center justify-between gap-2 mb-1">
+          <div className="text-[10px] text-textMuted">{t('scheduledTasks.history.title')}</div>
+          {runs.length > 0 ? (
+            <div className="text-[10px] text-textMuted/80">
+              {task.run_count > runs.length
+                ? t('scheduledTasks.history.countCapped', { n: runs.length, m: task.run_count })
+                : t('scheduledTasks.history.count', { n: runs.length })}
+            </div>
+          ) : null}
+        </div>
+        {runs.length === 0 ? (
+          <div className="text-[11px] text-textMuted/70">{t('scheduledTasks.emptyExecution')}</div>
+        ) : (
+          <div
+            data-testid="run-history"
+            className="max-h-[320px] overflow-y-auto rounded-lg border border-border/60 p-1"
+          >
+            {runDayGroups.map(group => (
+              <React.Fragment key={group.key || 'unknown-day'}>
+                {group.key ? (
+                  <div
+                    data-testid="run-history-day"
+                    className="px-2 pt-2 pb-1 text-[10px] font-medium text-textMuted/80"
+                  >
+                    {formatDayLabel(group.items[0]?.started_at, { locale: dayLabelLocale })}
+                  </div>
+                ) : null}
+                {group.items.map(r => (
+                  <RunHistoryRow key={r.id} exec={r} onClick={() => onOpenRun(r.id)} />
+                ))}
+              </React.Fragment>
+            ))}
+          </div>
+        )}
       </div>
       {task.skills && task.skills.length > 0 && (
         <div>
-          <div className="text-[10px] text-textMuted mb-1">Enabled Skills</div>
+          <div className="text-[10px] text-textMuted mb-1">{t('scheduledTasks.fSkills')}</div>
           <div className="flex flex-wrap gap-1">
             {task.skills.map(s => (
               <span key={s} className="px-1.5 py-0.5 rounded bg-violet-500/10 text-violet-600 text-[10px] font-medium">{s}</span>
@@ -557,11 +625,47 @@ const TaskDetail: React.FC<{ task: ScheduledTask; onEdit: () => void; onRun: () 
         </div>
       )}
       <div>
-        <div className="text-[10px] text-textMuted mb-1">Execution Prompt</div>
+        <div className="text-[10px] text-textMuted mb-1">{t('scheduledTasks.fPrompt')}</div>
         <div className="rounded-lg bg-black/[0.02] dark:bg-white/[0.03] p-3 text-[11px] whitespace-pre-wrap">{task.prompt}</div>
       </div>
     </div>
   </div>
-);
+  );
+};
+
+/**
+ * One row of a task's run history: when it ran, how it ended and how long it
+ * took. Clicking opens that run's workflow — the task detail is the place the
+ * user knows the task from, so its history must lead to the same view the
+ * 执行 tab shows.
+ */
+const RunHistoryRow: React.FC<{ exec: ScheduledExecution; onClick: () => void }> = ({ exec, onClick }) => {
+  const { t } = useTranslation();
+  const duration = exec.ended_at ? formatElapsed((exec.ended_at - exec.started_at) * 1000) : null;
+  const label = [fmtDateTime(exec.started_at), t('scheduledTasks.history.open')].join(' · ');
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      title={label}
+      aria-label={label}
+      className="w-full flex items-center gap-2 px-2 py-1.5 rounded-lg text-left border-0 bg-transparent hover:bg-black/[0.04] dark:hover:bg-white/[0.05] transition-colors cursor-pointer"
+    >
+      <StatusBadge status={exec.status} />
+      <span className="text-[11px] font-medium tabular-nums shrink-0">{fmtDateTime(exec.started_at)}</span>
+      {exec.manual ? (
+        <span className="px-1 py-0.5 rounded bg-black/[0.04] dark:bg-white/[0.06] text-[9px] text-textMuted shrink-0">
+          {t('scheduledTasks.manual')}
+        </span>
+      ) : null}
+      {exec.error ? (
+        <span className="flex-1 min-w-0 truncate text-[10px] text-rose-600/80">{exec.error}</span>
+      ) : (
+        <span className="flex-1" />
+      )}
+      <span className="text-[10px] text-textMuted shrink-0 tabular-nums">{duration || ''}</span>
+    </button>
+  );
+};
 
 export default ScheduledTasksPage;

@@ -5,7 +5,7 @@
 import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { useTranslation } from 'react-i18next';
-import { BookOpen, Check, ChevronRight, Image as ImageIcon, Mic, Paperclip, Plus, Upload, Volume2 } from 'lucide-react';
+import { BookOpen, Check, ChevronRight, Image as ImageIcon, Mic, Paperclip, Plus, Target, Upload, Volume2 } from 'lucide-react';
 import type { SkillInfo } from '../../services/api';
 import { POPOVER_SURFACE_CLASS, usePopMenuMounted } from './popoverSurface';
 
@@ -18,6 +18,11 @@ export interface SoloAttachMenuProps {
   onUploadImages: () => void;
   onSelectSkill: (skill: SkillInfo) => void;
   onOpenSkills?: () => void;
+  /**
+   * Put the composer into goal mode — identical to typing `/goal ` (the
+   * objective is then typed and sent through the same goal path).
+   */
+  onGoalMode?: () => void;
   /**
    * Voice panel (录音消息 / 实时通话 + model-card config). It lives here rather
    * than behind the composer's mic button: the mic records on click, and this
@@ -41,6 +46,7 @@ export const SoloAttachMenu: React.FC<SoloAttachMenuProps> = ({
   onUploadImages,
   onSelectSkill,
   onOpenSkills,
+  onGoalMode,
   voiceEnabled = false,
   onOpenVoice,
   voiceActive = false,
@@ -142,9 +148,9 @@ export const SoloAttachMenu: React.FC<SoloAttachMenuProps> = ({
   const skillsMounted = usePopMenuMounted(skillsOpen);
 
   const attachItems = [
-    { key: 'files', label: 'Upload files', icon: Paperclip, onClick: onUploadFiles },
-    { key: 'folder', label: 'Upload folder', icon: Upload, onClick: onUploadFolder },
-    { key: 'images', label: 'Upload images', icon: ImageIcon, onClick: onUploadImages },
+    { key: 'files', label: t('aiChat.attach.uploadFiles'), icon: Paperclip, onClick: onUploadFiles },
+    { key: 'folder', label: t('aiChat.attach.uploadFolder'), icon: Upload, onClick: onUploadFolder },
+    { key: 'images', label: t('aiChat.attach.uploadImages'), icon: ImageIcon, onClick: onUploadImages },
   ] as const;
 
   const menu = menuMounted ? (
@@ -162,7 +168,7 @@ export const SoloAttachMenu: React.FC<SoloAttachMenuProps> = ({
         }`}
       >
         <div className="px-3 py-1 text-[11px] text-textMuted/70 truncate">
-          Add agents, context, tools…
+          {t('aiChat.attach.hint')}
         </div>
         {attachItems.map((item) => {
           const Icon = item.icon;
@@ -194,7 +200,7 @@ export const SoloAttachMenu: React.FC<SoloAttachMenuProps> = ({
                     ? 'bg-black/[0.06] dark:bg-white/[0.08] text-blue-600 dark:text-blue-400'
                     : 'bg-transparent text-textMain hover:bg-black/[0.06] dark:hover:bg-white/[0.10]'
                 }`}
-                title="录音消息 / 实时通话与语音模型卡配置"
+                title={t('aiChat.attach.voiceHint')}
               >
                 <span className="w-4 shrink-0 flex items-center justify-center">
                   <Mic size={14} className={voiceActive ? 'text-blue-600 dark:text-blue-400' : 'text-textMuted'} />
@@ -215,18 +221,32 @@ export const SoloAttachMenu: React.FC<SoloAttachMenuProps> = ({
                     ? 'bg-black/[0.06] dark:bg-white/[0.08] text-blue-600 dark:text-blue-400'
                     : 'bg-transparent text-textMain hover:bg-black/[0.06] dark:hover:bg-white/[0.10]'
                 }`}
-                title="Automatically speak each final agent reply"
+                title={t('aiChat.attach.autoSpeechHint')}
               >
                 <span className="w-4 shrink-0 flex items-center justify-center">
                   <Volume2 size={14} className={autoSpeechEnabled ? 'text-blue-600 dark:text-blue-400' : 'text-textMuted'} />
                 </span>
-                <span className="flex-1 min-w-0 truncate font-medium">Auto speech</span>
+                <span className="flex-1 min-w-0 truncate font-medium">{t('aiChat.attach.autoSpeech')}</span>
                 {autoSpeechEnabled ? <Check size={13} className="text-blue-600 dark:text-blue-400" /> : null}
               </button>
             )}
           </>
         ) : null}
         <div className="my-0.5 h-px bg-border/60" />
+        {onGoalMode ? (
+          <button
+            type="button"
+            onMouseEnter={() => setSkillsOpen(false)}
+            onClick={() => run(onGoalMode)}
+            className="w-full flex items-center gap-2 px-3 py-1.5 text-left text-[12px] text-textMain hover:bg-black/[0.06] dark:hover:bg-white/[0.10] transition-colors border-0 bg-transparent cursor-pointer"
+            title={t('aiChat.attach.goalModeHint')}
+          >
+            <span className="w-4 shrink-0 flex items-center justify-center">
+              <Target size={14} className="text-textMuted" />
+            </span>
+            <span className="flex-1 min-w-0 truncate font-medium">{t('aiChat.attach.goalMode')}</span>
+          </button>
+        ) : null}
         <button
           type="button"
           onMouseEnter={() => {
@@ -247,7 +267,7 @@ export const SoloAttachMenu: React.FC<SoloAttachMenuProps> = ({
           <span className="w-4 shrink-0 flex items-center justify-center">
             <BookOpen size={14} className="text-textMuted" />
           </span>
-          <span className="flex-1 min-w-0 truncate font-medium">Skills</span>
+          <span className="flex-1 min-w-0 truncate font-medium">{t('nav.skills')}</span>
           <ChevronRight size={13} className="text-textMuted/50" />
         </button>
       </div>
@@ -259,9 +279,9 @@ export const SoloAttachMenu: React.FC<SoloAttachMenuProps> = ({
           }`}
         >
           {skillsLoading && skills.length === 0 ? (
-            <div className="px-3 py-4 text-[12px] text-textMuted text-center">Loading skills…</div>
+            <div className="px-3 py-4 text-[12px] text-textMuted text-center">{t('aiChat.attach.skillsLoading')}</div>
           ) : skills.length === 0 ? (
-            <div className="px-3 py-4 text-[12px] text-textMuted text-center">No skills installed</div>
+            <div className="px-3 py-4 text-[12px] text-textMuted text-center">{t('aiChat.attach.skillsEmpty')}</div>
           ) : (
             skills.map((skill) => {
               const id = skill.dir || skill.name;
@@ -306,7 +326,7 @@ export const SoloAttachMenu: React.FC<SoloAttachMenuProps> = ({
               ? 'bg-primary/10 text-primary'
               : 'bg-black/[0.05] dark:bg-white/[0.08] text-textMuted hover:bg-primary/15 hover:text-textMain'
         }`}
-        title={autoSpeechEnabled ? 'Attach (Auto speech on)' : 'Attach'}
+        title={autoSpeechEnabled ? t('aiChat.attach.triggerAutoSpeechOn') : t('aiChat.attach.trigger')}
       >
         <Plus
           size={16}

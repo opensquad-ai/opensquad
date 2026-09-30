@@ -38,18 +38,19 @@ interface Props {
 }
 
 const StatusBadge: React.FC<{ status: string }> = ({ status }) => {
-  const map: Record<string, { c: string; label: string }> = {
-    running: { c: 'bg-primary/15 text-primary', label: 'running' },
-    success: { c: 'bg-emerald-500/15 text-emerald-600', label: 'success' },
-    failed: { c: 'bg-rose-500/15 text-rose-600', label: 'failed' },
-    missed: { c: 'bg-amber-500/15 text-amber-600', label: 'missed' },
-    stopped: { c: 'bg-emerald-500/10 text-emerald-700', label: 'stopped' },
+  const { t } = useTranslation();
+  const map: Record<string, { c: string }> = {
+    running: { c: 'bg-primary/15 text-primary' },
+    success: { c: 'bg-emerald-500/15 text-emerald-600' },
+    failed: { c: 'bg-rose-500/15 text-rose-600' },
+    missed: { c: 'bg-amber-500/15 text-amber-600' },
+    stopped: { c: 'bg-emerald-500/10 text-emerald-700' },
   };
   const m = map[status] || map.success;
   return (
     <span className={`inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[10px] font-medium ${m.c}`}>
       {status === 'running' ? <OpenSquadLoader size={12} /> : null}
-      {m.label}
+      {t(`scheduledTasks.status.${status}`, { defaultValue: status })}
     </span>
   );
 };
@@ -397,7 +398,7 @@ export const ExecWorkflowView: React.FC<Props> = ({
             <StatusBadge status={exec.status} />
           </div>
           <div className="mt-0.5 text-[10px] text-textMuted truncate">
-            {fmtDateTime(exec.started_at)}{exec.manual ? ' · manual' : ''}{exec.session_id ? ` · ${exec.session_id.slice(-8)}` : ''}
+            {fmtDateTime(exec.started_at)}{exec.manual ? ` · ${t('scheduledTasks.manual')}` : ''}{exec.session_id ? ` · ${exec.session_id.slice(-8)}` : ''}
           </div>
         </div>
         <div className="flex items-center gap-1.5 shrink-0 flex-wrap">
