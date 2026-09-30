@@ -630,6 +630,16 @@ def _build_diff_lines(old: str | None, new: str | None, *, collapse: bool = True
     return lines
 
 
+def build_diff_lines(old: str | None, new: str | None, *, collapse: bool = True) -> list[dict[str, Any]]:
+    """Public alias of :func:`_build_diff_lines` for the git pane.
+
+    The git pane (``opensquad.vcs.git_service``) renders its diffs through this
+    same builder, so a commit's file and an uncommitted file produce identical
+    rows and the frontend keeps a single viewer for both.
+    """
+    return _build_diff_lines(old, new, collapse=collapse)
+
+
 def _diff_file_unlocked(root: str, rel: str, meta: dict[str, Any], *, collapse: bool = True) -> dict[str, Any]:
     """Compute one file diff; caller must hold ``_lock``.
 
