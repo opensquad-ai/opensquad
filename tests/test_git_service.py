@@ -48,6 +48,19 @@ _GIT_ENV = {
     "GIT_COMMITTER_EMAIL": "t@t",
 }
 
+# ``git_service`` spawns with ``{**os.environ, **hardening}`` — same as
+# production, where the user's own identity is what a commit must carry. So the
+# identity the *service's* commits use has to be in ``os.environ``, not only in
+# the fixture's ``env=``: a CI runner has no ambient ``user.name``, and commit
+# tests would fail there for a reason unrelated to the code under test.
+for _k, _v in {
+    "GIT_AUTHOR_NAME": "t",
+    "GIT_AUTHOR_EMAIL": "t@t",
+    "GIT_COMMITTER_NAME": "t",
+    "GIT_COMMITTER_EMAIL": "t@t",
+}.items():
+    os.environ.setdefault(_k, _v)
+
 
 def _git(cwd: Path | str, *args: str, check: bool = True) -> str:
     proc = subprocess.run(
@@ -204,6 +217,10 @@ class TestStatus:
         _git(tmp_path, "init", "--bare", "-b", "main", str(origin))
         work = tmp_path / "work"
         _git(tmp_path, "clone", str(origin), str(work))
+        # The origin is still empty, so the clone's HEAD follows the client's
+        # ``init.defaultBranch`` — ``main`` on Git for Windows, ``master`` on
+        # the Linux CI runner. Name it instead of assuming.
+        _git(work, "checkout", "-B", "main")
         _write(work, "a.txt", "1\n")
         _git(work, "add", "-A")
         _git(work, "commit", "-m", "first")
@@ -268,6 +285,10 @@ class TestBranches:
         _git(tmp_path, "init", "--bare", "-b", "main", str(origin))
         work = tmp_path / "work"
         _git(tmp_path, "clone", str(origin), str(work))
+        # The origin is still empty, so the clone's HEAD follows the client's
+        # ``init.defaultBranch`` — ``main`` on Git for Windows, ``master`` on
+        # the Linux CI runner. Name it instead of assuming.
+        _git(work, "checkout", "-B", "main")
         _write(work, "a.txt", "1\n")
         _git(work, "add", "-A")
         _git(work, "commit", "-m", "first")
@@ -286,6 +307,10 @@ class TestBranches:
         _git(tmp_path, "init", "--bare", "-b", "main", str(origin))
         work = tmp_path / "work"
         _git(tmp_path, "clone", str(origin), str(work))
+        # The origin is still empty, so the clone's HEAD follows the client's
+        # ``init.defaultBranch`` — ``main`` on Git for Windows, ``master`` on
+        # the Linux CI runner. Name it instead of assuming.
+        _git(work, "checkout", "-B", "main")
         _write(work, "a.txt", "1\n")
         _git(work, "add", "-A")
         _git(work, "commit", "-m", "first")
@@ -681,6 +706,10 @@ class TestUndoLastCommit:
         _git(tmp_path, "init", "--bare", "-b", "main", str(origin))
         work = tmp_path / "work"
         _git(tmp_path, "clone", str(origin), str(work))
+        # The origin is still empty, so the clone's HEAD follows the client's
+        # ``init.defaultBranch`` — ``main`` on Git for Windows, ``master`` on
+        # the Linux CI runner. Name it instead of assuming.
+        _git(work, "checkout", "-B", "main")
         _write(work, "a.txt", "1\n")
         _stage_all(work)
         gs.commit(str(work), "first")
@@ -718,6 +747,10 @@ def remote_pair(tmp_path: Path) -> tuple[Path, Path]:
     _git(tmp_path, "init", "--bare", "-b", "main", str(origin))
     work = tmp_path / "work"
     _git(tmp_path, "clone", str(origin), str(work))
+    # The origin is still empty, so the clone's HEAD follows the client's
+    # ``init.defaultBranch`` — ``main`` on Git for Windows, ``master`` on the
+    # Linux CI runner. Name it instead of assuming.
+    _git(work, "checkout", "-B", "main")
     _write(work, "a.txt", "1\n")
     _stage_all(work)
     gs.commit(str(work), "first")

@@ -207,6 +207,17 @@ _GIT_ENV = {
     "GIT_COMMITTER_EMAIL": "t@t",
 }
 
+# The commit handlers reach git through ``git_service``, which spawns with
+# ``{**os.environ, **hardening}`` — so the identity a service-side commit needs
+# must be in ``os.environ`` too.  A CI runner has no ambient ``user.name``.
+for _k, _v in {
+    "GIT_AUTHOR_NAME": "t",
+    "GIT_AUTHOR_EMAIL": "t@t",
+    "GIT_COMMITTER_NAME": "t",
+    "GIT_COMMITTER_EMAIL": "t@t",
+}.items():
+    os.environ.setdefault(_k, _v)
+
 
 @pytest.fixture()
 def repo(tmp_path: pathlib.Path) -> str:
