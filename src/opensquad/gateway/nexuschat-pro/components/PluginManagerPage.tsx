@@ -7,7 +7,7 @@ import {
   Briefcase, Code2, MessageSquare, Sparkles, Film, SearchIcon,
   Languages, LineChart, Link2, LayoutTemplate, MoreHorizontal,
   Server, Play, StopCircle, RotateCw, Terminal, ChevronDown, ChevronUp,
-  Plus, Trash2, FolderOpen, Menu, Upload, LayoutGrid, List,
+  Plus, Trash2, FolderOpen, Menu, Upload, LayoutGrid, List, X,
 } from 'lucide-react';
 import { OpenSquadLoader } from './OpenSquadLoader';
 import { pluginAPI, pluginServiceAPI, PluginInfo, PluginConfigField, PluginServiceStatus, adminAPI, AdminAgent } from '../services/api';
@@ -251,6 +251,9 @@ export const PluginManagerPage: React.FC<PluginManagerPageProps> = ({
   const [toggling, setToggling] = useState<Record<string, boolean>>({});
   const [uninstallTarget, setUninstallTarget] = useState<PluginInfo | null>(null);
   const [uninstalling, setUninstalling] = useState(false);
+  // Card text is clamped to two lines; this holds the plugin whose full
+  // details are open in the read-only dialog.
+  const [detailTarget, setDetailTarget] = useState<PluginInfo | null>(null);
   const [filter, setFilter]     = useState<'all' | 'builtin' | 'platform' | 'tool' | 'hook' | 'starred'>('all');
   const [configOpen, setConfigOpen] = useState<string | null>(null);
   const [activeView, setActiveView] = useState<string | null>(null);
@@ -882,6 +885,7 @@ export const PluginManagerPage: React.FC<PluginManagerPageProps> = ({
                     agentToolLevel={agentHiddenPlugins.has(plugin.name) ? 'hidden' : (agentToolLevels[plugin.name] || 'extended')}
                     onToolLevelChange={(level) => setToolLevel(plugin.name, level)}
                     onUninstall={() => handleUninstall(plugin)}
+                    onOpenDetail={() => setDetailTarget(plugin)}
                   />
                 ))}
               </div>
@@ -898,6 +902,10 @@ export const PluginManagerPage: React.FC<PluginManagerPageProps> = ({
           onConfirm={confirmUninstall}
           onCancel={() => setUninstallTarget(null)}
         />
+      )}
+
+      {detailTarget && (
+        <PluginDetailDialog plugin={detailTarget} onClose={() => setDetailTarget(null)} />
       )}
 
       {/* Mobile Agent Dropdown (Moved to avoid clipping) */}
@@ -1001,12 +1009,14 @@ interface PluginCardProps {
   agentToolLevel?: 'core' | 'extended' | 'hidden';
   onToolLevelChange: (level: 'core' | 'extended' | 'hidden') => void;
   onUninstall: () => void;
+  /** Open the read-only detail dialog (the card text is clamped to 2 lines). */
+  onOpenDetail: () => void;
 }
 
-const PluginCard: React.FC<PluginCardProps> = ({
+export const PluginCard: React.FC<PluginCardProps> = ({
   plugin, layout = 'grid', toggling, onToggle, configOpen, onConfigToggle,
   onOpenView, starred, onToggleStar, agentLoaded, onAgentToggle,
-  agentToolLevel, onToolLevelChange, onUninstall,
+  agentToolLevel, onToolLevelChange, onUninstall, onOpenDetail,
 }) => {
   const { t: tr } = useTranslation();
   const typeClass = TYPE_COLORS[plugin.type] || TYPE_COLORS.tool;
@@ -1014,6 +1024,23 @@ const PluginCard: React.FC<PluginCardProps> = ({
   const contributedViews = plugin.contributes?.views || [];
   const showGlobalDisabledStyle = !!plugin.service_toggle && !plugin.enabled;
   const isList = layout === 'list';
+
+  // The card's read-only text is clamped (name truncated, description 2 lines),
+  // so clicking it opens the full-detail dialog. Only the text regions carry the
+  // handler: the action controls and the inline config panel live in the same
+  // card, and a card-level onClick would swallow their clicks.
+  const detailTrigger = {
+    role: 'button' as const,
+    tabIndex: 0,
+    title: tr('pluginManager.detailHint'),
+    onClick: onOpenDetail,
+    onKeyDown: (e: React.KeyboardEvent<HTMLElement>) => {
+      if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault();
+        onOpenDetail();
+      }
+    },
+  };
 
   // Split actions so the grid header stays narrow (name gets the width):
   // star/trash live in the footer next to the settings gear, per-agent
@@ -1131,7 +1158,10 @@ const PluginCard: React.FC<PluginCardProps> = ({
         <div className="flex items-center gap-3 min-w-0">
           {getPluginIcon(plugin, true)}
 
-          <div className="flex-1 min-w-0">
+          <div
+            className="flex-1 min-w-0 cursor-pointer rounded-md outline-none hover:bg-bgLight/60 focus-visible:ring-1 focus-visible:ring-primary/40 transition-colors"
+            {...detailTrigger}
+          >
             <div className="flex items-center gap-1.5 min-w-0 overflow-hidden">
               <h3 className="text-[13px] font-semibold text-textMain truncate leading-tight min-w-[5rem]">
                 {plugin.display_name || plugin.name}
@@ -1165,14 +1195,17 @@ const PluginCard: React.FC<PluginCardProps> = ({
       <div className="flex items-start justify-between gap-2">
         {getPluginIcon(plugin)}
 
-        <div className="flex-1 min-w-0">
+        <div
+          className="flex-1 min-w-0 cursor-pointer rounded-md outline-none hover:bg-bgLight/60 focus-visible:ring-1 focus-visible:ring-primary/40 transition-colors"
+          {...detailTrigger}
+        >
           {/* Name owns the full first line. It used to share a row with the
               shrink-0 version/origin badge: once an agent was selected the
               On/Off chip + service toggle crowded the header, flex starved
               the truncate'd h3 to zero width (names vanished in 收藏/平台/钩子)
               and the meta row painted over the action buttons. */}
           <h3
-            className="text-sm font-bold text-textMain truncate cursor-default"
+            className="text-sm font-bold text-textMain truncate"
             title={plugin.display_name || plugin.name}
           >
             {plugin.display_name || plugin.name}
@@ -1192,14 +1225,17 @@ const PluginCard: React.FC<PluginCardProps> = ({
         </div>
       </div>
 
-      {/* Description */}
-      <p className="text-xs text-textMuted leading-relaxed line-clamp-2">
+      {/* Description — clamped to 2 lines; clicking opens the full text. */}
+      <p
+        className="text-xs text-textMuted leading-relaxed line-clamp-2 cursor-pointer rounded-md outline-none hover:text-textMain/80 focus-visible:ring-1 focus-visible:ring-primary/40 transition-colors"
+        {...detailTrigger}
+      >
         {plugin.description || 'No description'}
       </p>
 
       {/* Tags */}
       {(plugin.tags || []).length > 0 && (
-        <div className="flex items-center gap-1 flex-wrap">
+        <div className="flex items-center gap-1 flex-wrap cursor-pointer rounded-md" {...detailTrigger}>
           {(plugin.tags || []).map(tag => (
             <span
               key={tag}
@@ -2005,6 +2041,189 @@ const BotField: React.FC<BotFieldProps> = ({ fieldKey, fieldDef, isSecret, value
         <p className="text-[10px] text-textMuted leading-tight">{fieldDef.description}</p>
       )}
       {input}
+    </div>
+  );
+};
+
+// ---- Plugin Detail Dialog ----
+
+interface PluginDetailDialogProps {
+  plugin: PluginInfo;
+  onClose: () => void;
+}
+
+/**
+ * Read-only full details for one plugin.
+ *
+ * The card clamps its text (name truncated, description `line-clamp-2`), so
+ * there was no way to read a long description at all. This dialog shows the
+ * unclamped description plus what the card has no room for — tags, tools and
+ * their levels, hooks, contributed views, service entry and pip/npm deps.
+ */
+export const PluginDetailDialog: React.FC<PluginDetailDialogProps> = ({ plugin, onClose }) => {
+  const { t: tr } = useTranslation();
+  const typeClass = TYPE_COLORS[plugin.type] || TYPE_COLORS.tool;
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose();
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [onClose]);
+
+  const deps: string[] = Object.entries(plugin.dependencies || {}).flatMap(([kind, list]) =>
+    Array.isArray(list) ? list.map((d) => `${kind}: ${d}`) : [],
+  );
+  const views = plugin.contributes?.views || [];
+  const service = plugin.service;
+
+  const section = (title: string, body: React.ReactNode) => (
+    <div className="flex flex-col gap-1.5">
+      <h4 className="text-[10px] font-semibold uppercase tracking-wider text-textMuted/70">{title}</h4>
+      {body}
+    </div>
+  );
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm"
+      onClick={onClose}
+    >
+      <div
+        className="bg-panel border border-border rounded-xl shadow-2xl w-full max-w-lg mx-4 max-h-[85vh] overflow-y-auto p-6 flex flex-col gap-4"
+        onClick={(e) => e.stopPropagation()}
+      >
+        {/* Header */}
+        <div className="flex items-start gap-3">
+          {getPluginIcon(plugin)}
+          <div className="flex-1 min-w-0">
+            <h3 className="text-base font-bold text-textMain break-words">
+              {plugin.display_name || plugin.name}
+            </h3>
+            <div className="flex items-center gap-1.5 mt-1 flex-wrap text-xs text-textMuted">
+              <span className="shrink-0">v{plugin.version}</span>
+              <PluginOriginBadge plugin={plugin} />
+              <span className={`inline-flex items-center gap-0.5 px-1.5 py-0 rounded text-[9px] font-medium border ${typeClass}`}>
+                {TYPE_LABELS[plugin.type] ? tr(TYPE_LABELS[plugin.type]) : plugin.type}
+              </span>
+              <span className="shrink-0">
+                {plugin.enabled ? tr('pluginManager.enabled') : tr('pluginManager.disabled')}
+              </span>
+              {plugin.author && <span className="truncate">by {plugin.author}</span>}
+            </div>
+            <p className="text-[10px] text-textMuted/70 font-mono mt-1 break-all">
+              {tr('pluginManager.detailDirectory')}: {plugin.dir_name}
+            </p>
+          </div>
+          <button
+            onClick={onClose}
+            title={tr('common.close')}
+            className="p-1 rounded text-textMuted hover:bg-bgLight/80 transition-colors shrink-0"
+          >
+            <X size={16} />
+          </button>
+        </div>
+
+        {/* Description — the full text, no clamp */}
+        {section(
+          tr('pluginManager.detailDescription'),
+          <p className="text-xs text-textMain/90 leading-relaxed whitespace-pre-wrap break-words">
+            {plugin.description || tr('pluginManager.detailNoDescription')}
+          </p>,
+        )}
+
+        {(plugin.tags || []).length > 0 &&
+          section(
+            tr('pluginManager.detailTags'),
+            <div className="flex items-center gap-1 flex-wrap">
+              {(plugin.tags || []).map((tag) => (
+                <span
+                  key={tag}
+                  className="px-1.5 py-0.5 rounded text-[10px] bg-slate-500/10 text-slate-400 border border-slate-500/20"
+                >
+                  {tag}
+                </span>
+              ))}
+            </div>,
+          )}
+
+        {(plugin.tools || []).length > 0 &&
+          section(
+            `${tr('pluginManager.detailTools')} (${plugin.tools.length})`,
+            <ul className="flex flex-col gap-1">
+              {(plugin.tools || []).map((tool) => (
+                <li key={tool.name} className="bg-bgLight/60 rounded-md border border-border/50 px-2.5 py-1.5">
+                  <div className="flex items-center gap-2 min-w-0">
+                    <code className="text-[11px] font-mono text-textMain truncate">{tool.name}</code>
+                    {tool.level && (
+                      <span className="text-[9px] px-1 py-px rounded bg-slate-500/10 text-slate-400 border border-slate-500/20 shrink-0">
+                        {tool.level}
+                      </span>
+                    )}
+                  </div>
+                  {tool.description && (
+                    <p className="text-[10px] text-textMuted leading-snug mt-0.5 break-words">{tool.description}</p>
+                  )}
+                </li>
+              ))}
+            </ul>,
+          )}
+
+        {(plugin.hooks || []).length > 0 &&
+          section(
+            `${tr('pluginManager.detailHooks')} (${plugin.hooks.length})`,
+            <ul className="flex flex-col gap-0.5">
+              {(plugin.hooks || []).map((hook) => (
+                <li key={hook} className="text-[11px] font-mono text-textMuted break-all">
+                  {hook}
+                </li>
+              ))}
+            </ul>,
+          )}
+
+        {views.length > 0 &&
+          section(
+            tr('pluginManager.detailViews'),
+            <ul className="flex flex-col gap-0.5">
+              {views.map((view) => (
+                <li key={view.name} className="text-[11px] text-textMuted break-all">
+                  {view.title || view.name}
+                </li>
+              ))}
+            </ul>,
+          )}
+
+        {service &&
+          section(
+            tr('pluginManager.detailService'),
+            <p className="text-[11px] font-mono text-textMuted break-all">
+              {service.entry}
+              {service.default_port ? ` · :${service.default_port}` : ''}
+            </p>,
+          )}
+
+        {deps.length > 0 &&
+          section(
+            tr('pluginManager.detailDependencies'),
+            <ul className="flex flex-col gap-0.5">
+              {deps.map((dep) => (
+                <li key={dep} className="text-[11px] font-mono text-textMuted break-all">
+                  {dep}
+                </li>
+              ))}
+            </ul>,
+          )}
+
+        <div className="flex justify-end pt-1">
+          <button
+            onClick={onClose}
+            className="px-4 py-1.5 rounded-lg text-sm font-medium border border-border text-textMain hover:bg-bgLight/80 transition-colors"
+          >
+            {tr('common.close')}
+          </button>
+        </div>
+      </div>
     </div>
   );
 };

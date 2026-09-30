@@ -389,7 +389,18 @@
     "uninstallServiceWarning": "Uninstalling removes the plugin directory that owns this service and clears its configuration. The service disappears from this list and can no longer be started.",
     "uninstallServiceStopsHint": "This service is running and will be stopped before it is uninstalled.",
     "uninstallShort": "Uninstall",
-    "noServices": "No services configured"
+    "noServices": "No services configured",
+    "detailTitle": "Plugin details",
+    "detailHint": "View details",
+    "detailDescription": "Description",
+    "detailTools": "Tools",
+    "detailHooks": "Hooks",
+    "detailViews": "Views",
+    "detailTags": "Tags",
+    "detailDependencies": "Dependencies",
+    "detailService": "Service",
+    "detailDirectory": "Directory",
+    "detailNoDescription": "No description"
   },
   "pluginMarket": {
     "title": "Plugins",

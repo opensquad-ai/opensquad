@@ -389,7 +389,18 @@
     "uninstallServiceWarning": "卸载会删除该服务所属的插件目录并清除其配置数据：服务将不再出现在列表里，也无法再启动。",
     "uninstallServiceStopsHint": "该服务正在运行，卸载前会先将其停止。",
     "uninstallShort": "卸载",
-    "noServices": "暂无服务"
+    "noServices": "暂无服务",
+    "detailTitle": "插件详情",
+    "detailHint": "查看详情",
+    "detailDescription": "描述",
+    "detailTools": "工具",
+    "detailHooks": "钩子",
+    "detailViews": "界面",
+    "detailTags": "标签",
+    "detailDependencies": "依赖",
+    "detailService": "服务",
+    "detailDirectory": "目录",
+    "detailNoDescription": "暂无描述"
   },
   "pluginMarket": {
     "title": "插件",
