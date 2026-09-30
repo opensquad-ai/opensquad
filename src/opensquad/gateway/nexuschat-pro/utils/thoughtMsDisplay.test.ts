@@ -16,6 +16,8 @@
 import { describe, expect, it } from 'vitest';
 import {
   appendWorkflowEvent,
+  buildTimelineFromSession,
+  convertSessionEventsToWorkflow,
   genTimelineUID,
   readThoughtMs,
   stampThoughtDuration,
@@ -116,5 +118,59 @@ describe('the recorded duration is displayed, never inferred', () => {
     ]);
     const thought = buildLines(b, {}, t).find((l) => l.kind === 'thought');
     expect(thought?.secondary).toBe('4s');
+  });
+});
+
+describe('a session reloaded from disk keeps the recorded durations', () => {
+  const sessionEvent = (over: Record<string, unknown>) => ({
+    timestamp: '2026-09-28T07:03:47Z',
+    turn_id: 1,
+    round_id: 1,
+    ...over,
+  });
+
+  function thoughtRows(events: unknown[]): Array<{ secondary?: string; running?: boolean; elapsedStartMs?: number }> {
+    const lines = buildTimelineFromSession([], events)
+      .filter((e): e is Extract<TimelineEntry, { kind: 'workflow' }> => e.kind === 'workflow')
+      .flatMap((e) => buildLines(e.data, {}, t));
+    return lines.filter((l) => l.kind === 'thought');
+  }
+
+  it('shows each row the number the live stream showed', () => {
+    // Shape of a real persisted round: thought → tool_call → tool_result.
+    const events = [
+      sessionEvent({ type: 'thought', data: { text: 'first', thought_ms: 4200 } }),
+      sessionEvent({ type: 'tool_call', data: { id: 'c1', name: 'websearch__search', args: '{}' } }),
+      sessionEvent({
+        type: 'tool_result',
+        data: { id: 'c1', name: 'websearch__search', args: '{}', result: 'ok' },
+      }),
+      sessionEvent({ type: 'thought', data: { text: 'second', thought_ms: 31_000 }, timestamp: '2026-09-28T07:04:10Z' }),
+      sessionEvent({
+        type: 'tool_call',
+        data: { id: 'c2', name: 'websearch__search', args: '{}' },
+        timestamp: '2026-09-28T07:04:10Z',
+      }),
+      sessionEvent({
+        type: 'tool_result',
+        data: { id: 'c2', name: 'websearch__search', args: '{}', result: 'ok' },
+        timestamp: '2026-09-28T07:04:12Z',
+      }),
+    ];
+    const rows = thoughtRows(events);
+    expect(rows).toHaveLength(2);
+    expect(rows.map((r) => r.secondary)).toEqual(['4s', '31s']);
+    // Recorded rows must not tick: the ISO-second timestamps cannot time them.
+    expect(rows.every((r) => r.elapsedStartMs === undefined && !r.running)).toBe(true);
+  });
+
+  it('keeps the newest recorded duration when two chunks merge into one row', () => {
+    const merged = convertSessionEventsToWorkflow([
+      sessionEvent({ type: 'thought', data: { text: 'a', thought_ms: 100 } }),
+      sessionEvent({ type: 'thought', data: { text: 'b', thought_ms: 900 } }),
+    ] as never);
+    expect(merged).toHaveLength(1);
+    expect(merged[0].content).toBe('ab');
+    expect(merged[0].thoughtMs).toBe(900);
   });
 });

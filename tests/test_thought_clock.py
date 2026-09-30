@@ -25,11 +25,20 @@ Mutations verified (applied, run, reverted):
   M3 keep the phase open after stamping the end              -> R4 fails
   M4 drop ``thought_ms`` from the SDK frame whitelist         -> R6b fails
   M5 stop stamping the frame in the adapter                  -> R6 fails
-  M6 stop persisting it with the thought event               -> the recorder test
-      in ``test_turn_result_handler.py`` fails
+  M6 stop persisting it with the thought event               -> R7/R7b fail
+
+Note the second half of this file: the value must reach the DISK.  The first
+attempt wired that into ``turn_result_handler.parse_and_persist_tags``, which a
+refactor had already replaced with ``_runner/_turn_loop.py`` — the recorder and
+the reader both worked, nothing wrote the field, and every refreshed session
+showed blank 深度思考 rows.  R7 pins the site that actually runs.
 """
 
 from __future__ import annotations
+
+import ast
+import pathlib
+import time
 
 import pytest
 
@@ -140,3 +149,100 @@ def test_sdk_frame_whitelist_keeps_thought_ms():
     from opensquad import sdk
 
     assert "thought_ms" in sdk._FRAME_META_KEYS
+
+
+# ─────────────────────────── the disk half ───────────────────────────
+
+
+def test_phase_total_reports_the_phase_that_ended_this_round():
+    """R7a — the round-end persist asks for the duration it just measured."""
+    thought_clock.stamp("thought", "s1", {}, now=100.0)
+    thought_clock.stamp("tool_call", "s1", {}, now=104.0)
+    assert thought_clock.phase_total("s1", since_ms=0) == 4000
+
+
+def test_phase_total_refuses_a_phase_from_an_earlier_round():
+    """R7b — a round that never closed its own phase must not inherit a number."""
+    thought_clock.stamp("thought", "s1", {}, now=100.0)
+    thought_clock.stamp("tool_call", "s1", {}, now=104.0)
+    # This round started a second later than the recorded phase ended.
+    assert thought_clock.phase_total("s1", since_ms=int(time.time() * 1000) + 1000) is None
+
+
+def test_phase_total_reports_an_open_phase_as_it_stands():
+    """R7c — the round can end while its phase is still open; elapsed is honest."""
+    thought_clock.stamp("thought", "s1", {})  # real monotonic: phase is open now
+    value = thought_clock.phase_total("s1", since_ms=int(time.time() * 1000) - 60_000)
+    assert value is not None and 0 <= value < 60_000
+
+
+def test_phase_total_is_scoped_like_the_live_clock():
+    """R7d — a sub-agent's phase must not be written onto the parent's row."""
+    thought_clock.stamp("thought", "s1", {}, scope="sub", now=100.0)
+    thought_clock.stamp("tool_call", "s1", {}, scope="sub", now=112.5)
+    assert thought_clock.phase_total("s1", "sub", since_ms=0) == 12_500
+    assert thought_clock.phase_total("s1", since_ms=0) is None
+
+
+def test_thought_event_data_carries_text_and_duration():
+    """R7e — what the persist site writes; without it a refresh shows no time."""
+    thought_clock.stamp("thought", "s1", {}, now=100.0)
+    thought_clock.stamp("message", "s1", {}, now=107.0)
+
+    data = thought_clock.thought_event_data("reasoning", "s1", since_ms=0)
+    assert data == {"text": "reasoning", "thought_ms": 7000}
+
+    # Nothing recorded (or a stale phase) → text only, never a made-up number.
+    assert thought_clock.thought_event_data("reasoning", "other-sid", since_ms=0) == {"text": "reasoning"}
+    assert thought_clock.thought_event_data("reasoning", "s1", since_ms=int(time.time() * 1000) + 1000) == {
+        "text": "reasoning"
+    }
+
+
+def test_the_live_turn_loop_persists_via_the_recorder():
+    """R7 — the site that runs must be the one that carries the value.
+
+    Guarding the source because the failure mode is exactly "the code that
+    records and the code that persists drifted apart": no runtime assertion can
+    see a persist site that silently stopped being the live one.
+    """
+    src = pathlib.Path("src/opensquad/_runner/_turn_loop.py").read_text(encoding="utf-8")
+    called = [
+        node.func.id
+        for node in ast.walk(ast.parse(src))
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+    ]
+    assert "thought_event_data" in called, "the live turn loop must persist thought events through thought_event_data()"
+
+
+def test_sub_agent_flush_persists_via_the_recorder(monkeypatch):
+    """R7f — the sub-agent's coalesced thought row is persisted the same way."""
+    from opensquad.sub_agent_runner import SubAgentRunner
+
+    runner = SubAgentRunner.__new__(SubAgentRunner)
+    runner._sid = "s1"
+    runner._sub_task_label = "look it up"
+    runner._job_id = "job-1"
+    runner._aborted = False
+    runner._run_started_ms = int(time.time() * 1000) - 10_000
+    runner._thought_persist_buf = ["think", "ing"]
+
+    captured: list[tuple[str, dict]] = []
+    monkeypatch.setattr(runner, "_persist_sub_event", lambda etype, data: captured.append((etype, data)))
+
+    thought_clock.stamp("thought", "s1", {}, scope="sub", now=100.0)
+    thought_clock.stamp("tool_call", "s1", {}, scope="sub", now=103.0)
+    runner._flush_thought_persist()
+
+    assert captured == [
+        (
+            "thought",
+            {
+                "text": "thinking",
+                "thought_ms": 3000,
+                "sub_agent": True,
+                "sub_task_label": "look it up",
+                "job_id": "job-1",
+            },
+        )
+    ]

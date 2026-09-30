@@ -43,6 +43,15 @@ _PHASE_ENDERS = frozenset(
 _open: dict[str, float] = {}
 # sid -> duration of its last completed phase, in ms
 _last_ms: dict[str, int] = {}
+# sid -> epoch ms when the phase opened / ended.  Only used to tell "this
+# round's phase" from a leftover of an earlier one when a thought event is
+# persisted at round end (see phase_total).
+_open_at_ms: dict[str, int] = {}
+_last_at_ms: dict[str, int] = {}
+
+
+def _wall_ms() -> int:
+    return int(time.time() * 1000)
 
 
 def _key(sid: str, scope: str) -> str:
@@ -74,15 +83,18 @@ def stamp(
         if started is None:
             started = t
             _open[key] = started
+            _open_at_ms[key] = _wall_ms()
         ms = int((t - started) * 1000)
         payload["thought_ms"] = ms
         return ms
     if event_type in _PHASE_ENDERS:
         started = _open.pop(key, None)
+        _open_at_ms.pop(key, None)
         if started is None:
             return None
         ms = int((t - started) * 1000)
         _last_ms[key] = ms
+        _last_at_ms[key] = _wall_ms()
         payload["thought_ms"] = ms
         return ms
     return None
@@ -93,12 +105,60 @@ def last_ms(sid: str, scope: str = "") -> int | None:
     return _last_ms.get(_key(sid, scope))
 
 
+def phase_total(
+    sid: str,
+    scope: str = "",
+    *,
+    since_ms: int | None = None,
+) -> int | None:
+    """Duration (ms) of the thinking phase a persisted ``thought`` event belongs to.
+
+    The live UI reads the value off the wire frame; a session reloaded from disk
+    only has whatever was written with the event, so the round-end persist asks
+    here.  Prefer the last COMPLETED phase, but only when it ended during the
+    caller's round (*since_ms*): otherwise a round that never closed its own
+    phase would inherit the previous round's number, and a wrong number shown as
+    fact is worse than a blank row.  A phase still open when the round ends is
+    reported by its elapsed-so-far, which is the same honest figure.
+    """
+    key = _key(sid, scope)
+    ended = _last_ms.get(key)
+    if ended is not None and (since_ms is None or _last_at_ms.get(key, 0) >= since_ms):
+        return ended
+    started = _open.get(key)
+    if started is not None and (since_ms is None or _open_at_ms.get(key, 0) >= since_ms):
+        return int((time.monotonic() - started) * 1000)
+    return None
+
+
+def thought_event_data(
+    text: str,
+    sid: str,
+    *,
+    scope: str = "",
+    since_ms: int | None = None,
+) -> dict:
+    """Payload for a persisted ``thought`` event: the text plus its recorded duration.
+
+    Whoever persists a thought event must use this, or a refresh silently loses
+    the duration: the persisted timestamps are ISO seconds, so the UI can only
+    guess (or show nothing) once the live frame is gone.
+    """
+    data: dict = {"text": text}
+    ms = phase_total(sid, scope, since_ms=since_ms)
+    if ms is not None:
+        data["thought_ms"] = ms
+    return data
+
+
 def reset(sid: str | None = None) -> None:
     """Drop the phase state for one session (or all of them)."""
     if sid is None:
         _open.clear()
         _last_ms.clear()
+        _open_at_ms.clear()
+        _last_at_ms.clear()
         return
-    for store in (_open, _last_ms):
+    for store in (_open, _last_ms, _open_at_ms, _last_at_ms):
         for key in [k for k in store if k.split("\0", 1)[0] == (sid or "")]:
             store.pop(key, None)

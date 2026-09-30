@@ -3769,7 +3769,14 @@ export function convertSessionEventsToWorkflow(rawEvents: any[]): WorkflowEvent[
         if (eKey === key && e.type !== 'thought') break;
       }
       if (mergeIdx >= 0) {
-        result[mergeIdx].content = String(result[mergeIdx].content ?? '') + text;
+        const prev = result[mergeIdx];
+        result[mergeIdx] = {
+          ...prev,
+          content: String(prev.content ?? '') + text,
+          // The recorded duration rides on the chunk; keep the newest, same as
+          // the live merge, so a reloaded row still shows its own number.
+          ...(typeof incoming.thoughtMs === 'number' ? { thoughtMs: incoming.thoughtMs } : {}),
+        };
       } else {
         result.push(incoming);
       }

@@ -16,10 +16,12 @@ v1.1 additions:
 
 import asyncio
 import logging
+import time
 import uuid
 from typing import Any
 
 from opensquad.events import bus
+from opensquad.thought_clock import thought_event_data
 
 logger = logging.getLogger(__name__)
 
@@ -258,6 +260,9 @@ class SubAgentRunner:
         # Live thought chunks are still streamed; persistence coalesces to one
         # event per thought phase so refresh does not explode into fragments.
         self._thought_persist_buf: list[str] = []
+        # Epoch ms of this run's start: an event persisted later must not pick up
+        # a phase duration recorded by an earlier run of the same session.
+        self._run_started_ms: int = 0
         self._aborted = False
         self._abort_reason = ""
 
@@ -310,7 +315,19 @@ class SubAgentRunner:
         text = "".join(self._thought_persist_buf)
         self._thought_persist_buf.clear()
         if text.strip():
-            self._persist_sub_event("thought", self._tag_payload(text))
+            # Recorded duration rides along, or a refreshed session shows the
+            # sub-agent's 深度思考 rows without any time (see thought_clock).
+            self._persist_sub_event(
+                "thought",
+                self._tag_payload(
+                    thought_event_data(
+                        text,
+                        self._sid or "",
+                        scope="sub",
+                        since_ms=self._run_started_ms,
+                    )
+                ),
+            )
 
     def _persist_sub_event(self, etype: str, data: dict) -> None:
         """Best-effort persist so refresh/history_sync can rebuild the nest."""
@@ -472,6 +489,8 @@ class SubAgentRunner:
         """Internal execution loop (no timeout wrapper)."""
         import json as _json
         from datetime import datetime as _dt
+
+        self._run_started_ms = int(time.time() * 1000)
 
         # Notify frontend that sub-agent has started
         await self._emit_sub("info", {"message": f"[Sub-Agent] Starting: {self._sub_task_label or task[:80]}"})

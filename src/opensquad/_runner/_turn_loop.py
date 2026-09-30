@@ -19,6 +19,7 @@ from opensquad.input_hub import input_hub
 from opensquad.log_setup import get_tool_call_debug_logger
 from opensquad.messages import parse_tool_calls
 from opensquad.parser import ResponseParser
+from opensquad.thought_clock import thought_event_data
 from opensquad.vision_inject import add_paths_to_turn, apply_vision_injection, clear_path_file
 
 # Consecutive format_error replies (leak guard) before we stop auto-retrying.
@@ -259,9 +260,16 @@ class TurnLoop:
             full_response, "think"
         )
         if thought_text:
+            # Carry the recorded phase duration with the text: a reloaded session
+            # has only this event, and without the number every 深度思考 row lost
+            # its time after a refresh (the ISO-second timestamps cannot rebuild it).
             _get_session_manager().add_event(
                 "thought",
-                {"text": thought_text},
+                thought_event_data(
+                    thought_text,
+                    self.runner._turn_sid or "",
+                    since_ms=int(self.runner._turn_started_ms or 0),
+                ),
                 turn_id=self.runner._current_turn,
                 round_id=self.runner._current_round,
             )
