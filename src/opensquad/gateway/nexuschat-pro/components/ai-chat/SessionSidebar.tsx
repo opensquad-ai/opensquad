@@ -20,6 +20,7 @@ import {
   Archive,
   ChevronRight,
   BookOpen,
+  Bot,
   Code2,
   MessageCircle,
   LayoutGrid,
@@ -83,6 +84,7 @@ interface SessionSidebarProps {
   onOpenRoles?: () => void;
   onOpenScheduledTasks?: () => void;
   onOpenTasks?: () => void;
+  onOpenAgents?: () => void;
   onOpenSearch?: () => void;
   /** Highlight Skill 库 when the in-chat skills panel is open. */
   skillsActive?: boolean;
@@ -90,6 +92,8 @@ interface SessionSidebarProps {
   pluginsActive?: boolean;
   /** Highlight 角色 when the in-chat roles panel is open. */
   rolesActive?: boolean;
+  /** Highlight 智能体 while the agent switcher dialog is open. */
+  agentsActive?: boolean;
   isOpen: boolean;
   sessionTitleUpdate?: { id: string; title: string } | null;
   /** Session ids currently running a parallel turn */
@@ -209,10 +213,12 @@ const SessionSidebarInner: React.FC<SessionSidebarProps> = ({
   onOpenRoles,
   onOpenScheduledTasks,
   onOpenTasks,
+  onOpenAgents,
   onOpenSearch,
   skillsActive = false,
   pluginsActive = false,
   rolesActive = false,
+  agentsActive = false,
   isOpen,
   sessionTitleUpdate,
   busySessionIds = [],
@@ -1105,6 +1111,18 @@ const SessionSidebarInner: React.FC<SessionSidebarProps> = ({
         >
           <UserCircle size={16} className={rolesActive ? 'text-primary' : 'text-textMuted/70'} />
           {t('nav.roles')}
+        </button>
+        <button
+          type="button"
+          onClick={() => onOpenAgents?.()}
+          className={`w-full flex items-center gap-2 px-2 py-1.5 rounded-lg text-[14px] font-normal os-interactive ${
+            agentsActive
+              ? 'bg-primary/10 text-primary'
+              : 'text-textMain'
+          }`}
+        >
+          <Bot size={16} className={agentsActive ? 'text-primary' : 'text-textMuted/70'} />
+          {t('aiChat.agents')}
         </button>
       </div>
 

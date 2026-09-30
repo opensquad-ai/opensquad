@@ -143,7 +143,6 @@ import { OPEN_SESSION_TAB_EVENT } from '../utils/uiEvents';
 // AI Chat sub-components
 import { MessageBubble, ChatMessage, FileAttachment } from './ai-chat/MessageBubble';
 import { StreamingMessage } from './ai-chat/StreamingMessage';
-import { SoloMessage } from './ai-chat/SoloMessage';
 import { SoloActivityRow, mergeWorkflowBlocks } from './ai-chat/SoloActivityRow';
 import {
   indexHtmlEmbedsByAssistantMessage,
@@ -203,6 +202,7 @@ import { SoloContextFooter } from './ai-chat/SoloContextFooter';
 import { PlanBlock, PlanStep, parsePlanContent } from './ai-chat/PlanBlock';
 import { StatusBadge, AgentStatus } from './ai-chat/StatusBadge';
 import { SessionSidebar } from './ai-chat/SessionSidebar';
+import { AgentSwitcherDialog } from './ai-chat/AgentSwitcherDialog';
 import { SessionSearchModal } from './ai-chat/SessionSearchModal';
 import { ContextViewer, ContextEntry } from './ai-chat/ContextViewer';
 
@@ -490,6 +490,9 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     })();
   }, [agentId]);
   const closeSessionSearch = useCallback(() => setSessionSearchOpen(false), []);
+  /** 左侧菜单「智能体」：切换对话对象 / 管理其运行状态。 */
+  const [agentSwitcherOpen, setAgentSwitcherOpen] = useState(false);
+  const closeAgentSwitcher = useCallback(() => setAgentSwitcherOpen(false), []);
   /** In-chat Skill 库 / 插件：keep SessionSidebar, replace center + files. */
   const [libraryView, setLibraryView] = useState<null | 'skills' | 'plugins' | 'roles'>(null);
   const [filesPanelOpen, setFilesPanelOpen] = useState(() => {
@@ -4771,7 +4774,6 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
           agentId={agentId}
           sessionId={sessionId}
           liveTimeline={live != null && live.length > 0 ? flattenArchivedSections(live) : null}
-          isSolo={isSolo}
           expandLevel={workflowExpandLevel}
           columnClass={soloColumnClass}
           userName={currentUser?.name || undefined}
@@ -5121,6 +5123,15 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     refreshWsSnap();
   };
 
+  const handleOpenAgents = () => {
+    setLibraryView(null);
+    if (isCompactLayout) {
+      setSessionSidebarOpen(false);
+      setFilesPanelOpen(false);
+    }
+    setAgentSwitcherOpen(true);
+  };
+
   const handleOpenTasks = () => {
     setLibraryView(null);
     if (isCompactLayout) {
@@ -5459,10 +5470,12 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
         onOpenRoles={handleOpenRoles}
         onOpenScheduledTasks={handleOpenScheduledTasks}
         onOpenTasks={handleOpenTasks}
+        onOpenAgents={handleOpenAgents}
         onOpenSearch={openSessionSearch}
         skillsActive={libraryView === 'skills'}
         pluginsActive={libraryView === 'plugins'}
         rolesActive={libraryView === 'roles'}
+        agentsActive={agentSwitcherOpen}
         isOpen={sessionSidebarOpen}
         sessionTitleUpdate={sessionTitleUpdate}
         busySessionIds={busySessions}
@@ -5498,6 +5511,12 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
           const path = (activeWorkspace?.rootPath || defaultCwd || agentCwd || '').trim();
           if (path) handleNewSessionInWorkspace(path);
         }}
+      />
+
+      <AgentSwitcherDialog
+        open={agentSwitcherOpen}
+        onClose={closeAgentSwitcher}
+        currentAgentId={agentId}
       />
 
       {showContextViewer && (
@@ -5711,7 +5730,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
               content={displayStreamingText}
               isComplete={!isStreaming}
               avatarSrc={resolveChatAvatar(agentProfile?.chat_profile) ?? undefined}
-              variant={isSolo ? 'solo' : 'classic'}
+              variant="classic"
               // 流式文本前若是工作流组，名字已在工作流上方显示，避免重复。
               // 中间渲染为 null 的 `prompt` 条目要跨过（见 previousRenderedEntryKind）。
               senderName={
@@ -5817,17 +5836,13 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
               if (replyEmbeds.length === 0 && !turnFilesCard) {
                 return (
                   <TimelineRow key={entryKey} lockLayout={lockLayout} style={revealStyle}>
-                    {isSolo
-                      ? <SoloMessage {...msgProps} anchorId={entryKey} />
-                      : <MessageBubble {...msgProps} anchorId={entryKey} />}
+                    <MessageBubble {...msgProps} anchorId={entryKey} />
                   </TimelineRow>
                 );
               }
               return (
                 <TimelineRow key={entryKey} lockLayout={lockLayout} style={revealStyle}>
-                  {isSolo
-                    ? <SoloMessage {...msgProps} anchorId={entryKey} />
-                    : <MessageBubble {...msgProps} anchorId={entryKey} />}
+                  <MessageBubble {...msgProps} anchorId={entryKey} />
                   {(replyEmbeds.length > 0 || turnFilesCard) && (
                     <div className="w-full mt-1 mb-4" data-html-embeds-below-reply={replyEmbeds.length > 0 ? '1' : undefined}>
                       {replyEmbeds.map((payload, ei) => (
@@ -5880,7 +5895,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
                 && !!(nextAfterGroup.data as ChatMessage).content.trim();
               const turnMs = groupHasIncomplete
                 ? turnStartedMs
-                : (!isSolo && i === lastIncompleteIdx ? turnStartedMs : undefined);
+                : (i === lastIncompleteIdx ? turnStartedMs : undefined);
               return (
                 <TimelineRow
                   key={entryKey}
@@ -5912,7 +5927,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
                       shellStreams={shellStreams}
                       onOpenFile={openProjectFile}
                       embedVisualizations={false}
-                      uiMode={uiMode}
+                      uiMode="classic"
                     />
                   </div>
                 </TimelineRow>
@@ -5968,7 +5983,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
                   messageCount={fold.messageCount}
                   eventCount={fold.eventCount}
                   defaultCollapsed={fold.collapsed !== false}
-                  isSolo={isSolo}
+                  isSolo={false}
                 >
                   {fold.entries.map((nested, ni) => {
                     const nestedKey = nested._uid || `${entryKey}-n${ni}`;
@@ -5996,15 +6011,11 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
                         nested.data.role === 'assistant'
                           ? (foldEmbedIndex?.get(ni) ?? [])
                           : [];
-                      const bubble = isSolo
-                        ? <SoloMessage key={nestedKey} {...msgProps} anchorId={nestedKey} />
-                        : <MessageBubble key={nestedKey} {...msgProps} anchorId={nestedKey} />;
+                      const bubble = <MessageBubble key={nestedKey} {...msgProps} anchorId={nestedKey} />;
                       if (replyEmbeds.length === 0) return bubble;
                       return (
                         <React.Fragment key={nestedKey}>
-                          {isSolo
-                            ? <SoloMessage {...msgProps} anchorId={nestedKey} />
-                            : <MessageBubble {...msgProps} anchorId={nestedKey} />}
+                          <MessageBubble {...msgProps} anchorId={nestedKey} />
                           <div className="w-full mt-1 mb-4" data-html-embeds-below-reply="1">
                             {replyEmbeds.map((payload, ei) => (
                               <HtmlEmbedBlock
@@ -6030,7 +6041,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
                           shellStreams={shellStreams}
                           onOpenFile={openProjectFile}
                           embedVisualizations={false}
-                          uiMode={uiMode}
+                          uiMode="classic"
                         />
                       );
                     }
@@ -6074,9 +6085,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
 
         {/* Image & attachment preview */}
         {(images.length > 0 || attachments.length > 0 || isUploading) && (
-          <div className={`px-2 sm:px-4 py-2 flex gap-2 flex-wrap items-center flex-shrink-0 ${
-            isSolo ? 'bg-transparent' : 'border-t border-border bg-panel'
-          }`}>
+          <div className="px-2 sm:px-4 py-2 flex gap-2 flex-wrap items-center flex-shrink-0 border-t border-border bg-panel">
             <div className={`${soloColumnClass} flex gap-2 flex-wrap items-center`}>
             {/* Images */}
             {images.map((img, i) => (
@@ -6148,13 +6157,11 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
           </div>
         )}
 
-        {!isSolo && (
-          <ChatScrollComposerHint
-            scrollRef={messagesContainerRef}
-            columnClass={soloColumnClass}
-            onUnpin={markUnpinnedFromBottom}
-          />
-        )}
+        <ChatScrollComposerHint
+          scrollRef={messagesContainerRef}
+          columnClass={soloColumnClass}
+          onUnpin={markUnpinnedFromBottom}
+        />
 
       </div>
           )}
@@ -6205,6 +6212,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
         onSessionChanges={onSessionChangesStable}
         treeOnly
         onOpenFile={handleOpenFileInTab}
+        uiMode={uiMode}
       />
       </div>
       </>

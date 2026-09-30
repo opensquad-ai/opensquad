@@ -35,6 +35,7 @@ import { UnifiedDiffView, type DiffLine } from './UnifiedDiffView';
 import { GitChangesPanel } from './GitChangesPanel';
 import { fillDiffCollapseHidden, flattenDiffCollapses } from './fillDiffCollapseHidden';
 import { SOFT_PRESENCE_MS, useSoftPresence } from '../../utils/useSoftPresence';
+import { formatRelativeAge } from '../../utils/time';
 import { OpenSquadLoader } from '../OpenSquadLoader';
 import { ControlledFold, FoldChevron } from '../Collapse';
 import {
@@ -274,6 +275,12 @@ interface ProjectFilesPanelProps {
   treeOnly?: boolean;
   /** Called when user opens a file (treeOnly or when provided). */
   onOpenFile?: (relPath: string) => void;
+  /**
+   * 对话布局模式。classic（Work）下「变动」页签列出本次会话产出的文件（产物）
+   * —— Work 模式交付的是东西而不是仓库状态，git diff 在那里是噪音；
+   * solo（Code）保留 git 变更视图。默认 solo，其余调用方行为不变。
+   */
+  uiMode?: 'classic' | 'solo';
 }
 
 const WIDTH_MIN = 320;
@@ -505,6 +512,107 @@ const ImagePreview: React.FC<{ src: string; fileName: string; size?: number }> =
   </div>
 );
 
+/** 产物行状态 → i18n key（Work 模式的变动区不做 git 语义，只分新增/修改/删除）。 */
+function artifactStatusKey(
+  e: ChangedEntry,
+): 'aiChat.artifactDeleted' | 'aiChat.artifactCreated' | 'aiChat.artifactUpdated' {
+  if (e.missing || e.status === 'D') return 'aiChat.artifactDeleted';
+  if (e.created || e.status === 'A' || e.status === 'U' || e.status === '??') {
+    return 'aiChat.artifactCreated';
+  }
+  return 'aiChat.artifactUpdated';
+}
+
+function artifactStatusClass(e: ChangedEntry): string {
+  if (e.missing || e.status === 'D') return 'bg-rose-500/10 text-rose-600 dark:text-rose-400';
+  if (e.created || e.status === 'A' || e.status === 'U' || e.status === '??') {
+    return 'bg-emerald-500/10 text-emerald-700 dark:text-emerald-400';
+  }
+  return 'bg-black/[0.06] dark:bg-white/[0.08] text-textMuted';
+}
+
+/**
+ * Work（经典）模式「变动区」的产物列表。
+ *
+ * Work 模式交付的是*东西*而不是仓库状态：这里只列出本次会话产出的文件
+ * （名称 / 位置 / 新增·修改·删除 / 大小 / 时间），点了直接打开。
+ * 不展示 git diff，也不提供 keep / revert —— 那些属于 Code（solo）模式。
+ */
+const ArtifactsList: React.FC<{
+  entries: ChangedEntry[];
+  loading: boolean;
+  error: string | null;
+  onOpen: (relPath: string) => void;
+}> = ({ entries, loading, error, onOpen }) => {
+  const { t } = useTranslation();
+  if (loading && entries.length === 0) {
+    return (
+      <div className="flex items-center gap-2 px-3 py-3 text-[11px] text-textMuted">
+        <OpenSquadLoader size={18} />
+      </div>
+    );
+  }
+  if (error && entries.length === 0) {
+    return <div className="px-3 py-3 text-[11px] text-textMuted">{error}</div>;
+  }
+  if (entries.length === 0) {
+    return (
+      <div className="px-3 py-3 text-[11px] text-textMuted/60" data-fs-empty="1">
+        {t('aiChat.noArtifacts')}
+      </div>
+    );
+  }
+  return (
+    <div className="flex flex-col" data-testid="artifacts-list">
+      {entries.map((e) => {
+        const gone = !!e.missing || e.status === 'D';
+        const parent = parentRel(e.path);
+        return (
+          <div
+            key={`artifact:${e.path}`}
+            className="group flex items-center gap-1.5 px-2 py-[6px] text-[11px] border-b border-border/40 last:border-b-0"
+          >
+            <FileTypeIcon name={e.name} type={e.type === 'dir' ? 'dir' : 'file'} />
+            <button
+              type="button"
+              className="flex-1 min-w-0 text-left"
+              title={e.path}
+              disabled={gone}
+              onClick={() => onOpen(e.path)}
+            >
+              <span
+                className={`block truncate font-mono ${
+                  gone ? 'text-textMuted/45 line-through' : 'text-textMuted/85'
+                }`}
+              >
+                {e.name}
+              </span>
+              {parent ? (
+                <span className="block truncate text-[10px] text-textMuted/40">{parent}</span>
+              ) : null}
+            </button>
+            <span
+              className={`shrink-0 rounded-full px-1.5 py-[1px] text-[9px] font-medium ${artifactStatusClass(e)}`}
+            >
+              {t(artifactStatusKey(e))}
+            </span>
+            {typeof e.size === 'number' && e.size > 0 ? (
+              <span className="shrink-0 text-[10px] tabular-nums text-textMuted/50">
+                {formatBytes(e.size)}
+              </span>
+            ) : null}
+            {typeof e.mtime === 'number' && e.mtime > 0 ? (
+              <span className="shrink-0 text-[10px] text-textMuted/45">
+                {formatRelativeAge(e.mtime)}
+              </span>
+            ) : null}
+          </div>
+        );
+      })}
+    </div>
+  );
+};
+
 export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
   isOpen,
   onClose,
@@ -518,8 +626,11 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
   onSessionChanges,
   treeOnly = false,
   onOpenFile,
+  uiMode = 'solo',
 }) => {
   const { t } = useTranslation();
+  /** Work(classic) 模式：变动区 = 产物（本次会话产出的文件），不展示代码变更。 */
+  const isArtifactsMode = uiMode === 'classic';
   const [browsePath, setBrowsePath] = useState('');
   const [treeEntries, setTreeEntries] = useState<TreeEntry[]>([]);
   const [treeTruncated, setTreeTruncated] = useState(false);
@@ -2156,7 +2267,7 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
       {/* Tabs */}
       <div className="flex items-center gap-0 px-1.5 pt-1.5 pb-0 border-b border-border flex-shrink-0">
         {([
-          { id: 'changed' as const, label: t('aiChat.changedFiles') },
+          { id: 'changed' as const, label: isArtifactsMode ? t('aiChat.artifacts') : t('aiChat.changedFiles') },
           { id: 'all' as const, label: t('aiChat.allFiles') },
         ]).map((tt) => (
           <button
@@ -2182,7 +2293,7 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
             ) : null}
           </button>
         ))}
-        {tab === 'changed' && rootPath ? (
+        {tab === 'changed' && rootPath && !isArtifactsMode ? (
           <div className="flex items-center gap-1 ml-auto pr-0.5" data-testid="changed-scope-chips">
             {(['session', 'all'] as const).map((id) => (
               <button
@@ -2233,6 +2344,13 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
           <div className="px-3 py-4 text-[11px] text-textMuted leading-relaxed" data-fs-empty="1">
             {t('aiChat.chooseProjectFolderHint')}
           </div>
+        ) : tab === 'changed' && isArtifactsMode ? (
+          <ArtifactsList
+            entries={filteredChanged}
+            loading={changedLoading}
+            error={changedError}
+            onOpen={(rel) => void openFileOrDiff(rel)}
+          />
         ) : tab === 'changed' && changedScope === 'all' ? (
           // The git view owns its own list, selection and commit form. `h-full`
           // gives its internal scroller a height inside this scroll container.

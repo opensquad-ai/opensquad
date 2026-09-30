@@ -30,7 +30,6 @@ import { CHAT_DOCUMENT_COLUMN_CLASS } from '../../utils/chatLayout';
 import { useTextSelectionFreeze } from '../../hooks/useTextSelectionFreeze';
 import { ChatTimeline } from './ChatTimeline';
 import { ChatScrollComposerHint, ChatScrollHud } from './ChatScrollHud';
-import { SoloMessage } from './SoloMessage';
 import { MessageBubble, type ChatMessage } from './MessageBubble';
 import { SoloActivityRow, mergeWorkflowBlocks } from './SoloActivityRow';
 import { TimelineRow } from './TimelineRow';
@@ -49,6 +48,11 @@ export interface SessionChatPaneProps {
   sessionId: string;
   /** When set, render this instead of fetching history (same-session mirror of live pane). */
   liveTimeline?: TimelineEntry[] | null;
+  /**
+   * @deprecated 对话渲染已统一到 Work(classic) 管线（见 conversationRenderParity.test.ts），
+   * 本 prop 现在**被忽略**，仅为兼容既有调用方保留；不要再新增使用，也不要据此
+   * 恢复任何按模式选择组件的渲染分叉。
+   */
   isSolo?: boolean;
   /** @deprecated Prefer reading Settings → General; kept for optional override. */
   expandLevel?: WorkflowExpandLevel;
@@ -81,7 +85,6 @@ export const SessionChatPane: React.FC<SessionChatPaneProps> = ({
   agentId,
   sessionId,
   liveTimeline,
-  isSolo = true,
   expandLevel: expandLevelProp,
   columnClass = CHAT_DOCUMENT_COLUMN_CLASS,
   userName,
@@ -544,11 +547,7 @@ export const SessionChatPane: React.FC<SessionChatPaneProps> = ({
                   };
                   return (
                     <TimelineRow key={entryKey} lockLayout={lockLayout} style={revealStyle}>
-                      {isSolo ? (
-                        <SoloMessage {...msgProps} />
-                      ) : (
-                        <MessageBubble {...msgProps} />
-                      )}
+                      <MessageBubble {...msgProps} />
                     </TimelineRow>
                   );
                 }
@@ -583,7 +582,7 @@ export const SessionChatPane: React.FC<SessionChatPaneProps> = ({
                           turnDelivered={turnDelivered}
                           expandLevel={expandLevel}
                           embedVisualizations={false}
-                          uiMode={isSolo ? 'solo' : 'classic'}
+                          uiMode="classic"
                           shellStreams={EMPTY_SHELL_STREAMS}
                         />
                       </div>
@@ -611,13 +610,11 @@ export const SessionChatPane: React.FC<SessionChatPaneProps> = ({
         />
       </div>
 
-      {!isSolo && (
-        <ChatScrollComposerHint
-          scrollRef={listRef}
-          columnClass={columnClass}
-          onUnpin={markUnpinnedFromBottom}
-        />
-      )}
+      <ChatScrollComposerHint
+        scrollRef={listRef}
+        columnClass={columnClass}
+        onUnpin={markUnpinnedFromBottom}
+      />
     </div>
   );
 };
