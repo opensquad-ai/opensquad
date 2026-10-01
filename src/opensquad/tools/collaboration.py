@@ -149,7 +149,18 @@ def start_collaboration(
 
         agent_dir = input_hub.agent_dir or ""
         creator = os.path.basename(agent_dir) if agent_dir else "unknown_agent"
-        task_rec = create_task(task_name=project_name or card, created_by=creator)
+        task_rec = create_task(task_name=project_name or card, created_by=creator, group_id=group_id)
+        # The board belongs to the machine that owns the group: remember it, so
+        # later board calls that carry only the collab_id still route back there.
+        if isinstance(task_rec, dict) and task_rec.get("task_id") and group_id:
+            try:
+                from ..collab_board import board_owner, remember_board_owner
+
+                owner = board_owner(group_id=group_id)
+                if owner:
+                    remember_board_owner(task_rec["task_id"], owner)
+            except Exception:
+                pass
     except Exception as e:
         logger.warning(f"[Collab] Failed to create task id: {e}")
 

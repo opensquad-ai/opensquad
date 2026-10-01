@@ -243,7 +243,12 @@ def _gen_task_id(existing: set[str]) -> str:
 
 
 def create_task(
-    *, task_name: str, created_by: str, task_id: str | None = None, metadata: dict[str, Any] | None = None
+    *,
+    task_name: str,
+    created_by: str,
+    task_id: str | None = None,
+    metadata: dict[str, Any] | None = None,
+    group_id: str = "",
 ) -> dict[str, Any]:
     with _board_lock():
         tasks = _read_tasks()
@@ -252,6 +257,9 @@ def create_task(
         if cid in existing:
             raise ValueError(f"task_id already exists: {cid}")
         now = _now_iso()
+        extra = dict(metadata) if isinstance(metadata, dict) else {}
+        if group_id:
+            extra["group_id"] = str(group_id)
         rec = {
             "task_id": cid,
             "task_name": task_name or cid,
@@ -265,7 +273,7 @@ def create_task(
             "updated_at": now,
             "closed_at": None,
             "ended_at": None,
-            "extra": metadata if isinstance(metadata, dict) else {},
+            "extra": extra,
         }
         tasks.append(rec)
         _write_tasks(tasks)
@@ -1325,8 +1333,94 @@ def board_mode() -> str:
     return mode if mode in ("local", "remote", "auto") else "auto"
 
 
-def board_base_url() -> str:
-    """Gateway base URL owning this board, or ``""`` when the board is local."""
+# ---------------------------------------------------------------------------
+# Which machine owns a board
+#
+# The board belongs to the deployment that owns the *group*, not to whichever
+# machine an agent happens to run on. Pairing a second machine no longer repoints
+# the agent's chat bridge, so the old "forward whenever group_chat.base_url is
+# off this host" test is no longer the whole story: a group joined on a paired
+# peer must forward to *that peer*, while the agent's own groups stay local.
+#
+# The mapping is recorded when the agent joins: the group in
+# ``group_chat.peers[<host>].groups`` (via peer_bridge.remember_peer_group), and
+# the collaboration task in ``board_owners.json`` — because most board calls carry
+# only a ``collab_id``, and the task id does not say which machine minted it.
+# ---------------------------------------------------------------------------
+def _board_owners_file() -> str:
+    return os.path.join(syscfg.workspace_data_dir("collab_board"), "board_owners.json")
+
+
+def remember_board_owner(collab_id: str, host: str) -> bool:
+    """Record that collaboration task ``collab_id`` lives on ``host``.
+
+    A no-op for an empty host: an empty host means "local", and local needs no
+    entry (the absence of one is exactly what keeps it local).
+    """
+    cid = str(collab_id or "").strip()
+    key = str(host or "").strip()
+    if not cid or not key:
+        return False
+    try:
+        data = read_json(_board_owners_file(), {})
+        if not isinstance(data, dict):
+            data = {}
+        data[cid] = key
+        atomic_write_json(_board_owners_file(), data)
+        return True
+    except Exception:
+        logger.debug("Failed to record board owner for %s", cid, exc_info=True)
+        return False
+
+
+def board_owner(collab_id: str = "", group_id: str = "") -> str:
+    """The host owning this board, or ``""`` when it is local.
+
+    Resolution order, most specific first: the collaboration task's recorded
+    owner, then the group it belongs to. An unknown task or group is local — this
+    never guesses a remote host, because forwarding a local board's calls to a
+    machine that does not own them would split one group's board in two.
+    """
+    from opensquad import peer_bridge
+
+    cid = str(collab_id or "").strip()
+    if cid:
+        try:
+            data = read_json(_board_owners_file(), {})
+            if isinstance(data, dict):
+                host = str(data.get(cid) or "").strip()
+                if host:
+                    return host
+        except Exception:
+            pass
+    group = str(group_id or "").strip()
+    if group:
+        entry = peer_bridge.peer_for_group(group)
+        if entry:
+            return str(entry.get("host") or entry.get("base_url") or "").strip()
+    return ""
+
+
+def _board_hint_base_url(host: str) -> str:
+    """The base URL of the peer named/addressable as ``host``, or ``""``."""
+    if not host:
+        return ""
+    try:
+        from opensquad import peer_bridge
+
+        entry = peer_bridge.find_peer(host) or {}
+        return _http_url(str(entry.get("base_url") or ""))
+    except Exception:
+        return ""
+
+
+def board_base_url(collab_id: str = "", group_id: str = "") -> str:
+    """Gateway base URL owning this board, or ``""`` when the board is local.
+
+    ``collab_id`` / ``group_id`` name the board when the caller knows it; without
+    them the legacy behaviour applies (env, explicit config, else the chat bridge
+    when it points off this machine).
+    """
     env = (os.environ.get("OPENSQUAD_BOARD_URL") or "").strip()
     if env:
         return _http_url(env)
@@ -1338,6 +1432,10 @@ def board_base_url() -> str:
     explicit = str((collab_cfg or {}).get("url") or "").strip()
     if explicit:
         return _http_url(explicit)
+    # A board this agent joined on a paired machine belongs to that machine.
+    hinted = _board_hint_base_url(board_owner(collab_id=collab_id, group_id=group_id))
+    if hinted:
+        return hinted
     chat = cfg.get("group_chat") if isinstance(cfg.get("group_chat"), dict) else {}
     base = str((chat or {}).get("base_url") or "").strip()
     if mode == "remote":
@@ -1350,11 +1448,27 @@ def board_base_url() -> str:
     return _http_url(base)
 
 
+def _board_args_hint(op: str, args: tuple, kwargs: dict) -> dict[str, str]:
+    """The ``collab_id`` / ``group_id`` a board op was called with, if any."""
+    hint: dict[str, str] = {}
+    for name in ("collab_id", "group_id", "task_id"):
+        value = kwargs.get(name)
+        if value is None and name == "task_id" and args:
+            value = args[0]
+        if value:
+            hint[name] = str(value)
+    return hint
+
+
 def _remote_call(op: str, args: tuple, kwargs: dict) -> Any:
     import urllib.error
     import urllib.request
 
-    base = board_base_url()
+    hint = _board_args_hint(op, args, kwargs)
+    base = board_base_url(
+        collab_id=hint.get("collab_id") or hint.get("task_id", ""),
+        group_id=hint.get("group_id", ""),
+    )
     if not base:
         raise BoardRemoteError("no remote board configured")
     try:
@@ -1419,7 +1533,11 @@ def _install_remote_dispatch() -> None:
 
         def make(local_impl, name):
             def wrapper(*args: Any, **kwargs: Any) -> Any:
-                if board_base_url():
+                hint = _board_args_hint(name, args, kwargs)
+                if board_base_url(
+                    collab_id=hint.get("collab_id") or hint.get("task_id", ""),
+                    group_id=hint.get("group_id", ""),
+                ):
                     return _remote_call(name, args, kwargs)
                 return local_impl(*args, **kwargs)
 

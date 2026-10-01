@@ -181,6 +181,44 @@ def test_an_invite_for_a_paired_machine_uses_that_peers_own_bridge(monkeypatch, 
     assert home.token == "t"  # touched, not replaced
 
 
+def test_joining_a_peer_group_remembers_which_machine_owns_it(monkeypatch, http):
+    """The group is on the peer, so its board is too. Joining records that, which
+    is what lets a collaboration task started here route its board calls back."""
+    import opensquad.peer_bridge as peer_bridge_mod
+
+    home = _Bridge(joined=True, base_url="http://127.0.0.1:9555")
+    peer = _Bridge(joined=True, base_url="http://192.168.5.4:9555")
+    recorded: list[tuple] = []
+    monkeypatch.setattr(bridge_mod, "bridge", home)
+    monkeypatch.setattr(peer_bridge_mod, "peer_bridge", lambda host: (peer, ""))
+    monkeypatch.setattr(peer_bridge_mod, "find_peer", lambda host: {"base_url": "http://192.168.5.4:9555"})
+    monkeypatch.setattr(
+        peer_bridge_mod, "remember_peer_group", lambda host, group: recorded.append((host, group)) or True
+    )
+
+    res = invite_tool.join_by_invite("192.168.5.4#g-7f3a")
+
+    assert res["status"] == "success"
+    assert recorded == [("192.168.5.4", "g-7f3a")]
+
+
+def test_joining_a_home_group_records_nothing(monkeypatch, http):
+    """A group on this machine is not on any peer: nothing to remember."""
+    import opensquad.peer_bridge as peer_bridge_mod
+
+    home = _Bridge(joined=True, base_url="http://127.0.0.1:9555")
+    recorded: list[tuple] = []
+    monkeypatch.setattr(bridge_mod, "bridge", home)
+    monkeypatch.setattr(
+        peer_bridge_mod, "remember_peer_group", lambda host, group: recorded.append((host, group)) or True
+    )
+
+    res = invite_tool.join_by_invite("127.0.0.1:9555#g-home")
+
+    assert res["status"] == "success"
+    assert recorded == []
+
+
 def test_a_malformed_invite_says_what_it_wants(monkeypatch):
     res = invite_tool.join_by_invite("not-an-invite")
 

@@ -401,13 +401,24 @@ def create_group(name: str, description: str = "", is_private: bool = False) -> 
         return {"status": "error", "message": str(e)}
 
 
-def list_groups() -> dict[str, Any]:
+def list_groups(host: str = "") -> dict[str, Any]:
     """
     Get a list of all groups the agent has currently joined.
     Returns each group's ID, name, and description.
+
+    Args:
+        host: Optional peer host (a machine this agent paired with). When set, list
+              the groups on THAT machine instead of this agent's own gateway.
     """
     try:
-        groups = _bridge().list_groups_api()
+        bridge_inst = _bridge()
+        if (host or "").strip():
+            from ..peer_bridge import peer_bridge
+
+            bridge_inst, why = peer_bridge(host.strip())
+            if bridge_inst is None:
+                return {"status": "error", "code": "peer_not_ready", "message": why}
+        groups = bridge_inst.list_groups_api()
         if not groups:
             return {"status": "success", "count": 0, "groups": []}
         return {
@@ -464,16 +475,16 @@ def join_group(group_id: str) -> dict[str, Any]:
 # 发了两遍（实测：同一条 DM 相隔 5 秒落库两次，工具折叠里显示「发送消息 ×2」，
 # 用户会看到两条一模一样的消息）。窗口很短，所以「有意再发一次」不受影响。
 _DUPLICATE_WINDOW_S = 15.0
-# (target_type, target_id, content) -> monotonic 时间戳
-_last_send_at: dict[tuple[str, str, str], float] = {}
+# (host, target_type, target_id, content) -> monotonic 时间戳
+_last_send_at: dict[tuple[str, ...], float] = {}
 
 
-def _is_duplicate_send(target_type: str, target_id: str, content: str, has_files: bool) -> bool:
+def _is_duplicate_send(target_type: str, target_id: str, content: str, has_files: bool, host: str = "") -> bool:
     """True when this exact message was sent to the same target a moment ago."""
     if has_files:
         # 附件可能真的要在短时间内重复发（分片、多次投递），不做去重。
         return False
-    key = (str(target_type), str(target_id), content.strip())
+    key = (str(host or ""), str(target_type), str(target_id), content.strip())
     now = time.monotonic()
     last = _last_send_at.get(key)
     _last_send_at[key] = now
@@ -487,6 +498,7 @@ def send_message(
     wakeup_delay: float = 0.0,
     file_paths: list[str] | None = None,
     collab_id: str | None = None,
+    host: str = "",
 ) -> dict[str, Any]:
     """
     Proactively send a message to a specific target (non-reply mode), with optional file attachments
@@ -515,6 +527,10 @@ def send_message(
                     With `collab_id` they are uploaded and attached to the task instead.
         collab_id: Collaboration task id. When set, the message and files go to that task's
                    thread only — see above.
+        host: Optional peer host (a machine this agent paired with). When set, the message
+              is sent through that peer's own bridge, so a group/DM living there can be
+              reached without repointing this agent's home gateway. The peer needs an
+              account there first (`im.register_account(..., host=...)`).
     """
     if not content.strip() and not file_paths:
         return {"status": "error", "message": "Content is empty and no files provided."}
@@ -553,10 +569,19 @@ def send_message(
         return result
 
     try:
+        # A message aimed at a paired machine goes through that peer's bridge, so a
+        # group/DM living there can be reached without repointing the home gateway.
+        bridge_inst = _bridge()
+        if (host or "").strip():
+            from ..peer_bridge import peer_bridge
+
+            bridge_inst, why = peer_bridge(host.strip())
+            if bridge_inst is None:
+                return {"status": "error", "code": "peer_not_ready", "message": why}
+
         # Support sending messages by group name: if target_type is group, try to look up the ID
         if target_type == "group":
             # Check cache first: if target_id is already in cached key set, treat it as valid ID, skip HTTP
-            bridge_inst = _bridge()
             if target_id in bridge_inst._group_cache:
                 pass  # Already a valid group_id, no lookup needed
             else:
@@ -580,7 +605,7 @@ def send_message(
                 if prepared:
                     final_files.extend(prepared)
 
-        if _is_duplicate_send(target_type, target_id, content, bool(final_files)):
+        if _is_duplicate_send(target_type, target_id, content, bool(final_files), host):
             logger.warning(
                 "[im] Duplicate %s send to %s within %.0fs dropped (identical content)",
                 target_type,
@@ -595,7 +620,9 @@ def send_message(
                 ),
             }
 
-        success = _bridge().send_message(content, target_id=target_id, target_type=target_type, file_paths=final_files)
+        success = bridge_inst.send_message(
+            content, target_id=target_id, target_type=target_type, file_paths=final_files
+        )
 
         # Clean up temporary split parts
         if file_paths:

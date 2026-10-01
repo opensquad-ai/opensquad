@@ -48,7 +48,9 @@ def captured(monkeypatch):
 
 
 def _board_base(monkeypatch, base="http://192.168.5.4:9555"):
-    monkeypatch.setattr(cb, "board_base_url", lambda: base)
+    # board_base_url now takes collab_id/group_id so a board joined on a peer can
+    # route to that peer; these cases exercise the token, not the routing.
+    monkeypatch.setattr(cb, "board_base_url", lambda *args, **kwargs: base)
     return base
 
 

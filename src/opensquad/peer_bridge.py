@@ -79,6 +79,68 @@ def peer_token(host: str) -> str:
         return ""
 
 
+def remember_peer_group(host: str, group_id: str) -> bool:
+    """Record that ``group_id`` lives on ``host``, a machine this agent paired with.
+
+    Written when this agent joins a group on a peer. The board belongs to the
+    machine that owns the group, and pairing no longer repoints the home bridge, so
+    this is what lets a board call about that group be routed back to its owner:
+    the group is noted *next to* the peer's address and token in
+    ``group_chat.peers[<host>].groups``.
+    """
+    group = str(group_id or "").strip()
+    if not group:
+        return False
+    path = _config_path()
+    if not path:
+        return False
+    try:
+        with open(path, encoding="utf-8") as fh:
+            cfg = json.load(fh)
+        if not isinstance(cfg, dict):
+            return False
+        chat = cfg.get("group_chat") if isinstance(cfg.get("group_chat"), dict) else {}
+        peers = chat.get("peers") if isinstance(chat.get("peers"), dict) else {}
+        wanted = host_key(host)
+        entry = peers.get(wanted) if isinstance(peers.get(wanted), dict) else None
+        if entry is None:
+            entry = next(
+                (v for v in peers.values() if isinstance(v, dict) and host_key(str(v.get("base_url") or "")) == wanted),
+                None,
+            )
+        if entry is None:
+            return False
+        groups = entry.get("groups")
+        if not isinstance(groups, list):
+            groups = []
+        if group not in [str(g) for g in groups]:
+            groups.append(group)
+        entry["groups"] = groups
+        tmp = f"{path}.tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(cfg, fh, ensure_ascii=False, indent=2)
+        os.replace(tmp, path)
+        return True
+    except Exception:
+        return False
+
+
+def peer_for_group(group_id: str) -> dict[str, Any] | None:
+    """The remembered peer that owns ``group_id``, or ``None`` when it is local.
+
+    A group on this machine is in no peer's ``groups`` list, so ``None`` means
+    "keep it local" — never "unknown, guess".
+    """
+    group = str(group_id or "").strip()
+    if not group:
+        return None
+    for entry in load_peers().values():
+        groups = entry.get("groups")
+        if isinstance(groups, list) and group in [str(g) for g in groups]:
+            return entry
+    return None
+
+
 def remember_peer(
     host: str,
     base_url: str,

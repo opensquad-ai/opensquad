@@ -78,6 +78,33 @@ def test_a_peer_without_an_account_says_what_to_run(env):
     assert "register_account" in why and "host=" in why
 
 
+def test_a_group_joined_on_a_peer_is_remembered_against_it(env):
+    peer_bridge_mod.remember_peer("192.168.5.4", "http://192.168.5.4:9555", "peer-tok")
+
+    assert peer_bridge_mod.remember_peer_group("192.168.5.4", "g-7f3a") is True
+
+    entry = peer_bridge_mod.peer_for_group("g-7f3a")
+    assert entry is not None
+    assert entry["host"] == "192.168.5.4"
+    assert peer_bridge_mod.peer_for_group("g-home") is None  # a local group has no owner
+    # recorded next to the peer, home binding untouched
+    assert _config(env)["group_chat"]["base_url"] == "http://127.0.0.1:9555"
+
+
+def test_remembering_a_peer_group_is_idempotent(env):
+    peer_bridge_mod.remember_peer("192.168.5.4", "http://192.168.5.4:9555", "peer-tok")
+
+    peer_bridge_mod.remember_peer_group("192.168.5.4", "g-7f3a")
+    peer_bridge_mod.remember_peer_group("192.168.5.4", "g-7f3a")
+
+    assert _config(env)["group_chat"]["peers"]["192.168.5.4"]["groups"] == ["g-7f3a"]
+
+
+def test_remembering_a_group_for_an_unpaired_host_changes_nothing(env):
+    assert peer_bridge_mod.remember_peer_group("10.0.0.9", "g-7f3a") is False
+    assert peer_bridge_mod.peer_for_group("g-7f3a") is None
+
+
 def test_an_unpaired_host_says_to_pair_first(env):
     bridge, why = peer_bridge_mod.peer_bridge("10.1.2.3")
 
@@ -173,3 +200,80 @@ def test_an_existing_peer_account_with_a_wrong_password_is_reported_not_taken_ov
     assert res["status"] == "error"
     assert res["code"] == "email_in_use"
     assert "cannot reset passwords" in res["message"]
+
+
+def _peer_with_account(monkeypatch, *, sent: list):
+    peer_bridge_mod.remember_peer(
+        "192.168.5.4",
+        "http://192.168.5.4:9555",
+        "peer-tok",
+        account={"email": "b@ai", "password": "pw"},
+    )
+
+    class _FakeBridge:
+        base_url = "http://192.168.5.4:9555"
+        token = "user-tok"
+        _group_cache = {"g-7f3a": True}
+
+        def __init__(self, **kwargs):
+            pass
+
+        def login(self):
+            return True
+
+        def list_groups_api(self):
+            return [{"id": "g-7f3a", "name": "远端群"}]
+
+        def send_message(self, content, target_id, target_type="group", file_paths=None, **kwargs):
+            sent.append({"content": content, "target_id": target_id, "target_type": target_type})
+            return True
+
+    monkeypatch.setattr(bridge_mod, "ChatProBridge", _FakeBridge)
+
+
+def test_sending_to_a_peer_host_uses_that_peers_bridge(env, monkeypatch):
+    sent: list = []
+    _peer_with_account(monkeypatch, sent=sent)
+
+    res = im_tool.send_message("你好", target_id="g-7f3a", host="192.168.5.4")
+
+    assert res["status"] == "success"
+    assert sent == [{"content": "你好", "target_id": "g-7f3a", "target_type": "group"}]
+
+
+def test_listing_groups_on_a_peer_host_reads_that_machine(env, monkeypatch):
+    sent: list = []
+    _peer_with_account(monkeypatch, sent=sent)
+
+    res = im_tool.list_groups(host="192.168.5.4")
+
+    assert res["status"] == "success"
+    assert res["groups"][0]["id"] == "g-7f3a"
+
+
+def test_a_send_to_an_unpaired_host_says_to_pair_first(env):
+    res = im_tool.send_message("你好", target_id="g-7f3a", host="10.1.2.3")
+
+    assert res["status"] == "error"
+    assert res["code"] == "peer_not_ready"
+    assert "pair_with_node" in res["message"]
+
+
+def test_a_send_without_a_host_still_uses_the_home_bridge(env, monkeypatch):
+    sent: list = []
+
+    class _HomeBridge:
+        base_url = "http://127.0.0.1:9555"
+        token = "home-tok"
+        _group_cache = {"g-home": True}
+
+        def send_message(self, content, target_id, target_type="group", file_paths=None, **kwargs):
+            sent.append(target_id)
+            return True
+
+    monkeypatch.setattr(bridge_mod, "bridge", _HomeBridge())
+
+    res = im_tool.send_message("hi", target_id="g-home")
+
+    assert res["status"] == "success"
+    assert sent == ["g-home"]

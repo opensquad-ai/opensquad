@@ -180,6 +180,13 @@ def join_by_invite(invite: str, note: str = "") -> dict[str, Any]:
 
         result = target.join_group_api(parsed["group_id"])
         if isinstance(result, dict) and result.get("ok"):
+            # The group lives on that peer, so its board does too: remember it now,
+            # while the invite string is in hand, so a collaboration task started
+            # here routes its board calls back to that machine.
+            if not is_home:
+                from ..peer_bridge import remember_peer_group
+
+                remember_peer_group(parsed["host"], parsed["group_id"])
             return {
                 "status": "success",
                 "joined": True,

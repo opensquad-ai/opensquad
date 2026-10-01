@@ -19,6 +19,7 @@ from opensquad.system_config import syscfg
 @pytest.fixture()
 def board(tmp_path, monkeypatch):
     monkeypatch.setattr(cb, "_board_dir", lambda: str(tmp_path))
+    monkeypatch.setattr(cb, "_board_owners_file", lambda: str(tmp_path / "board_owners.json"))
     return cb
 
 
@@ -45,6 +46,7 @@ class _BoardServer(BaseHTTPRequestHandler):
             {
                 "path": self.path,
                 "secret": self.headers.get("X-Node-Secret"),
+                "token": self.headers.get("X-Node-Token"),
                 "body": json.loads(raw),
             }
         )
@@ -164,6 +166,80 @@ def test_transport_failure_is_loud_and_never_falls_back(board, monkeypatch):
     with pytest.raises(cb.BoardRemoteError):
         cb.create_task(task_name="跨机任务", created_by="pm")
     assert not Path(cb._board_dir(), "board_tasks.json").exists()
+
+
+# --------------------------------------------------------------------------
+# A board joined on a paired machine belongs to that machine
+#
+# Pairing no longer repoints the home bridge, so a group joined there is no
+# longer "remote" by the old test. The owner has to be recorded when the agent
+# joins, and read back when a board call about that group (or its collab task)
+# comes in.
+# --------------------------------------------------------------------------
+def test_a_group_joined_on_a_peer_routes_its_board_there(board, board_server, monkeypatch):
+    base, server = board_server
+    monkeypatch.delenv("OPENSQUAD_BOARD_URL", raising=False)
+    # home bridge is loopback: by the legacy rule this would stay local
+    monkeypatch.setattr(cb, "_agent_config", lambda: {"group_chat": {"base_url": "http://127.0.0.1:9555"}})
+    monkeypatch.setattr(syscfg, "node_secret", lambda: "sec")
+    import opensquad.node_peers as node_peers
+
+    monkeypatch.setattr(node_peers, "load_local_peer", lambda host: {"token": "peer-tok"})
+    import opensquad.peer_bridge as peer_bridge
+
+    monkeypatch.setattr(
+        peer_bridge,
+        "peer_for_group",
+        lambda group: {"host": "192.168.5.4", "base_url": base, "token": "peer-tok"},
+    )
+    monkeypatch.setattr(peer_bridge, "find_peer", lambda host: {"host": "192.168.5.4", "base_url": base})
+
+    result = cb.create_task(task_name="跨机任务", created_by="pm", group_id="g-7f3a")
+
+    assert result == {"from": "gateway"}
+    assert len(server.received) == 1
+    assert server.received[0]["token"] == "peer-tok"  # the peer token, not node_secret
+    assert server.received[0]["body"]["kwargs"]["group_id"] == "g-7f3a"
+    assert not Path(cb._board_dir(), "board_tasks.json").exists()
+
+
+def test_a_collab_task_remembers_the_machine_that_owns_its_group(board, board_server, monkeypatch):
+    base, server = board_server
+    monkeypatch.delenv("OPENSQUAD_BOARD_URL", raising=False)
+    monkeypatch.setattr(cb, "_agent_config", lambda: {"group_chat": {"base_url": "http://127.0.0.1:9555"}})
+    monkeypatch.setattr(syscfg, "node_secret", lambda: "sec")
+    import opensquad.node_peers as node_peers
+
+    monkeypatch.setattr(node_peers, "load_local_peer", lambda host: {"token": "peer-tok"})
+    import opensquad.peer_bridge as peer_bridge
+
+    monkeypatch.setattr(
+        peer_bridge,
+        "peer_for_group",
+        lambda group: {"host": "192.168.5.4", "base_url": base, "token": "peer-tok"},
+    )
+    monkeypatch.setattr(peer_bridge, "find_peer", lambda host: {"host": "192.168.5.4", "base_url": base})
+
+    assert cb.remember_board_owner("AB12CD", "192.168.5.4") is True
+    # a later call that carries only the collab_id still routes to the owner
+    cb.update_task(task_id="AB12CD", progress=50)
+
+    assert len(server.received) == 1
+    assert server.received[0]["body"]["op"] == "update_task"
+
+
+def test_a_local_group_and_task_stay_local(board, monkeypatch):
+    monkeypatch.delenv("OPENSQUAD_BOARD_URL", raising=False)
+    monkeypatch.setattr(cb, "_agent_config", lambda: {"group_chat": {"base_url": "http://127.0.0.1:9555"}})
+    import opensquad.peer_bridge as peer_bridge
+
+    monkeypatch.setattr(peer_bridge, "peer_for_group", lambda group: None)
+
+    assert cb.board_owner(group_id="g-home") == ""
+    assert cb.board_owner(collab_id="LOCAL1") == ""
+    rec = cb.create_task(task_name="本地任务", created_by="pm", group_id="g-home")
+    assert cb.get_task(task_id=rec["task_id"])["task_name"] == "本地任务"
+    assert cb.get_task(task_id=rec["task_id"])["extra"]["group_id"] == "g-home"
 
 
 # --------------------------------------------------------------------------
