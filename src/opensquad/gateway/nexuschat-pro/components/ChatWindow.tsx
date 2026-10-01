@@ -21,6 +21,8 @@ import {
 } from './ProposeOptionsCard';
 import { CollabTaskCard, parseCollabTask, openCollabTaskWindow } from './CollabTaskCard';
 import { WindowCard, parseWindowCard } from './WindowCard';
+import { markMentions, renderMentionSpans } from '../utils/mentions';
+import { wrapMarkdownTables } from '../utils/markdownTables';
 import { useMobileChatSwipe } from '../hooks/useMobileChatSwipe';
 import { formatLocalClock, parseTimestampMs } from '../utils/time';
 
@@ -521,7 +523,7 @@ const MessageRowImpl: React.FC<MessageRowProps> = ({
                   }
                   return (
                     <div
-                      className="prose prose-sm max-w-full prose-p:my-0 prose-ul:my-1 break-all"
+                      className="ai-markdown prose prose-sm max-w-full prose-p:my-0 prose-ul:my-1 break-all"
                       style={{ wordBreak: 'break-all', overflowWrap: 'break-word' }}
                       dangerouslySetInnerHTML={{ __html: parseContent(msg.content, msg.id) }}
                       onClick={(e) => actions.contentClick(e, msg.id)}
@@ -2797,11 +2799,13 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
     );
 
     // 先处理 markdown
-    const withMentions = withExplicitLinks.replace(/@(\w+)/g, '**@$1**');
+    const withMentions = markMentions(withExplicitLinks);
     let parsed = parse(withMentions) as string;
 
     // 将 @提及 转换为可点击的 span，带有 data-username 属性
-    parsed = parsed.replace(/@(\w+)/g, '<span class="mention-link text-primary font-bold cursor-pointer hover:underline" data-username="$1">@$1</span>');
+    parsed = renderMentionSpans(parsed);
+    // 表格包进 agent web 用的容器，群聊里才有同样的表格样式
+    parsed = wrapMarkdownTables(parsed);
 
     // Sanitize LAST. `marked` passes raw HTML straight through, and message
     // content is not trusted: it can originate from another agent, a tool

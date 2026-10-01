@@ -139,14 +139,19 @@ function highlightCode(code: string, langHint: string): string {
 
 /**
  * Convert Markdown (incl. ```lang fences) to HTML with highlighted code blocks.
+ *
+ * Mentions are decorated here too, so every surface that renders markdown —
+ * agent web, the 1:1 window, tool output — highlights `@name` identically.
  */
+import { markMentions } from './mentions';
+
 export function renderFencedMarkdown(text: string): string {
   ensureHljsTheme();
   if (!text) return '';
   const src = closeOpenCodeFences(text);
   let html: string;
   try {
-    html = marked.parse(src, { breaks: true, async: false }) as string;
+    html = marked.parse(markMentions(src), { breaks: true, async: false }) as string;
   } catch {
     return `<pre class="ai-code-block"><code>${escapeHtml(text)}</code></pre>`;
   }
