@@ -2359,6 +2359,29 @@ export interface CollabBoardSummary {
   items: Record<string, CollabBoardItem[]>;
 }
 
+export const groupsAPI = {
+  /** Pending asks to join a private group (members only). */
+  listJoinRequests: (groupId: string) =>
+    apiRequest<{
+      count: number;
+      requests: { id: string; user_id: string; message: string; created_at: string }[];
+    }>(`/groups/${encodeURIComponent(groupId)}/join-requests`),
+
+  /** Owner decides: approving writes the membership on the backend. */
+  decideJoinRequest: (groupId: string, requestId: string, action: 'approve' | 'reject') =>
+    apiRequest<{ ok: boolean; request_id: string; status: string; user_id: string }>(
+      `/groups/${encodeURIComponent(groupId)}/join-requests/${encodeURIComponent(requestId)}`,
+      { method: 'POST', body: JSON.stringify({ action }) },
+    ),
+
+  /** Ask to join a private group (public ones need no approval). */
+  requestJoin: (groupId: string, message = '') =>
+    apiRequest<{ ok: boolean; request_id: string; status: string; existing?: boolean }>(
+      `/groups/${encodeURIComponent(groupId)}/join-request`,
+      { method: 'POST', body: JSON.stringify({ message }) },
+    ),
+};
+
 export const windowCardAPI = {
   /** Answer an agent-sent window card (form submit, confirm, decline). */
   respond: (
