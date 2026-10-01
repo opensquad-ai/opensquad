@@ -1180,6 +1180,19 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     return () => window.removeEventListener('opensquad-chat-ui-request', onRequest as EventListener);
   }, [setUiModePersisted, setChatUiPersisted]);
 
+  // 「聊天」开关不再在 agent-web 里换版面：它离开 agent-web，进 App 的通讯录外壳
+  // （群聊侧那一套：左栏 ContactsRail，右栏群窗口 / agent 私信窗口）。
+  // 聊天版面在这里还剩一个可渲染的旧分支，靠始终 setChatUi(false) 保证不再进入。
+  const goToMessenger = useCallback(
+    (on: boolean) => {
+      if (on) {
+        window.dispatchEvent(new CustomEvent('switchView', { detail: 'chat' }));
+      }
+      setChatUiPersisted(false);
+    },
+    [setChatUiPersisted],
+  );
+
   // 聊天模式没有工作区/资料库那一套：切进来时收起右栏与内嵌管理页，
   // 切走时收起「详细」抽屉。否则从 Code 切过去会带着一个 project rail。
   useEffect(() => {
@@ -5531,12 +5544,12 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
         uiMode={uiMode}
         onUiModeChange={setUiModePersisted}
         chatUi={chatUi}
-        onChatUiChange={setChatUiPersisted}
         isOpen={sessionSidebarOpen}
         activeAgentId={agentId}
         currentUser={currentUser}
         onOpenProfile={onOpenProfile}
         onOpenSettings={onOpenSettings}
+        onChatUiChange={goToMessenger}
         railActions={
           <button
             type="button"
@@ -5588,7 +5601,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
         uiMode={uiMode}
         onUiModeChange={setUiModePersisted}
         chatUi={chatUi}
-        onChatUiChange={setChatUiPersisted}
+        onChatUiChange={goToMessenger}
         currentUser={currentUser}
         onOpenProfile={onOpenProfile}
         onOpenSettings={onOpenSettings}
