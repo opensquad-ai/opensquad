@@ -374,8 +374,11 @@ const App: React.FC = () => {
   // group chat or in a DM (both dispatch `openCollabTask`).
   const [openCollabTaskId, setOpenCollabTaskId] = useState<string | null>(null);
   // Generic agent-sent window card ([[WINDOW_CARD]]): the payload *is* the
-  // window, so no business-specific lookup is needed to render it.
-  const [openWindowCardPayload, setOpenWindowCardPayload] = useState<Record<string, any> | null>(null);
+  // window, and the message id lets the window post an answer back.
+  const [openWindowCard, setOpenWindowCard] = useState<{
+    payload: Record<string, any>;
+    messageId?: string;
+  } | null>(null);
 
   useEffect(() => {
     const onOpenCollabTask = (e: Event) => {
@@ -383,8 +386,14 @@ const App: React.FC = () => {
       if (id) setOpenCollabTaskId(String(id));
     };
     const onOpenWindowCard = (e: Event) => {
-      const payload = (e as CustomEvent).detail?.payload;
-      if (payload?.id) setOpenWindowCardPayload(payload);
+      const detail = (e as CustomEvent).detail;
+      const payload = detail?.payload;
+      if (payload?.id) {
+        setOpenWindowCard({
+          payload,
+          messageId: detail?.messageId ? String(detail.messageId) : undefined,
+        });
+      }
     };
     window.addEventListener('openCollabTask', onOpenCollabTask);
     window.addEventListener('openWindowCard', onOpenWindowCard);
@@ -1890,8 +1899,8 @@ const App: React.FC = () => {
       </SoftOverlay>
 
       <SoftOverlay
-        open={!!openWindowCardPayload}
-        onBackdrop={() => setOpenWindowCardPayload(null)}
+        open={!!openWindowCard}
+        onBackdrop={() => setOpenWindowCard(null)}
         zClass="z-[110]"
         panelClassName="w-full max-w-4xl h-[min(85vh,860px)]"
       >
@@ -1901,10 +1910,11 @@ const App: React.FC = () => {
               <div className="flex flex-1 items-center justify-center text-textMuted"><OpenSquadLoader size={72} /></div>
             }
           >
-            {openWindowCardPayload ? (
+            {openWindowCard ? (
               <WindowCardWindow
-                payload={openWindowCardPayload as never}
-                onClose={() => setOpenWindowCardPayload(null)}
+                payload={openWindowCard.payload as never}
+                messageId={openWindowCard.messageId}
+                onClose={() => setOpenWindowCard(null)}
               />
             ) : null}
           </Suspense>

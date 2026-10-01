@@ -39,7 +39,13 @@ from __future__ import annotations
 import json
 import re
 import uuid
+from datetime import datetime, timezone
 from typing import Any
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
 
 WINDOW_CARD_START = "[[WINDOW_CARD]]"
 WINDOW_CARD_END = "[[/WINDOW_CARD]]"
@@ -67,7 +73,53 @@ _VIEW_ALIASES = {
     "md": "raw",
 }
 
-VALID_INTENTS = ("open_url", "copy", "open_collab_task", "none")
+VALID_INTENTS = ("open_url", "copy", "open_collab_task", "respond", "confirm", "decline", "none")
+
+# Interactive fields a card may ask the user to fill in. Submitting a form (or
+# pressing a respond/confirm/decline button) posts the answer back through the
+# gateway, which rewrites the card's marker so every surface shows the same
+# answered state and nudges the agent that sent it.
+FORM_FIELD_TYPES = ("text", "textarea", "select", "radio", "checkbox")
+
+
+def normalize_form(form: Any) -> dict[str, Any] | None:
+    """Coerce a form definition into something the window can render."""
+    if not isinstance(form, dict):
+        return None
+    fields: list[dict[str, Any]] = []
+    for f in _as_list(form.get("fields")):
+        if not isinstance(f, dict):
+            continue
+        fid = str(f.get("id") or f.get("name") or "").strip()
+        if not fid:
+            continue
+        ftype = str(f.get("type") or "text").strip().lower()
+        if ftype not in FORM_FIELD_TYPES:
+            ftype = "text"
+        options: list[dict[str, str]] = []
+        for o in _as_list(f.get("options")):
+            if isinstance(o, str):
+                options.append({"id": o, "label": o})
+            elif isinstance(o, dict):
+                label = str(o.get("label") or o.get("value") or o.get("id") or "")
+                options.append({"id": str(o.get("id") or o.get("value") or label), "label": label})
+        fields.append(
+            {
+                "id": fid,
+                "label": str(f.get("label") or fid),
+                "type": ftype,
+                "placeholder": str(f.get("placeholder") or ""),
+                "required": bool(f.get("required")),
+                "options": options,
+            }
+        )
+    if not fields:
+        return None
+    return {
+        "submit_label": str(form.get("submit_label") or "提交"),
+        "cancel_label": str(form.get("cancel_label") or ""),
+        "fields": fields,
+    }
 
 
 def new_window_card_id() -> str:
@@ -166,6 +218,7 @@ def normalize_view(view: Any) -> dict[str, Any]:
         "items": items,
         "columns": columns,
         "rows": rows,
+        "form": normalize_form(view.get("form")),
         "text": str(view.get("text") or ""),
     }
 
@@ -203,6 +256,15 @@ def normalize_actions(actions: Any) -> list[dict[str, str]]:
     return out
 
 
+def _view_with_form(view: Any, form: Any) -> dict[str, Any]:
+    """Normalize the view and fold in an optional interactive form."""
+    normalized = normalize_view(view)
+    form_norm = normalize_form(form)
+    if form_norm:
+        normalized["form"] = form_norm
+    return normalized
+
+
 def build_window_card_payload(
     *,
     title: str,
@@ -215,6 +277,7 @@ def build_window_card_payload(
     actions: Any = None,
     sender_id: str = "",
     sender_name: str = "",
+    form: Any = None,
     source: str = "",
     card_id: str = "",
     state: str = "open",
@@ -229,7 +292,7 @@ def build_window_card_payload(
         "sender": {"agent_id": sender_id, "agent_name": sender_name or sender_id},
         "target": {"group_id": group_id, "recipient_name": recipient_name},
         "source": (source or "").strip(),
-        "view": normalize_view(view),
+        "view": _view_with_form(view, form),
         "actions": normalize_actions(actions),
         "state": state,
     }
@@ -293,6 +356,31 @@ def patch_window_card_state_in_content(content: str, state: str, action_id: str 
     payload["state"] = state
     if action_id:
         payload["last_action_id"] = action_id
+    marker = f"{WINDOW_CARD_START}{json.dumps(payload, ensure_ascii=False, separators=(',', ':'))}{WINDOW_CARD_END}"
+    return _WINDOW_CARD_RE.sub(marker, content, count=1)
+
+
+def patch_window_card_response_in_content(
+    content: str,
+    *,
+    action_id: str = "",
+    values: dict[str, Any] | None = None,
+    by: str = "",
+    state: str = "answered",
+) -> str:
+    """Record the user's answer on the card (state + response) in place."""
+    payload = parse_window_card_payload(content)
+    if not payload:
+        return content
+    payload["state"] = state
+    if action_id:
+        payload["last_action_id"] = action_id
+    payload["response"] = {
+        "action_id": action_id,
+        "values": {str(k): v for k, v in (values or {}).items()},
+        "by": by,
+        "at": _now_iso(),
+    }
     marker = f"{WINDOW_CARD_START}{json.dumps(payload, ensure_ascii=False, separators=(',', ':'))}{WINDOW_CARD_END}"
     return _WINDOW_CARD_RE.sub(marker, content, count=1)
 

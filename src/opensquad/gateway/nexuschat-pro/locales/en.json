@@ -792,6 +792,8 @@
     "raw": "Raw data",
     "empty": "Nothing yet",
     "copy": "Copy",
+    "submit": "Submit",
+    "answered": "Answered",
     "source": "Source"
   },
   "collabTask": {

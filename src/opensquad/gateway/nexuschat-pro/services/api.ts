@@ -2346,6 +2346,31 @@ export interface CollabBoardSummary {
   items: Record<string, CollabBoardItem[]>;
 }
 
+export const windowCardAPI = {
+  /** Answer an agent-sent window card (form submit, confirm, decline). */
+  respond: (
+    cardId: string,
+    payload: { messageId: string; actionId?: string; values?: Record<string, any> }
+  ) =>
+    apiRequest<{
+      ok: boolean;
+      card_id: string;
+      action_id: string;
+      values: Record<string, any>;
+      state: string;
+      scope: 'group' | 'dm';
+      message_id: string;
+      agent_notified: boolean;
+    }>(`/window-cards/${encodeURIComponent(cardId)}/respond`, {
+      method: 'POST',
+      body: JSON.stringify({
+        message_id: payload.messageId,
+        action_id: payload.actionId || 'submit',
+        values: payload.values || {},
+      }),
+    }),
+};
+
 export const collabBoardAPI = {
   listTasks: () => {
     return apiRequest<{ tasks: CollabBoardTask[]; count: number }>(`/ai-web/collab-board/tasks`);

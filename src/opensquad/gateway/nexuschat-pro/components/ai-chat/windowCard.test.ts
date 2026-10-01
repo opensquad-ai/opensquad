@@ -76,12 +76,12 @@ describe('window cards', () => {
   it('is rendered in group chat and in the DM window', () => {
     const chatWindow = read('components/ChatWindow.tsx');
     expect(chatWindow).toMatch(/parseWindowCard\(msg\.content \|\| ''\)/);
-    expect(chatWindow).toMatch(/return <WindowCard payload=\{windowCard\} \/>/);
+    expect(chatWindow).toMatch(/return <WindowCard payload=\{windowCard\} messageId=\{msg\.id\} \/>/);
     expect(chatWindow).toMatch(/interactiveWindowCard/);
 
     const dmWindow = read('components/DirectChatWindow.tsx');
     expect(dmWindow).toMatch(/parseWindowCard\(b\.message\.content\)/);
-    expect(dmWindow).toMatch(/<WindowCard payload=\{windowCard\} \/>/);
+    expect(dmWindow).toMatch(/<WindowCard payload=\{windowCard\} messageId=\{b\.id\} \/>/);
   });
 
   it('opens a generic window from the payload alone', () => {
@@ -106,5 +106,54 @@ describe('window cards', () => {
     expect(card).toMatch(/intent === 'copy'/);
     expect(card).toMatch(/intent === 'open_collab_task'/);
     expect(card).toMatch(/new CustomEvent\('windowCardAction'/);
+  });
+
+  it('carries an interactive form and the recorded answer', () => {
+    const withForm = cardContent({
+      view: {
+        kind: 'sections',
+        blocks: [{ title: '需求', text: 'x' }],
+        form: {
+          submit_label: '确认',
+          fields: [
+            { id: 'decision', label: '是否通过', type: 'radio', required: true, options: [{ id: 'yes', label: '通过' }] },
+          ],
+        },
+      },
+    });
+    const payload = parseWindowCard(withForm);
+    expect(payload?.view.form?.fields[0].id).toBe('decision');
+    expect(payload?.view.form?.submit_label).toBe('确认');
+
+    // after answering, the card carries the response and stops being 'open'
+    const answered = parseWindowCard(
+      cardContent({ state: 'answered', response: { action_id: 'submit', values: { decision: 'yes' }, by: 'aa' } }),
+    );
+    expect(answered?.state).toBe('answered');
+    expect(answered?.response?.values).toEqual({ decision: 'yes' });
+  });
+
+  it('posts an answer back from the card and from the window', () => {
+    const card = read('components/WindowCard.tsx');
+    expect(card).toMatch(/export function answerWindowCard\(/);
+    expect(card).toMatch(/windowCardAPI\.respond\(payload\.id/);
+    expect(card).toMatch(/messageId=\{msg\.id\}|messageId,/);
+    // confirm/decline buttons answer through the same endpoint
+    expect(card).toMatch(/action\.intent === 'respond' \|\| action\.intent === 'confirm' \|\| action\.intent === 'decline'/);
+
+    const win = read('components/WindowCardWindow.tsx');
+    expect(win).toMatch(/data-testid="window-card-form"/);
+    expect(win).toMatch(/data-testid="window-card-submit"/);
+    expect(win).toMatch(/data-testid="window-card-answer"/);
+    expect(win).toMatch(/await answerWindowCard\(payload, actionId, values, messageId\)/);
+
+    const api = read('services/api.ts');
+    expect(api).toMatch(/export const windowCardAPI/);
+    expect(api).toMatch(/\/window-cards\/\$\{encodeURIComponent\(cardId\)\}\/respond/);
+
+    // the window gets the message id it needs to answer
+    const app = read('App.tsx');
+    expect(app).toMatch(/onOpenWindowCard/);
+    expect(app).toMatch(/messageId=\{openWindowCard\.messageId\}/);
   });
 });

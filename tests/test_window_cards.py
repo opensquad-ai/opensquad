@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
+from types import SimpleNamespace
+
 import pytest
 
 import opensquad.bridge as bridge_mod
@@ -210,3 +213,256 @@ def test_tool_is_registered_for_agents():
     # the docstring is the schema the model reads — it must describe both targets
     doc = wc_tool.send_window_card.__doc__ or ""
     assert "group_id" in doc and "recipient_name" in doc
+
+
+# --------------------------------------------------------------------------
+# Interactive forms + answers
+# --------------------------------------------------------------------------
+def test_form_normalization():
+    form = wc.normalize_form(
+        {
+            "fields": [
+                {
+                    "id": "decision",
+                    "label": "是否通过",
+                    "type": "radio",
+                    "required": True,
+                    "options": [{"id": "yes", "label": "通过"}, "no"],
+                },
+                {"id": "note", "label": "备注", "type": "textarea"},
+                {"id": "weird", "type": "nonsense"},
+                {"label": "no id — dropped"},
+            ]
+        }
+    )
+    assert form is not None
+    assert form["submit_label"] == "提交"
+    assert [f["id"] for f in form["fields"]] == ["decision", "note", "weird"]
+    assert form["fields"][0]["options"] == [{"id": "yes", "label": "通过"}, {"id": "no", "label": "no"}]
+    assert form["fields"][0]["required"] is True
+    assert form["fields"][2]["type"] == "text"
+    assert wc.normalize_form({"fields": []}) is None
+    assert wc.normalize_form("nope") is None
+
+
+def test_payload_carries_the_form():
+    payload = wc.build_window_card_payload(
+        title="审批",
+        view={"kind": "raw", "text": "看下面"},
+        form={"fields": [{"id": "ok", "type": "checkbox"}]},
+    )
+    assert payload["view"]["form"]["fields"][0]["id"] == "ok"
+    parsed = wc.parse_window_card_payload(wc.encode_window_card_message(payload))
+    assert parsed["view"]["form"]["fields"][0]["id"] == "ok"
+
+
+def test_patch_response_records_the_answer():
+    content = wc.encode_window_card_message(_payload())
+    updated = wc.patch_window_card_response_in_content(
+        content, action_id="submit", values={"decision": "yes", "note": "lgtm"}, by="aa"
+    )
+    parsed = wc.parse_window_card_payload(updated)
+    assert parsed["state"] == "answered"
+    assert parsed["last_action_id"] == "submit"
+    assert parsed["response"]["values"] == {"decision": "yes", "note": "lgtm"}
+    assert parsed["response"]["by"] == "aa"
+    assert parsed["response"]["at"]
+    # the readable text survives the rewrite
+    assert "自动审核通过" in updated
+
+
+def test_action_intents_include_respond_confirm_decline():
+    actions = wc.normalize_actions(
+        [
+            {"label": "确定", "intent": "confirm"},
+            {"label": "驳回", "intent": "decline"},
+            {"label": "回复", "intent": "respond"},
+        ]
+    )
+    assert [a["intent"] for a in actions] == ["confirm", "decline", "respond"]
+
+
+# --------------------------------------------------------------------------
+# Respond endpoint (group card and DM card)
+# --------------------------------------------------------------------------
+class _Result:
+    def __init__(self, value):
+        self._value = value
+
+    def scalar_one_or_none(self):
+        return self._value
+
+    def scalar_one(self):
+        return self._value
+
+    def scalars(self):
+        return self
+
+    def all(self):
+        return self._value or []
+
+
+class _DB:
+    def __init__(self, results):
+        self._results = list(results)
+        self.commits = 0
+
+    async def execute(self, *args, **kwargs):
+        return _Result(self._results.pop(0))
+
+    async def commit(self):
+        self.commits += 1
+
+
+class _NudgeSpy:
+    """Stands in for registry.send_to_agent (the module attribute is the instance)."""
+
+    def __init__(self):
+        self.sent: list = []
+
+    async def __call__(self, agent_id, payload):
+        self.sent.append((agent_id, payload))
+        return True
+
+
+def _patch_registry(monkeypatch) -> _NudgeSpy:
+    from app.ai_web.registry import registry as agent_registry
+
+    spy = _NudgeSpy()
+    monkeypatch.setattr(agent_registry, "send_to_agent", spy)
+    return spy
+
+
+def _card_message_for(content: str) -> SimpleNamespace:
+    return SimpleNamespace(id="m_card", group_id="g-default", content=content, is_edited=False)
+
+
+def _card_content() -> str:
+    payload = wc.build_window_card_payload(
+        title="审批卡",
+        view={"kind": "raw", "text": "内容"},
+        sender_id="Agent305",
+        sender_name="Agent305",
+        form={"fields": [{"id": "decision", "type": "radio", "options": ["yes", "no"]}]},
+    )
+    return wc.encode_window_card_message(payload)
+
+
+@pytest.fixture()
+def gateway_route():
+    import sys
+    from pathlib import Path
+
+    backend = Path(__file__).resolve().parents[1] / "src" / "opensquad" / "gateway" / "backend"
+    if str(backend) not in sys.path:
+        sys.path.insert(0, str(backend))
+    from opensquad.gateway.backend.app import api as gw
+
+    return gw
+
+
+def test_respond_route_is_registered(gateway_route):
+    paths = {getattr(r, "path", "") for r in gateway_route.router.routes}
+    assert "/window-cards/{card_id}/respond" in paths
+
+
+def test_group_card_answer_updates_the_card_and_the_agent(gateway_route, monkeypatch):
+    content = _card_content()
+    card_id = wc.parse_window_card_payload(content)["id"]
+    message = _card_message_for(content)
+    db = _DB([message, object(), message])  # lookup, membership, refetch
+
+    spy = _patch_registry(monkeypatch)
+    monkeypatch.setattr(gateway_route, "notify_message_update", lambda *a, **k: asyncio.sleep(0))
+    monkeypatch.setattr(
+        gateway_route,
+        "format_message_response",
+        lambda m: SimpleNamespace(model_dump=lambda mode="json": {"id": m.id}),
+    )
+
+    res = asyncio.run(
+        gateway_route.respond_window_card(
+            card_id=card_id,
+            body={"message_id": "m_card", "action_id": "submit", "values": {"decision": "yes"}},
+            current_user=SimpleNamespace(id="u1", name="aa"),
+            db=db,
+        )
+    )
+    assert res["ok"] is True
+    assert res["scope"] == "group"
+    assert res["agent_notified"] is True
+    assert message.is_edited is True
+
+    parsed = wc.parse_window_card_payload(message.content)
+    assert parsed["state"] == "answered"
+    assert parsed["response"]["values"] == {"decision": "yes"}
+    assert parsed["response"]["by"] == "aa"
+
+    agent_id, payload = spy.sent[0]
+    assert agent_id == "Agent305"
+    assert "decision=yes" in payload["content"]
+    assert payload["channel"] == "gateway"
+
+
+def test_dm_card_answer(gateway_route, monkeypatch):
+    content = _card_content()
+    card_id = wc.parse_window_card_payload(content)["id"]
+    dm = SimpleNamespace(id="m_card", sender_id="u1", recipient_id="bot", content=content, is_edited=False)
+    db = _DB([None, dm])  # not a group message → DM lookup
+
+    _patch_registry(monkeypatch)
+
+    res = asyncio.run(
+        gateway_route.respond_window_card(
+            card_id=card_id,
+            body={"message_id": "m_card", "action_id": "confirm", "values": {"decision": "no"}},
+            current_user=SimpleNamespace(id="u1", name="aa"),
+            db=db,
+        )
+    )
+    assert res["ok"] is True
+    assert res["scope"] == "dm"
+    assert wc.parse_window_card_payload(dm.content)["response"]["action_id"] == "confirm"
+
+
+def test_answer_errors(gateway_route):
+    content = _card_content()
+    card_id = wc.parse_window_card_payload(content)["id"]
+    user = SimpleNamespace(id="u1", name="aa")
+
+    # message_id is required
+    with pytest.raises(Exception) as missing:
+        asyncio.run(gateway_route.respond_window_card(card_id=card_id, body={}, current_user=user, db=_DB([])))
+    assert missing.value.status_code == 400
+
+    # unknown message → 404
+    with pytest.raises(Exception) as not_found:
+        asyncio.run(
+            gateway_route.respond_window_card(
+                card_id=card_id, body={"message_id": "nope"}, current_user=user, db=_DB([None, None])
+            )
+        )
+    assert not_found.value.status_code == 404
+
+    # someone else's DM → 403
+    foreign = SimpleNamespace(id="m_card", sender_id="x", recipient_id="y", content=content, is_edited=False)
+    with pytest.raises(Exception) as forbidden:
+        asyncio.run(
+            gateway_route.respond_window_card(
+                card_id=card_id, body={"message_id": "m_card"}, current_user=user, db=_DB([None, foreign])
+            )
+        )
+    assert forbidden.value.status_code == 403
+
+    # already answered → 409
+    answered = wc.patch_window_card_response_in_content(content, action_id="submit", values={}, by="aa")
+    with pytest.raises(Exception) as conflict:
+        asyncio.run(
+            gateway_route.respond_window_card(
+                card_id=card_id,
+                body={"message_id": "m_card"},
+                current_user=user,
+                db=_DB([_card_message_for(answered)]),
+            )
+        )
+    assert conflict.value.status_code == 409

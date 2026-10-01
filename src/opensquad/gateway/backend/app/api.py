@@ -1758,6 +1758,142 @@ async def undo_recall(
     return {"message": "Undone"}
 
 
+@router.post("/window-cards/{card_id}/respond")
+async def respond_window_card(
+    card_id: str,
+    body: dict = Body(default={}),
+    current_user: User = Depends(get_current_user_dep),
+    db: AsyncSession = Depends(get_db),
+):
+    """Answer an agent-sent window card — submit a form, or press confirm/decline.
+
+    Works for cards posted in a group (message_updated is broadcast, so every
+    client re-renders the answered card) and for cards sent as a direct message
+    (the DM client picks it up on its next load). The answer is written into the
+    card in place and handed to the agent that sent it, so clicking 确定 / an
+    option / typing text actually moves the work forward.
+    """
+    from opensquad.window_cards import (
+        parse_window_card_payload,
+        patch_window_card_response_in_content,
+    )
+
+    message_id = str((body or {}).get("message_id") or "").strip()
+    action_id = str((body or {}).get("action_id") or "submit").strip()
+    raw_values = (body or {}).get("values")
+    values = raw_values if isinstance(raw_values, dict) else {}
+    if not message_id:
+        raise HTTPException(status_code=400, detail="message_id is required")
+
+    scope = ""
+    group_id = ""
+    result = await db.execute(
+        select(Message)
+        .where(Message.id == message_id)
+        .options(selectinload(Message.attachments), selectinload(Message.sender))
+    )
+    message = result.scalar_one_or_none()
+    if message is not None:
+        scope, group_id = "group", str(message.group_id or "")
+    else:
+        result = await db.execute(select(DirectMessage).where(DirectMessage.id == message_id))
+        dm = result.scalar_one_or_none()
+        if dm is None:
+            raise HTTPException(status_code=404, detail="Card message not found")
+        if str(dm.sender_id) != str(current_user.id) and str(dm.recipient_id) != str(current_user.id):
+            raise HTTPException(status_code=403, detail="Not your conversation")
+        scope, message = "dm", dm
+
+    payload = parse_window_card_payload(message.content or "")
+    if not payload or str(payload.get("id")) != card_id:
+        raise HTTPException(status_code=400, detail="Message is not this window card")
+    state = str(payload.get("state") or "open")
+    if state not in ("open", ""):
+        raise HTTPException(status_code=409, detail=f"Card already {state}")
+
+    if scope == "group":
+        member_check = await db.execute(
+            select(group_members).where(
+                and_(group_members.c.user_id == current_user.id, group_members.c.group_id == group_id)
+            )
+        )
+        if not member_check.scalar_one_or_none():
+            raise HTTPException(status_code=403, detail="Not a member of this group")
+
+    message.content = patch_window_card_response_in_content(
+        message.content or "",
+        action_id=action_id,
+        values=values,
+        by=current_user.name or current_user.id,
+    )
+    message.is_edited = True
+    await db.commit()
+
+    if scope == "group":
+        result = await db.execute(
+            select(Message)
+            .where(Message.id == message.id)
+            .options(selectinload(Message.attachments), selectinload(Message.sender))
+        )
+        message = result.scalar_one()
+        await notify_message_update(group_id, format_message_response(message).model_dump(mode="json"))
+
+    # Hand the answer to the agent that sent the card, whichever surface it used.
+    agent_notified = False
+    sender = payload.get("sender") if isinstance(payload.get("sender"), dict) else {}
+    agent_id = str((sender or {}).get("agent_id") or "")
+    agent_name = str((sender or {}).get("agent_name") or agent_id)
+    if agent_id or agent_name:
+        try:
+            from app.ai_web.registry import registry as agent_registry
+
+            candidates = [c for c in (agent_id, agent_name) if c]
+            for aid, info in list(getattr(agent_registry, "agents", {}).items()):
+                try:
+                    if aid in candidates:
+                        continue
+                    if str(getattr(info, "agent_name", "") or "") in (agent_id, agent_name):
+                        candidates.append(aid)
+                except Exception:
+                    pass
+
+            rendered = ", ".join(f"{k}={v}" for k, v in values.items()) or "-"
+            nudge = (
+                f"[System] Window card answered\n"
+                f"card_id: {card_id}\n"
+                f"title: {payload.get('title') or ''}\n"
+                f"action: {action_id}\n"
+                f"values: {rendered}\n"
+                f"by: {current_user.name or current_user.id}\n"
+                "The user interacted with your card. Continue based on this answer; "
+                "do not ask for the same input again."
+            )
+            chat_payload = {
+                "type": "chat",
+                "user_id": current_user.id,
+                "content": nudge,
+                "channel": "gateway",
+                "sender_name": current_user.name or "User",
+            }
+            for cand in candidates:
+                if await agent_registry.send_to_agent(cand, chat_payload):
+                    agent_notified = True
+                    break
+        except Exception as e:
+            logging.getLogger(__name__).warning("[API] Failed to nudge agent after window card answer: %s", e)
+
+    return {
+        "ok": True,
+        "card_id": card_id,
+        "action_id": action_id,
+        "values": values,
+        "state": "answered",
+        "scope": scope,
+        "message_id": message.id,
+        "agent_notified": agent_notified,
+    }
+
+
 @router.post("/groups/{group_id}/collab-tasks/{collab_id}/respond")
 async def respond_collab_task(
     group_id: str,

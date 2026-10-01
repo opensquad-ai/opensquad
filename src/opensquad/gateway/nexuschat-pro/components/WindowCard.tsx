@@ -10,6 +10,7 @@ import React, { useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { ArrowUpRight, Check, Copy, ExternalLink, Maximize2 } from 'lucide-react';
 import { openCollabTaskWindow } from './CollabTaskCard';
+import { windowCardAPI } from '../services/api';
 
 export const WINDOW_CARD_START = '[[WINDOW_CARD]]';
 export const WINDOW_CARD_END = '[[/WINDOW_CARD]]';
@@ -23,6 +24,21 @@ export interface WindowCardBlock {
   status?: string;
 }
 
+export interface WindowCardFormField {
+  id: string;
+  label: string;
+  type: 'text' | 'textarea' | 'select' | 'radio' | 'checkbox';
+  placeholder?: string;
+  required?: boolean;
+  options?: { id: string; label: string }[];
+}
+
+export interface WindowCardForm {
+  submit_label?: string;
+  cancel_label?: string;
+  fields: WindowCardFormField[];
+}
+
 export interface WindowCardView {
   kind: 'sections' | 'table' | 'flow' | 'metrics' | 'raw';
   blocks?: WindowCardBlock[];
@@ -30,13 +46,15 @@ export interface WindowCardView {
   items?: { label?: string; value?: string }[];
   columns?: string[];
   rows?: string[][];
+  /** Interactive fields the user fills in; submitting posts the answer back. */
+  form?: WindowCardForm | null;
   text?: string;
 }
 
 export interface WindowCardAction {
   id: string;
   label: string;
-  intent: 'open_url' | 'copy' | 'open_collab_task' | 'none';
+  intent: 'open_url' | 'copy' | 'open_collab_task' | 'respond' | 'confirm' | 'decline' | 'none';
   url?: string;
   copy?: string;
   collab_id?: string;
@@ -55,6 +73,13 @@ export interface WindowCardPayload {
   view: WindowCardView;
   actions?: WindowCardAction[];
   state?: string;
+  /** The user's answer, recorded in the card after they submit / press a button. */
+  response?: {
+    action_id?: string;
+    values?: Record<string, any>;
+    by?: string;
+    at?: string;
+  } | null;
 }
 
 /** Parse a window card out of message content, or null. */
@@ -79,13 +104,31 @@ export function stripWindowCardMarker(content?: string | null): string {
 }
 
 /** Open the window for a card (App listens for this event). */
-export function openWindowCard(payload: WindowCardPayload): void {
+export function openWindowCard(payload: WindowCardPayload, messageId?: string): void {
   if (!payload?.id) return;
-  window.dispatchEvent(new CustomEvent('openWindowCard', { detail: { payload } }));
+  window.dispatchEvent(new CustomEvent('openWindowCard', { detail: { payload, messageId } }));
+}
+
+/** Post an answer (form submit / confirm / decline) back to the gateway. */
+export function answerWindowCard(
+  payload: WindowCardPayload,
+  actionId: string,
+  values: Record<string, any>,
+  messageId?: string,
+): Promise<unknown> {
+  return windowCardAPI.respond(payload.id, {
+    messageId: messageId || '',
+    actionId: actionId || 'submit',
+    values: values || {},
+  });
 }
 
 /** Run an action button: the useful intents work with no server round trip. */
-export function runWindowCardAction(payload: WindowCardPayload, action: WindowCardAction): void {
+export function runWindowCardAction(
+  payload: WindowCardPayload,
+  action: WindowCardAction,
+  messageId?: string,
+): void {
   if (action.intent === 'open_url' && action.url) {
     window.open(action.url, '_blank', 'noopener,noreferrer');
     return;
@@ -99,6 +142,11 @@ export function runWindowCardAction(payload: WindowCardPayload, action: WindowCa
     openCollabTaskWindow(action.collab_id);
     return;
   }
+  if (action.intent === 'respond' || action.intent === 'confirm' || action.intent === 'decline') {
+    // Answering from the card itself, with no extra input.
+    void answerWindowCard(payload, action.id || action.intent, {}, messageId).catch(() => undefined);
+    return;
+  }
   window.dispatchEvent(
     new CustomEvent('windowCardAction', { detail: { cardId: payload.id, actionId: action.id } }),
   );
@@ -106,15 +154,18 @@ export function runWindowCardAction(payload: WindowCardPayload, action: WindowCa
 
 export interface WindowCardProps {
   payload: WindowCardPayload;
+  /** Backend id of the card message (needed to post an answer back). */
+  messageId?: string;
   /** Override the default open (App event). */
   onOpen?: (payload: WindowCardPayload) => void;
 }
 
-export const WindowCard: React.FC<WindowCardProps> = ({ payload, onOpen }) => {
+export const WindowCard: React.FC<WindowCardProps> = ({ payload, messageId, onOpen }) => {
   const { t } = useTranslation();
   const [copied, setCopied] = useState(false);
   const actions = payload.actions || [];
   const sender = payload.sender?.agent_name || payload.sender?.agent_id || '';
+  const answered = !!payload.state && payload.state !== 'open';
 
   return (
     <div
@@ -140,7 +191,7 @@ export const WindowCard: React.FC<WindowCardProps> = ({ payload, onOpen }) => {
         </div>
         <button
           type="button"
-          onClick={() => (onOpen ? onOpen(payload) : openWindowCard(payload))}
+          onClick={() => (onOpen ? onOpen(payload) : openWindowCard(payload, messageId))}
           className="shrink-0 rounded-lg p-1 text-textMuted hover:bg-primary/10 hover:text-textMain"
           title={t('windowCard.open')}
           aria-label={t('windowCard.open')}
@@ -153,7 +204,7 @@ export const WindowCard: React.FC<WindowCardProps> = ({ payload, onOpen }) => {
       <div className="mt-2.5 flex flex-wrap items-center gap-2">
         <button
           type="button"
-          onClick={() => (onOpen ? onOpen(payload) : openWindowCard(payload))}
+          onClick={() => (onOpen ? onOpen(payload) : openWindowCard(payload, messageId))}
           className="inline-flex items-center gap-1 rounded-lg bg-primary px-2.5 py-1 text-[12px] text-white hover:opacity-90"
         >
           {t('windowCard.open')}
@@ -163,13 +214,19 @@ export const WindowCard: React.FC<WindowCardProps> = ({ payload, onOpen }) => {
           <button
             key={a.id}
             type="button"
-            onClick={() => runWindowCardAction(payload, a)}
-            className="inline-flex items-center gap-1 rounded-lg border border-border px-2.5 py-1 text-[12px] text-textMain hover:bg-primary/10"
+            disabled={answered && (a.intent === 'respond' || a.intent === 'confirm' || a.intent === 'decline')}
+            onClick={() => runWindowCardAction(payload, a, messageId)}
+            className="inline-flex items-center gap-1 rounded-lg border border-border px-2.5 py-1 text-[12px] text-textMain hover:bg-primary/10 disabled:opacity-50"
           >
             {a.intent === 'open_url' ? <ExternalLink size={11} /> : null}
             {a.label}
           </button>
         ))}
+        {answered ? (
+          <span className="shrink-0 rounded-md bg-emerald-500/10 px-1.5 py-0.5 text-[10px] font-semibold text-emerald-600">
+            {t('windowCard.answered')}
+          </span>
+        ) : null}
         <button
           type="button"
           onClick={() => {

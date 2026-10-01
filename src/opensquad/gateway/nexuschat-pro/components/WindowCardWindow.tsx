@@ -10,10 +10,12 @@ import React, { useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { CheckCircle2, ChevronDown, ChevronRight, Circle, Code2, Loader2, X, XCircle } from 'lucide-react';
 import type { WindowCardPayload } from './WindowCard';
-import { runWindowCardAction } from './WindowCard';
+import { answerWindowCard, runWindowCardAction } from './WindowCard';
 
 export interface WindowCardWindowProps {
   payload: WindowCardPayload;
+  /** Backend id of the card message (needed to post an answer back). */
+  messageId?: string;
   onClose: () => void;
 }
 
@@ -131,10 +133,35 @@ const Raw: React.FC<{ payload: WindowCardPayload }> = ({ payload }) => (
   </div>
 );
 
-export const WindowCardWindow: React.FC<WindowCardWindowProps> = ({ payload, onClose }) => {
+export const WindowCardWindow: React.FC<WindowCardWindowProps> = ({ payload, messageId, onClose }) => {
   const { t } = useTranslation();
   const [showRaw, setShowRaw] = useState(false);
+  const [values, setValues] = useState<Record<string, any>>({});
+  const [submitting, setSubmitting] = useState(false);
+  const [submitted, setSubmitted] = useState<Record<string, any> | null>(null);
   const kind = payload.view?.kind || 'raw';
+  const form = payload.view?.form || null;
+  const recorded = submitted || payload.response?.values || null;
+  const answered = !!recorded || (!!payload.state && payload.state !== 'open');
+
+  const setField = (id: string, value: any) => setValues((prev) => ({ ...prev, [id]: value }));
+
+  const submit = async (actionId = 'submit') => {
+    if (!form || submitting || !messageId) return;
+    const missing = form.fields.filter((f) => f.required && !values[f.id]);
+    if (missing.length) return;
+    setSubmitting(true);
+    try {
+      await answerWindowCard(payload, actionId, values, messageId);
+      setSubmitted(values);
+    } catch {
+      /* the card stays interactive so the user can retry */
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const fieldLabel = (id: string) => form?.fields.find((f) => f.id === id)?.label || id;
 
   return (
     <div className="h-full min-h-0 flex flex-col" data-testid="window-card-window">
@@ -178,6 +205,105 @@ export const WindowCardWindow: React.FC<WindowCardWindowProps> = ({ payload, onC
         {kind === 'sections' ? <Sections payload={payload} /> : null}
         {kind === 'raw' ? <Raw payload={payload} /> : null}
         {!['table', 'flow', 'metrics', 'sections', 'raw'].includes(kind) ? <Raw payload={payload} /> : null}
+
+        {answered ? (
+          <div
+            className="mt-3 rounded-lg border border-border bg-bgLight px-2.5 py-2"
+            data-testid="window-card-answer"
+          >
+            <div className="text-[11px] font-semibold text-emerald-600">{t('windowCard.answered')}</div>
+            {recorded
+              ? Object.entries(recorded).map(([k, v]) => (
+                  <div key={k} className="mt-1 break-words text-[12px] text-textMain">
+                    <span className="text-textMuted">{fieldLabel(k)}: </span>
+                    {Array.isArray(v) ? v.join(', ') : String(v)}
+                  </div>
+                ))
+              : null}
+          </div>
+        ) : form ? (
+          <div
+            className="mt-3 space-y-2 rounded-lg border border-border bg-bgLight px-2.5 py-2"
+            data-testid="window-card-form"
+          >
+            {form.fields.map((f) => (
+              <div key={f.id}>
+                <div className="mb-0.5 text-[11px] text-textMuted">
+                  {f.label}
+                  {f.required ? <span className="ml-1 text-rose-500">*</span> : null}
+                </div>
+                {f.type === 'textarea' ? (
+                  <textarea
+                    rows={3}
+                    value={values[f.id] || ''}
+                    placeholder={f.placeholder}
+                    onChange={(e) => setField(f.id, e.target.value)}
+                    className="w-full resize-none rounded-lg border border-border bg-panel px-2 py-1.5 text-[12px] text-textMain outline-none focus:border-primary/40"
+                  />
+                ) : f.type === 'select' ? (
+                  <select
+                    value={values[f.id] || ''}
+                    onChange={(e) => setField(f.id, e.target.value)}
+                    className="rounded-lg border border-border bg-panel px-2 py-1.5 text-[12px] text-textMain outline-none focus:border-primary/40"
+                  >
+                    <option value="">-</option>
+                    {(f.options || []).map((o) => (
+                      <option key={o.id} value={o.id}>
+                        {o.label}
+                      </option>
+                    ))}
+                  </select>
+                ) : f.type === 'radio' || f.type === 'checkbox' ? (
+                  <div className="flex flex-wrap gap-2">
+                    {(f.options || []).map((o) => {
+                      const multi = f.type === 'checkbox';
+                      const current = multi ? (Array.isArray(values[f.id]) ? values[f.id] : []) : values[f.id];
+                      const checked = multi ? current.includes(o.id) : current === o.id;
+                      return (
+                        <label
+                          key={o.id}
+                          className="inline-flex cursor-pointer items-center gap-1 rounded-lg border border-border bg-panel px-2 py-1 text-[12px] text-textMain"
+                        >
+                          <input
+                            type={multi ? 'checkbox' : 'radio'}
+                            name={f.id}
+                            checked={checked}
+                            onChange={() => {
+                              if (multi) {
+                                const next = checked ? current.filter((x: string) => x !== o.id) : [...current, o.id];
+                                setField(f.id, next);
+                              } else {
+                                setField(f.id, o.id);
+                              }
+                            }}
+                          />
+                          {o.label}
+                        </label>
+                      );
+                    })}
+                  </div>
+                ) : (
+                  <input
+                    type="text"
+                    value={values[f.id] || ''}
+                    placeholder={f.placeholder}
+                    onChange={(e) => setField(f.id, e.target.value)}
+                    className="w-full rounded-lg border border-border bg-panel px-2 py-1.5 text-[12px] text-textMain outline-none focus:border-primary/40"
+                  />
+                )}
+              </div>
+            ))}
+            <button
+              type="button"
+              onClick={() => void submit('submit')}
+              disabled={submitting || !messageId}
+              className="rounded-lg bg-primary px-3 py-1 text-[12px] text-white hover:opacity-90 disabled:opacity-50"
+              data-testid="window-card-submit"
+            >
+              {form.submit_label || t('windowCard.submit')}
+            </button>
+          </div>
+        ) : null}
 
         {(payload.actions || []).length ? (
           <div className="mt-3 flex flex-wrap gap-2">

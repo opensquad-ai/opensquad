@@ -469,7 +469,7 @@ const MessageRowImpl: React.FC<MessageRowProps> = ({
                 {(() => {
                   const windowCard = !msg.isDeleted ? parseWindowCard(msg.content || '') : null;
                   if (windowCard) {
-                    return <WindowCard payload={windowCard} />;
+                    return <WindowCard payload={windowCard} messageId={msg.id} />;
                   }
                   const collabTask = !msg.isDeleted ? parseCollabTask(msg.content || '') : null;
                   if (collabTask) {

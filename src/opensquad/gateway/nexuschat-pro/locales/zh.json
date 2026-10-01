@@ -792,6 +792,8 @@
     "raw": "原始数据",
     "empty": "暂无内容",
     "copy": "复制",
+    "submit": "提交",
+    "answered": "已提交",
     "source": "来源"
   },
   "collabTask": {

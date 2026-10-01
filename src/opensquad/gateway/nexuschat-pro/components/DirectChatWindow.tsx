@@ -331,7 +331,7 @@ export const DirectChatWindow: React.FC<DirectChatWindowProps> = ({
               return (
                 <div key={b.id} className={`mb-2 flex ${b.mine ? 'justify-end' : 'justify-start'}`}>
                   <div className="max-w-[85%]">
-                    <WindowCard payload={windowCard} />
+                    <WindowCard payload={windowCard} messageId={b.id} />
                   </div>
                 </div>
               );

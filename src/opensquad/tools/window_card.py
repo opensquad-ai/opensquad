@@ -40,6 +40,7 @@ def send_window_card(
     group_id: str = "",
     recipient_name: str = "",
     actions: list[dict[str, Any]] | None = None,
+    form: dict[str, Any] | None = None,
     icon: str = "",
     source: str = "",
 ) -> dict[str, Any]:
@@ -63,8 +64,17 @@ def send_window_card(
         group_id: Group id or name to post to.
         recipient_name: IM username to DM instead (e.g. the human user's name).
         actions: Buttons under the card, each
-                 {"label": "...", "intent": "open_url|copy|open_collab_task|none",
+                 {"label": "...", "intent": "open_url|copy|open_collab_task|respond|confirm|decline|none",
                   "url": "...", "copy": "...", "collab_id": "..."}.
+                 `respond` / `confirm` / `decline` send the answer back to you.
+        form: Make the window interactive — the user fills it in and submitting
+              returns the values to you as a system message:
+              {"submit_label": "确认",
+               "fields": [{"id": "decision", "label": "是否通过", "type": "radio",
+                           "options": [{"id": "yes", "label": "通过"}, {"id": "no", "label": "驳回"}],
+                           "required": true},
+                          {"id": "note", "label": "备注", "type": "textarea"}]}
+              Field types: text | textarea | select | radio | checkbox.
         icon: Optional icon hint for the card header (e.g. "table", "shield").
         source: Optional refetch hint for the window (free-form string).
 
@@ -111,6 +121,7 @@ def send_window_card(
             group_id=group_id,
             recipient_name=recipient_name,
             actions=actions,
+            form=form,
             sender_id=sender_id,
             sender_name=sender_name,
             source=source,
