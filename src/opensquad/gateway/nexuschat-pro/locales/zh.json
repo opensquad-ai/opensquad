@@ -807,6 +807,7 @@
     "newChat": "新建对话",
     "workspaceFiles": "工作区文件",
     "changedFiles": "变动文件",
+    "changes": "更改",
     "allFiles": "所有文件",
     "noChangedFiles": "暂无变动文件",
     "artifacts": "产物",

@@ -807,6 +807,7 @@
     "newChat": "New Chat",
     "workspaceFiles": "Workspace Files",
     "changedFiles": "Changed Files",
+    "changes": "Changes",
     "allFiles": "All Files",
     "noChangedFiles": "No changed files",
     "artifacts": "Artifacts",

@@ -5866,6 +5866,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
                 turnChangedFiles.length > 0 ? (
                   <TurnChangedFilesCard
                     files={turnChangedFiles}
+                    uiMode={uiMode}
                     onOpenFile={openProjectFile}
                     onViewAll={() => {
                       setFilesPanelOpen(true);

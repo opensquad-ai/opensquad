@@ -5,6 +5,7 @@
  * "changed" tab for the full list.
  */
 import React from 'react';
+import { useTranslation } from 'react-i18next';
 import { FileCode2, FilePlus2, ListTree, Pencil } from 'lucide-react';
 import { extractFileEditInfo } from './FileDiffBlock';
 
@@ -14,6 +15,9 @@ export type TurnChangedFile = {
   name: string;
   /** write = created/new file, edit = modified existing file. */
   kind: 'write' | 'edit';
+  /** 行数变动，来自工具参数（write=新增行，edit=新/旧文本行数）。 */
+  additions: number;
+  deletions: number;
 };
 
 const LANG_BY_EXT: Record<string, string> = {
@@ -97,7 +101,13 @@ export function collectTurnChangedFiles(blocks: TurnWorkflowBlock[]): TurnChange
       const path = info.filePath;
       if (!path) continue;
       if (files.some((f) => isSameFile(f.path, path))) continue;
-      files.push({ path, name: info.fileName || path, kind: info.kind === 'write' ? 'write' : 'edit' });
+      files.push({
+        path,
+        name: info.fileName || path,
+        kind: info.kind === 'write' ? 'write' : 'edit',
+        additions: Math.max(0, Number(info.addedLines) || 0),
+        deletions: Math.max(0, Number(info.removedLines) || 0),
+      });
     }
   }
   return files;
@@ -132,6 +142,12 @@ interface TurnChangedFilesCardProps {
   onOpenFile: (path: string) => void;
   onViewAll: () => void;
   viewAllLabel: string;
+  /**
+   * Code(solo) 的「最终产出」要能看出改了哪个文件、动了多少行，所以走列表：
+   * 完整相对路径 + `+N -M`。Work(classic) 保持原来的文件卡片（名字 + 语言），
+   * 那边的产物语义是「交付了什么」，不是仓库变更。
+   */
+  uiMode?: 'classic' | 'solo';
 }
 
 const MAX_SHOWN = 4;
@@ -141,8 +157,45 @@ export const TurnChangedFilesCard: React.FC<TurnChangedFilesCardProps> = ({
   onOpenFile,
   onViewAll,
   viewAllLabel,
+  uiMode = 'classic',
 }) => {
+  const { t } = useTranslation();
   if (!files.length) return null;
+
+  if (uiMode === 'solo') {
+    return (
+      <div
+        className="w-full mt-1.5 mb-3 rounded-xl border border-border/60 overflow-hidden"
+        data-testid="changed-files-list"
+      >
+        <div className="px-3 py-1.5 text-[11px] font-medium text-textMuted border-b border-border/40 bg-black/[0.02] dark:bg-white/[0.04]">
+          {t('aiChat.changes')}
+        </div>
+        {files.map((f) => (
+          <button
+            key={f.path}
+            type="button"
+            onClick={() => onOpenFile(f.path)}
+            className="w-full flex items-center gap-2 px-3 py-[7px] text-left border-b border-border/40 last:border-b-0 hover:bg-primary/10 transition-colors min-w-0"
+            title={f.path}
+          >
+            <FileCode2 size={14} className="shrink-0 text-textMuted/60" />
+            <span className="min-w-0 flex-1 truncate font-mono text-[12px] text-textMain">
+              {f.path}
+            </span>
+            <span className="shrink-0 flex items-center gap-1 text-[11px] font-mono tabular-nums">
+              {f.additions > 0 ? <span className="text-emerald-600/80">+{f.additions}</span> : null}
+              {f.deletions > 0 ? <span className="text-rose-500/80">-{f.deletions}</span> : null}
+              {f.additions === 0 && f.deletions === 0 ? (
+                <span className="text-textMuted/50">+0</span>
+              ) : null}
+            </span>
+          </button>
+        ))}
+      </div>
+    );
+  }
+
   const shown = files.slice(0, MAX_SHOWN);
   return (
     <div className="w-full mt-1.5 mb-3 rounded-xl border border-border/60 bg-black/[0.03] dark:bg-white/[0.05] overflow-hidden">
