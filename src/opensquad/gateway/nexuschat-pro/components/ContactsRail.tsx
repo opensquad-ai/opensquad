@@ -31,7 +31,8 @@ export interface ContactsRailProps {
   activeGroupId?: string | null;
   activeAgentId?: string | null;
   onSelectGroup?: (groupId: string) => void;
-  onPickAgent?: (agentId: string) => void;
+  /** agent_id（事件桥/映射键）+ dir_name（文件与工作目录 API）+ 运行状态。 */
+  onPickAgent?: (agentId: string, dirName: string, status: string) => void;
   /** 底部账号栏右侧的额外按钮（聊天版面的「详细」）。 */
   railActions?: React.ReactNode;
   currentUser?: AccountUser;
@@ -107,13 +108,13 @@ export const ContactsRail: React.FC<ContactsRailProps> = ({
   );
 
   const pickAgent = useCallback(
-    (agentId: string, ready: boolean) => {
+    (agentId: string, dirName: string, status: string, ready: boolean) => {
       if (!ready) {
         window.alert(t('agentManager.agentStartingHint'));
         return;
       }
       if (onPickAgent) {
-        onPickAgent(agentId);
+        onPickAgent(agentId, dirName, status);
         return;
       }
       window.dispatchEvent(new CustomEvent('openAgentChat', { detail: { agentId } }));
@@ -313,7 +314,7 @@ export const ContactsRail: React.FC<ContactsRailProps> = ({
                     <div
                       key={`rail-agent-${a.agent_id || a.dir_name}`}
                       data-testid="contacts-rail-agent-row"
-                      onClick={() => pickAgent(a.agent_id, !!a.ready)}
+                      onClick={() => pickAgent(a.agent_id, a.dir_name, st, !!a.ready)}
                       className={`flex items-center gap-2.5 mx-1.5 px-2 py-2 rounded-xl cursor-pointer transition-colors ${
                         isCurrent ? 'bg-primary/[0.07]' : 'hover:bg-black/[0.04] dark:hover:bg-white/[0.06]'
                       }`}

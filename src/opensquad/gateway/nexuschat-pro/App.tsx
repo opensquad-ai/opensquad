@@ -155,15 +155,17 @@ const App: React.FC = () => {
   // 聊天版面里选中的联系人（一对一私信）。address 是对方的 IM User.name ——
   // 它由群成员表解析而来，绝不能按 dir_name 推导（真实部署里
   // ` investigator@ai` 的显示名是「调查员」，与目录名毫无关系）。
-  const [dmContact, setDmContact] = useState<{ name: string; label: string; avatar: string | null; agentId: string } | null>(null);
+  const [dmContact, setDmContact] = useState<{ name: string; label: string; avatar: string | null; agentId: string; dirName: string; status: string } | null>(null);
   /** 私信窗口的「详细」抽屉（文件 + 私信历史）。 */
   const [dmDetailOpen, setDmDetailOpen] = useState(false);
+  /** 该 agent 的项目根，供抽屉的文件树用（会话/agent 的工作目录）。 */
+  const [dmRootPath, setDmRootPath] = useState('');
   /** agent_id → IM 显示名，来自默认协作群成员（含全部 @ai agent）。 */
   const agentImNamesRef = useRef<Record<string, string>>({});
   const agentImAvatarsRef = useRef<Record<string, string | null>>({});
 
   const resolveDmContact = useCallback(
-    async (agentId: string) => {
+    async (agentId: string, dirName: string, status: string) => {
       const label = agentId;
       try {
         if (Object.keys(agentImNamesRef.current).length === 0) {
@@ -181,7 +183,22 @@ const App: React.FC = () => {
           return;
         }
         setDmDetailOpen(false);
-        setDmContact({ name, label: name, avatar: agentImAvatarsRef.current[agentId] ?? null, agentId });
+        setDmContact({
+          name,
+          label: name,
+          avatar: agentImAvatarsRef.current[agentId] ?? null,
+          agentId,
+          dirName,
+          status,
+        });
+        // 抽屉的文件树要该项目根；拿不到就留空（历史检索不依赖它）。
+        setDmRootPath('');
+        if (dirName) {
+          void adminAPI
+            .getWorkingDirectory(dirName)
+            .then((wd) => setDmRootPath((wd.active_cwd || wd.workspace_root || '').trim()))
+            .catch(() => undefined);
+        }
       } catch {
         alert(t('aiChat.chat.dmNoAccount', { agent: label, defaultValue: label }));
       }
@@ -1459,7 +1476,7 @@ const App: React.FC = () => {
                 setDmDetailOpen(false);
                 void handleSelectGroup(id);
               }}
-              onPickAgent={(agentId) => void resolveDmContact(agentId)}
+              onPickAgent={(agentId, dirName, status) => void resolveDmContact(agentId, dirName, status)}
               onUiModeChange={(mode) => {
                 window.dispatchEvent(new CustomEvent('opensquad-chat-ui-request', { detail: { uiMode: mode } }));
                 setCurrentView('ai-chat');
@@ -1500,12 +1517,12 @@ const App: React.FC = () => {
                     open
                     onClose={() => setDmDetailOpen(false)}
                     agentId={dmContact.agentId}
-                    fsAgentId={dmContact.agentId}
+                    fsAgentId={dmContact.dirName || dmContact.agentId}
                     agentName={dmContact.label}
                     avatar={dmContact.avatar}
-                    status="running"
-                    dirName={dmContact.agentId}
-                    rootPath=""
+                    status={dmContact.status}
+                    dirName={dmContact.dirName}
+                    rootPath={dmRootPath}
                     width={360}
                     onWidthChange={() => undefined}
                     onOpenFile={() => undefined}
@@ -1688,7 +1705,8 @@ const App: React.FC = () => {
           <Suspense fallback={<div className="flex-1 flex items-center justify-center bg-bgLight text-textMuted"><OpenSquadLoader size={72} /></div>}>
             <AgentManagerPage
               onBack={() => setCurrentView('chat')}
-              onChat={openAgentChat}
+              // 聊天版面下联系人列表的「聊天」＝ 打开私信窗口；Work/Code 下仍是 agent-web。
+              onChat={(agentId) => (chatUi ? void resolveDmContact(agentId, '', 'running') : openAgentChat(agentId))}
               onOpenGroupChat={() => setCurrentView('chat')}
               onOpenSettings={() => setIsSettingsOpen(true)}
               variant={chatUi ? 'contacts' : 'full'}
