@@ -2573,7 +2573,11 @@ async def send_direct_message(
 
 @router.get("/direct-messages")
 async def get_direct_messages(
-    filter_type: str = "all", current_user: User = Depends(get_current_user_dep), db: AsyncSession = Depends(get_db)
+    filter_type: str = "all",
+    q: str | None = None,
+    contact_name: str | None = None,
+    current_user: User = Depends(get_current_user_dep),
+    db: AsyncSession = Depends(get_db),
 ):
     # Build query
     if filter_type == "sent":
@@ -2591,6 +2595,20 @@ async def get_direct_messages(
                 and_(DirectMessage.recipient_id == current_user.id, DirectMessage.is_deleted_by_recipient.is_(False)),
             )
         )
+
+    # One thread: everything exchanged with that contact (either direction).
+    # `contact_name` is the User.name the send endpoint already takes, so the
+    # caller does not need to resolve an id first.
+    if contact_name:
+        contact_res = await db.execute(select(User).where(User.name == contact_name))
+        contact = contact_res.scalar_one_or_none()
+        if not contact:
+            return []
+        query = query.where(or_(DirectMessage.sender_id == contact.id, DirectMessage.recipient_id == contact.id))
+
+    # Keyword search over the message body (the 聊天 layout's history search).
+    if q:
+        query = query.where(DirectMessage.content.ilike(f"%{q}%"))
 
     query = query.order_by(desc(DirectMessage.timestamp))
 
