@@ -90,8 +90,25 @@ class EventPipeline:
     def __init__(self, max_size: int = 200):
         self._max_size = max_size
         self._events_by_sid: dict[str, deque] = {}
+        # sid -> identities already delivered (bounded). One DM can reach the
+        # runner through more than one path (message_queue and the input_hub
+        # supplement drain), and without this the model reads the same message
+        # twice and answers twice — the duplicate-DM the user sees.
+        self._seen_by_sid: dict[str, deque] = {}
         self._lock = threading.Lock()
-        self._stats = {"pushed": 0, "drained": 0}
+        self._stats = {"pushed": 0, "drained": 0, "deduped": 0}
+
+    @staticmethod
+    def _identity(source: str, metadata: dict[str, Any] | None) -> str:
+        """Stable id for one inbound message, or '' when it has none.
+
+        Only *ids* are deduped: two identical-looking messages a user really
+        did send twice are two different messages and must both arrive.
+        """
+        md = metadata or {}
+        raw = md.get("raw_data")
+        raw_id = raw.get("id") if isinstance(raw, dict) else ""
+        return str(md.get("client_id") or raw_id or "").strip()
 
     def _bucket(self, sid: str) -> deque:
         key = sid or ""
@@ -111,6 +128,7 @@ class EventPipeline:
     ):
         """Sync push (non-async). Safe to call from sync code like input_hub.push()."""
         sid = resolve_pipeline_session_id(session_id)
+        identity = self._identity(source, metadata)
         evt = PipelineEvent(
             source=source,
             content=content,
@@ -118,6 +136,25 @@ class EventPipeline:
             session_id=sid,
         )
         with self._lock:
+            if identity:
+                seen = self._seen_by_sid.get(sid or "")
+                pending = self._events_by_sid.get(sid or "")
+                in_flight = False
+                if pending:
+                    in_flight = any(self._identity(e.source, e.metadata) == identity for e in pending)
+                if in_flight or (seen and identity in seen):
+                    self._stats["deduped"] += 1
+                    logger.info(
+                        "[EventPipeline] Dropped duplicate event sid=%s source=%s id=%s",
+                        sid or "-",
+                        source,
+                        identity,
+                    )
+                    return
+                if seen is None:
+                    seen = deque(maxlen=self._max_size)
+                    self._seen_by_sid[sid or ""] = seen
+                seen.append(identity)
             self._bucket(sid).append(evt)
         self._stats["pushed"] += 1
         logger.debug("[EventPipeline] Pushed sid=%s source=%s content=%s", sid or "-", source, content[:80])
@@ -169,6 +206,14 @@ class EventPipeline:
                 self._events_by_sid[sid or ""] = kept
             else:
                 self._events_by_sid.pop(sid or "", None)
+            # 撤回后同一条消息可能被重新发送：把它从已投递集合里去掉，
+            # 否则那次重发会被判成重复而被丢掉。
+            seen = self._seen_by_sid.get(sid or "")
+            if seen:
+                try:
+                    seen.remove(cid)
+                except ValueError:
+                    pass
         if removed:
             logger.info("[EventPipeline] Cancelled user event sid=%s client_id=%s", sid or "-", cid)
         return removed
