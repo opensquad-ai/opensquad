@@ -101,17 +101,31 @@ describe('C3 一对一窗口只有对话（走私信通道）', () => {
     expect(DM).not.toMatch(/buildTimelineFromSession/);
   });
 
-  it('两边都是气泡，且新消息走 websocket 而不是纯轮询', () => {
+  it('两边都是气泡，且气泡底部常显时间 + 复制', () => {
     expect(DM).toMatch(/variant="messenger"/);
     expect(MSG_BUBBLE).toMatch(/const isMessenger = variant === 'messenger'/);
     expect(MSG_BUBBLE).toMatch(/bg-chatBubbleOther/);
     expect(MSG_BUBBLE).toMatch(/bg-chatBubbleSelf/);
+    // 复制/时间不能是 hover-only：messenger 布局里没有 classic 的 actionRow 提示。
+    expect(MSG_BUBBLE).toMatch(/data-testid="msg-meta"/);
+    expect(MSG_BUBBLE).toMatch(/onClick=\{handleCopy\}/);
     expect(DM).toMatch(/new_direct_message/);
   });
 
   it('长线程分页取更早的私信', () => {
     expect(DM).toMatch(/limit: PAGE_SIZE/);
     expect(DM).toMatch(/offset: messagesRef\.current\.length/);
+  });
+
+  it('发送框支持文件 / 文件夹 / 图片', () => {
+    expect(DM).toMatch(/uploadAPI\.uploadFile/);
+    expect(DM).toMatch(/uploadAPI\.uploadFolder/);
+    expect(DM).toMatch(/data-testid="dm-attach-menu"/);
+    expect(DM).toMatch(/t\('aiChat\.attach\.uploadFiles'\)/);
+    expect(DM).toMatch(/t\('aiChat\.attach\.uploadFolder'\)/);
+    expect(DM).toMatch(/t\('aiChat\.attach\.uploadImages'\)/);
+    // 附件随私信一起发出去（同一发送路径）。
+    expect(DM).toMatch(/attachments\.length \? attachments : undefined/);
   });
 
   it('agent-web 回到纯 Work/Code：composer 没有 simple 分叉', () => {

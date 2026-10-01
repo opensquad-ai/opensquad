@@ -881,7 +881,32 @@ const MessageBubbleInner: React.FC<MessageBubbleProps> = ({
           >
             {mediaAndBody}
           </div>
-          {actionRow}
+          {/* 气泡底部：时间 + 复制。聊天窗口里这两样必须常显 —— classic 的
+              actionRow 是 opacity-0 group-hover，messenger 布局下用户既看不到
+              复制按钮，也看不到时间。 */}
+          <div
+            data-testid="msg-meta"
+            className={`flex items-center gap-1.5 px-1 text-[10px] leading-none text-textMuted/70 tabular-nums ${
+              isUser ? 'flex-row-reverse' : ''
+            }`}
+          >
+            {message.timestamp ? (
+              <span>
+                {new Date(message.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+              </span>
+            ) : null}
+            {bodyContent ? (
+              <button
+                type="button"
+                onClick={handleCopy}
+                className="p-0 border-0 bg-transparent cursor-pointer text-textMuted/70 hover:text-primary"
+                title="Copy"
+                aria-label="Copy"
+              >
+                {copied ? <Check size={12} /> : <Copy size={12} />}
+              </button>
+            ) : null}
+          </div>
         </div>
       </div>
     );

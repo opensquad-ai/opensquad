@@ -9,11 +9,11 @@
  * 绝不是 dir_name 推导出来的），见 App 的 `resolveDmContact`。
  */
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Send } from 'lucide-react';
+import { FolderUp, Image as ImageIcon, Paperclip, Send, X } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
-import { directMessageAPI, type DirectMessageItem } from '../services/api';
+import { directMessageAPI, uploadAPI, type DirectMessageItem } from '../services/api';
 import { getLocalAvatarFallback } from '../utils/image';
-import { MessageBubble, type ChatMessage } from './ai-chat/MessageBubble';
+import { MessageBubble, type ChatMessage, type FileAttachment } from './ai-chat/MessageBubble';
 import { OpenSquadLoader } from './OpenSquadLoader';
 
 export interface DirectChatWindowProps {
@@ -34,6 +34,12 @@ const PAGE_SIZE = 50;
 /** 兜底轮询：正常情况靠 `websocket_message` 即时增量，这里只防丢事件。 */
 const POLL_MS = 20000;
 
+/** 私信附件在库里的形态（后端按 JSON 原样存取）。 */
+type DmAttachment = { url: string; type: string; name: string; size: string };
+
+const isImageAttachment = (a: DmAttachment): boolean =>
+  a.type === 'image' || /\.(png|jpe?g|gif|webp|bmp|svg)$/i.test(a.url || '');
+
 export const DirectChatWindow: React.FC<DirectChatWindowProps> = ({
   contactName,
   contactLabel,
@@ -49,11 +55,19 @@ export const DirectChatWindow: React.FC<DirectChatWindowProps> = ({
   const [sending, setSending] = useState(false);
   const [hasMore, setHasMore] = useState(false);
   const [loadingOlder, setLoadingOlder] = useState(false);
+  // 待发送的附件：文件/文件夹走 FileAttachment 卡片，图片走 images。
+  const [pendingFiles, setPendingFiles] = useState<FileAttachment[]>([]);
+  const [pendingImages, setPendingImages] = useState<string[]>([]);
+  const [uploading, setUploading] = useState(false);
+  const [menuOpen, setMenuOpen] = useState(false);
   const endRef = useRef<HTMLDivElement>(null);
   const scrollerRef = useRef<HTMLDivElement>(null);
   const seqRef = useRef(0);
   const messagesRef = useRef<DirectMessageItem[]>([]);
   messagesRef.current = messages;
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const folderInputRef = useRef<HTMLInputElement>(null);
+  const imageInputRef = useRef<HTMLInputElement>(null);
 
   const load = useCallback(
     async (silent = false) => {
@@ -104,6 +118,8 @@ export const DirectChatWindow: React.FC<DirectChatWindowProps> = ({
 
   useEffect(() => {
     setMessages([]);
+    setPendingFiles([]);
+    setPendingImages([]);
     void load();
   }, [load]);
 
@@ -135,35 +151,104 @@ export const DirectChatWindow: React.FC<DirectChatWindowProps> = ({
     endRef.current?.scrollIntoView({ block: 'end' });
   }, [messages.length]);
 
+  /** 上传选中的文件/图片；文件夹走一次性打包上传。 */
+  const uploadSelection = useCallback(
+    async (files: File[], kind: 'file' | 'image' | 'folder') => {
+      if (!files.length) return;
+      setUploading(true);
+      try {
+        if (kind === 'folder') {
+          const res = await uploadAPI.uploadFolder(files as unknown as FileList);
+          const url = String((res as { url?: string })?.url || '');
+          if (url) {
+            setPendingFiles((prev) => [
+              ...prev,
+              {
+                name: String((res as { name?: string })?.name || files[0]?.webkitRelativePath || 'folder'),
+                size: String((res as { size?: string })?.size || ''),
+                url,
+                type: 'file',
+              },
+            ]);
+          }
+          return;
+        }
+        const nextFiles: FileAttachment[] = [];
+        const nextImages: string[] = [];
+        for (const f of files) {
+          const res = await uploadAPI.uploadFile(f);
+          const url = String((res as { url?: string })?.url || '');
+          if (!url) continue;
+          const name = String((res as { name?: string })?.name || f.name);
+          const size = String((res as { size?: string })?.size || '');
+          if (kind === 'image' || f.type.startsWith('image/')) nextImages.push(url);
+          else nextFiles.push({ name, size, url, type: 'file' });
+        }
+        if (nextFiles.length) setPendingFiles((prev) => [...prev, ...nextFiles]);
+        if (nextImages.length) setPendingImages((prev) => [...prev, ...nextImages]);
+      } catch {
+        setError(true);
+      } finally {
+        setUploading(false);
+      }
+    },
+    [],
+  );
+
   const send = useCallback(async () => {
     const text = draft.trim();
-    if (!text || sending) return;
+    const attachments: DmAttachment[] = [
+      ...pendingFiles.map((f) => ({
+        url: f.url || '',
+        type: f.type === 'voice' || f.type === 'audio' ? f.type : 'file',
+        name: f.name,
+        size: f.size,
+      })),
+      ...pendingImages.map((url) => ({ url, type: 'image', name: '', size: '' })),
+    ];
+    if ((!text && attachments.length === 0) || sending || uploading) return;
     setSending(true);
     try {
-      await directMessageAPI.sendDirectMessage(contactName, '', text);
+      await directMessageAPI.sendDirectMessage(
+        contactName,
+        '',
+        text,
+        attachments.length ? attachments : undefined,
+      );
       setDraft('');
+      setPendingFiles([]);
+      setPendingImages([]);
       await load(true);
     } catch {
       setError(true);
     } finally {
       setSending(false);
     }
-  }, [contactName, draft, load, sending]);
+  }, [contactName, draft, load, pendingFiles, pendingImages, sending, uploading]);
 
   const bubbles = useMemo(
     () =>
       messages.map((m) => {
         const mine = m.is_sender;
+        const raw = Array.isArray(m.attachments) ? (m.attachments as DmAttachment[]) : [];
+        const images = raw.filter(isImageAttachment).map((a) => a.url);
+        const files: FileAttachment[] = raw
+          .filter((a) => !isImageAttachment(a))
+          .map((a) => ({ name: a.name || a.url, size: a.size || '', url: a.url, type: 'file' as const }));
         const message: ChatMessage = {
           role: mine ? 'user' : 'assistant',
           content: m.content,
           timestamp: new Date(m.timestamp).toISOString(),
           message_id: m.id,
+          ...(images.length ? { images } : {}),
+          ...(files.length ? { attachments: files } : {}),
         };
         return { id: m.id, mine, message };
       }),
     [messages],
   );
+
+  const pendingCount = pendingFiles.length + pendingImages.length;
 
   return (
     <div className="flex-1 min-w-0 min-h-0 flex flex-col os-depth-card overflow-hidden">
@@ -229,7 +314,96 @@ export const DirectChatWindow: React.FC<DirectChatWindowProps> = ({
         <div ref={endRef} />
       </div>
 
+      {pendingCount > 0 || uploading ? (
+        <div className="shrink-0 px-3 pt-2 flex flex-wrap items-center gap-1.5" data-testid="dm-pending-attachments">
+          {pendingFiles.map((f) => (
+            <span
+              key={`pf-${f.url}`}
+              className="inline-flex max-w-[220px] items-center gap-1 rounded-lg border border-border bg-bgLight px-2 py-1 text-[11px] text-textMain"
+            >
+              <Paperclip size={11} className="shrink-0 text-textMuted" />
+              <span className="min-w-0 truncate">{f.name}</span>
+              <button
+                type="button"
+                className="shrink-0 p-0 border-0 bg-transparent cursor-pointer text-textMuted hover:text-rose-500"
+                onClick={() => setPendingFiles((prev) => prev.filter((x) => x.url !== f.url))}
+                aria-label={t('common.delete')}
+              >
+                <X size={11} />
+              </button>
+            </span>
+          ))}
+          {pendingImages.map((url) => (
+            <span key={`pi-${url}`} className="relative inline-block">
+              <img src={url} alt="" className="h-12 w-12 rounded-lg object-cover border border-border" />
+              <button
+                type="button"
+                className="absolute -top-1.5 -right-1.5 rounded-full bg-black/60 p-0.5 text-white cursor-pointer"
+                onClick={() => setPendingImages((prev) => prev.filter((x) => x !== url))}
+                aria-label={t('common.delete')}
+              >
+                <X size={10} />
+              </button>
+            </span>
+          ))}
+          {uploading ? <OpenSquadLoader size={14} /> : null}
+        </div>
+      ) : null}
+
       <div className="shrink-0 border-t border-border px-3 py-2 flex items-end gap-2">
+        <div className="relative shrink-0">
+          <button
+            type="button"
+            onClick={() => setMenuOpen((v) => !v)}
+            disabled={uploading}
+            className="h-9 w-9 rounded-full flex items-center justify-center text-textMuted hover:text-textMain hover:bg-primary/10 disabled:opacity-40"
+            title={t('aiChat.attach.trigger')}
+            aria-label={t('aiChat.attach.trigger')}
+          >
+            <Paperclip size={17} strokeWidth={1.75} />
+          </button>
+          {menuOpen ? (
+            <div
+              className="absolute bottom-11 left-0 z-30 min-w-[148px] rounded-xl border border-border bg-panel py-1 shadow-lg text-[12px] text-textMain"
+              data-testid="dm-attach-menu"
+            >
+              <button
+                type="button"
+                className="w-full flex items-center gap-2 px-3 py-1.5 text-left hover:bg-primary/10"
+                onClick={() => {
+                  setMenuOpen(false);
+                  fileInputRef.current?.click();
+                }}
+              >
+                <Paperclip size={13} className="text-textMuted" />
+                {t('aiChat.attach.uploadFiles')}
+              </button>
+              <button
+                type="button"
+                className="w-full flex items-center gap-2 px-3 py-1.5 text-left hover:bg-primary/10"
+                onClick={() => {
+                  setMenuOpen(false);
+                  folderInputRef.current?.click();
+                }}
+              >
+                <FolderUp size={13} className="text-textMuted" />
+                {t('aiChat.attach.uploadFolder')}
+              </button>
+              <button
+                type="button"
+                className="w-full flex items-center gap-2 px-3 py-1.5 text-left hover:bg-primary/10"
+                onClick={() => {
+                  setMenuOpen(false);
+                  imageInputRef.current?.click();
+                }}
+              >
+                <ImageIcon size={13} className="text-textMuted" />
+                {t('aiChat.attach.uploadImages')}
+              </button>
+            </div>
+          ) : null}
+        </div>
+
         <textarea
           value={draft}
           onChange={(e) => setDraft(e.target.value)}
@@ -246,7 +420,7 @@ export const DirectChatWindow: React.FC<DirectChatWindowProps> = ({
         <button
           type="button"
           onClick={() => void send()}
-          disabled={sending || !draft.trim()}
+          disabled={sending || uploading || (!draft.trim() && pendingCount === 0)}
           className="h-9 w-9 shrink-0 rounded-full bg-primary text-white flex items-center justify-center disabled:opacity-40"
           title={t('aiChat.chat.send')}
           aria-label={t('aiChat.chat.send')}
@@ -254,6 +428,43 @@ export const DirectChatWindow: React.FC<DirectChatWindowProps> = ({
           {sending ? <OpenSquadLoader size={14} /> : <Send size={15} />}
         </button>
       </div>
+
+      {/* 三个隐藏 input 承载 + 菜单的三个入口（文件 / 文件夹 / 图片）。 */}
+      <input
+        ref={fileInputRef}
+        type="file"
+        multiple
+        className="hidden"
+        onChange={(e) => {
+          const files = Array.from(e.target.files || []);
+          e.target.value = '';
+          void uploadSelection(files, 'file');
+        }}
+      />
+      <input
+        ref={folderInputRef}
+        type="file"
+        multiple
+        className="hidden"
+        {...({ webkitdirectory: '', directory: '' } as Record<string, string>)}
+        onChange={(e) => {
+          const files = Array.from(e.target.files || []);
+          e.target.value = '';
+          void uploadSelection(files, 'folder');
+        }}
+      />
+      <input
+        ref={imageInputRef}
+        type="file"
+        accept="image/*"
+        multiple
+        className="hidden"
+        onChange={(e) => {
+          const files = Array.from(e.target.files || []);
+          e.target.value = '';
+          void uploadSelection(files, 'image');
+        }}
+      />
     </div>
   );
 };
