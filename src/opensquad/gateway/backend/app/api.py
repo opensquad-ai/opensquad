@@ -1090,6 +1090,66 @@ async def update_group(
     return response
 
 
+@router.post("/groups/{group_id}/join-request")
+async def request_group_join(
+    group_id: str,
+    body: dict = Body(default={}),
+    current_user: User = Depends(get_current_user_dep),
+    db: AsyncSession = Depends(get_db),
+):
+    """Ask to join a private group (public groups need no approval).
+
+    Idempotent: asking twice returns the same pending request instead of stacking
+    them, so an agent that retries does not spam the owner.
+    """
+    from app.models import GroupJoinRequest
+
+    result = await db.execute(select(Group).where(Group.id == group_id))
+    group = result.scalar_one_or_none()
+    if not group:
+        raise HTTPException(status_code=404, detail="Group not found")
+    if not group.is_private:
+        raise HTTPException(
+            status_code=400,
+            detail="This group is public — just join it (POST /groups/{id}/join).",
+        )
+
+    member_check = await db.execute(
+        select(group_members).where(
+            and_(group_members.c.user_id == current_user.id, group_members.c.group_id == group_id)
+        )
+    )
+    if member_check.scalar_one_or_none():
+        raise HTTPException(status_code=400, detail="Already a member")
+
+    pending = await db.execute(
+        select(GroupJoinRequest).where(
+            and_(
+                GroupJoinRequest.group_id == group_id,
+                GroupJoinRequest.user_id == current_user.id,
+                GroupJoinRequest.status == "pending",
+            )
+        )
+    )
+    existing = pending.scalar_one_or_none()
+    if existing:
+        return {"ok": True, "request_id": existing.id, "status": "pending", "existing": True}
+
+    import uuid
+
+    request = GroupJoinRequest(
+        id=f"jr_{uuid.uuid4().hex[:12]}",
+        group_id=group_id,
+        user_id=current_user.id,
+        message=str((body or {}).get("message") or "")[:500],
+        status="pending",
+    )
+    db.add(request)
+    await db.commit()
+    _log.info(f"[Group] Join request {request.id} for {group_id} from {current_user.id}")
+    return {"ok": True, "request_id": request.id, "status": "pending", "existing": False}
+
+
 @router.post("/groups/{group_id}/join")
 async def join_group(
     group_id: str, current_user: User = Depends(get_current_user_dep), db: AsyncSession = Depends(get_db)

@@ -137,6 +137,28 @@ class Group(Base):
     pinned_message = relationship("Message", foreign_keys=[pinned_message_id], post_update=True)
 
 
+class GroupJoinRequest(Base):
+    """A pending ask to join a *private* group.
+
+    Public groups need no approval, but private ones are created private for a
+    reason, so self-join is refused — which left an agent on another machine with
+    no way in at all. This records the ask, and the group's owner decides. New
+    table, so it is created by ``create_all`` on startup; no migration involved.
+    """
+
+    __tablename__ = "group_join_requests"
+
+    id = Column(String, primary_key=True, index=True)
+    group_id = Column(String, ForeignKey("groups.id"), nullable=False, index=True)
+    user_id = Column(String, ForeignKey("users.id"), nullable=False, index=True)
+    message = Column(Text, nullable=True)
+    # pending | approved | rejected
+    status = Column(String, default="pending", index=True)
+    created_at = Column(DateTime, default=beijing_now)
+    decided_at = Column(DateTime, nullable=True)
+    decided_by = Column(String, ForeignKey("users.id"), nullable=True)
+
+
 class Message(Base):
     __tablename__ = "messages"
 
