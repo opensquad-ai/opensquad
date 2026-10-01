@@ -2053,24 +2053,6 @@ def get_approval_status(collab_id: str, approval_id: str = "") -> dict[str, Any]
         return {"status": "error", "message": str(e)}
 
 
-# Task-scoped chat: same (collab_id, kind) announces at most once per window so a
-# busy team cannot flood group chat. The board keeps every message regardless.
-_TASK_CARD_THROTTLE_SECONDS = 60.0
-_TASK_CARD_LAST: dict[tuple[str, str], float] = {}
-
-
-def _task_card_throttled(collab_id: str, kind: str) -> bool:
-    import time
-
-    key = (str(collab_id), str(kind))
-    now = time.time()
-    last = _TASK_CARD_LAST.get(key, 0.0)
-    if now - last < _TASK_CARD_THROTTLE_SECONDS:
-        return True
-    _TASK_CARD_LAST[key] = now
-    return False
-
-
 def post_task_message(
     collab_id: str,
     content: str,
@@ -2078,14 +2060,13 @@ def post_task_message(
     attachments: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """
-    [All members] Send a message about one collaboration task (team-task chat).
+    [All members] Post a message into one collaboration task (the task's own thread).
 
-    This is the task-scoped channel: agents discussing a specific team task use
-    this instead of bare group chat. The message is (1) written to the task's
-    board as a discussion item -- the task window reads the board, so it stays
-    complete -- and (2) announced in the task's group as a task-tagged card the
-    user can click to open the task window. The group announcement is throttled
-    (same collab_id + kind once per minute); the board write never is.
+    This is the task-scoped channel and it is **not** the group chat. The message
+    is written to the task's board as a discussion item; the task window — opened
+    from the collaboration card in the group — is where the user reads it, replies
+    and shares files. A task therefore behaves like a temporary group that never
+    appears in anyone's conversation list: only its card links to it.
 
     Args:
         collab_id: collaboration task id (from start_collaboration)
@@ -2106,14 +2087,11 @@ def post_task_message(
     try:
         from ..collab_approval import (
             TASK_KIND_PROGRESS,
-            build_collab_task_payload,
             normalize_task_kind,
-            post_collab_task_card,
         )
         from ..collab_board import (
             append_public_discussion,
             get_task,
-            list_participants,
         )
         from ..input_hub import input_hub
 
@@ -2127,11 +2105,8 @@ def post_task_message(
         task = get_task(task_id=collab_id)
         if not task:
             return {"status": "error", "message": f"collab task '{collab_id}' not found"}
-        extra = task.get("extra") if isinstance(task.get("extra"), dict) else {}
         task_name = str(task.get("task_name") or collab_id)
 
-        # 1. Board first: the window's discussion list is the board, not group
-        #    history (which pages and is throttled below).
         item = append_public_discussion(
             collab_id=collab_id,
             task_name=task_name,
@@ -2140,9 +2115,9 @@ def post_task_message(
             content=text,
         )
 
-        # 1b. Files/images attached to this message belong to the task itself, so
-        #     they are recorded on the board (the URL is served by the gateway,
-        #     which is what makes them visible from every machine).
+        # Files/images attached to this message belong to the task itself, so they
+        # are recorded on the board (the URL is served by the gateway, which is
+        # what makes them visible from every machine).
         attached: list[str] = []
         if attachments:
             from ..collab_board import attach_files
@@ -2159,37 +2134,17 @@ def post_task_message(
                     str((f or {}).get("name") or (f or {}).get("url") or "") for f in attachments if isinstance(f, dict)
                 ]
 
-        # 2. Announce in the task's group. No group (task created without one) =>
-        #    board only, never an error.
-        group_id = str(extra.get("group_id") or "")
-        card: dict[str, Any] | None = None
-        if group_id:
-            if _task_card_throttled(collab_id, kind_n):
-                card = {"ok": True, "throttled": True}
-            else:
-                payload = build_collab_task_payload(
-                    collab_id=collab_id,
-                    title=task_name,
-                    kind=kind_n,
-                    group_id=group_id,
-                    card=str(extra.get("card") or ""),
-                    summary=f"{agent_id}: {text}" + (f"（附件 {len(attached)} 个）" if attached else ""),
-                    participants=list_participants(collab_id=collab_id),
-                    status=str(task.get("status") or "active"),
-                    agent_id=agent_id,
-                    agent_name=agent_id,
-                )
-                card = post_collab_task_card(payload, group_id)
-        else:
-            card = {"ok": False, "error": "no group bound to this task; recorded on board only"}
-
         return {
             "status": "success",
             "collab_id": collab_id,
             "item_id": item.get("id"),
             "attachments": attached,
-            "announced": bool(card and card.get("ok") and not card.get("throttled")),
-            "card": card,
+            "thread": "task-window",
+            "hint": (
+                "Posted in the task window. Task talk stays out of the group chat "
+                "on purpose — the group only shows the collaboration card that "
+                "opens this window."
+            ),
         }
     except Exception as e:
         return {"status": "error", "message": str(e)}
