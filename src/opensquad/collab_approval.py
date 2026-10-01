@@ -390,3 +390,277 @@ def post_group_approval_card(payload: dict[str, Any], group_id: str) -> dict[str
         except Exception:
             pass
     return {"ok": True, "group_id": target, "message_id": message_id}
+
+
+# ---------------------------------------------------------------------------
+# Collaboration task cards — [[COLLAB_TASK]]{json}[[/COLLAB_TASK]]
+#
+# These announce a collaboration task (invite / assignment / progress /
+# discussion / done) as a clickable card in group chat and in DMs. Like the
+# approval cards above they ride on TEXT content (no schema change); the UI
+# parses the marker out and opens the task window keyed by ``collab_id``.
+# ---------------------------------------------------------------------------
+COLLAB_TASK_START = "[[COLLAB_TASK]]"
+COLLAB_TASK_END = "[[/COLLAB_TASK]]"
+
+_COLLAB_TASK_RE = re.compile(
+    r"\[\[COLLAB_TASK\]\]\s*(\{.*?\})\s*\[\[/COLLAB_TASK\]\]",
+    re.DOTALL,
+)
+
+TASK_KIND_INVITE = "invite"
+TASK_KIND_ASSIGN = "assign"
+TASK_KIND_PROGRESS = "progress"
+TASK_KIND_DISCUSSION = "discussion"
+TASK_KIND_DONE = "done"
+VALID_TASK_KINDS = frozenset(
+    {TASK_KIND_INVITE, TASK_KIND_ASSIGN, TASK_KIND_PROGRESS, TASK_KIND_DISCUSSION, TASK_KIND_DONE}
+)
+
+PARTICIPANT_INVITED = "invited"
+PARTICIPANT_ACCEPTED = "accepted"
+PARTICIPANT_DECLINED = "declined"
+VALID_PARTICIPANT_STATES = frozenset({PARTICIPANT_INVITED, PARTICIPANT_ACCEPTED, PARTICIPANT_DECLINED})
+
+_TASK_HEADLINES = {
+    TASK_KIND_INVITE: "🤝 协作邀请",
+    TASK_KIND_ASSIGN: "📌 任务分配",
+    TASK_KIND_PROGRESS: "📈 任务进度",
+    TASK_KIND_DISCUSSION: "💬 任务讨论",
+    TASK_KIND_DONE: "✅ 协作完成",
+}
+
+
+def new_task_card_id() -> str:
+    return f"ctask_{uuid.uuid4().hex[:12]}"
+
+
+def normalize_task_kind(kind: str) -> str:
+    k = (kind or "").strip().lower()
+    if k in VALID_TASK_KINDS:
+        return k
+    if k in ("start", "open", "join", "collab_start"):
+        return TASK_KIND_INVITE
+    if k in ("task", "assign_task", "assignment"):
+        return TASK_KIND_ASSIGN
+    if k in ("update", "status"):
+        return TASK_KIND_PROGRESS
+    if k in ("chat", "message", "talk"):
+        return TASK_KIND_DISCUSSION
+    if k in ("finish", "finished", "end", "close"):
+        return TASK_KIND_DONE
+    return TASK_KIND_DISCUSSION
+
+
+def normalize_participant_state(state: str) -> str:
+    s = (state or "").strip().lower()
+    if s in VALID_PARTICIPANT_STATES:
+        return s
+    if s in ("received", "pending", "sent", "ack"):
+        return PARTICIPANT_INVITED
+    if s in ("joined", "accept", "ok", "in"):
+        return PARTICIPANT_ACCEPTED
+    if s in ("reject", "refused", "no", "out"):
+        return PARTICIPANT_DECLINED
+    return PARTICIPANT_INVITED
+
+
+def build_collab_task_payload(
+    *,
+    collab_id: str,
+    title: str,
+    kind: str = TASK_KIND_INVITE,
+    group_id: str = "",
+    participants: list[dict[str, Any]] | None = None,
+    status: str = "open",
+    summary: str = "",
+    card: str = "",
+    card_id: str = "",
+    agent_id: str = "",
+    agent_name: str = "",
+    task_card_id: str = "",
+) -> dict[str, Any]:
+    """Payload for a collaboration-task card. ``participants`` entries are
+    ``{agent_id, name, state}`` with state in invited/accepted/declined."""
+    parts: list[dict[str, str]] = []
+    for p in participants or []:
+        if not isinstance(p, dict):
+            continue
+        aid = str(p.get("agent_id") or p.get("id") or "").strip()
+        if not aid:
+            continue
+        parts.append(
+            {
+                "agent_id": aid,
+                "name": str(p.get("name") or aid).strip(),
+                "state": normalize_participant_state(str(p.get("state") or "")),
+            }
+        )
+    return {
+        "v": 1,
+        "id": task_card_id or new_task_card_id(),
+        "kind": normalize_task_kind(kind),
+        "collab_id": (collab_id or "").strip(),
+        "title": (title or "").strip() or "协作任务",
+        "summary": (summary or "").strip(),
+        "card": (card or "").strip(),
+        "card_id": (card_id or "").strip(),
+        "group_id": group_id,
+        "status": status,
+        "participants": parts,
+        "agent_id": agent_id,
+        "agent_name": agent_name or agent_id,
+    }
+
+
+def encode_collab_task_message(payload: dict[str, Any]) -> str:
+    """Build chat TEXT content: machine marker first, then a readable fallback
+    (agents read this text too, so the task id / card / join hint stay)."""
+    kind = normalize_task_kind(str(payload.get("kind") or ""))
+    body = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+    headline = _TASK_HEADLINES.get(kind, "🤝 协作任务")
+    cid = str(payload.get("collab_id") or "")
+    lines = [
+        f"{COLLAB_TASK_START}{body}{COLLAB_TASK_END}",
+        f"{headline}：{payload.get('title') or '协作任务'}",
+        f"Task ID: {cid}",
+    ]
+    card = str(payload.get("card") or "")
+    if card:
+        lines.append(f"Collab Card: {card}")
+    parts = payload.get("participants") or []
+    if isinstance(parts, list) and parts:
+        labels = {PARTICIPANT_INVITED: "已邀请", PARTICIPANT_ACCEPTED: "已参与", PARTICIPANT_DECLINED: "已拒绝"}
+        rendered = [
+            f"{p.get('name') or p.get('agent_id')}({labels.get(str(p.get('state')), str(p.get('state')))})"
+            for p in parts
+            if isinstance(p, dict)
+        ]
+        if rendered:
+            lines.append("参与人员: " + "、".join(rendered))
+    summary = str(payload.get("summary") or "")
+    if summary:
+        lines.append(summary)
+    if kind == TASK_KIND_INVITE:
+        lines.append(
+            f'You\'re invited to join -- consider calling: join_collaboration(card="{card}", collab_id="{cid}")'
+        )
+    lines.append(f'All board updates/reads must include collab_id="{cid}"')
+    return "\n".join(lines)
+
+
+def parse_collab_task_payload(content: str) -> dict[str, Any] | None:
+    if not content or COLLAB_TASK_START not in content:
+        return None
+    m = _COLLAB_TASK_RE.search(content)
+    if not m:
+        return None
+    try:
+        data = json.loads(m.group(1))
+    except Exception:
+        return None
+    if not isinstance(data, dict) or not data.get("id") or not data.get("collab_id"):
+        return None
+    data["kind"] = normalize_task_kind(str(data.get("kind") or ""))
+    parts = data.get("participants")
+    data["participants"] = (
+        [
+            {
+                "agent_id": str(p.get("agent_id") or ""),
+                "name": str(p.get("name") or p.get("agent_id") or ""),
+                "state": normalize_participant_state(str(p.get("state") or "")),
+            }
+            for p in parts
+            if isinstance(p, dict) and (p.get("agent_id") or p.get("id"))
+        ]
+        if isinstance(parts, list)
+        else []
+    )
+    return data
+
+
+def strip_collab_task_marker(content: str) -> str:
+    """Drop only this module's own marker line, keeping the readable text."""
+    if not content or COLLAB_TASK_START not in content:
+        return content
+    return _COLLAB_TASK_RE.sub("", content).strip()
+
+
+def _rewrite_collab_task_marker(content: str, payload: dict[str, Any]) -> str:
+    new_marker = f"{COLLAB_TASK_START}{json.dumps(payload, ensure_ascii=False, separators=(',', ':'))}{COLLAB_TASK_END}"
+    return _COLLAB_TASK_RE.sub(new_marker, content, count=1)
+
+
+def patch_collab_task_status_in_content(content: str, status: str, note: str = "") -> str:
+    payload = parse_collab_task_payload(content)
+    if not payload:
+        return content
+    payload["status"] = status
+    if note:
+        payload["resolve_note"] = note
+    return _rewrite_collab_task_marker(content, payload)
+
+
+def patch_collab_task_participant_in_content(content: str, agent_id: str, state: str) -> str:
+    """Set one participant's state (invited → accepted / declined) in the marker."""
+    payload = parse_collab_task_payload(content)
+    if not payload or not agent_id:
+        return content
+    target = str(agent_id)
+    changed = False
+    for p in payload.get("participants") or []:
+        if isinstance(p, dict) and str(p.get("agent_id")) == target:
+            p["state"] = normalize_participant_state(state)
+            changed = True
+    if not changed:
+        payload.setdefault("participants", []).append(
+            {
+                "agent_id": target,
+                "name": target,
+                "state": normalize_participant_state(state),
+            }
+        )
+    return _rewrite_collab_task_marker(content, payload)
+
+
+def post_collab_task_card(payload: dict[str, Any], group_id: str) -> dict[str, Any]:
+    """Send a collaboration-task card to a group. Returns {ok, group_id, message_id}."""
+    from opensquad.bridge import bridge
+
+    if not bridge or not bridge.token:
+        return {"ok": False, "error": "Bridge not connected"}
+
+    target = group_id
+    try:
+        groups = bridge.list_groups_api() or []
+        if not any(isinstance(g, dict) and g.get("id") == group_id for g in groups):
+            for g in groups:
+                if isinstance(g, dict) and g.get("name") == group_id:
+                    target = str(g.get("id") or group_id)
+                    break
+    except Exception:
+        pass
+
+    ok = bridge.send_message(encode_collab_task_message(payload), target_id=target, target_type="group")
+    if not ok:
+        return {"ok": False, "error": "Failed to send collab-task card", "group_id": target}
+    return {"ok": True, "group_id": target, "message_id": bridge.last_sent_message_id()}
+
+
+def post_dm_collab_task_card(payload: dict[str, Any], recipient_name: str) -> dict[str, Any]:
+    """Send a collaboration-task card as a direct message (1:1 chat window)."""
+    from opensquad.bridge import bridge
+
+    if not bridge or not bridge.token:
+        return {"ok": False, "error": "Bridge not connected"}
+    if not (recipient_name or "").strip():
+        return {"ok": False, "error": "recipient_name is required"}
+
+    ok = bridge.send_message(
+        encode_collab_task_message(payload),
+        target_id=recipient_name.strip(),
+        target_type="dm",
+    )
+    if not ok:
+        return {"ok": False, "error": "Failed to send DM collab-task card", "recipient": recipient_name}
+    return {"ok": True, "recipient": recipient_name, "message_id": bridge.last_sent_message_id()}

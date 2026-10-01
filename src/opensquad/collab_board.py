@@ -986,6 +986,181 @@ def _notify_board_changed(
         logger.debug("EventBus not available; skipping board_changed notification", exc_info=True)
 
 
+# ---------------------------------------------------------------------------
+# Collaboration task metadata + participant state
+#
+# Stored under task["extra"] (no schema change, no migration):
+#   extra["card"]         — collab card name the team runs on
+#   extra["skills"]       — skill names the team loaded for this task
+#   extra["files"]        — files the task produced / touches
+#   extra["participants"] — {agent_id: {name, state, invited_at, responded_at}}
+# ---------------------------------------------------------------------------
+def get_task(*, task_id: str) -> dict[str, Any] | None:
+    """Return a task record, or None when it does not exist."""
+    if not task_id:
+        return None
+    with _board_lock():
+        tasks = _read_tasks()
+    return next((t for t in tasks if str(t.get("task_id", "")) == str(task_id)), None)
+
+
+def _mutate_task_extra(collab_id: str, mutate) -> dict[str, Any]:
+    """Apply ``mutate`` to a copy of the task's extra dict and persist it."""
+    if not collab_id:
+        return {}
+    try:
+        with _board_lock():
+            tasks = _read_tasks()
+            idx = next((i for i, t in enumerate(tasks) if str(t.get("task_id", "")) == str(collab_id)), -1)
+            if idx < 0:
+                return {}
+            rec = dict(tasks[idx])
+            extra = rec.get("extra")
+            extra = dict(extra) if isinstance(extra, dict) else {}
+            mutate(extra)
+            rec["extra"] = extra
+            rec["updated_at"] = _now_iso()
+            rec["board_rev"] = int(rec.get("board_rev") or 0) + 1
+            tasks[idx] = rec
+            _write_tasks(tasks)
+            new_rev = int(rec["board_rev"])
+    except Exception:
+        logger.debug("Failed to update task extra for %s", collab_id, exc_info=True)
+        return {}
+    _notify_board_changed(collab_id, board_rev=new_rev, reason="task_extra", item_type="task_meta", item_key="")
+    return rec
+
+
+def set_card_and_skills(
+    *,
+    collab_id: str,
+    card: str = "",
+    skills: list[str] | None = None,
+    files: list[str] | None = None,
+) -> dict[str, Any]:
+    """Record which collab card + skills (+ produced files) this task runs on."""
+
+    def _apply(extra: dict[str, Any]) -> None:
+        if card:
+            extra["card"] = str(card)
+        if skills:
+            merged = [str(s) for s in (extra.get("skills") or []) if str(s)]
+            for s in skills:
+                s = str(s).strip()
+                if s and s not in merged:
+                    merged.append(s)
+            extra["skills"] = merged
+        if files:
+            merged_f = [str(f) for f in (extra.get("files") or []) if str(f)]
+            for f in files:
+                f = str(f).strip()
+                if f and f not in merged_f:
+                    merged_f.append(f)
+            extra["files"] = merged_f
+
+    return _mutate_task_extra(collab_id, _apply)
+
+
+def mark_participant(*, collab_id: str, agent_id: str, state: str, name: str = "") -> dict[str, Any]:
+    """Record a participant's invite state: invited / accepted / declined."""
+    aid = (agent_id or "").strip()
+    if not aid:
+        return {}
+    st = (state or "").strip().lower()
+    if st not in ("invited", "accepted", "declined"):
+        st = "invited"
+    now = _now_iso()
+
+    def _apply(extra: dict[str, Any]) -> None:
+        parts = extra.get("participants")
+        parts = dict(parts) if isinstance(parts, dict) else {}
+        cur = parts.get(aid)
+        cur = dict(cur) if isinstance(cur, dict) else {}
+        cur["name"] = (name or cur.get("name") or aid).strip()
+        cur["state"] = st
+        if st == "invited":
+            cur.setdefault("invited_at", now)
+        else:
+            cur["responded_at"] = now
+            cur.setdefault("invited_at", now)
+        parts[aid] = cur
+        extra["participants"] = parts
+
+    return _mutate_task_extra(collab_id, _apply)
+
+
+def list_participants(*, collab_id: str) -> list[dict[str, Any]]:
+    """Participants in insertion order (invited first), for card rendering."""
+    task = get_task(task_id=collab_id)
+    if not task:
+        return []
+    extra = task.get("extra")
+    parts = extra.get("participants") if isinstance(extra, dict) else None
+    if not isinstance(parts, dict):
+        return []
+    out = []
+    for aid, rec in parts.items():
+        rec = rec if isinstance(rec, dict) else {}
+        out.append(
+            {
+                "agent_id": str(aid),
+                "name": str(rec.get("name") or aid),
+                "state": str(rec.get("state") or "invited"),
+                "invited_at": rec.get("invited_at"),
+                "responded_at": rec.get("responded_at"),
+            }
+        )
+    out.sort(key=lambda p: (0 if p["state"] == "invited" else 1, str(p.get("invited_at") or "")))
+    return out
+
+
+_SUMMARY_ITEM_TYPES = (
+    "requirement",
+    "requirement_doc",
+    "plan",
+    "task",
+    "status",
+    "discussion",
+    "change_request",
+    "approval",
+)
+
+
+def board_summary(*, collab_id: str) -> dict[str, Any]:
+    """Everything the single-task window needs, in one call."""
+    if not collab_id:
+        raise ValueError("collab_id(task_id) is required")
+    task = get_task(task_id=collab_id) or {}
+    extra = task.get("extra") if isinstance(task.get("extra"), dict) else {}
+    items = list_items(collab_id=collab_id)
+    grouped: dict[str, list[dict[str, Any]]] = {t: [] for t in _SUMMARY_ITEM_TYPES}
+    for it in items:
+        grouped.setdefault(str(it.get("item_type") or ""), []).append(it)
+    # Discussion reads chronologically; documents read oldest-first too.
+    for bucket in grouped.values():
+        bucket.sort(key=lambda i: str(i.get("created_at") or i.get("updated_at") or ""))
+    files: list[str] = [str(f) for f in (extra.get("files") or []) if str(f)]
+    for it in grouped.get("task", []):
+        scope = (it.get("extra") or {}).get("file_scope") if isinstance(it.get("extra"), dict) else ""
+        for f in str(scope or "").split(","):
+            f = f.strip()
+            if f and f not in files:
+                files.append(f)
+    return {
+        "collab_id": collab_id,
+        "task": task,
+        "title": task.get("task_name") or collab_id,
+        "status": task.get("status") or "",
+        "progress": task.get("progress") or 0,
+        "board_rev": task.get("board_rev") or 0,
+        "card": str(extra.get("card") or ""),
+        "skills": [str(s) for s in (extra.get("skills") or []) if str(s)],
+        "files": files,
+        "participants": list_participants(collab_id=collab_id),
+        "items": grouped,
+    }
+
+
 # Run WAL replay on module import — recovers data from any uncommitted WAL entries
 # that were written before a crash. Must be at end of file so all helpers are defined.
 _wal_replay()
