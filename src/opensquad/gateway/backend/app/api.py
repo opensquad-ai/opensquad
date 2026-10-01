@@ -1090,6 +1090,110 @@ async def update_group(
     return response
 
 
+@router.get("/groups/{group_id}/join-requests")
+async def list_group_join_requests(
+    group_id: str,
+    current_user: User = Depends(get_current_user_dep),
+    db: AsyncSession = Depends(get_db),
+):
+    """Pending asks on a group. Any member may review them; outsiders may not even look."""
+    from app.models import GroupJoinRequest
+
+    group = (await db.execute(select(Group).where(Group.id == group_id))).scalar_one_or_none()
+    if not group:
+        raise HTTPException(status_code=404, detail="Group not found")
+
+    member = (
+        await db.execute(
+            select(group_members).where(
+                and_(group_members.c.user_id == current_user.id, group_members.c.group_id == group_id)
+            )
+        )
+    ).scalar_one_or_none()
+    if not member:
+        raise HTTPException(status_code=403, detail="Only group members can review join requests")
+
+    rows = (
+        (
+            await db.execute(
+                select(GroupJoinRequest)
+                .where(and_(GroupJoinRequest.group_id == group_id, GroupJoinRequest.status == "pending"))
+                .order_by(GroupJoinRequest.created_at)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    return {
+        "count": len(rows),
+        "requests": [
+            {
+                "id": r.id,
+                "user_id": r.user_id,
+                "message": r.message or "",
+                "created_at": r.created_at.isoformat() if getattr(r, "created_at", None) else "",
+            }
+            for r in rows
+        ],
+    }
+
+
+@router.post("/groups/{group_id}/join-requests/{request_id}")
+async def decide_group_join_request(
+    group_id: str,
+    request_id: str,
+    body: dict = Body(default={}),
+    current_user: User = Depends(get_current_user_dep),
+    db: AsyncSession = Depends(get_db),
+):
+    """Approve or reject a pending ask; approving writes the membership.
+
+    Owner-only, the same rule the add-member endpoint uses — a private group is
+    the owner's call.
+    """
+    from app.models import GroupJoinRequest, utc_now
+
+    action = str((body or {}).get("action") or "").strip().lower()
+    if action not in ("approve", "reject"):
+        raise HTTPException(status_code=400, detail="action must be approve or reject")
+
+    group = (await db.execute(select(Group).where(Group.id == group_id))).scalar_one_or_none()
+    if not group:
+        raise HTTPException(status_code=404, detail="Group not found")
+    if group.created_by != current_user.id:
+        raise HTTPException(status_code=403, detail="Only the group owner can decide join requests")
+
+    request = (
+        await db.execute(
+            select(GroupJoinRequest).where(
+                and_(GroupJoinRequest.id == request_id, GroupJoinRequest.group_id == group_id)
+            )
+        )
+    ).scalar_one_or_none()
+    if not request:
+        raise HTTPException(status_code=404, detail="Join request not found")
+    if request.status != "pending":
+        raise HTTPException(status_code=409, detail=f"Join request is already {request.status}")
+
+    if action == "approve":
+        already = (
+            await db.execute(
+                select(group_members).where(
+                    and_(group_members.c.user_id == request.user_id, group_members.c.group_id == group_id)
+                )
+            )
+        ).scalar_one_or_none()
+        if not already:
+            await db.execute(group_members.insert().values(user_id=request.user_id, group_id=group_id))
+
+    request.status = "approved" if action == "approve" else "rejected"
+    request.decided_at = utc_now()
+    request.decided_by = current_user.id
+    await db.commit()
+    _log.info(f"[Group] join request {request_id} on {group_id} -> {request.status} by {current_user.id}")
+    return {"ok": True, "request_id": request_id, "status": request.status, "user_id": request.user_id}
+
+
 @router.post("/groups/{group_id}/join-request")
 async def request_group_join(
     group_id: str,
