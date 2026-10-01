@@ -241,3 +241,60 @@ def verify(token: str) -> dict | None:
 
 def has_scope(peer: dict | None, scope: str) -> bool:
     return bool(peer) and scope in tuple(peer.get("scopes") or ())
+
+
+# ── this machine's own side: which hosts it is paired with ─────────────────
+_LOCAL_FILE = "peer_tokens.json"
+
+
+def local_file() -> str:
+    from opensquad.system_config import syscfg
+
+    return os.path.join(syscfg.workspace_data_dir("node_peers"), _LOCAL_FILE)
+
+
+def _read_local() -> dict:
+    try:
+        with open(local_file(), encoding="utf-8") as fh:
+            data = json.load(fh)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _write_local(data: dict) -> None:
+    path = local_file()
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = f"{path}.tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(data, fh, ensure_ascii=False, indent=2)
+    os.replace(tmp, path)
+
+
+def save_local_peer(host: str, token: str, name: str = "") -> bool:
+    """Remember the token this machine was given by ``host``."""
+    key = str(host or "").strip().lower().rstrip("/")
+    if not key or not token:
+        return False
+    with _LOCK:
+        data = _read_local()
+        data[key] = {"host": key, "token": str(token), "name": str(name or key)[:120], "paired_at": _now()}
+        _write_local(data)
+    return True
+
+
+def load_local_peer(host: str) -> dict | None:
+    key = str(host or "").strip().lower().rstrip("/")
+    entry = _read_local().get(key)
+    return entry if isinstance(entry, dict) else None
+
+
+def forget_local_peer(host: str) -> bool:
+    key = str(host or "").strip().lower().rstrip("/")
+    with _LOCK:
+        data = _read_local()
+        if key not in data:
+            return False
+        data.pop(key)
+        _write_local(data)
+    return True
