@@ -8,9 +8,10 @@
  */
 import React, { useCallback, useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { KeyRound, ShieldCheck, Trash2 } from 'lucide-react';
+import { Check, Copy, KeyRound, ShieldCheck, Trash2 } from 'lucide-react';
 
-import { nodesAPI } from '../services/api';
+import { GATEWAY_ENDPOINT, nodesAPI } from '../services/api';
+import { buildInviteString } from '../utils/invite';
 
 interface Pending {
   id: string;
@@ -24,12 +25,31 @@ interface Peer {
   revoked: boolean;
 }
 
-export const NodePairingPanel: React.FC = () => {
+interface Props {
+  /** The gateway address the other machine should dial (from the invite panel). */
+  host?: string;
+  /** Group being viewed, so the invite and the code can be merged into one string. */
+  groupId?: string;
+}
+
+export const NodePairingPanel: React.FC<Props> = ({ host = '', groupId = '' }) => {
   const { t } = useTranslation();
   const [code, setCode] = useState('');
   const [pending, setPending] = useState<Pending[]>([]);
   const [paired, setPaired] = useState<Peer[]>([]);
   const [busy, setBusy] = useState('');
+  const [copied, setCopied] = useState(false);
+  // What the peer actually pastes: pairing needs the code, and the invite is shown
+  // in a different panel, so the operator used to assemble the two by hand — and
+  // get it wrong. Buildable only while both halves are known.
+  const codedInvite =
+    code && host.trim() && groupId
+      ? buildInviteString(host.trim(), groupId, {
+          port: GATEWAY_ENDPOINT.port,
+          secure: GATEWAY_ENDPOINT.secure,
+          code,
+        })
+      : '';
 
   const load = useCallback(async () => {
     try {
@@ -79,6 +99,30 @@ export const NodePairingPanel: React.FC = () => {
           ) : null}
         </div>
         <p className="mt-1 text-[11px] text-textMuted">{t('nodePairing.codeHint')}</p>
+        {codedInvite ? (
+          <div className="mt-2" data-testid="node-pairing-coded-invite">
+            <div className="mb-1 text-[11px] text-textMuted">{t('nodePairing.codedTitle')}</div>
+            <div className="flex items-center gap-1">
+              <code className="min-w-0 flex-1 truncate rounded-lg border border-border bg-bgLight px-2 py-1 text-[11px] text-textMain">
+                {codedInvite}
+              </code>
+              <button
+                type="button"
+                title={t('nodePairing.copy')}
+                aria-label={t('nodePairing.copy')}
+                onClick={() => {
+                  void navigator.clipboard.writeText(codedInvite);
+                  setCopied(true);
+                  window.setTimeout(() => setCopied(false), 1200);
+                }}
+                className="shrink-0 rounded-md border border-border px-1.5 py-1 text-textMuted hover:text-textMain"
+              >
+                {copied ? <Check size={13} /> : <Copy size={13} />}
+              </button>
+            </div>
+            <p className="mt-1 text-[11px] text-textMuted">{t('nodePairing.codedHint')}</p>
+          </div>
+        ) : null}
       </div>
 
       <div>

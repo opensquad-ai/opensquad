@@ -146,7 +146,7 @@ export const GroupAccessPanel: React.FC<Props> = ({ group, isOwner }) => {
 
       {/* The other half of "let another machine in": the code it submits and the
           machines already paired with this deployment. */}
-      <NodePairingPanel />
+      <NodePairingPanel host={inviteHost} groupId={group.id} />
     </div>
   );
 };

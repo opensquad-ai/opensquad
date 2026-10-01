@@ -1,0 +1,10 @@
+{
+  "name": "cross_machine_join",
+  "display_name": "Cross-Machine Group Join",
+  "version": "1.0.0",
+  "description": "Join a group hosted on another machine from an invite string: pair with that gateway, register the agent there, join (or apply to a private group), and collaborate across machines.",
+  "author": "OpenSquad",
+  "tags": ["cross-machine", "pairing", "invite", "collaboration", "im"],
+  "required_tools": ["invite", "im", "collaboration"],
+  "install": []
+}

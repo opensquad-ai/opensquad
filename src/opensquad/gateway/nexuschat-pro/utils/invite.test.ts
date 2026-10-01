@@ -53,5 +53,16 @@ describe('invite strings', () => {
     // and the operator can correct the host when it is a loopback address
     expect(panel).toContain('groupAccess.loopbackWarning');
     expect(panel).toContain('data-testid="group-invite-host"');
+    // the panel hands host + group to the pairing panel so the code can be merged
+    expect(panel).toContain('host={inviteHost}');
+    expect(panel).toContain('groupId={group.id}');
+
+    // One string to send: the pairing panel merges the invite with its code.
+    const pairing = fs.readFileSync(
+      path.resolve(__dirname, '..', 'components', 'NodePairingPanel.tsx'),
+      'utf8',
+    );
+    expect(pairing).toContain('buildInviteString(host.trim(), groupId');
+    expect(pairing).toContain('data-testid="node-pairing-coded-invite"');
   });
 });
