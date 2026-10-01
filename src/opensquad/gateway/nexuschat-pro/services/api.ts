@@ -778,6 +778,22 @@ export const searchAPI = {
 
 // ========== 私信 (Direct Messages) ==========
 
+/** 一条私信（后端 /direct-messages 的响应元素，时间戳为 epoch ms）。 */
+export interface DirectMessageItem {
+  id: string;
+  title: string;
+  content: string;
+  sender: string;
+  sender_avatar: string | null;
+  recipient: string;
+  timestamp: number;
+  is_read: boolean;
+  read_at: number | null;
+  is_sender: boolean;
+  other_party: string;
+  attachments: Array<{ url: string; type: string; name: string; size: string }>;
+}
+
 export const directMessageAPI = {
   // 发送私信
   sendDirectMessage: async (recipientName: string, title: string, content: string, attachments?: Array<{url: string, type: string, name: string, size: string}>) => {
@@ -799,6 +815,13 @@ export const directMessageAPI = {
         attachments: attachments ? JSON.stringify(attachments) : null,
       }),
     });
+  },
+
+  // 获取私信列表（可选：只取与某联系人的线程 / 按关键词搜索）
+  listThread: async (contactName: string, q?: string) => {
+    const params = new URLSearchParams({ contact_name: contactName });
+    if (q && q.trim()) params.set('q', q.trim());
+    return apiRequest<DirectMessageItem[]>(`/direct-messages?${params.toString()}`);
   },
 
   // 获取私信列表

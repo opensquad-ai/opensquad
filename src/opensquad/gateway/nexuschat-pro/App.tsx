@@ -3,6 +3,7 @@ import React, { useState, useEffect, useRef, useCallback, useMemo, Suspense } fr
 import { MessageSquare, Sun, Moon, X, Camera, Save, LogOut } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { ContactsRail } from './components/ContactsRail';
+import { DirectChatWindow } from './components/DirectChatWindow';
 import { ChatWindow } from './components/ChatWindow';
 import { RightPanel } from './components/RightPanel';
 import { AuthScreen } from './components/AuthScreen';
@@ -164,6 +165,40 @@ const App: React.FC = () => {
     window.addEventListener('opensquad-ui-mode-changed', onUiMode as EventListener);
     return () => window.removeEventListener('opensquad-ui-mode-changed', onUiMode as EventListener);
   }, []);
+
+  // 聊天版面里选中的联系人（一对一私信）。address 是对方的 IM User.name ——
+  // 它由群成员表解析而来，绝不能按 dir_name 推导（真实部署里
+  // ` investigator@ai` 的显示名是「调查员」，与目录名毫无关系）。
+  const [dmContact, setDmContact] = useState<{ name: string; label: string; avatar: string | null } | null>(null);
+  /** agent_id → IM 显示名，来自默认协作群成员（含全部 @ai agent）。 */
+  const agentImNamesRef = useRef<Record<string, string>>({});
+  const agentImAvatarsRef = useRef<Record<string, string | null>>({});
+
+  const resolveDmContact = useCallback(
+    async (agentId: string) => {
+      const label = agentId;
+      try {
+        if (Object.keys(agentImNamesRef.current).length === 0) {
+          const g = await groupAPI.getGroup('g-default');
+          for (const m of g.members || []) {
+            if (m.is_agent && m.agent_id) {
+              agentImNamesRef.current[m.agent_id] = m.name;
+              agentImAvatarsRef.current[m.agent_id] = m.avatar ?? null;
+            }
+          }
+        }
+        const name = agentImNamesRef.current[agentId];
+        if (!name) {
+          alert(t('aiChat.chat.dmNoAccount', { agent: label, defaultValue: label }));
+          return;
+        }
+        setDmContact({ name, label: name, avatar: agentImAvatarsRef.current[agentId] ?? null });
+      } catch {
+        alert(t('aiChat.chat.dmNoAccount', { agent: label, defaultValue: label }));
+      }
+    },
+    [t],
+  );
 
   const openAgentChat = useCallback((agentId: string) => {
     const raw = (agentId || '').trim();
@@ -1430,8 +1465,11 @@ const App: React.FC = () => {
               chatUi
               isOpen
               activeGroupId={state.activeGroupId}
-              onSelectGroup={(id) => void handleSelectGroup(id)}
-              onPickAgent={(agentId) => openAgentChat(agentId)}
+              onSelectGroup={(id) => {
+                setDmContact(null);
+                void handleSelectGroup(id);
+              }}
+              onPickAgent={(agentId) => void resolveDmContact(agentId)}
               onUiModeChange={(mode) => {
                 window.dispatchEvent(new CustomEvent('opensquad-chat-ui-request', { detail: { chatUi: false, uiMode: mode } }));
                 setCurrentView('ai-chat');
@@ -1456,8 +1494,16 @@ const App: React.FC = () => {
               onOpenSettings={handleOpenSettings}
             />
           </div>
-          <div className={`${!state.activeGroupId ? 'hidden md:flex' : 'flex'} flex-1 h-full min-w-0`}>
-            {activeGroup ? (
+          <div className={`${!state.activeGroupId && !dmContact ? 'hidden md:flex' : 'flex'} flex-1 h-full min-w-0`}>
+            {dmContact ? (
+              <DirectChatWindow
+                key={`dm-${dmContact.name}`}
+                contactName={dmContact.name}
+                contactLabel={dmContact.label}
+                contactAvatar={dmContact.avatar}
+                currentUser={currentUser}
+              />
+            ) : activeGroup ? (
               <ChatWindow
                 // NOTE: deliberately no `key={activeGroup.id}`. Remounting the
                 // window on every switch threw away all group-scoped UI state
