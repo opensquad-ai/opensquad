@@ -912,6 +912,7 @@
       "dmLoadFailed": "Could not load direct messages",
       "dmEmpty": "No direct messages yet — send one to start",
       "dmPlaceholder": "Send a direct message…",
+      "loadEarlier": "Scroll up for earlier messages",
       "send": "Send",
       "searchHistoryPlaceholder": "Search history",
       "searchHistoryHint": "Type a keyword to search this agent's past sessions",

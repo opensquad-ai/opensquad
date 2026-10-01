@@ -817,10 +817,14 @@ export const directMessageAPI = {
     });
   },
 
-  // 获取私信列表（可选：只取与某联系人的线程 / 按关键词搜索）
-  listThread: async (contactName: string, q?: string) => {
+  // 获取私信列表（可选：只取与某联系人的线程 / 关键词 / 分页）
+  listThread: async (contactName: string, q?: string, page?: { limit?: number; offset?: number }) => {
     const params = new URLSearchParams({ contact_name: contactName });
     if (q && q.trim()) params.set('q', q.trim());
+    if (page?.limit) {
+      params.set('limit', String(page.limit));
+      params.set('offset', String(page.offset ?? 0));
+    }
     return apiRequest<DirectMessageItem[]>(`/direct-messages?${params.toString()}`);
   },
 

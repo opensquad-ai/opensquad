@@ -2576,6 +2576,8 @@ async def get_direct_messages(
     filter_type: str = "all",
     q: str | None = None,
     contact_name: str | None = None,
+    limit: int = 0,
+    offset: int = 0,
     current_user: User = Depends(get_current_user_dep),
     db: AsyncSession = Depends(get_db),
 ):
@@ -2611,6 +2613,12 @@ async def get_direct_messages(
         query = query.where(DirectMessage.content.ilike(f"%{q}%"))
 
     query = query.order_by(desc(DirectMessage.timestamp))
+
+    # Newest-first paging for a long thread: `offset` walks backwards from the
+    # newest entry. `limit=0` (the default) keeps the old "everything" response
+    # the notification panel relies on.
+    if limit and limit > 0:
+        query = query.offset(max(0, offset)).limit(min(limit, 200))
 
     # Fetch all message IDs first, then batch query
     res = await db.execute(query)

@@ -27,6 +27,8 @@ export interface DirectChatWindowProps {
   onBack?: () => void;
 }
 
+/** 一页私信条数；滚动到顶再往前取一页。 */
+const PAGE_SIZE = 50;
 /** 兜底轮询：正常情况靠 `websocket_message` 即时增量，这里只防丢事件。 */
 const POLL_MS = 20000;
 
@@ -42,8 +44,13 @@ export const DirectChatWindow: React.FC<DirectChatWindowProps> = ({
   const [error, setError] = useState(false);
   const [draft, setDraft] = useState('');
   const [sending, setSending] = useState(false);
+  const [hasMore, setHasMore] = useState(false);
+  const [loadingOlder, setLoadingOlder] = useState(false);
   const endRef = useRef<HTMLDivElement>(null);
+  const scrollerRef = useRef<HTMLDivElement>(null);
   const seqRef = useRef(0);
+  const messagesRef = useRef<DirectMessageItem[]>([]);
+  messagesRef.current = messages;
 
   const load = useCallback(
     async (silent = false) => {
@@ -51,10 +58,12 @@ export const DirectChatWindow: React.FC<DirectChatWindowProps> = ({
       const seq = (seqRef.current += 1);
       if (!silent) setLoading(true);
       try {
-        const list = await directMessageAPI.listThread(contactName);
+        // 只取最新一页；更早的按需往前翻（长线程不再一次性拉全）。
+        const list = await directMessageAPI.listThread(contactName, undefined, { limit: PAGE_SIZE });
         if (seq !== seqRef.current) return;
         // 后端按时间倒序返回；气泡从上到下要正序。
         setMessages([...list].sort((a, b) => a.timestamp - b.timestamp));
+        setHasMore(list.length >= PAGE_SIZE);
         setError(false);
       } catch {
         if (seq === seqRef.current) setError(true);
@@ -64,6 +73,31 @@ export const DirectChatWindow: React.FC<DirectChatWindowProps> = ({
     },
     [contactName],
   );
+
+  /** 往前取一页更早的私信，并把滚动位置固定在原处（不跳）。 */
+  const loadOlder = useCallback(async () => {
+    if (!contactName || loadingOlder || !hasMore) return;
+    setLoadingOlder(true);
+    const el = scrollerRef.current;
+    const prevHeight = el?.scrollHeight ?? 0;
+    try {
+      const older = await directMessageAPI.listThread(contactName, undefined, {
+        limit: PAGE_SIZE,
+        offset: messagesRef.current.length,
+      });
+      const seen = new Set(messagesRef.current.map((m) => m.id));
+      const add = older.filter((m) => !seen.has(m.id));
+      setHasMore(older.length >= PAGE_SIZE);
+      if (add.length) setMessages((prev) => [...add].sort((a, b) => a.timestamp - b.timestamp).concat(prev));
+      requestAnimationFrame(() => {
+        if (el) el.scrollTop = el.scrollHeight - prevHeight;
+      });
+    } catch {
+      /* 保留已渲染的内容 */
+    } finally {
+      setLoadingOlder(false);
+    }
+  }, [contactName, hasMore, loadingOlder]);
 
   useEffect(() => {
     setMessages([]);
@@ -146,7 +180,19 @@ export const DirectChatWindow: React.FC<DirectChatWindowProps> = ({
         <span className="min-w-0 flex-1 truncate text-sm font-bold text-textMain">{contactLabel}</span>
       </div>
 
-      <div className="flex-1 min-h-0 overflow-y-auto px-3 sm:px-4 py-3">
+      <div
+        ref={scrollerRef}
+        onScroll={() => {
+          const el = scrollerRef.current;
+          if (el && el.scrollTop <= 40) void loadOlder();
+        }}
+        className="flex-1 min-h-0 overflow-y-auto px-3 sm:px-4 py-3"
+      >
+        {hasMore || loadingOlder ? (
+          <div className="pb-2 text-center text-[11px] text-textMuted">
+            {loadingOlder ? t('common.loading') : t('aiChat.chat.loadEarlier')}
+          </div>
+        ) : null}
         {loading && messages.length === 0 ? (
           <div className="h-40 flex items-center justify-center">
             <OpenSquadLoader size={28} />

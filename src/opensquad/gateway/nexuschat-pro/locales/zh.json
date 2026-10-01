@@ -912,6 +912,7 @@
       "dmLoadFailed": "私信加载失败",
       "dmEmpty": "还没有私信记录，发一条开始吧",
       "dmPlaceholder": "发送私信…",
+      "loadEarlier": "上滑加载更早的私信",
       "send": "发送",
       "searchHistoryPlaceholder": "搜索历史消息",
       "searchHistoryHint": "输入关键词，搜索这个智能体的历史会话",
