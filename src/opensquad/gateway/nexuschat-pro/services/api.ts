@@ -2359,6 +2359,32 @@ export interface CollabBoardSummary {
   items: Record<string, CollabBoardItem[]>;
 }
 
+export const nodesAPI = {
+  /** Show a short-lived pairing code for another machine to submit. */
+  startPairing: () => apiRequest<{ code: string; expires_in: number }>('/node/pair/code', { method: 'POST' }),
+
+  /** Machines waiting to be let in. */
+  listPairingRequests: () =>
+    apiRequest<{ requests: { id: string; name: string; requested_at: number }[] }>('/node/pair/requests'),
+
+  /** Approve mints the peer's scoped token; reject closes the ask. */
+  decidePairing: (requestId: string, action: 'approve' | 'reject') =>
+    apiRequest<{ ok: boolean; status: string; peer_id?: string; token?: string; scopes?: string[] }>(
+      `/node/pair/${encodeURIComponent(requestId)}/decide`,
+      { method: 'POST', body: JSON.stringify({ action }) },
+    ),
+
+  /** Machines already paired with this deployment. */
+  listPeers: () =>
+    apiRequest<{
+      peers: { id: string; name: string; scopes: string[]; created_at: number; revoked: boolean }[];
+    }>('/node/peers'),
+
+  /** Cut a machine off; its token stops working immediately. */
+  revokePeer: (peerId: string) =>
+    apiRequest<{ ok: boolean; peer_id: string }>(`/node/peers/${encodeURIComponent(peerId)}`, { method: 'DELETE' }),
+};
+
 export const groupsAPI = {
   /** Pending asks to join a private group (members only). */
   listJoinRequests: (groupId: string) =>

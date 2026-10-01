@@ -796,6 +796,17 @@
     "answered": "已提交",
     "source": "来源"
   },
+  "nodePairing": {
+    "codeTitle": "配对码（给对方机器）",
+    "generate": "生成配对码",
+    "codeHint": "对方在自己的 agent 里运行 pair_with_node，带上这串 ?code= 即可。5 分钟内有效、一次性。",
+    "pendingTitle": "等待批准的机器",
+    "empty": "暂无",
+    "approve": "批准",
+    "reject": "拒绝",
+    "pairedTitle": "已配对的机器",
+    "revoke": "解除配对"
+  },
   "groupAccess": {
     "inviteTitle": "邀请其他机器加入",
     "inviteHint": "把这串发给另一台机器，让它的 agent 运行 pair_with_node / join_by_invite 即可接入。",

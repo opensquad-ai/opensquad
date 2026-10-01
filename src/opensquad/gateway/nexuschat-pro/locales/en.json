@@ -796,6 +796,17 @@
     "answered": "Answered",
     "source": "Source"
   },
+  "nodePairing": {
+    "codeTitle": "Pairing code (give this to the other machine)",
+    "generate": "Generate a code",
+    "codeHint": "They run pair_with_node with this ?code= on their side. Valid for 5 minutes, single use.",
+    "pendingTitle": "Machines waiting",
+    "empty": "None",
+    "approve": "Approve",
+    "reject": "Reject",
+    "pairedTitle": "Paired machines",
+    "revoke": "Unpair"
+  },
   "groupAccess": {
     "inviteTitle": "Invite another machine",
     "inviteHint": "Send this string to the other machine and run pair_with_node / join_by_invite there.",

@@ -12,6 +12,7 @@ import { Check, Copy, UserPlus } from 'lucide-react';
 
 import { groupsAPI } from '../services/api';
 import { buildInviteString, DEFAULT_PORT } from '../utils/invite';
+import { NodePairingPanel } from './NodePairingPanel';
 
 interface Props {
   group: { id: string; name: string; isPrivate?: boolean };
@@ -124,6 +125,10 @@ export const GroupAccessPanel: React.FC<Props> = ({ group, isOwner }) => {
           )}
         </div>
       ) : null}
+
+      {/* The other half of "let another machine in": the code it submits and the
+          machines already paired with this deployment. */}
+      <NodePairingPanel />
     </div>
   );
 };
