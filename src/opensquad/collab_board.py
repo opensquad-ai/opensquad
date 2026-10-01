@@ -1363,11 +1363,22 @@ def _remote_call(op: str, args: tuple, kwargs: dict) -> Any:
         secret = syscfg.node_secret()
     except Exception:
         secret = ""
+    headers = {"Content-Type": "application/json", "X-Node-Secret": secret or ""}
+    # A paired machine does not hold this gateway's node_secret: it authenticates
+    # with the scoped token it was given for that host (opensquad.node_peers).
+    try:
+        from opensquad import node_peers
+
+        peer = node_peers.load_local_peer(base)
+        if peer and peer.get("token"):
+            headers["X-Node-Token"] = str(peer["token"])
+    except Exception:
+        pass
     payload = json.dumps({"op": op, "args": list(args), "kwargs": kwargs}).encode("utf-8")
     req = urllib.request.Request(
         f"{base}{_BOARD_AGENT_PATH}",
         data=payload,
-        headers={"Content-Type": "application/json", "X-Node-Secret": secret or ""},
+        headers=headers,
         method="POST",
     )
     try:

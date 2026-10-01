@@ -156,6 +156,17 @@ class ChatProBridge:
                     or f"{_os.environ.get('COMPUTERNAME') or _os.environ.get('HOSTNAME') or 'node'}"
                     f"-{self.agent_name or self.email}"
                 ).strip()
+                reg_headers = self._internal_headers()
+                try:
+                    from opensquad import node_peers
+
+                    peer = node_peers.load_local_peer(self.base_url)
+                    if peer and peer.get("token"):
+                        # A paired machine registers with its scoped token instead
+                        # of holding this gateway's node_secret.
+                        reg_headers = {**reg_headers, "X-Node-Token": str(peer["token"])}
+                except Exception:
+                    pass
                 reg = self._session.post(
                     f"{self.base_url}/api/auth/register",
                     json={
@@ -164,7 +175,7 @@ class ChatProBridge:
                         "name": self.agent_name,
                         "agent_uid": node_uid,
                     },
-                    headers=self._internal_headers(),
+                    headers=reg_headers,
                     timeout=5,
                 )
                 if reg.status_code in (200, 201):
