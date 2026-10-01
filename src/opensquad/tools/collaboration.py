@@ -153,6 +153,38 @@ def start_collaboration(
     except Exception as e:
         logger.warning(f"[Collab] Failed to create task id: {e}")
 
+    # 3b. Record the card + activated skills, and mark invitees as invited so the
+    # invite card and the task window can show who was asked and who joined.
+    if isinstance(task_rec, dict) and task_rec.get("task_id"):
+        try:
+            from ..collab_board import mark_participant, set_card_and_skills
+
+            _skills = [f"collab_{card}"]
+            try:
+                for _s in _skill_loader.get_loaded_skills():
+                    if _s.name not in _skills:
+                        _skills.append(_s.name)
+                    if len(_skills) >= 20:
+                        break
+            except Exception:
+                pass
+            set_card_and_skills(collab_id=task_rec["task_id"], card=card, skills=_skills)
+
+            for m in members or []:
+                _name = m
+                _cfg_path = os.path.join(_agents_dir(), m, "config.json")
+                if os.path.exists(_cfg_path):
+                    try:
+                        from opensquad.json_cache import load_json_cached
+
+                        _cfg = load_json_cached(_cfg_path)
+                        _name = str((_cfg or {}).get("agent_name") or m)
+                    except Exception:
+                        _name = m
+                mark_participant(collab_id=task_rec["task_id"], agent_id=m, state="invited", name=_name)
+        except Exception as e:
+            logger.warning(f"[Collab] Failed to record card/participants: {e}")
+
     # 4. Optionally send group chat invitation to members
     im_result = None
     if not members:
@@ -201,7 +233,36 @@ def start_collaboration(
                         if isinstance(g, dict) and g.get("name") == group_id:
                             target = g.get("id", group_id)
                             break
-                bridge.send_message(invite_msg, target_id=target, target_type="group")
+                # Announce as a clickable collaboration card: marker + the same
+                # readable text as before, so agents read what they always read.
+                try:
+                    import json as _json
+
+                    from ..collab_approval import (
+                        COLLAB_TASK_END,
+                        COLLAB_TASK_START,
+                        build_collab_task_payload,
+                    )
+                    from ..collab_board import list_participants
+
+                    _cid = str(_task_id)
+                    _payload = build_collab_task_payload(
+                        collab_id=_cid,
+                        title=project_name or card,
+                        kind="invite",
+                        group_id=str(target),
+                        card=card,
+                        summary=project_description or "",
+                        participants=list_participants(collab_id=_cid) if _cid != "(pending)" else [],
+                    )
+                    _marker = (
+                        f"{COLLAB_TASK_START}"
+                        f"{_json.dumps(_payload, ensure_ascii=False, separators=(',', ':'))}"
+                        f"{COLLAB_TASK_END}"
+                    )
+                    bridge.send_message(f"{_marker}\n{invite_msg}", target_id=target, target_type="group")
+                except Exception:
+                    bridge.send_message(invite_msg, target_id=target, target_type="group")
                 im_result = f"Invitation sent to group {target}"
 
                 # Store group info in task metadata for later use (e.g. assign_task notifications)
@@ -376,6 +437,13 @@ def join_collaboration(card: str, collab_id: str = "") -> dict[str, Any]:
             _agent_dir = input_hub.agent_dir or ""
             _agent_id = os.path.basename(_agent_dir) if _agent_dir else "unknown_agent"
             update_task(task_id=collab_id, add_member=_agent_id)
+            try:
+                from ..collab_board import mark_participant, set_card_and_skills
+
+                set_card_and_skills(collab_id=collab_id, card=card, skills=[f"collab_{card}"])
+                mark_participant(collab_id=collab_id, agent_id=_agent_id, state="accepted")
+            except Exception:
+                pass
             join_tracking = f"joined task {collab_id}"
         except Exception as e:
             join_tracking = f"join tracking failed: {e}"
@@ -833,6 +901,25 @@ def assign_task(
                             f"Subtasks:\n{_sub_lines}"
                         )
                         bridge.send_message(_assign_msg, target_id=_group_id, target_type="group")
+                        try:
+                            from ..collab_approval import build_collab_task_payload, post_collab_task_card
+                            from ..collab_board import list_participants
+
+                            post_collab_task_card(
+                                build_collab_task_payload(
+                                    collab_id=collab_id,
+                                    title=task_name,
+                                    kind="assign",
+                                    group_id=str(_group_id),
+                                    summary=f"@{worker_id} · {len(subtask_records)} subtasks",
+                                    participants=list_participants(collab_id=collab_id),
+                                    agent_id=worker_id,
+                                    agent_name=worker_id,
+                                ),
+                                str(_group_id),
+                            )
+                        except Exception:
+                            pass
         except Exception:
             pass
 
@@ -1941,6 +2028,118 @@ def get_approval_status(collab_id: str, approval_id: str = "") -> dict[str, Any]
                 for i in approvals
             ],
             "count": len(approvals),
+        }
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+
+# Task-scoped chat: same (collab_id, kind) announces at most once per window so a
+# busy team cannot flood group chat. The board keeps every message regardless.
+_TASK_CARD_THROTTLE_SECONDS = 60.0
+_TASK_CARD_LAST: dict[tuple[str, str], float] = {}
+
+
+def _task_card_throttled(collab_id: str, kind: str) -> bool:
+    import time
+
+    key = (str(collab_id), str(kind))
+    now = time.time()
+    last = _TASK_CARD_LAST.get(key, 0.0)
+    if now - last < _TASK_CARD_THROTTLE_SECONDS:
+        return True
+    _TASK_CARD_LAST[key] = now
+    return False
+
+
+def post_task_message(collab_id: str, content: str, kind: str = "discussion") -> dict[str, Any]:
+    """
+    [All members] Send a message about one collaboration task (team-task chat).
+
+    This is the task-scoped channel: agents discussing a specific team task use
+    this instead of bare group chat. The message is (1) written to the task's
+    board as a discussion item -- the task window reads the board, so it stays
+    complete -- and (2) announced in the task's group as a task-tagged card the
+    user can click to open the task window. The group announcement is throttled
+    (same collab_id + kind once per minute); the board write never is.
+
+    Args:
+        collab_id: collaboration task id (from start_collaboration)
+        content: the message body
+        kind: 'discussion' (default) or 'progress'
+    """
+    text = (content or "").strip()
+    if not text:
+        return {"status": "error", "message": "content is required"}
+    if not collab_id:
+        return {"status": "error", "message": "collab_id is required"}
+
+    try:
+        from ..collab_approval import (
+            TASK_KIND_PROGRESS,
+            build_collab_task_payload,
+            normalize_task_kind,
+            post_collab_task_card,
+        )
+        from ..collab_board import (
+            append_public_discussion,
+            get_task,
+            list_participants,
+        )
+        from ..input_hub import input_hub
+
+        kind_n = normalize_task_kind(kind)
+        if kind_n not in ("discussion", TASK_KIND_PROGRESS):
+            kind_n = "discussion"
+
+        agent_dir = input_hub.agent_dir or ""
+        agent_id = os.path.basename(agent_dir) if agent_dir else "unknown_agent"
+
+        task = get_task(task_id=collab_id)
+        if not task:
+            return {"status": "error", "message": f"collab task '{collab_id}' not found"}
+        extra = task.get("extra") if isinstance(task.get("extra"), dict) else {}
+        task_name = str(task.get("task_name") or collab_id)
+
+        # 1. Board first: the window's discussion list is the board, not group
+        #    history (which pages and is throttled below).
+        item = append_public_discussion(
+            collab_id=collab_id,
+            task_name=task_name,
+            author_agent_id=agent_id,
+            title="Task progress" if kind_n == TASK_KIND_PROGRESS else "Task discussion",
+            content=text,
+        )
+
+        # 2. Announce in the task's group. No group (task created without one) =>
+        #    board only, never an error.
+        group_id = str(extra.get("group_id") or "")
+        card: dict[str, Any] | None = None
+        if group_id:
+            if _task_card_throttled(collab_id, kind_n):
+                card = {"ok": True, "throttled": True}
+            else:
+                payload = build_collab_task_payload(
+                    collab_id=collab_id,
+                    title=task_name,
+                    kind=kind_n,
+                    group_id=group_id,
+                    card=str(extra.get("card") or ""),
+                    summary=f"{agent_id}: {text}",
+                    participants=list_participants(collab_id=collab_id),
+                    status=str(task.get("status") or "active"),
+                    agent_id=agent_id,
+                    agent_name=agent_id,
+                )
+                card = post_collab_task_card(payload, group_id)
+        else:
+            card = {"ok": False, "error": "no group bound to this task; recorded on board only"}
+
+        return {
+            "status": "success",
+            "collab_id": collab_id,
+            "item_id": item.get("id"),
+            "announced": bool(card and card.get("ok") and not card.get("throttled")),
+            "card": card,
         }
     except Exception as e:
         return {"status": "error", "message": str(e)}
