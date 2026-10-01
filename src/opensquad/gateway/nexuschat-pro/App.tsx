@@ -148,24 +148,9 @@ const App: React.FC = () => {
     return saved ? [saved] : [];
   });
 
-  // 聊天（通讯录）版面：Agent 管理页在这一版面下是联系人列表而不是运维工作台。
-  // AIChatPage 是该开关的唯一所有者（localStorage + host prefs），这里只镜像它
-  // 通过事件广播出来的值。
-  const [chatUi, setChatUi] = useState<boolean>(() => {
-    try {
-      return localStorage.getItem('ai_chat_ui') === '1';
-    } catch {
-      return false;
-    }
-  });
-  useEffect(() => {
-    const onUiMode = (e: any) => {
-      const on = e?.detail?.chatUi;
-      if (typeof on === 'boolean') setChatUi(on);
-    };
-    window.addEventListener('opensquad-ui-mode-changed', onUiMode as EventListener);
-    return () => window.removeEventListener('opensquad-ui-mode-changed', onUiMode as EventListener);
-  }, []);
+  // 聊天（通讯录）版面 = 群聊视图本身。Agent 管理页在这一版面下是联系人列表
+  // 而不是运维工作台。
+  const chatUi = currentView === 'chat';
 
   // 聊天版面里选中的联系人（一对一私信）。address 是对方的 IM User.name ——
   // 它由群成员表解析而来，绝不能按 dir_name 推导（真实部署里
@@ -1476,11 +1461,11 @@ const App: React.FC = () => {
               }}
               onPickAgent={(agentId) => void resolveDmContact(agentId)}
               onUiModeChange={(mode) => {
-                window.dispatchEvent(new CustomEvent('opensquad-chat-ui-request', { detail: { chatUi: false, uiMode: mode } }));
+                window.dispatchEvent(new CustomEvent('opensquad-chat-ui-request', { detail: { uiMode: mode } }));
                 setCurrentView('ai-chat');
               }}
               onChatUiChange={(on) => {
-                window.dispatchEvent(new CustomEvent('opensquad-chat-ui-request', { detail: { chatUi: on } }));
+                // 关掉＝回 agent-web；开是当前视图本身，无需处理。
                 if (!on) setCurrentView('ai-chat');
               }}
               railActions={

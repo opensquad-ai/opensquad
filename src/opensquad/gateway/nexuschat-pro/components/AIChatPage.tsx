@@ -203,8 +203,6 @@ import { SoloContextFooter } from './ai-chat/SoloContextFooter';
 import { PlanBlock, PlanStep, parsePlanContent } from './ai-chat/PlanBlock';
 import { StatusBadge, AgentStatus } from './ai-chat/StatusBadge';
 import { SessionSidebar } from './ai-chat/SessionSidebar';
-import { ContactsRail } from './ContactsRail';
-import { ChatDetailDrawer } from './ai-chat/ChatDetailDrawer';
 import { type UiMode } from './ai-chat/UiModeSwitch';
 import { agentStatusOf } from '../utils/agentStatus';
 import { AgentSwitcherDialog } from './ai-chat/AgentSwitcherDialog';
@@ -1119,9 +1117,8 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     [displayTimeline, shellStreams],
   );
 
-  // 版面：Work(classic) | Code(solo)。聊天是**另一套整个 Web 版面**（通讯录 +
-  // 聊天窗口），所以它是独立开关 chatUi，而不是第三个 uiMode —— 点聊天时左边
-  // 的会话列表整体换成通讯录，点回去恢复。
+  // 版面：Work(classic) | Code(solo)。「聊天」不在这里 —— 它换掉整个 Web 版面
+  // （通讯录外壳，见 App），所以它只切换视图，不改变本页的任何渲染分支。
   type AiChatUiMode = UiMode;
   const [uiMode, setUiMode] = useState<AiChatUiMode>(() => {
     try {
@@ -1132,18 +1129,6 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     }
   });
   const isSolo = uiMode === 'solo';
-  const [chatUi, setChatUi] = useState<boolean>(() => {
-    try {
-      return localStorage.getItem('ai_chat_ui') === '1';
-    } catch {
-      return false;
-    }
-  });
-  /** 聊天版面：通讯录左栏 + 只有对话的聊天窗口。 */
-  const isChat = chatUi;
-  /** 详细抽屉（聊天模式右键栏）：文件 + 历史搜索。 */
-  const [chatDetailOpen, setChatDetailOpen] = useState(false);
-  const [chatDetailWidth, setChatDetailWidth] = useState(360);
   // Both render modes put visualization iframes below the reply — solo used to
   // skip the index entirely, which silently dropped every HTML embed there.
   const htmlEmbedsByAssistantIndex = useMemo(
@@ -1153,56 +1138,29 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
   const setUiModePersisted = useCallback((mode: AiChatUiMode) => {
     setUiMode(mode);
     try { localStorage.setItem('ai_chat_ui_mode', mode); } catch {}
-    // 切到 Work/Code 就是离开聊天版面。
-    setChatUi(false);
-    try { localStorage.setItem('ai_chat_ui', '0'); } catch {}
-    // App 镜像这个状态来决定 Agent 管理页的形态（通讯录 / 工作台）。
-    window.dispatchEvent(new CustomEvent('opensquad-ui-mode-changed', { detail: { uiMode: mode, chatUi: false } }));
+    // App 镜像版面（也用来决定 Agent 管理页的形态）。
+    window.dispatchEvent(new CustomEvent('opensquad-ui-mode-changed', { detail: { uiMode: mode } }));
     void import('../utils/hostUiPrefs').then((m) => m.schedulePushHostUiPrefs()).catch(() => undefined);
   }, []);
 
-  const setChatUiPersisted = useCallback((on: boolean) => {
-    setChatUi(on);
-    try { localStorage.setItem('ai_chat_ui', on ? '1' : '0'); } catch {}
-    window.dispatchEvent(new CustomEvent('opensquad-ui-mode-changed', { detail: { uiMode: uiMode, chatUi: on } }));
-    void import('../utils/hostUiPrefs').then((m) => m.schedulePushHostUiPrefs()).catch(() => undefined);
-  }, [uiMode]);
-
-  // 群聊版面的左栏与本页共用同一个开关，但它不是状态的所有者 —— 只能发请求事件。
+  // 群聊外壳的 rail 与本页共用同一个「Work/Code」开关，但它不是状态所有者 ——
+  // 只发请求事件，由这里落到 localStorage + host prefs。
   useEffect(() => {
     const onRequest = (e: any) => {
-      const on = e?.detail?.chatUi;
       const mode = e?.detail?.uiMode;
       if (mode === 'classic' || mode === 'solo') setUiModePersisted(mode);
-      if (typeof on === 'boolean') setChatUiPersisted(on);
     };
     window.addEventListener('opensquad-chat-ui-request', onRequest as EventListener);
     return () => window.removeEventListener('opensquad-chat-ui-request', onRequest as EventListener);
-  }, [setUiModePersisted, setChatUiPersisted]);
+  }, [setUiModePersisted]);
 
-  // 「聊天」开关不再在 agent-web 里换版面：它离开 agent-web，进 App 的通讯录外壳
-  // （群聊侧那一套：左栏 ContactsRail，右栏群窗口 / agent 私信窗口）。
-  // 聊天版面在这里还剩一个可渲染的旧分支，靠始终 setChatUi(false) 保证不再进入。
-  const goToMessenger = useCallback(
-    (on: boolean) => {
-      if (on) {
-        window.dispatchEvent(new CustomEvent('switchView', { detail: 'chat' }));
-      }
-      setChatUiPersisted(false);
-    },
-    [setChatUiPersisted],
-  );
-
-  // 聊天模式没有工作区/资料库那一套：切进来时收起右栏与内嵌管理页，
-  // 切走时收起「详细」抽屉。否则从 Code 切过去会带着一个 project rail。
-  useEffect(() => {
-    if (isChat) {
-      setFilesPanelOpen(false);
-      setLibraryView(null);
-    } else {
-      setChatDetailOpen(false);
-    }
-  }, [isChat]);
+  // 「聊天」开关：离开 agent-web，进 App 的通讯录外壳（左栏通讯录，右栏群窗口 /
+  // agent 私信窗口）。这里不留任何版面分支 —— 只有一个入口。
+  const goToMessenger = useCallback((on: boolean) => {
+    if (!on) return;
+    try { localStorage.removeItem('ai_chat_ui'); } catch { /* ignore */ }
+    window.dispatchEvent(new CustomEvent('switchView', { detail: 'chat' }));
+  }, []);
 
   // Document column for both classic + solo (classic: user bubble + agent doc stream)
   const soloColumnClass = CHAT_DOCUMENT_COLUMN_CLASS;
@@ -4846,8 +4804,6 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
           columnClass={soloColumnClass}
           userName={currentUser?.name || undefined}
           agentName={agentProfile?.agent_name || undefined}
-          messagesOnly={isChat}
-          agentAvatar={resolveChatAvatar(agentProfile?.chat_profile)}
           canWithdraw={!changesBusy}
           onLoadEarlier={() => loadMoreHistory(sessionId)}
           loadEarlierEnabled={
@@ -4887,9 +4843,8 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
         landing={isSessionComposerLanding(sessionId)}
         disabled={isLoadingSession || (!sessionBootstrapped && !composerLandingSessionsRef.current.has(sessionId))}
         busy={isSessionBusy(sessionId)}
-        simple={isChat}
         terminalsPanel={
-          !isChat && runningShellJobs.length > 0 ? (
+          runningShellJobs.length > 0 ? (
             <ShellTerminalsBar
               jobs={runningShellJobs}
               onStopJob={(job) => {
@@ -4910,7 +4865,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
         }}
         approvalPanel={(() => {
           // 聊天模式不弹工程师审批卡（模式切换 / 选项）：那是 Work/Code 的交互。
-          if (isChat || focusedPaneId !== paneId) return null;
+          if (focusedPaneId !== paneId) return null;
           const pendingModes = modeApprovals.filter((a) => a.status === 'pending');
           const pendingOptions = optionsProposals.filter((p) => p.status === 'pending');
           if (pendingModes.length === 0 && pendingOptions.length === 0) {
@@ -5125,7 +5080,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
         onMouthpieceUtterance={handleMouthpieceUtterance}
         onForceAskAgentChange={handleForceAskAgentChange}
         planPanel={
-          !isChat && sessionId === currentSessionId && effectivePlanSteps.length > 0 ? (
+          sessionId === currentSessionId && effectivePlanSteps.length > 0 ? (
             <PlanBlock
               steps={effectivePlanSteps}
               defaultOpen={false}
@@ -5539,30 +5494,6 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
             : 'relative z-0 h-full flex-shrink-0'
         }
       >
-      {isChat ? (
-      <ContactsRail
-        uiMode={uiMode}
-        onUiModeChange={setUiModePersisted}
-        chatUi={chatUi}
-        isOpen={sessionSidebarOpen}
-        activeAgentId={agentId}
-        currentUser={currentUser}
-        onOpenProfile={onOpenProfile}
-        onOpenSettings={onOpenSettings}
-        onChatUiChange={goToMessenger}
-        railActions={
-          <button
-            type="button"
-            onClick={() => setChatDetailOpen(true)}
-            className="rounded-lg p-1.5 text-textMuted hover:bg-primary/10 hover:text-textMain"
-            title={t('aiChat.chat.detail')}
-            aria-label={t('aiChat.chat.detail')}
-          >
-            <Bot size={16} strokeWidth={1.75} />
-          </button>
-        }
-      />
-      ) : (
       <SessionSidebar
         agentId={agentId}
         currentSessionId={sidebarSelectedSessionId}
@@ -5600,13 +5531,12 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
         onSessionsChange={handleSessionsChange}
         uiMode={uiMode}
         onUiModeChange={setUiModePersisted}
-        chatUi={chatUi}
+        chatUi={false}
         onChatUiChange={goToMessenger}
         currentUser={currentUser}
         onOpenProfile={onOpenProfile}
         onOpenSettings={onOpenSettings}
       />
-      )}
       </div>
 
       <SessionSearchModal
@@ -5702,21 +5632,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
                   <PanelLeftOpen size={16} className="text-textMuted" />
                 )}
               </button>
-              <div className={`flex min-w-0 items-center gap-1.5 ${isChat ? 'max-w-[240px] sm:max-w-[320px]' : 'max-w-[120px] sm:max-w-[180px]'}`}>
-                {isChat ? (
-                  <img
-                    src={resolveChatAvatar(agentProfile?.chat_profile) || getLocalAvatarFallback(agentId, agentProfile?.agent_name || agentId)}
-                    alt=""
-                    className="h-7 w-7 shrink-0 rounded-full object-cover bg-border"
-                    loading="lazy"
-                    onError={(e) => {
-                      const img = e.currentTarget;
-                      if (img.dataset.fallbackApplied) return;
-                      img.dataset.fallbackApplied = '1';
-                      img.src = getLocalAvatarFallback(agentId, agentProfile?.agent_name || agentId);
-                    }}
-                  />
-                ) : null}
+              <div className="flex min-w-0 max-w-[120px] sm:max-w-[180px] items-center gap-1.5">
                 <StatusBadge status={agentStatus} />
                 <h2 className="min-w-0 truncate text-sm font-bold leading-none text-textMain">
                   {agentProfile?.agent_name || modelName || agentId}
@@ -5730,50 +5646,35 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
             </div>
 
             <div className="flex-1 min-w-0 overflow-visible self-stretch flex items-end">
-              {!isChat ? (
-                <WorkspaceTabBar
-                  workspaces={wsSnap.workspaces}
-                  openIds={wsSnap.chrome.openWorkspaceIds}
-                  activeId={wsSnap.chrome.activeWorkspaceId}
-                  onSelect={handleSelectWorkspace}
-                  onRequestClose={(id) => {
-                    const ws = wsSnap.workspaces.find((w) => w.id === id);
-                    if (ws) setCloseWorkspaceTarget(ws);
-                  }}
-                  onOpenExisting={handleOpenExistingWorkspace}
-                  onCreateNew={() => setCreateWorkspaceOpen(true)}
-                />
-              ) : null}
+              <WorkspaceTabBar
+                workspaces={wsSnap.workspaces}
+                openIds={wsSnap.chrome.openWorkspaceIds}
+                activeId={wsSnap.chrome.activeWorkspaceId}
+                onSelect={handleSelectWorkspace}
+                onRequestClose={(id) => {
+                  const ws = wsSnap.workspaces.find((w) => w.id === id);
+                  if (ws) setCloseWorkspaceTarget(ws);
+                }}
+                onOpenExisting={handleOpenExistingWorkspace}
+                onCreateNew={() => setCreateWorkspaceOpen(true)}
+              />
             </div>
 
             <div className="flex h-8 items-center gap-0.5 sm:gap-1 shrink-0">
-              {isChat ? (
-                <button
-                  type="button"
-                  onClick={() => setChatDetailOpen((v) => !v)}
-                  className={`px-2 py-1 rounded-lg text-[12px] transition-colors flex-shrink-0 ${
-                    chatDetailOpen ? 'bg-primary/15 text-primary' : 'text-textMuted hover:bg-primary/10 hover:text-textMain'
-                  }`}
-                  title={t('aiChat.chat.detailHint')}
-                >
-                  {t('aiChat.chat.detail')}
-                </button>
-              ) : (
-                <button
-                  type="button"
-                  onClick={toggleFilesPanel}
-                  className={`p-1 sm:p-1.5 rounded-lg transition-colors flex-shrink-0 ${
-                    filesPanelOpen ? 'bg-primary/15 hover:bg-primary/20' : 'hover:bg-primary/10'
-                  }`}
-                  title={filesPanelOpen ? 'Hide project files' : 'Show project files'}
-                >
-                  {filesPanelOpen ? (
-                    <PanelRightClose size={16} className="text-primary" />
-                  ) : (
-                    <PanelRightOpen size={16} className="text-textMuted" />
-                  )}
-                </button>
-              )}
+              <button
+                type="button"
+                onClick={toggleFilesPanel}
+                className={`p-1 sm:p-1.5 rounded-lg transition-colors flex-shrink-0 ${
+                  filesPanelOpen ? 'bg-primary/15 hover:bg-primary/20' : 'hover:bg-primary/10'
+                }`}
+                title={filesPanelOpen ? 'Hide project files' : 'Show project files'}
+              >
+                {filesPanelOpen ? (
+                  <PanelRightClose size={16} className="text-primary" />
+                ) : (
+                  <PanelRightOpen size={16} className="text-textMuted" />
+                )}
+              </button>
             </div>
           </div>
         </div>
@@ -5807,7 +5708,6 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
           fileDirtyMap={fileDirtyMap}
           onResizeSplit={handleResizeSplit}
           handlers={{ makePaneHandlers }}
-          hideTabBar={isChat}
           renderChatSlot={(slotPaneId) => (
       /* Main Chat Area — live messages only (agent chrome is above the split) */
       <div className="flex-1 flex flex-col h-full min-w-0">
@@ -5877,27 +5777,24 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
               content={displayStreamingText}
               isComplete={!isStreaming}
               avatarSrc={resolveChatAvatar(agentProfile?.chat_profile) ?? undefined}
-              variant={isChat ? 'messenger' : 'classic'}
+              variant="classic"
               // 流式文本前若是工作流组，名字已在工作流上方显示，避免重复。
               // 中间渲染为 null 的 `prompt` 条目要跨过（见 previousRenderedEntryKind）。
-              // 聊天版面没有工作流，签名必须留着当联系人名字。
               senderName={
-                !isChat && previousRenderedEntryKind(displayTimeline, displayTimeline.length) === 'workflow'
+                previousRenderedEntryKind(displayTimeline, displayTimeline.length) === 'workflow'
                   ? undefined
                   : agentProfile?.agent_name
               }
               // 只传 undefined 不够 —— 组件会退化成兜底文案「Agent」。
               hideSenderLabel={
-                !isChat
-                && previousRenderedEntryKind(displayTimeline, displayTimeline.length) === 'workflow'
+                previousRenderedEntryKind(displayTimeline, displayTimeline.length) === 'workflow'
               }
             />
           )}
           {/* 对话后续预期：贴在「最终输出」末尾，而不是输入框上方。
               仅在回合结束后出现（流式/进行中一律不渲染），因此新的工具流或
               新的消息输出一旦开始，它就先被隐藏、随后由 hook 清空。 */}
-          {!isChat
-            && followupSuggestions.length > 0
+          {followupSuggestions.length > 0
             && currentSessionId
             && !displayStreamingText
             && !isSessionBusy(currentSessionId) && (
@@ -5922,18 +5819,12 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
             </>
           )}
           renderEntry={(entry, i, entryKey, revealStyle) => {
-            // 聊天模式只画对话本身：工具流、状态提示、计划、任务折叠全部收起。
-            // 这是「像通讯软件一样聊天」的核心 —— 过程属于 Work/Code。
-            if (isChat && entry.kind !== 'message') return null;
             const lockLayout =
               i >= displayTimeline.length - 8
               || (entry.kind === 'workflow' && !entry.data.completed);
             if (entry.kind === 'message') {
               const msgProps = {
                 message: entry.data,
-                // 聊天版面：两边都是气泡（像通讯软件），Work/Code 仍是原来的
-                // 「用户右气泡 + agent 文档流」。
-                variant: isChat ? 'messenger' as const : 'classic' as const,
                 senderName:
                   entry.data.role === 'user'
                     ? (currentUser?.name || undefined)
@@ -5944,8 +5835,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
                 // 中间的 `prompt` 条目渲染为 null，判定要跨过它们，否则刷新后
                 // [workflow][prompt][message] 会在同一条回复上方出现第二个名字。
                 hideSenderLabel:
-                  !isChat
-                  && entry.data.role === 'assistant'
+                  entry.data.role === 'assistant'
                   && previousRenderedEntryKind(displayTimeline, i) === 'workflow',
                 senderAvatar:
                   entry.data.role === 'user'
@@ -5961,16 +5851,15 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
                     : undefined,
               };
               // Files created/modified by the workflow that produced this reply
-              // (shown below the reply once the turn completes). 聊天模式没有
-              // 工作流，也就没有「本次改动」卡片。
+              // (shown below the reply once the turn completes).
               const turnChangedFiles =
-                !isChat && entry.data.role === 'assistant'
+                entry.data.role === 'assistant'
                   ? collectTurnChangedFilesBefore(displayTimeline, i)
                   : [];
               // Visualization iframes sit below the reply (the tool stream keeps
               // the normal tool_call row only) — in classic *and* solo.
               const replyEmbeds: HtmlEmbedPayload[] =
-                !isChat && entry.data.role === 'assistant'
+                entry.data.role === 'assistant'
                   ? (htmlEmbedsByAssistantIndex?.get(i) ?? [])
                   : [];
               const turnFilesCard =
@@ -6333,22 +6222,6 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
       </div>
       </div>
 
-      {isChat ? (
-        <ChatDetailDrawer
-          open={chatDetailOpen}
-          onClose={() => setChatDetailOpen(false)}
-          agentId={agentId}
-          fsAgentId={agentProfile?.dir_name || agentId}
-          agentName={agentProfile?.agent_name || agentId}
-          avatar={resolveChatAvatar(agentProfile?.chat_profile)}
-          status={agentProfile ? agentStatusOf(agentProfile) : (agentStatus as string)}
-          dirName={agentProfile?.dir_name}
-          rootPath={(activeWorkspace?.rootPath || agentCwd || defaultCwd || '').trim()}
-          width={chatDetailWidth}
-          onWidthChange={setChatDetailWidth}
-          onOpenFile={handleOpenFileInTab}
-        />
-      ) : (
       <div
         className={
           isCompactLayout
@@ -6389,7 +6262,6 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
         uiMode={uiMode === 'solo' ? 'solo' : 'classic'}
       />
       </div>
-      )}
       </>
       )}
       </div>

@@ -47,9 +47,9 @@ describe('L1 对话渲染不再按 UI 模式分叉', () => {
     }
   });
 
-  it('流式消息只按版面取 classic / messenger，不按 Work/Code 分叉', () => {
+  it('流式消息固定 classic 变体', () => {
     expect(PAGE).not.toMatch(/variant=\{isSolo/);
-    expect(PAGE).toMatch(/variant=\{isChat \? 'messenger' : 'classic'\}/);
+    expect(PAGE).toMatch(/variant="classic"/);
   });
 });
 
