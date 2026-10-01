@@ -85,6 +85,9 @@ describe('C2 左栏 = 唯一的通讯录（群聊 + 智能体，没有会话列�
     expect(RAIL).toMatch(/opensquad-create-group/);
     expect(RAIL).toMatch(/t\('aiChat\.chat\.joinGroup'\)/);
     expect(RAIL).toMatch(/t\('aiChat\.chat\.createGroup'\)/);
+    // 面板要留在应用里（浏览器原生 prompt 又生硬又不跟主题）。
+    expect(RAIL).not.toMatch(/window\.prompt/);
+    expect(RAIL).toMatch(/data-testid="contacts-rail-group-prompt"/);
   });
 
   it('通讯录点 agent / 群聊各自走事件桥', () => {

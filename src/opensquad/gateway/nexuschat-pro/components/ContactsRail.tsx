@@ -65,6 +65,9 @@ export const ContactsRail: React.FC<ContactsRailProps> = ({
   const { t } = useTranslation();
   const { agents, groups, loading, reload } = useChatContacts({ enabled: isOpen });
   const [groupFilter, setGroupFilter] = useState('');
+  /** 加群 / 创建群的小面板：留在 rail 里，用应用的样式，不用浏览器原生 prompt。 */
+  const [groupPrompt, setGroupPrompt] = useState<null | 'join' | 'create'>(null);
+  const [groupPromptValue, setGroupPromptValue] = useState('');
 
   const { mounted: softMounted, visible: softVisible } = useSoftPresence(isOpen, SOFT_PRESENCE_MS);
 
@@ -120,16 +123,26 @@ export const ContactsRail: React.FC<ContactsRailProps> = ({
   );
 
   const requestJoinGroup = useCallback(() => {
-    const id = window.prompt(t('aiChat.chat.joinGroupPrompt'))?.trim();
-    if (!id) return;
-    window.dispatchEvent(new CustomEvent('opensquad-join-group', { detail: { groupId: id } }));
-  }, [t]);
+    setGroupPromptValue('');
+    setGroupPrompt('join');
+  }, []);
 
   const requestCreateGroup = useCallback(() => {
-    const name = window.prompt(t('aiChat.chat.createGroupPrompt'))?.trim();
-    if (!name) return;
-    window.dispatchEvent(new CustomEvent('opensquad-create-group', { detail: { name } }));
-  }, [t]);
+    setGroupPromptValue('');
+    setGroupPrompt('create');
+  }, []);
+
+  const submitGroupPrompt = useCallback(() => {
+    const value = groupPromptValue.trim();
+    if (!value) return;
+    if (groupPrompt === 'join') {
+      window.dispatchEvent(new CustomEvent('opensquad-join-group', { detail: { groupId: value } }));
+    } else if (groupPrompt === 'create') {
+      window.dispatchEvent(new CustomEvent('opensquad-create-group', { detail: { name: value } }));
+    }
+    setGroupPrompt(null);
+    setGroupPromptValue('');
+  }, [groupPrompt, groupPromptValue]);
 
   if (!softMounted) return null;
 
@@ -184,6 +197,43 @@ export const ContactsRail: React.FC<ContactsRailProps> = ({
             <RefreshCw size={13} className={loading ? 'animate-spin' : undefined} />
           </button>
         </div>
+
+        {groupPrompt ? (
+          <div className="px-2 pt-2 shrink-0" data-testid="contacts-rail-group-prompt">
+            <div className="rounded-xl border border-border bg-panel p-2 shadow-sm">
+              <div className="px-0.5 pb-1.5 text-[11px] text-textMuted">
+                {groupPrompt === 'join' ? t('aiChat.chat.joinGroupPrompt') : t('aiChat.chat.createGroupPrompt')}
+              </div>
+              <input
+                autoFocus
+                value={groupPromptValue}
+                onChange={(e) => setGroupPromptValue(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') submitGroupPrompt();
+                  if (e.key === 'Escape') setGroupPrompt(null);
+                }}
+                className="w-full rounded-lg border border-border bg-bgLight px-2 py-1.5 text-[12px] text-textMain outline-none focus:border-primary/40"
+              />
+              <div className="mt-1.5 flex items-center justify-end gap-1">
+                <button
+                  type="button"
+                  onClick={() => setGroupPrompt(null)}
+                  className="rounded-md px-2 py-1 text-[11px] text-textMuted hover:bg-black/[0.05] dark:hover:bg-white/10"
+                >
+                  {t('common.cancel')}
+                </button>
+                <button
+                  type="button"
+                  onClick={submitGroupPrompt}
+                  disabled={!groupPromptValue.trim()}
+                  className="rounded-md bg-primary px-2.5 py-1 text-[11px] font-medium text-white disabled:opacity-40"
+                >
+                  {t('common.confirm')}
+                </button>
+              </div>
+            </div>
+          </div>
+        ) : null}
 
         <div className="flex-1 min-h-0 overflow-y-auto os-depth-nest os-depth-nest--flush">
           <div className="px-3 pt-2 pb-1 flex items-center gap-2">
