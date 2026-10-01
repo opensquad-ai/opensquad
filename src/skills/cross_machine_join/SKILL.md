@@ -36,16 +36,22 @@ revoke it.
 
 ## What this does and does not do
 
-- **Outbound works**: join a group there, and collaborate in a task there (the task
-  board is owned by the host gateway and calls are forwarded, authorised by the peer
-  token).
+- **Outbound works**: pairing, and joining a group there with an account registered
+  there.
+- **Task-board forwarding needs one more thing today**: the board is routed by this
+  agent's chat bridge (`collab_board` forwards only when ``group_chat.base_url``
+  points off this machine, or ``collab_board.url`` is set). Repointing that is exactly
+  what pairing no longer does, so a collaboration task on a paired machine currently
+  lands on the LOCAL board unless ``collab_board.url`` is set for it.
 - **Inbound is not available yet**: a paired gateway is reached with a bridge that
   holds no WebSocket, so **messages sent to that group do not arrive here**. Do not
   promise otherwise.
 
 So: when the user needs this agent to *receive and answer* on that machine, the
 supported arrangement is **one agent per machine** — a dedicated agent living there
-(or a second agent for that gateway), not this one swinging its bridge across.
+(or a second agent for that gateway), not this one swinging its bridge across. A
+dedicated agent also gets the board routing right for free, because its own bridge
+belongs to that machine.
 
 ## When not to use this
 
@@ -116,9 +122,12 @@ peer's bridge. Nothing is repointed either way.
 2. If they expect **messages from that group to arrive here**, say plainly that this
    agent does not receive from a paired machine yet, and offer the arrangement that
    does: a dedicated agent on that machine.
-3. For a collaboration task, work normally: `start_collaboration` / `assign_task` /
-   `post_task_message` for that group — the board is owned by the host gateway and
-   the calls are forwarded there.
+3. For a collaboration task, check the board routing before promising it works:
+   `collab_board` forwards to another machine only when this agent's chat bridge
+   points off this machine, or `collab_board.url` is set. On a **paired** machine
+   neither is true by default, so either set `collab_board.url` for that board, or
+   tell the user the honest answer: a dedicated agent on that machine is the
+   arrangement that works end to end today.
 
 ## Failure modes → what to do
 
