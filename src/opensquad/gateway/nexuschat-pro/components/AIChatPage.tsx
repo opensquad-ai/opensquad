@@ -23,6 +23,7 @@ import {
   RefreshCw,
   Clock,
   Reply, Pencil, Trash2,
+  Bot,
 } from 'lucide-react';
 
 import { useTranslation } from 'react-i18next';
@@ -202,7 +203,7 @@ import { SoloContextFooter } from './ai-chat/SoloContextFooter';
 import { PlanBlock, PlanStep, parsePlanContent } from './ai-chat/PlanBlock';
 import { StatusBadge, AgentStatus } from './ai-chat/StatusBadge';
 import { SessionSidebar } from './ai-chat/SessionSidebar';
-import { ChatModeSidebar } from './ai-chat/ChatModeSidebar';
+import { ContactsRail } from './ContactsRail';
 import { ChatDetailDrawer } from './ai-chat/ChatDetailDrawer';
 import { type UiMode } from './ai-chat/UiModeSwitch';
 import { agentStatusOf } from '../utils/agentStatus';
@@ -1166,6 +1167,18 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     window.dispatchEvent(new CustomEvent('opensquad-ui-mode-changed', { detail: { uiMode: uiMode, chatUi: on } }));
     void import('../utils/hostUiPrefs').then((m) => m.schedulePushHostUiPrefs()).catch(() => undefined);
   }, [uiMode]);
+
+  // 群聊版面的左栏与本页共用同一个开关，但它不是状态的所有者 —— 只能发请求事件。
+  useEffect(() => {
+    const onRequest = (e: any) => {
+      const on = e?.detail?.chatUi;
+      const mode = e?.detail?.uiMode;
+      if (mode === 'classic' || mode === 'solo') setUiModePersisted(mode);
+      if (typeof on === 'boolean') setChatUiPersisted(on);
+    };
+    window.addEventListener('opensquad-chat-ui-request', onRequest as EventListener);
+    return () => window.removeEventListener('opensquad-chat-ui-request', onRequest as EventListener);
+  }, [setUiModePersisted, setChatUiPersisted]);
 
   // 聊天模式没有工作区/资料库那一套：切进来时收起右栏与内嵌管理页，
   // 切走时收起「详细」抽屉。否则从 Code 切过去会带着一个 project rail。
@@ -5514,17 +5527,27 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
         }
       >
       {isChat ? (
-      <ChatModeSidebar
-        agentId={agentId}
+      <ContactsRail
         uiMode={uiMode}
         onUiModeChange={setUiModePersisted}
         chatUi={chatUi}
         onChatUiChange={setChatUiPersisted}
         isOpen={sessionSidebarOpen}
+        activeAgentId={agentId}
         currentUser={currentUser}
         onOpenProfile={onOpenProfile}
         onOpenSettings={onOpenSettings}
-        onOpenDetail={() => setChatDetailOpen(true)}
+        railActions={
+          <button
+            type="button"
+            onClick={() => setChatDetailOpen(true)}
+            className="rounded-lg p-1.5 text-textMuted hover:bg-primary/10 hover:text-textMain"
+            title={t('aiChat.chat.detail')}
+            aria-label={t('aiChat.chat.detail')}
+          >
+            <Bot size={16} strokeWidth={1.75} />
+          </button>
+        }
       />
       ) : (
       <SessionSidebar

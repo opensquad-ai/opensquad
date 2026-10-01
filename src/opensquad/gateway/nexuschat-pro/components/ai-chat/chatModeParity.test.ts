@@ -21,7 +21,8 @@ const PAGE = read('components/AIChatPage.tsx');
 const PANE = read('components/ai-chat/SessionChatPane.tsx');
 const MSG_BUBBLE = read('components/ai-chat/MessageBubble.tsx');
 const MODE_SWITCH = read('components/ai-chat/UiModeSwitch.tsx');
-const RAIL = read('components/ai-chat/ChatModeSidebar.tsx');
+// 通讯录左栏现在只有一份：群聊与聊天共用（components/ContactsRail.tsx）。
+const RAIL = read('components/ContactsRail.tsx');
 const DRAWER = read('components/ai-chat/ChatDetailDrawer.tsx');
 const FILES = read('components/ai-chat/ProjectFilesPanel.tsx');
 const SIDEBAR = read('components/ai-chat/SessionSidebar.tsx');
@@ -58,9 +59,15 @@ describe('C1 聊天是一个独立版面开关，不是第三段 tab', () => {
   });
 });
 
-describe('C2 聊天模式左栏 = 通讯录（没有会话列表）', () => {
-  it('AIChatPage 在 chat 模式换掉项目会话侧栏', () => {
-    expect(PAGE).toMatch(/\{isChat \? \(\s*<ChatModeSidebar/);
+describe('C2 左栏 = 唯一的通讯录（群聊 + 智能体，没有会话列表）', () => {
+  it('AIChatPage 在聊天版面用通讯录，而不是项目会话侧栏', () => {
+    expect(PAGE).toMatch(/\{isChat \? \(\s*<ContactsRail/);
+  });
+
+  it('群聊与聊天共用同一份 rail（不再各写一份）', () => {
+    // App 的群聊版面也挂同一个组件 —— 两处渲染同一件事就是这个 feature 的教训。
+    expect(APP).toMatch(/<ContactsRail/);
+    expect(APP).not.toMatch(/<ChatList/);
   });
 
   it('左栏只列联系人：没有会话列表，也不读 session API', () => {
@@ -73,10 +80,17 @@ describe('C2 聊天模式左栏 = 通讯录（没有会话列表）', () => {
     expect(RAIL).not.toMatch(/data-testid="chat-mode-session-row"/);
   });
 
+  it('群管理入口在「通讯录 + 刷新」左边（加群 / 创建群）', () => {
+    expect(RAIL).toMatch(/opensquad-join-group/);
+    expect(RAIL).toMatch(/opensquad-create-group/);
+    expect(RAIL).toMatch(/t\('aiChat\.chat\.joinGroup'\)/);
+    expect(RAIL).toMatch(/t\('aiChat\.chat\.createGroup'\)/);
+  });
+
   it('通讯录点 agent / 群聊各自走事件桥', () => {
     expect(RAIL).toMatch(/useChatContacts/);
     // 点击 agent 走 App 的事件桥，用 agent_id 而不是目录名
-    expect(RAIL).toMatch(/detail: \{ agentId: agentIdToOpen \}/);
+    expect(RAIL).toMatch(/detail: \{ agentId \}/);
     expect(RAIL).toMatch(/opensquad-select-group/);
   });
 });

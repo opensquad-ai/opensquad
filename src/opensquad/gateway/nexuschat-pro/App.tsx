@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef, useCallback, useMemo, Suspense } fr
 
 import { MessageSquare, Sun, Moon, X, Camera, Save, LogOut } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
-import { ChatList } from './components/ChatList';
+import { ContactsRail } from './components/ContactsRail';
 import { ChatWindow } from './components/ChatWindow';
 import { RightPanel } from './components/RightPanel';
 import { AuthScreen } from './components/AuthScreen';
@@ -1282,6 +1282,25 @@ const App: React.FC = () => {
     }
   }, [handleSelectGroup, loadGroups, t]);
 
+  // 通讯录左栏的加群 / 创建群：它注册在 rail 上，事件桥回到这里执行（同一套
+  // handleJoinGroup / handleCreateGroup，群聊与聊天版面共用）。
+  useEffect(() => {
+    const onJoin = (e: any) => {
+      const groupId = e?.detail?.groupId;
+      if (typeof groupId === 'string' && groupId.trim()) void handleJoinGroup(groupId.trim());
+    };
+    const onCreate = (e: any) => {
+      const name = e?.detail?.name;
+      if (typeof name === 'string' && name.trim()) void handleCreateGroup(name.trim());
+    };
+    window.addEventListener('opensquad-join-group', onJoin as EventListener);
+    window.addEventListener('opensquad-create-group', onCreate as EventListener);
+    return () => {
+      window.removeEventListener('opensquad-join-group', onJoin as EventListener);
+      window.removeEventListener('opensquad-create-group', onCreate as EventListener);
+    };
+  }, [handleJoinGroup, handleCreateGroup]);
+
   const handleToggleGroupSound = useCallback(async (id: string) => {
     const g = state.groups.find(x => x.id === id);
     if (g) await groupAPI.updateGroup(id, { notification_sound_enabled: !g.notificationSoundEnabled });
@@ -1400,24 +1419,36 @@ const App: React.FC = () => {
               </div>
             </div>
           )}
-          <div className={`${state.activeGroupId ? 'hidden md:flex' : 'flex'} w-full md:w-80 h-full shrink-0 border-r border-border bg-bgLight`}>
-            <ChatList
-
-              groups={state.groups}
+          <div className={`${state.activeGroupId ? 'hidden md:flex' : 'flex'} shrink-0 h-full`}>
+            <ContactsRail
+              uiMode="classic"
+              chatUi
+              isOpen
               activeGroupId={state.activeGroupId}
-              onSelectGroup={handleSelectGroup}
-              onJoinGroup={handleJoinGroup}
-              onCreateGroup={handleCreateGroup}
-              onToggleGroupSound={handleToggleGroupSound}
-              lastMessages={lastMessages}
-               currentUser={currentUser}
-
-              onUpdateUser={handleUpdateUser}
-              onLogout={handleLogout}
-              onSwitchView={setCurrentView}
-              onPrefetchGroup={handlePrefetchGroup}
+              onSelectGroup={(id) => void handleSelectGroup(id)}
+              onPickAgent={(agentId) => openAgentChat(agentId)}
+              onUiModeChange={(mode) => {
+                window.dispatchEvent(new CustomEvent('opensquad-chat-ui-request', { detail: { chatUi: false, uiMode: mode } }));
+                setCurrentView('ai-chat');
+              }}
+              onChatUiChange={(on) => {
+                window.dispatchEvent(new CustomEvent('opensquad-chat-ui-request', { detail: { chatUi: on } }));
+                if (!on) setCurrentView('ai-chat');
+              }}
+              railActions={
+                <button
+                  type="button"
+                  onClick={handleLogout}
+                  className="rounded-lg p-1.5 text-textMuted hover:bg-primary/10 hover:text-textMain"
+                  title={t('nav.logout', { defaultValue: 'Logout' })}
+                  aria-label={t('nav.logout', { defaultValue: 'Logout' })}
+                >
+                  <LogOut size={16} strokeWidth={1.75} />
+                </button>
+              }
+              currentUser={currentUser}
+              onOpenProfile={handleOpenProfile}
               onOpenSettings={handleOpenSettings}
-              onOpenCollabBoard={handleOpenCollabBoard}
             />
           </div>
           <div className={`${!state.activeGroupId ? 'hidden md:flex' : 'flex'} flex-1 h-full min-w-0`}>
