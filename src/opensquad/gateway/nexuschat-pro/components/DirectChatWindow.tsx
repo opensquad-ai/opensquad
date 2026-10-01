@@ -25,6 +25,8 @@ export interface DirectChatWindowProps {
   /** 当前用户，用于气泡方向与头像。 */
   currentUser?: { id: string; name: string; avatar?: string | null } | null;
   onBack?: () => void;
+  /** 打开「详细」抽屉（文件 + 私信历史检索）。 */
+  onOpenDetail?: () => void;
 }
 
 /** 一页私信条数；滚动到顶再往前取一页。 */
@@ -37,6 +39,7 @@ export const DirectChatWindow: React.FC<DirectChatWindowProps> = ({
   contactLabel,
   contactAvatar,
   currentUser = null,
+  onOpenDetail,
 }) => {
   const { t } = useTranslation();
   const [messages, setMessages] = useState<DirectMessageItem[]>([]);
@@ -178,6 +181,16 @@ export const DirectChatWindow: React.FC<DirectChatWindowProps> = ({
           }}
         />
         <span className="min-w-0 flex-1 truncate text-sm font-bold text-textMain">{contactLabel}</span>
+        {onOpenDetail ? (
+          <button
+            type="button"
+            onClick={onOpenDetail}
+            className="shrink-0 rounded-lg px-2 py-1 text-[12px] text-textMuted hover:bg-primary/10 hover:text-textMain"
+            title={t('aiChat.chat.detailHint')}
+          >
+            {t('aiChat.chat.detail')}
+          </button>
+        ) : null}
       </div>
 
       <div

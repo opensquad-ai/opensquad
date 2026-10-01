@@ -4,6 +4,7 @@ import { MessageSquare, Sun, Moon, X, Camera, Save, LogOut } from 'lucide-react'
 import { useTranslation } from 'react-i18next';
 import { ContactsRail } from './components/ContactsRail';
 import { DirectChatWindow } from './components/DirectChatWindow';
+import { ChatDetailDrawer } from './components/ai-chat/ChatDetailDrawer';
 import { ChatWindow } from './components/ChatWindow';
 import { RightPanel } from './components/RightPanel';
 import { AuthScreen } from './components/AuthScreen';
@@ -169,7 +170,9 @@ const App: React.FC = () => {
   // 聊天版面里选中的联系人（一对一私信）。address 是对方的 IM User.name ——
   // 它由群成员表解析而来，绝不能按 dir_name 推导（真实部署里
   // ` investigator@ai` 的显示名是「调查员」，与目录名毫无关系）。
-  const [dmContact, setDmContact] = useState<{ name: string; label: string; avatar: string | null } | null>(null);
+  const [dmContact, setDmContact] = useState<{ name: string; label: string; avatar: string | null; agentId: string } | null>(null);
+  /** 私信窗口的「详细」抽屉（文件 + 私信历史）。 */
+  const [dmDetailOpen, setDmDetailOpen] = useState(false);
   /** agent_id → IM 显示名，来自默认协作群成员（含全部 @ai agent）。 */
   const agentImNamesRef = useRef<Record<string, string>>({});
   const agentImAvatarsRef = useRef<Record<string, string | null>>({});
@@ -192,7 +195,8 @@ const App: React.FC = () => {
           alert(t('aiChat.chat.dmNoAccount', { agent: label, defaultValue: label }));
           return;
         }
-        setDmContact({ name, label: name, avatar: agentImAvatarsRef.current[agentId] ?? null });
+        setDmDetailOpen(false);
+        setDmContact({ name, label: name, avatar: agentImAvatarsRef.current[agentId] ?? null, agentId });
       } catch {
         alert(t('aiChat.chat.dmNoAccount', { agent: label, defaultValue: label }));
       }
@@ -1467,6 +1471,7 @@ const App: React.FC = () => {
               activeGroupId={state.activeGroupId}
               onSelectGroup={(id) => {
                 setDmContact(null);
+                setDmDetailOpen(false);
                 void handleSelectGroup(id);
               }}
               onPickAgent={(agentId) => void resolveDmContact(agentId)}
@@ -1496,13 +1501,32 @@ const App: React.FC = () => {
           </div>
           <div className={`${!state.activeGroupId && !dmContact ? 'hidden md:flex' : 'flex'} flex-1 h-full min-w-0`}>
             {dmContact ? (
-              <DirectChatWindow
-                key={`dm-${dmContact.name}`}
-                contactName={dmContact.name}
-                contactLabel={dmContact.label}
-                contactAvatar={dmContact.avatar}
-                currentUser={currentUser}
-              />
+              <>
+                <DirectChatWindow
+                  key={`dm-${dmContact.name}`}
+                  contactName={dmContact.name}
+                  contactLabel={dmContact.label}
+                  contactAvatar={dmContact.avatar}
+                  currentUser={currentUser}
+                  onOpenDetail={() => setDmDetailOpen(true)}
+                />
+                {dmDetailOpen ? (
+                  <ChatDetailDrawer
+                    open
+                    onClose={() => setDmDetailOpen(false)}
+                    agentId={dmContact.agentId}
+                    fsAgentId={dmContact.agentId}
+                    agentName={dmContact.label}
+                    avatar={dmContact.avatar}
+                    status="running"
+                    dirName={dmContact.agentId}
+                    rootPath=""
+                    width={360}
+                    onWidthChange={() => undefined}
+                    onOpenFile={() => undefined}
+                  />
+                ) : null}
+              </>
             ) : activeGroup ? (
               <ChatWindow
                 // NOTE: deliberately no `key={activeGroup.id}`. Remounting the
