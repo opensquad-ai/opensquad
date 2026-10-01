@@ -1679,6 +1679,9 @@ export const tokenStatsAPI = {
       view: 'agent_tokens',
       agent_id: params.agentId,
       range: params.range,
+      // Minutes east of UTC, so the chart's day / hour buckets line up with the
+      // viewer's local time instead of UTC (the DB stores UTC timestamps).
+      tz_offset: String(-new Date().getTimezoneOffset()),
     });
     if (params.model) q.set('model', params.model);
     return apiRequest<AgentTokenStats>(`/ai-web/admin/plugins/token_analytics/data?${q.toString()}`);

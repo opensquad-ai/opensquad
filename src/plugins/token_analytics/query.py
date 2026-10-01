@@ -56,6 +56,33 @@ def _bucket_expr(time_range: str) -> tuple:
     return "substr(timestamp, 1, 10)", "day"
 
 
+def _agent_bucket_expr(time_range: str, tz_offset_minutes: int = 0) -> str:
+    """Bucket expression for query_agent_tokens, shifted to the caller's timezone.
+
+    ``_bucket_expr`` slices the raw UTC ISO string, so its labels and — more
+    importantly — its day/hour boundaries are UTC: a UTC+8 viewer's "day" would
+    run 08:00→08:00 local. Here the caller's UTC offset is applied first, so the
+    buckets line up with the viewer's local day / hour.
+
+    The offset is an integer, so interpolating it is injection-safe.
+    """
+    if time_range in ("1h", "6h"):
+        fmt = "%Y-%m-%dT%H:%M"
+    elif time_range == "24h":
+        fmt = "%Y-%m-%dT%H"
+    else:
+        fmt = "%Y-%m-%d"
+    return f"strftime('{fmt}', timestamp, '{int(tz_offset_minutes):+d} minutes')"
+
+
+def _clamp_tz_offset(value: Any) -> int:
+    try:
+        minutes = int(float(value))
+    except (TypeError, ValueError):
+        return 0
+    return max(-1440, min(1440, minutes))
+
+
 # CTE that materializes per-call deltas over the FULL unfiltered table.
 # Window function LAG() gives the previous row's cumul within the same
 # agent; the difference is this row's incremental token cost.
@@ -117,7 +144,9 @@ def query_data(project_root: str, params: dict) -> dict:
         view      - "agent_tokens" switches to the per-agent cache-hit / cache-miss
                     / output breakdown used by the in-chat Statistics page
                     (see query_agent_tokens); other params apply there too and a
-                    "model" param filters to a single model.
+                    "model" param filters to a single model. A "tz_offset" param
+                    (minutes east of UTC) shifts the buckets to the caller's
+                    local day / hour.
 
     Returns JSON-serializable dict.
     """
@@ -127,6 +156,7 @@ def query_data(project_root: str, params: dict) -> dict:
             time_range=params.get("range", "24h"),
             agent_id=params.get("agent_id") or "",
             model=(params.get("model") or None),
+            tz_offset_minutes=_clamp_tz_offset(params.get("tz_offset", 0)),
         )
 
     time_range = params.get("range", "24h")
@@ -307,7 +337,11 @@ def query_dashboard(
 
 
 def query_agent_tokens(
-    db_path: str, time_range: str = "24h", agent_id: str = "", model: str | None = None
+    db_path: str,
+    time_range: str = "24h",
+    agent_id: str = "",
+    model: str | None = None,
+    tz_offset_minutes: int = 0,
 ) -> dict[str, Any]:
     """Per-agent token usage split into cache-hit input, cache-miss input and
     output, bucketed by time range. Backs the in-chat Statistics page.
@@ -333,7 +367,7 @@ def query_agent_tokens(
     """
     conn = _connect(db_path, query_only=False)
     if conn is None or not agent_id:
-        return _empty_agent_tokens(db_path, time_range, agent_id, model)
+        return _empty_agent_tokens(db_path, time_range, agent_id, model, tz_offset_minutes)
 
     cutoff = _range_to_cutoff(time_range)
     params: list[Any] = [cutoff, agent_id]
@@ -356,7 +390,7 @@ def query_agent_tokens(
     lower_id = prev[0] if prev else 0
 
     try:
-        bucket_expr, _bucket_label = _bucket_expr(time_range)
+        bucket_expr = _agent_bucket_expr(time_range, tz_offset_minutes)
         # Restrict the window-function source to this agent's rows from the
         # lookback row onward. Safe because LAG() is PARTITION BY agent_id.
         deltas_cte = _DELTAS_CTE_TEMPLATE.format(
@@ -386,11 +420,14 @@ def query_agent_tokens(
             "time_range": time_range,
             "agent_id": agent_id,
             "model": model or "",
+            "tz_offset_minutes": tz_offset_minutes,
         },
     }
 
 
-def _empty_agent_tokens(db_path: str, time_range: str, agent_id: str, model: str | None) -> dict[str, Any]:
+def _empty_agent_tokens(
+    db_path: str, time_range: str, agent_id: str, model: str | None, tz_offset_minutes: int = 0
+) -> dict[str, Any]:
     return {
         "summary": {"input": 0, "output": 0, "cache_read": 0, "cache_miss": 0, "total": 0, "requests": 0},
         "timeline": [],
@@ -401,6 +438,7 @@ def _empty_agent_tokens(db_path: str, time_range: str, agent_id: str, model: str
             "time_range": time_range,
             "agent_id": agent_id,
             "model": model or "",
+            "tz_offset_minutes": tz_offset_minutes,
         },
     }
 

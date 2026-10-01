@@ -89,6 +89,30 @@ def test_splits_input_into_cache_hit_and_miss(tmp_path):
     }
 
 
+def test_tz_offset_shifts_day_buckets(tmp_path):
+    db = _make_db(tmp_path, [_row("2026-05-01T23:30:00+00:00", "a1", "m1", 100, 10, 1)])
+
+    utc = query.query_agent_tokens(db, time_range="all", agent_id="a1")
+    assert [p["bucket"] for p in utc["timeline"]] == ["2026-05-01"]
+
+    # 23:30 UTC is 07:30 the next day in UTC+8 — buckets must follow local time,
+    # otherwise a Chinese viewer's "day" runs 08:00→08:00 local.
+    local = query.query_agent_tokens(db, time_range="all", agent_id="a1", tz_offset_minutes=480)
+    assert [p["bucket"] for p in local["timeline"]] == ["2026-05-02"]
+    assert local["summary"] == utc["summary"]
+    assert local["meta"]["tz_offset_minutes"] == 480
+
+
+def test_clamp_tz_offset():
+    clamp = query._clamp_tz_offset
+    assert clamp("480") == 480
+    assert clamp(-330) == -330
+    assert clamp("nonsense") == 0
+    assert clamp(None) == 0
+    assert clamp(99999) == 1440
+    assert clamp(-99999) == -1440
+
+
 def test_window_lookback_keeps_first_row_delta_correct(tmp_path):
     now = datetime.now(timezone.utc)
     db = _make_db(
@@ -171,10 +195,14 @@ def test_query_data_dispatch_reads_workspace_db(tmp_path, monkeypatch):
     _make_db(db_dir, [_row("2026-05-05T00:00:00+00:00", "a1", "m1", 200, 20, 1, 50)])
 
     monkeypatch.setenv("OPENSQUAD_WORKSPACE", str(ws))
-    out = query.query_data(str(tmp_path / "install"), {"view": "agent_tokens", "range": "all", "agent_id": "a1"})
+    out = query.query_data(
+        str(tmp_path / "install"),
+        {"view": "agent_tokens", "range": "all", "agent_id": "a1", "tz_offset": "480"},
+    )
 
     assert out["summary"]["total"] == 220
     assert out["meta"]["agent_id"] == "a1"
+    assert out["meta"]["tz_offset_minutes"] == 480
 
     # The default (non agent_tokens) path must still be the dashboard shape.
     dashboard = query.query_data(str(tmp_path / "install"), {"range": "24h"})
