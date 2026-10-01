@@ -137,7 +137,11 @@ def register_account(email: str, password: str, name: str = "") -> dict[str, Any
 
     from opensquad.system_config import syscfg
 
-    base_url = syscfg.gateway_http()
+    # Talk to the gateway the bridge is pointed at: an agent on another machine
+    # must register its IM account on *that* gateway, not the local one.
+    from ..bridge import gateway_base_url
+
+    base_url = gateway_base_url() or syscfg.gateway_http()
     headers = {}
     secret = syscfg.node_secret() or ""
     if secret and secret not in ("YOUR_NODE_SECRET_HERE", "opensquad-gateway-simple-token"):
@@ -549,27 +553,15 @@ def get_history(group_id: str, limit: int = 20) -> dict[str, Any]:
 
             # Fix relative paths in text content (Markdown images, etc.)
             if "/uploads/" in msg["content"]:
-                # Use InputHub logic; since _fix_path handles a single path, we can do a simple regex replace.
-                # For safety, at least replace /uploads/ with the absolute path prefix.
-                # This assumes input_hub is initialized and knows agent_dir.
-                import os
+                # Uploads live with the gateway that received them: on this
+                # machine that is the workspace dir, on a remote agent it is the
+                # gateway's /uploads URL. Resolving against a local path on a
+                # remote agent would point at a file that does not exist here.
+                from ..bridge import uploads_display_prefix
 
-                # Uploads live in the writable workspace (data/uploads), NOT the
-                # install dir. In frozen mode the install dir is read-only and has
-                # no uploads/ at all, so resolving against __file__ would yield a
-                # nonexistent path and images would silently fail to render.
-                try:
-                    from ..system_config import syscfg
-
-                    uploads_abs = syscfg.workspace_uploads_dir().replace("\\", "/")
-                except Exception:
-                    # Last-resort fallback: keep old behaviour for non-syscfg envs.
-                    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-                    uploads_abs = os.path.join(project_root, "data", "uploads").replace("\\", "/")
-                # Simple replace /uploads -> C:/.../uploads
-                # Note: this does not trigger InputHub file-copy logic (set_agent_context).
-                # To copy, the full path must be parsed and _fix_path called.
-                msg["content"] = msg["content"].replace("/uploads", uploads_abs)
+                prefix = uploads_display_prefix()
+                if prefix:
+                    msg["content"] = msg["content"].replace("/uploads", prefix)
 
             # Include attachment info (images, files, etc.)
             attachments = m.get("attachments", [])

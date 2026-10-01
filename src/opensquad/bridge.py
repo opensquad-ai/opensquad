@@ -31,6 +31,53 @@ def _is_loopback(url: str) -> bool:
     return host in ("127.0.0.1", "localhost", "::1")
 
 
+def is_loopback_url(url: str) -> bool:
+    """True when ``url`` points at this machine (localhost / 127.0.0.1 / 0.0.0.0)."""
+    return _is_loopback(url)
+
+
+def gateway_base_url() -> str:
+    """The gateway this process actually talks to.
+
+    The bridge is already pointed at the agent's ``group_chat.base_url``, so an
+    agent running on another machine keeps talking to *that* gateway (IM account
+    registration, upload fetching, board operations) instead of falling back to
+    the locally configured one.
+    """
+    try:
+        base = str(getattr(bridge, "base_url", "") or "").strip()
+        if base:
+            return base.rstrip("/")
+    except Exception:
+        pass
+    try:
+        from opensquad.system_config import syscfg
+
+        return str(syscfg.gateway_http() or "").rstrip("/")
+    except Exception:
+        return ""
+
+
+def uploads_display_prefix() -> str:
+    """Prefix a ``/uploads/...`` reference should be rewritten to.
+
+    Local file directory when the gateway is this machine (uploads live in the
+    workspace here); otherwise the gateway's ``/uploads`` URL, so the reference
+    still resolves instead of pointing at a file this machine does not have.
+    """
+    local = ""
+    try:
+        from opensquad.system_config import syscfg
+
+        local = str(syscfg.workspace_uploads_dir() or "").replace("\\", "/")
+    except Exception:
+        local = ""
+    base = gateway_base_url()
+    if base and not is_loopback_url(base):
+        return f"{base}/uploads"
+    return local or (f"{base}/uploads" if base else "")
+
+
 class ChatProBridge:
     """
     ChatPro Bridge v2

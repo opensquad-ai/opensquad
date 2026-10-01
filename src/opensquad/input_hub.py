@@ -472,6 +472,45 @@ class InputHub:
             # Absolute source path (data/uploads/)
             src_abs_path = os.path.join(uploads_dir, filename)
 
+            def fetch_from_gateway() -> str:
+                """Pull the upload from the gateway that received it.
+
+                Uploads are stored on the machine running the gateway. When this
+                agent runs elsewhere there is no shared filesystem, so the file is
+                downloaded over HTTP and cached in the local uploads dir. Returns
+                the local path, or "" when it cannot be retrieved.
+                """
+                import shutil as _shutil
+                import tempfile
+                import urllib.error
+                import urllib.request
+
+                from opensquad.bridge import gateway_base_url, is_loopback_url
+
+                base = gateway_base_url()
+                if not base or is_loopback_url(base):
+                    return ""
+                url = f"{base}{path if path.startswith('/') else '/' + path}"
+                try:
+                    os.makedirs(uploads_dir, exist_ok=True)
+                    fd, tmp_path = tempfile.mkstemp(dir=uploads_dir, suffix=".part")
+                    with os.fdopen(fd, "wb") as fh, urllib.request.urlopen(url, timeout=20) as resp:
+                        _shutil.copyfileobj(resp, fh)
+                    if os.path.getsize(tmp_path) == 0:
+                        os.unlink(tmp_path)
+                        return ""
+                    os.replace(tmp_path, src_abs_path)
+                    logger.info(f"[InputHub] Fetched upload from gateway: {url} -> {src_abs_path}")
+                    return src_abs_path
+                except urllib.error.HTTPError as e:
+                    logger.warning(f"[InputHub] Upload not on gateway ({e.code}): {url}")
+                except Exception as e:
+                    logger.warning(f"[InputHub] Could not fetch upload {url}: {e}")
+                return ""
+
+            if not os.path.exists(src_abs_path):
+                src_abs_path = fetch_from_gateway() or src_abs_path
+
             # If agent_dir is configured, copy to the agent's private directory
             if self.agent_dir and os.path.exists(src_abs_path):
                 # Target directory: agents/xxx/data/uploads
