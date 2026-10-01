@@ -809,6 +809,8 @@
   },
   "groupAccess": {
     "inviteTitle": "Invite another machine",
+    "hostLabel": "Address the other machine should use",
+    "loopbackWarning": "That is this machine's loopback address — other machines cannot reach it. Use this machine's LAN IP or domain.",
     "inviteHint": "Send this string to the other machine and run pair_with_node / join_by_invite there.",
     "requestsTitle": "Pending join requests",
     "requestsEmpty": "No requests",

@@ -10,8 +10,8 @@ import React, { useCallback, useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Check, Copy, UserPlus } from 'lucide-react';
 
-import { groupsAPI } from '../services/api';
-import { buildInviteString, DEFAULT_PORT } from '../utils/invite';
+import { GATEWAY_ENDPOINT, groupsAPI } from '../services/api';
+import { buildInviteString } from '../utils/invite';
 import { NodePairingPanel } from './NodePairingPanel';
 
 interface Props {
@@ -26,9 +26,14 @@ export const GroupAccessPanel: React.FC<Props> = ({ group, isOwner }) => {
   const [requests, setRequests] = useState<{ id: string; user_id: string; message: string }[]>([]);
   const [busy, setBusy] = useState('');
 
-  const invite = buildInviteString(window.location.hostname || '127.0.0.1', group.id, {
-    port: Number(window.location.port) || DEFAULT_PORT,
-    secure: window.location.protocol === 'https:',
+  // The other machine needs THIS deployment's gateway, not whatever address this
+  // browser happens to use: under Vite DEV the page sits on :5173 while agents
+  // talk to the gateway on :9555 — the invite used to read "127.0.0.1:5173".
+  const [inviteHost, setInviteHost] = useState(GATEWAY_ENDPOINT.host);
+  const hostIsLoopback = /^(localhost|127\.|0\.0\.0\.0|\[?::1\]?)/i.test(inviteHost.trim());
+  const invite = buildInviteString(inviteHost.trim(), group.id, {
+    port: GATEWAY_ENDPOINT.port,
+    secure: GATEWAY_ENDPOINT.secure,
   });
 
   const load = useCallback(async () => {
@@ -61,6 +66,19 @@ export const GroupAccessPanel: React.FC<Props> = ({ group, isOwner }) => {
         <div className="mb-1 text-xs font-semibold uppercase tracking-wide text-textMuted">
           {t('groupAccess.inviteTitle')}
         </div>
+        <input
+          value={inviteHost}
+          onChange={(e) => setInviteHost(e.target.value)}
+          placeholder={t('groupAccess.hostLabel')}
+          aria-label={t('groupAccess.hostLabel')}
+          data-testid="group-invite-host"
+          className="mb-1 w-full rounded-lg border border-border bg-bgLight px-2 py-1 text-[11px] text-textMain outline-none focus:border-primary/40"
+        />
+        {hostIsLoopback ? (
+          <p className="mb-1 text-[11px] text-amber-600" data-testid="group-invite-loopback">
+            {t('groupAccess.loopbackWarning')}
+          </p>
+        ) : null}
         <div className="flex items-center gap-1">
           <code className="min-w-0 flex-1 truncate rounded-lg border border-border bg-bgLight px-2 py-1 text-[11px] text-textMain">
             {invite}

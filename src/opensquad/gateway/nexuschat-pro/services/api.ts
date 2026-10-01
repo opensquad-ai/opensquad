@@ -39,6 +39,20 @@ const getBackendHost = () => {
   return BACKEND_HOST;
 };
 
+/**
+ * How ANOTHER machine reaches this deployment's gateway.
+ *
+ * Deliberately not `getBackendAuthority()`: that one returns the Vite dev/proxy
+ * authority so the browser can go through the dev server, which means nothing to
+ * another machine — an invite built from it read `127.0.0.1:5173` (the dev server)
+ * instead of the gateway on :9555.
+ */
+export const GATEWAY_ENDPOINT = {
+  host: getBackendHost(),
+  port: BACKEND_PORT,
+  secure: isPageHttps(),
+};
+
 // Prefer same-origin authority when the page host already proxies the backend:
 // - HTTPS reverse proxy (:9443 → gateway)
 // - Vite DEV (:5173 proxies /api + /ai-web/ws) — critical for LAN; clients only
