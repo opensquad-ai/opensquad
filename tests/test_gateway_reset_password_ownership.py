@@ -127,3 +127,43 @@ def test_unknown_email_is_404(env, monkeypatch):
         _run("nobody@x.com", node_secret="real-secret")
 
     assert exc.value.status_code == 404
+
+
+# ── one @ai account, two machines ──────────────────────────────────────────
+
+
+def test_node_secret_refuses_to_take_over_a_live_account(env, monkeypatch):
+    """The ping-pong case: machine B must not steal the password of an account
+    that machine A is using right now."""
+    monkeypatch.setattr(syscfg, "node_secret", lambda: "real-secret")
+    monkeypatch.setattr(gw, "_has_live_connection", lambda uid: uid == "2")
+    victim = env["users"]["victim@x.com"]
+
+    with pytest.raises(HTTPException) as exc:
+        _run("victim@x.com", node_secret="real-secret")
+
+    assert exc.value.status_code == 409
+    # the message has to name the fix, not just fail
+    assert "another machine" in exc.value.detail
+    assert "unique @ai email" in exc.value.detail
+    assert victim.hashed_password == "old-hash"
+
+
+def test_a_live_connection_never_blocks_a_users_own_reset(env, monkeypatch):
+    """The browser is connected while its owner changes their password."""
+    _jwt(monkeypatch, "1")
+    monkeypatch.setattr(gw, "_has_live_connection", lambda uid: True)
+
+    res, _ = _run("a@ai", token="good")
+
+    assert res == {"status": "ok"}
+
+
+def test_without_a_live_connection_the_agent_still_self_heals(env, monkeypatch):
+    """A moved agent (old machine stopped) must still recover its account."""
+    monkeypatch.setattr(syscfg, "node_secret", lambda: "real-secret")
+    monkeypatch.setattr(gw, "_has_live_connection", lambda uid: False)
+
+    res, _ = _run("victim@x.com", node_secret="real-secret")
+
+    assert res == {"status": "ok"}

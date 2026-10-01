@@ -598,6 +598,22 @@ async def get_current_user_info(current_user: User = Depends(get_current_user_de
     return UserResponse.model_validate(current_user)
 
 
+def _has_live_connection(user_id: str) -> bool:
+    """True when the gateway currently holds an open WebSocket for this user.
+
+    Used to detect one @ai account being driven from more than one place. Any
+    failure to reach the connection manager means "no connection" — this guard
+    must never be the reason a legitimate reset fails.
+    """
+    try:
+        from app.websocket import manager
+
+        connections = getattr(manager, "active_connections", None) or {}
+        return bool(connections.get(user_id))
+    except Exception:
+        return False
+
+
 @router.post("/auth/reset-password")
 async def reset_password(
     reset_data: dict,
@@ -661,6 +677,24 @@ async def reset_password(
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="A token can only reset its own password",
+        )
+
+    # Two machines configured with the same @ai email would otherwise fight over
+    # this account: each one's login failure triggers a reset, so whoever restarts
+    # last changes the password the other needs (and both keep answering the same
+    # messages). A live connection means the identity is in use right now — refuse
+    # the takeover instead of silently stealing it.
+    #
+    # Only the node_secret path is guarded: that is the agent auto-heal path. A
+    # logged-in user resetting *their own* password is unaffected.
+    if node_secret_valid and _has_live_connection(str(user.id)):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                "This account is already in use by a live connection — probably another machine "
+                "running an agent with the same email. Stop that one, or give this agent its own "
+                "unique @ai email (e.g. '<machine>-<agent>@ai')."
+            ),
         )
 
     user.hashed_password = get_password_hash(new_password)
