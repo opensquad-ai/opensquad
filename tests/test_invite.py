@@ -111,7 +111,8 @@ def http(monkeypatch):
         calls.append(url)
         return _Response(status["join_request"])
 
-    monkeypatch.setattr(invite_tool, "requests", type("R", (), {"post": staticmethod(_post)}), raising=False)
+    # pair_with_node / join_by_invite import requests at call time, so patching
+    # the module attribute is what takes effect.
     import requests as real_requests
 
     monkeypatch.setattr(real_requests, "post", _post)
