@@ -20,6 +20,7 @@ import {
   parseProposeOptions,
 } from './ProposeOptionsCard';
 import { CollabTaskCard, parseCollabTask, openCollabTaskWindow } from './CollabTaskCard';
+import { WindowCard, parseWindowCard } from './WindowCard';
 import { useMobileChatSwipe } from '../hooks/useMobileChatSwipe';
 import { formatLocalClock, parseTimestampMs } from '../utils/time';
 
@@ -286,10 +287,18 @@ const MessageRowImpl: React.FC<MessageRowProps> = ({
     !msg.isDeleted && msg.type === MessageType.TEXT ? parseCollabApproval(msg.content || '') : null;
   const interactiveProposal =
     !msg.isDeleted && msg.type === MessageType.TEXT ? parseProposeOptions(msg.content || '') : null;
-  // Collaboration cards ([[COLLAB_TASK]]) render chrome-free like the others.
+  // Collaboration / window cards ([[COLLAB_TASK]], [[WINDOW_CARD]]) render
+  // chrome-free like the approval cards.
   const interactiveCollabTask =
     !msg.isDeleted && msg.type === MessageType.TEXT ? parseCollabTask(msg.content || '') : null;
-  const isInteractiveCard = !!(interactiveApproval || interactiveProposal || interactiveCollabTask);
+  const interactiveWindowCard =
+    !msg.isDeleted && msg.type === MessageType.TEXT ? parseWindowCard(msg.content || '') : null;
+  const isInteractiveCard = !!(
+    interactiveApproval ||
+    interactiveProposal ||
+    interactiveCollabTask ||
+    interactiveWindowCard
+  );
 
   return (
     <div
@@ -458,6 +467,10 @@ const MessageRowImpl: React.FC<MessageRowProps> = ({
             {msg.type === MessageType.TEXT ? (
               <div className="flex flex-col">
                 {(() => {
+                  const windowCard = !msg.isDeleted ? parseWindowCard(msg.content || '') : null;
+                  if (windowCard) {
+                    return <WindowCard payload={windowCard} />;
+                  }
                   const collabTask = !msg.isDeleted ? parseCollabTask(msg.content || '') : null;
                   if (collabTask) {
                     return (

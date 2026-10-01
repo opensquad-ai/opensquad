@@ -73,6 +73,7 @@ const MemoAIChatPage = React.memo(AIChatPage);
 const AgentManagerPage = React.lazy(() => import('./components/AgentManagerPage').then(m => ({ default: m.AgentManagerPage })));
 const CollabBoardPage = React.lazy(() => import('./components/CollabBoardPage').then(m => ({ default: m.CollabBoardPage })));
 const CollabTaskWindow = React.lazy(() => import('./components/CollabTaskWindow').then(m => ({ default: m.CollabTaskWindow })));
+const WindowCardWindow = React.lazy(() => import('./components/WindowCardWindow').then(m => ({ default: m.WindowCardWindow })));
 const SystemConfigPage = React.lazy(() => import('./components/SystemConfigPage').then(m => ({ default: m.SystemConfigPage })));
 
 /**
@@ -372,14 +373,25 @@ const App: React.FC = () => {
   // Single-task collaboration window, opened from a [[COLLAB_TASK]] card in
   // group chat or in a DM (both dispatch `openCollabTask`).
   const [openCollabTaskId, setOpenCollabTaskId] = useState<string | null>(null);
+  // Generic agent-sent window card ([[WINDOW_CARD]]): the payload *is* the
+  // window, so no business-specific lookup is needed to render it.
+  const [openWindowCardPayload, setOpenWindowCardPayload] = useState<Record<string, any> | null>(null);
 
   useEffect(() => {
     const onOpenCollabTask = (e: Event) => {
       const id = (e as CustomEvent).detail?.collabId;
       if (id) setOpenCollabTaskId(String(id));
     };
+    const onOpenWindowCard = (e: Event) => {
+      const payload = (e as CustomEvent).detail?.payload;
+      if (payload?.id) setOpenWindowCardPayload(payload);
+    };
     window.addEventListener('openCollabTask', onOpenCollabTask);
-    return () => window.removeEventListener('openCollabTask', onOpenCollabTask);
+    window.addEventListener('openWindowCard', onOpenWindowCard);
+    return () => {
+      window.removeEventListener('openCollabTask', onOpenCollabTask);
+      window.removeEventListener('openWindowCard', onOpenWindowCard);
+    };
   }, []);
 
   useEffect(() => {
@@ -1872,6 +1884,28 @@ const App: React.FC = () => {
           >
             {openCollabTaskId ? (
               <CollabTaskWindow collabId={openCollabTaskId} onClose={() => setOpenCollabTaskId(null)} />
+            ) : null}
+          </Suspense>
+        </div>
+      </SoftOverlay>
+
+      <SoftOverlay
+        open={!!openWindowCardPayload}
+        onBackdrop={() => setOpenWindowCardPayload(null)}
+        zClass="z-[110]"
+        panelClassName="w-full max-w-4xl h-[min(85vh,860px)]"
+      >
+        <div className="os-modal-shell flex h-full w-full flex-col overflow-hidden">
+          <Suspense
+            fallback={
+              <div className="flex flex-1 items-center justify-center text-textMuted"><OpenSquadLoader size={72} /></div>
+            }
+          >
+            {openWindowCardPayload ? (
+              <WindowCardWindow
+                payload={openWindowCardPayload as never}
+                onClose={() => setOpenWindowCardPayload(null)}
+              />
             ) : null}
           </Suspense>
         </div>

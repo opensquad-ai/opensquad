@@ -787,6 +787,13 @@
     "lines": "lines",
     "linesLabel": "Lines to show"
   },
+  "windowCard": {
+    "open": "View details",
+    "raw": "Raw data",
+    "empty": "Nothing yet",
+    "copy": "Copy",
+    "source": "Source"
+  },
   "collabTask": {
     "title": "Collaboration task",
     "open": "Open task window",

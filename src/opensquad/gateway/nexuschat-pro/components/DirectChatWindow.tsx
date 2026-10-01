@@ -16,6 +16,7 @@ import { getLocalAvatarFallback } from '../utils/image';
 import { DM_QUOTE_MAX, encodeDmQuote, parseDmQuote, type DmQuote } from '../utils/dmQuote';
 import { MessageBubble, type ChatMessage, type FileAttachment } from './ai-chat/MessageBubble';
 import { CollabTaskCard, openCollabTaskWindow, parseCollabTask } from './CollabTaskCard';
+import { WindowCard, parseWindowCard } from './WindowCard';
 import { OpenSquadLoader } from './OpenSquadLoader';
 
 export interface DirectChatWindowProps {
@@ -324,6 +325,17 @@ export const DirectChatWindow: React.FC<DirectChatWindowProps> = ({
           <div className="px-2 py-3 text-[12px] text-textMuted">{t('aiChat.chat.dmEmpty')}</div>
         ) : (
           bubbles.map((b) => {
+            // Agent-sent window cards arrive over the DM channel too.
+            const windowCard = parseWindowCard(b.message.content);
+            if (windowCard) {
+              return (
+                <div key={b.id} className={`mb-2 flex ${b.mine ? 'justify-end' : 'justify-start'}`}>
+                  <div className="max-w-[85%]">
+                    <WindowCard payload={windowCard} />
+                  </div>
+                </div>
+              );
+            }
             // Collaboration cards arrive over the DM channel too — render the
             // same clickable card instead of a plain bubble.
             const collabTask = parseCollabTask(b.message.content);

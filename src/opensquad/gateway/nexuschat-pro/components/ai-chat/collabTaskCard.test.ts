@@ -62,7 +62,8 @@ describe('collaboration-task card', () => {
     expect(chatWindow).toMatch(/parseCollabTask/);
     expect(chatWindow).toMatch(/<CollabTaskCard/);
     // interactive cards drop the bubble chrome in group chat
-    expect(chatWindow).toMatch(/isInteractiveCard = !!\(interactiveApproval \|\| interactiveProposal \|\| interactiveCollabTask\)/);
+    expect(chatWindow).toMatch(/isInteractiveCard = !!\(/);
+    expect(chatWindow).toMatch(/interactiveCollabTask/);
 
     const dmWindow = read('components/DirectChatWindow.tsx');
     expect(dmWindow).toMatch(/parseCollabTask\(b\.message\.content\)/);

@@ -787,6 +787,13 @@
     "lines": "行",
     "linesLabel": "显示行数"
   },
+  "windowCard": {
+    "open": "查看详情",
+    "raw": "原始数据",
+    "empty": "暂无内容",
+    "copy": "复制",
+    "source": "来源"
+  },
   "collabTask": {
     "title": "协作任务",
     "open": "打开任务窗口",
