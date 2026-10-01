@@ -27,7 +27,8 @@ export interface DirectChatWindowProps {
   onBack?: () => void;
 }
 
-const POLL_MS = 5000;
+/** 兜底轮询：正常情况靠 `websocket_message` 即时增量，这里只防丢事件。 */
+const POLL_MS = 20000;
 
 export const DirectChatWindow: React.FC<DirectChatWindowProps> = ({
   contactName,
@@ -69,7 +70,24 @@ export const DirectChatWindow: React.FC<DirectChatWindowProps> = ({
     void load();
   }, [load]);
 
-  // 私信没有挂在 agent-web 的 WS 上，靠轻轮询拿对方的新消息。
+  // 私信本来就不走 agent-web 的 WS，但网关会把新私信作为 `websocket_message`
+  // 广播出来（ChatList 也在听同一个事件）—— 用它做即时增量，轮询只当兜底。
+  useEffect(() => {
+    if (!contactName) return;
+    const onWs = (event: Event) => {
+      const detail = (event as CustomEvent).detail;
+      if (detail?.type !== 'new_direct_message') return;
+      const data = detail.data || {};
+      // 只关心这条线程：对方发来的（自己的回声由发送路径处理）。
+      if (data.sender_name && data.sender_name !== contactName) return;
+      void load(true);
+      if (data.id) void directMessageAPI.markAsRead(String(data.id)).catch(() => undefined);
+    };
+    window.addEventListener('websocket_message', onWs);
+    return () => window.removeEventListener('websocket_message', onWs);
+  }, [contactName, load]);
+
+  // 兜底轮询：漏掉 WS 事件时仍能把会话补上。
   useEffect(() => {
     if (!contactName) return;
     const timer = window.setInterval(() => void load(true), POLL_MS);
