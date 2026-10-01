@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import time
 from typing import Any
 
 import requests
@@ -346,6 +347,26 @@ def join_group(group_id: str) -> dict[str, Any]:
             }
 
 
+# 同一目标 + 同样正文在极短窗口内再次发送，几乎总是模型把同一个 im.send_message
+# 发了两遍（实测：同一条 DM 相隔 5 秒落库两次，工具折叠里显示「发送消息 ×2」，
+# 用户会看到两条一模一样的消息）。窗口很短，所以「有意再发一次」不受影响。
+_DUPLICATE_WINDOW_S = 15.0
+# (target_type, target_id, content) -> monotonic 时间戳
+_last_send_at: dict[tuple[str, str, str], float] = {}
+
+
+def _is_duplicate_send(target_type: str, target_id: str, content: str, has_files: bool) -> bool:
+    """True when this exact message was sent to the same target a moment ago."""
+    if has_files:
+        # 附件可能真的要在短时间内重复发（分片、多次投递），不做去重。
+        return False
+    key = (str(target_type), str(target_id), content.strip())
+    now = time.monotonic()
+    last = _last_send_at.get(key)
+    _last_send_at[key] = now
+    return last is not None and (now - last) < _DUPLICATE_WINDOW_S
+
+
 def send_message(
     content: str,
     target_id: str,
@@ -399,6 +420,21 @@ def send_message(
                 prepared = prepare_file_for_sending(fp)
                 if prepared:
                     final_files.extend(prepared)
+
+        if _is_duplicate_send(target_type, target_id, content, bool(final_files)):
+            logger.warning(
+                "[im] Duplicate %s send to %s within %.0fs dropped (identical content)",
+                target_type,
+                target_id,
+                _DUPLICATE_WINDOW_S,
+            )
+            return {
+                "status": "success",
+                "duplicate": True,
+                "message": (
+                    f"Already sent this exact message to {target_type} {target_id} seconds ago - not sending it twice."
+                ),
+            }
 
         success = _bridge().send_message(content, target_id=target_id, target_type=target_type, file_paths=final_files)
 
