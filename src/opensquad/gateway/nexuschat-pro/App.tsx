@@ -1375,7 +1375,12 @@ const App: React.FC = () => {
     <div className={`h-full w-full flex overflow-hidden bg-stage`}>
 
       {/* === Group Chat View === */}
-      <div style={{ display: currentView === 'chat' ? 'contents' : 'none' }}>
+      {/* 与聊天版面同一套舞台留白：左栏与右侧各是一张卡片、中间留缝。这里原本是
+          `display: contents`，两个子元素直接贴到窗口边上，于是群聊比一对一聊天挤。 */}
+      <div
+        className="flex-1 min-w-0 h-full p-1.5 sm:p-2 gap-1.5 sm:gap-2 overflow-hidden bg-stage max-md:pb-[max(0.375rem,env(safe-area-inset-bottom))]"
+        style={{ display: currentView === 'chat' ? 'flex' : 'none' }}
+      >
           {/* Error Banner */}
           {state.error && (
             <div style={{
