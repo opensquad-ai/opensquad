@@ -797,6 +797,10 @@
     "source": "Source"
   },
   "collabTask": {
+    "messagePlaceholder": "Say something in this task… (Enter to send, Shift+Enter for a new line)",
+    "send": "Send",
+    "attach": "Upload files or images",
+    "sendFailed": "Could not send, please retry",
     "title": "Collaboration task",
     "open": "Open task window",
     "respond": "Got it",

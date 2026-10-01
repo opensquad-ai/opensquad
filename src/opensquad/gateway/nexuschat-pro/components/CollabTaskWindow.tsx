@@ -11,6 +11,8 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { CheckCircle2, Circle, Loader2, X } from 'lucide-react';
+
+import { CollabTaskComposer } from './CollabTaskComposer';
 import {
   SERVER_BASE_URL,
   collabBoardAPI,
@@ -477,6 +479,7 @@ export const CollabTaskWindow: React.FC<CollabTaskWindowProps> = ({ collabId, on
           </>
         )}
       </div>
+      <CollabTaskComposer collabId={collabId} onSent={() => void load(true)} />
     </div>
   );
 };

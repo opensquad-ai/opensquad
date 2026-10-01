@@ -2385,6 +2385,17 @@ export const windowCardAPI = {
 };
 
 export const collabBoardAPI = {
+  /** Post into a task's own thread (the task window) — never into a group. */
+  postTaskMessage: (
+    taskId: string,
+    content: string,
+    attachments?: { url: string; name?: string; size?: string; type?: string }[],
+  ) =>
+    apiRequest<{ ok: boolean; collab_id: string; item_id?: string; notified: string[] }>(
+      `/ai-web/collab-board/tasks/${encodeURIComponent(taskId)}/messages`,
+      { method: 'POST', body: JSON.stringify({ content, attachments: attachments || [] }) },
+    ),
+
   listTasks: () => {
     return apiRequest<{ tasks: CollabBoardTask[]; count: number }>(`/ai-web/collab-board/tasks`);
   },

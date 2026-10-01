@@ -1301,6 +1301,118 @@ async def get_collab_board_tasks(
     return {"tasks": tasks, "count": len(tasks)}
 
 
+@router.post("/collab-board/tasks/{task_id}/messages")
+async def post_collab_task_message(
+    task_id: str,
+    body: dict = Body(default={}),
+    current_user: User = Depends(get_current_user_dep),
+):
+    """Post into a collaboration task from the web UI (the task window).
+
+    The user's side of the task thread. It never goes to a group: the task thread
+    *is* the window the collaboration card opens, so the message is written to the
+    task's board and handed to the agents on the task as a task event — they reply
+    with ``im.send_message(..., collab_id=...)``, which lands here too.
+    """
+    from opensquad import collab_board
+
+    content = str((body or {}).get("content") or "").strip()
+    raw_attachments = (body or {}).get("attachments")
+    attachments = [
+        a
+        for a in (raw_attachments if isinstance(raw_attachments, list) else [])
+        if isinstance(a, dict) and str(a.get("url") or "").strip()
+    ]
+    if not content and not attachments:
+        raise HTTPException(status_code=400, detail="content or attachments required")
+
+    task = collab_board.local_call("get_task", task_id=task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="collab task not found")
+
+    author = current_user.name or str(current_user.id)
+    task_name = str(task.get("task_name") or task_id)
+    item = None
+    if content:
+        item = collab_board.local_call(
+            "append_public_discussion",
+            collab_id=task_id,
+            task_name=task_name,
+            author_agent_id=author,
+            title="User",
+            content=content,
+        )
+    if attachments:
+        collab_board.local_call(
+            "attach_files",
+            collab_id=task_id,
+            agent_id=author,
+            files=attachments,
+            task_name=task_name,
+            note=content[:200],
+        )
+
+    # Hand it to the agents working on the task, so "the user said something in
+    # the task window" reaches them without touching any group.
+    notified: list[str] = []
+    try:
+        from app.ai_web.registry import registry as agent_registry
+
+        try:
+            participants = collab_board.local_call("list_participants", collab_id=task_id) or []
+        except Exception:
+            participants = []
+        candidates: list[str] = []
+        for member in list(task.get("members") or []):
+            name = str(member if isinstance(member, str) else (member or {}).get("agent_id") or "")
+            if name:
+                candidates.append(name)
+        for part in participants:
+            for key in ("agent_id", "name"):
+                value = str((part or {}).get(key) or "")
+                if value:
+                    candidates.append(value)
+        # de-duplicate, keep order
+        candidates = list(dict.fromkeys(candidates))
+
+        names = [str(a.get("name") or a.get("url") or "") for a in attachments]
+        lines = [
+            "[System] Message from the user in a collaboration task",
+            f"collab_id: {task_id}",
+            f"task: {task_name}",
+            f"from: {author}",
+            "---",
+            content or "(no text; files only)",
+        ]
+        if names:
+            lines.append(f"attachments: {', '.join(n for n in names if n)}")
+        lines.append(
+            f'Reply with im.send_message(content=..., collab_id="{task_id}") so it stays '
+            "in the task window; do not post this task's conversation into the group."
+        )
+        chat_payload = {
+            "type": "chat",
+            "user_id": current_user.id,
+            "content": "\n".join(lines),
+            "channel": "gateway",
+            "sender_name": author,
+        }
+        for candidate in candidates:
+            if await agent_registry.send_to_agent(candidate, chat_payload):
+                notified.append(candidate)
+    except Exception as exc:  # pragma: no cover - notification is best effort
+        logging.getLogger(__name__).warning("[API] Task message notify failed: %s", exc)
+
+    return {
+        "ok": True,
+        "collab_id": task_id,
+        "item_id": (item or {}).get("id"),
+        "author": author,
+        "attachments": [a.get("name") or a.get("url") for a in attachments],
+        "notified": notified,
+    }
+
+
 @router.get("/collab-board/tasks/{task_id}/summary")
 async def get_collab_board_task_summary(
     task_id: str,
