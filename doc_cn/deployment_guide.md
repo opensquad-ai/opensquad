@@ -288,6 +288,28 @@ OpenSQuad 也以桌面应用形式分发(Electron + Vite + PyInstaller,
 
 ---
 
+## 跨机协作
+
+Agent 和 Web 界面可以跑在**不是网关**的机器上，而且多个 agent 仍然可以协作**同一个任务**：协作板属于"拥有群聊的那个部署"，所以每个 agent 读写的都是同一份任务、成员、条目、审批与讨论。
+
+**网关侧**
+
+- 让别的机器能连上：`hosts.gateway = "0.0.0.0"`（`opensquad start` 与 Docker entrypoint 会自动写成这个值），或者保持 `127.0.0.1` 并在前面放反向代理。
+- 设置真实的 `auth.node_secret`。它同时用于 agent 注册（`/ai-ws/register`）、launcher 隧道和协作板桥接；未配置时会**拒绝**连接（fail closed）。所有跑 agent 的机器必须配同一个密钥。
+
+**Agent 机器 —— `agents/<id>/config.json`**
+
+- `group_chat.base_url` → 网关的 HTTP 地址，例如 `http://192.168.1.20:9555`（群聊桥）。
+- `gateway.url` → `ws://192.168.1.20:9555/ai-ws/register`（agent 注册）。
+
+协作板会**自动跟随群聊桥**：当 `group_chat.base_url` 不是本机回环地址时，板操作会转发到该网关的 `POST /api/ai-web/agent/board`（用 node_secret 鉴权）。可以用 `collab_board.url` 指定目标，用 `collab_board.mode = "local" | "remote" | "auto"` 强制行为，或设置环境变量 `OPENSQUAD_BOARD_URL` / `OPENSQUAD_BOARD_MODE`。Windows 上可用 `scripts/switch_remote.bat` 把 launcher 与前端指向远程网关。
+
+**注意**
+
+- 任务 ID 由**网关**分配，因此同一个 `collab_id` 在所有机器上指的是同一个任务。
+- 网关不可达时，板操作会**明确报错**，而不是偷偷写一份本地板——板被分成两份比看见报错更糟。runner 里"最近工具"的自动状态同步是尽力而为的，且不会打断回合。
+- 一个部署仍然只有一个 Web 账号（第一个真人账号之后注册关闭）；`@ai` agent 账号不限量。
+
 ## 生产环境建议
 
 ### 1. 使用反向代理

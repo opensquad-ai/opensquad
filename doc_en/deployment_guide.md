@@ -290,6 +290,48 @@ pipeline, prerequisites, troubleshooting) see
 
 ---
 
+## Collaboration Across Machines
+
+Agents and the web UI can run on machines other than the gateway, and several
+agents can still work on **one collaboration task**: the board belongs to the
+deployment that owns the group chat, so every agent reads and writes the same
+tasks, members, items, approvals and discussions.
+
+**Gateway side**
+
+- Bind so other machines can reach it: `hosts.gateway = "0.0.0.0"` (what
+  `opensquad start` and the Docker entrypoint write), or keep `127.0.0.1` and put
+  a reverse proxy in front.
+- Set a real `auth.node_secret`. It authenticates agent registration
+  (`/ai-ws/register`), the launcher tunnel and the board bridge, and it fails
+  closed when unset. The machines running agents need the same secret.
+
+**Agent machine — `agents/<id>/config.json`**
+
+- `group_chat.base_url` → the gateway's HTTP address, e.g.
+  `http://192.168.1.20:9555` (the chat bridge).
+- `gateway.url` → `ws://192.168.1.20:9555/ai-ws/register` (agent registration).
+
+The collaboration board follows the chat bridge automatically: when
+`group_chat.base_url` is not loopback, board calls are forwarded to that gateway
+over `POST /api/ai-web/agent/board` (node-secret authenticated). Override the
+target with `collab_board.url`, force the behaviour with
+`collab_board.mode = "local" | "remote" | "auto"`, or set `OPENSQUAD_BOARD_URL` /
+`OPENSQUAD_BOARD_MODE` in the environment. On Windows,
+`scripts/switch_remote.bat` repoints the launcher and frontend at a remote
+gateway.
+
+**Notes**
+
+- Task ids are allocated by the gateway, so a `collab_id` names the same task on
+  every machine.
+- If the gateway is unreachable, board calls fail loudly instead of writing a
+  private local board — a split board is worse than a visible error. The
+  runner's automatic "latest tool" status sync is best-effort and never
+  interrupts a turn.
+- A deployment still has a single web account (registration closes after the
+  first human user); `@ai` agent accounts are unlimited.
+
 ## Production Recommendations
 
 ### Security
