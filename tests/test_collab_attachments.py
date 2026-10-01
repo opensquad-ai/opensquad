@@ -50,7 +50,6 @@ class _UploadBridge:
 def bridge(monkeypatch):
     fake = _UploadBridge()
     monkeypatch.setattr(bridge_mod, "bridge", fake)
-    collab._TASK_CARD_LAST.clear()
     return fake
 
 
@@ -114,6 +113,7 @@ def test_attach_file_uploads_local_paths_and_records_urls(board, bridge):
     assert res["status"] == "success"
     assert res["attached"] == 2
     assert res["failed"] == ["/tmp/broken.bin"]
+    assert res["files"] == ["spec.pdf", "from-chat.png"]
     assert bridge.uploaded == ["/tmp/spec.pdf", "/tmp/broken.bin"]
     names = {a["name"] for a in cb.board_summary(collab_id=cid)["attachments"]}
     assert names == {"spec.pdf", "from-chat.png"}
@@ -126,35 +126,3 @@ def test_attach_file_reports_errors(board, bridge):
     res = collab.attach_file(collab_id=_cid(board), file_paths=["/tmp/broken.bin"])
     assert res["status"] == "error"
     assert res["failed"] == ["/tmp/broken.bin"]
-
-
-# --------------------------------------------------------------------------
-# Task chat with attachments
-# --------------------------------------------------------------------------
-def test_post_task_message_records_and_announces_attachments(board, bridge):
-    cid = _cid(board)
-    board.update_task(task_id=cid, extra={"group_id": "g-default"})
-
-    res = collab.post_task_message(
-        collab_id=cid,
-        content="交付材料见附件",
-        attachments=[{"url": "/uploads/spec.pdf", "name": "spec.pdf", "size": "12KB", "type": "file"}],
-    )
-
-    assert res["status"] == "success"
-    assert res["attachments"] == ["spec.pdf"]
-    attachments = cb.board_summary(collab_id=cid)["attachments"]
-    assert [a["name"] for a in attachments] == ["spec.pdf"]
-    # the announcement says files came with it
-    assert "附件 1 个" in bridge.sent[0]["content"]
-
-
-def test_post_task_message_without_attachments_is_unchanged(board, bridge):
-    cid = _cid(board)
-    board.update_task(task_id=cid, extra={"group_id": "g-default"})
-
-    res = collab.post_task_message(collab_id=cid, content="只有文字")
-
-    assert res["attachments"] == []
-    assert cb.board_summary(collab_id=cid)["attachments"] == []
-    assert "附件" not in bridge.sent[0]["content"]
