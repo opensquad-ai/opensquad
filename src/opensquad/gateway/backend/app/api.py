@@ -624,12 +624,14 @@ async def reset_password(
 
     expected_node_secret = syscfg.node_secret()
     token_valid = False
+    jwt_subject = ""
     if authorization and authorization.startswith("Bearer "):
         from app.auth import decode_token
 
         payload = decode_token(authorization[7:])
         if payload and "sub" in payload:
             token_valid = True
+            jwt_subject = str(payload.get("sub") or "")
     # SEC-11a: an unset node_secret must NOT short-circuit auth (previously
     # "not expected_node_secret" let anyone reset arbitrary passwords). Compare
     # in constant time so a timing side channel cannot leak the secret.
@@ -648,6 +650,19 @@ async def reset_password(
     user = await get_user_by_email(db, email)
     if not user:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+
+    # SEC: a bearer token may only reset its OWN password. The token was checked
+    # for validity but not for ownership, so any logged-in account — including an
+    # agent of another connected machine, or any @ai account — could reset the
+    # password of anyone else (the human account included) by passing its own
+    # token with someone else's email. node_secret stays exempt: agents need that
+    # path for auto-login self-healing.
+    if token_valid and not node_secret_valid and jwt_subject != str(user.id):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="A token can only reset its own password",
+        )
+
     user.hashed_password = get_password_hash(new_password)
     await db.commit()
     _log.info(f"[Auth] Password reset for {email}")
