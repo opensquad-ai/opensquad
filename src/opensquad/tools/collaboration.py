@@ -2233,6 +2233,7 @@ def attach_file(
             "collab_id": collab_id,
             "attached": result.get("count", 0),
             "failed": failed,
+            "files": [str(e.get("name") or e.get("url") or "") for e in entries],
             "hint": "Attachments appear in the collaboration task window.",
         }
     except Exception as e:

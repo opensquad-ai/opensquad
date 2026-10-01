@@ -373,10 +373,11 @@ def _is_duplicate_send(target_type: str, target_id: str, content: str, has_files
 
 def send_message(
     content: str,
-    target_id: str,
+    target_id: str = "",
     target_type: str = "group",
     wakeup_delay: float = 0.0,
     file_paths: list[str] | None = None,
+    collab_id: str | None = None,
 ) -> dict[str, Any]:
     """
     Proactively send a message to a specific target (non-reply mode), with optional file attachments
@@ -384,18 +385,63 @@ def send_message(
     Note: Do NOT auto-call this tool to reply when receiving group messages, unless the web UI user
     explicitly requests it.
 
+    **Group or task — `collab_id` decides.** Without it the message goes to the
+    group / DM and appears in everyone's conversation list. With it the message
+    goes to that collaboration task's own thread instead: the task window (opened
+    from the collaboration card in the group) is where the user reads it and
+    replies, and the group chat is not touched at all. Use `collab_id` for
+    anything belonging to a running task — status, questions between teammates,
+    delivery notes — and keep the group for ordinary conversation.
+
     Args:
         content: Message text content.
         target_id: Target ID. Pass group ID for groups, or recipient's username (User Name) for DMs.
+                   Ignored when `collab_id` is given.
         target_type: Target type, options: 'group' (group chat), 'dm' (direct message). Default: 'group'.
         wakeup_delay: Seconds to wait for auto-wakeup after sending a group message (float, e.g. 10.5).
                       Default 0.0 means no auto-wakeup. When set, the agent stays in interruptible
                       sleep for this duration; wakes early if there is a reply, otherwise times out.
         file_paths: List of local file paths to attach (any format, absolute paths supported).
                     Files over 100MB will be automatically ZIP-compressed and split into parts.
+                    With `collab_id` they are uploaded and attached to the task instead.
+        collab_id: Collaboration task id. When set, the message and files go to that task's
+                   thread only — see above.
     """
     if not content.strip() and not file_paths:
         return {"status": "error", "message": "Content is empty and no files provided."}
+
+    if collab_id:
+        # One tool, two destinations. Everything below this point — group-name
+        # lookup, the duplicate-send guard, group delivery — is chat, which a task
+        # message must never touch: the task board keeps every message, so the
+        # guard would silently drop a legitimately repeated line.
+        from .collaboration import attach_file as _attach_to_task
+        from .collaboration import post_task_message as _post_to_task
+
+        task = str(collab_id).strip()
+        res = _post_to_task(collab_id=task, content=content)
+        if res.get("status") != "success":
+            return res
+        attached: list[str] = []
+        attach_error = ""
+        if file_paths:
+            up = _attach_to_task(collab_id=task, file_paths=list(file_paths), note=content.strip()[:200])
+            if up.get("status") == "success":
+                attached = [str(n) for n in (up.get("files") or [])]
+            else:
+                attach_error = str(up.get("message") or "upload failed")
+        result: dict[str, Any] = {
+            "status": "success",
+            "thread": "task-window",
+            "collab_id": task,
+            "item_id": res.get("item_id"),
+            "attachments": attached,
+            "message": "Sent to the task window (nothing was posted to the group).",
+        }
+        if attach_error:
+            # Never drop an upload silently: the message landed, the files did not.
+            result["attachment_error"] = attach_error
+        return result
 
     try:
         # Support sending messages by group name: if target_type is group, try to look up the ID
