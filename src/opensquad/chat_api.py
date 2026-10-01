@@ -112,6 +112,64 @@ def apply_deepseek_prompt_cache(
 
 __all__ = ["ChatAPI", "apply_deepseek_prompt_cache", "wants_deepseek_prompt_cache"]
 
+# 事件通知在历史里的落点：合成的 assistant tool_call + 紧随其后的 role=tool。
+_PIPELINE_TOOL_NAME = "system__event_pipeline"
+
+# 每个事件块开头的一句提醒。事件块本身是"通知"，不是新一轮对话；模型把它
+# 当成新消息再回一遍，正是重复私信的由来（见 tests/test_pipeline_event_blocks.py）。
+_PIPELINE_EVENTS_NOTE = (
+    "(These are notifications that already arrived — read each one once and answer it once. "
+    "Do not treat an event you have already replied to as a new message.)"
+)
+
+
+def strip_previous_pipeline_events(req: list) -> int:
+    """Drop earlier event-notification blocks from the request history.
+
+    Every drain appends one synthetic assistant tool_call plus its ``role=tool``
+    message carrying the notification text. Leaving them all in the request has
+    two costs: the prompt grows with blocks whose events are long gone, and an
+    *older* block can be re-read as if it had just arrived — the model then
+    answers a message it already answered. The newest block carries everything
+    still relevant, so older pairs are removed.
+
+    Returns how many tool messages were dropped.
+    """
+    if not req:
+        return 0
+
+    stale: set[str] = set()
+    for msg in req:
+        if not isinstance(msg, dict) or msg.get("role") != "assistant":
+            continue
+        for tc in msg.get("tool_calls") or []:
+            if (tc.get("function") or {}).get("name") != _PIPELINE_TOOL_NAME:
+                continue
+            if tc.get("id"):
+                stale.add(str(tc["id"]))
+    if not stale:
+        return 0
+
+    kept: list = []
+    dropped_tools = 0
+    for msg in req:
+        if not isinstance(msg, dict):
+            kept.append(msg)
+            continue
+        if msg.get("role") == "tool" and str(msg.get("tool_call_id") or "") in stale:
+            dropped_tools += 1
+            continue
+        if msg.get("role") == "assistant" and msg.get("tool_calls"):
+            remaining = [tc for tc in msg["tool_calls"] if str(tc.get("id") or "") not in stale]
+            if len(remaining) != len(msg["tool_calls"]):
+                if not remaining and not (msg.get("content") or "").strip():
+                    continue  # synthetic message with nothing left to carry
+                msg = {**msg, "tool_calls": remaining}
+        kept.append(msg)
+
+    req[:] = kept
+    return dropped_tools
+
 
 class ChatAPI(ProviderAPIBase):
     """
@@ -905,6 +963,12 @@ class ChatAPI(ProviderAPIBase):
         if not events_text or not events_text.strip():
             return
 
+        # 只保留最新一块：旧块里的事件早处理完了，留着既涨 prompt，又可能被
+        # 模型当成"刚到的消息"再回一遍。
+        dropped = strip_previous_pipeline_events(self.req)
+        if dropped:
+            logger.info("[ChatAPI] Replaced %d earlier pipeline-events block(s)", dropped)
+
         # Use a SINGLE call_id for both the assistant's tool_calls and the tool message,
         # so DeepSeek/OpenAI API always sees matching IDs.
         _call_id = f"pipeline_events_{uuid.uuid4().hex[:8]}"
@@ -952,7 +1016,7 @@ class ChatAPI(ProviderAPIBase):
                 "role": "tool",
                 "tool_call_id": _call_id,
                 "name": "system__event_pipeline",
-                "content": events_text,
+                "content": f"{_PIPELINE_EVENTS_NOTE}\n{events_text}",
             }
         )
         self.save_history()
