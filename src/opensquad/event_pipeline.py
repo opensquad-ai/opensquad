@@ -56,29 +56,6 @@ class PipelineEvent:
         else:
             return f"[{self.source} @ {ts}] {self.content}"
 
-    def ui_steer_text(self) -> str:
-        """The text the UI should show for this event when it lands mid-turn.
-
-        Mid-turn chat messages are recorded as steers, and the UI recognises a
-        machine-delivered message by its wire marker (`[DM] ss: hi`,
-        `[Messages]\\n[<group> | group_id=…] ss: hi`). Without it a private message
-        renders as a bare "插话", indistinguishable from the user interrupting.
-
-        Web/gateway events are the user's own words, so they are returned as-is.
-        """
-        if self.source == "dm":
-            sender = str(self.metadata.get("sender_name") or self.metadata.get("source_name") or "")
-            return f"[DM] {sender}: {self.content}" if sender else self.content
-        if self.source == "group":
-            group = str(self.metadata.get("group_name") or self.metadata.get("source_name") or "")
-            sender = str(self.metadata.get("sender_name") or "")
-            group_id = str(self.metadata.get("group_id") or self.metadata.get("source_id") or "")
-            if not (group and sender):
-                return self.content
-            tail = f" | group_id={group_id}" if group_id else ""
-            return f"[Messages]\n[{group}{tail}] {sender}: {self.content}"
-        return self.content
-
 
 def resolve_pipeline_session_id(session_id: str | None = None) -> str:
     """Best-effort session id for routing pipeline push/drain."""

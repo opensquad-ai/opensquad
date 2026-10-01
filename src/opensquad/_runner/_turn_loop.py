@@ -811,18 +811,14 @@ class TurnLoop:
                         # 打上 steer 标记：前端据此把它嵌进正在跑的工具流，而不是
                         # 封口切段（见 buildTimelineFromSession 的 steer 分支）。
                         _steer_cid = str(evt.metadata.get("client_id") or "")
-                        # Chat that arrives mid-turn keeps its wire marker, so the
-                        # UI shows "私聊消息 ss: hi" instead of a bare 插话 — a DM
-                        # is not the user interrupting (see PipelineEvent.ui_steer_text).
-                        _steer_text = evt.ui_steer_text()
                         _get_session_manager().add_message(
                             "user",
-                            _steer_text,
+                            evt.content,
                             sid=_tool_sid or None,
                             steer=True,
                             client_id=_steer_cid or None,
                         )
-                        await self.runner._emit("user_msg", _steer_text)
+                        await self.runner._emit("user_msg", evt.content)
                         # Steer（引导注入）消费回执：该用户插话已随本轮工具结果
                         # 进入模型上下文。携带 client_id 供前端把引导条目挪进
                         # 时间线（steer_consumed 在 protocol_version 注册）。
