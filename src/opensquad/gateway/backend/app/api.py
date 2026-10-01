@@ -321,12 +321,42 @@ async def register(user_data: UserCreate, request: Request, db: AsyncSession = D
                 detail="Registration closed: this system already has a web account. Only the registered account can sign in.",
             )
 
+    # Which node may use this @ai email (opensquad.agent_identity). A second
+    # machine reusing an account is the two-agents-one-identity bug: it would
+    # fight over the password and answer the same messages. A client that sends
+    # no uid — every existing install — keeps the old behaviour.
+    agent_uid = ""
+    try:
+        import json as _json
+
+        parsed_body = _json.loads((await request.body()) or b"{}")
+        if isinstance(parsed_body, dict):
+            agent_uid = str(parsed_body.get("agent_uid") or "").strip()
+    except Exception:
+        agent_uid = ""
+    if agent_uid:
+        from opensquad import agent_identity
+
+        allowed, owner = agent_identity.check(user_data.email, agent_uid)
+        if not allowed:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    f"{user_data.email} is bound to another node ({owner}). Give this agent its own "
+                    "unique @ai email, or stop the machine that already uses this account."
+                ),
+            )
+
     # Standard uniqueness checks + creation.
     existing_user = await get_user_by_email(db, user_data.email)
     if existing_user:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Email already registered")
 
     user = await create_user(db, user_data)
+    if agent_uid:
+        from opensquad import agent_identity
+
+        agent_identity.bind(user_data.email, agent_uid)
 
     # First-registration bootstrap: create the default collaboration group
     # (and pinned welcome message) using the language the user just chose

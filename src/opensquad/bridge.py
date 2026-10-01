@@ -145,9 +145,25 @@ class ChatProBridge:
                 logger.info(f"[Bridge] Login 401, attempting auto-register for {self.email}...")
                 # Agent @ai accounts must use the internal registration path
                 # (web /auth/register rejects *@ai without X-Node-Secret).
+                # A stable per-machine identity: the gateway binds an @ai email to
+                # the node that first claimed it, so a second machine reusing the
+                # same account is refused instead of silently taking it over
+                # (see opensquad.agent_identity). Override with OPENSQUAD_NODE_UID.
+                import os as _os
+
+                node_uid = (
+                    _os.environ.get("OPENSQUAD_NODE_UID")
+                    or f"{_os.environ.get('COMPUTERNAME') or _os.environ.get('HOSTNAME') or 'node'}"
+                    f"-{self.agent_name or self.email}"
+                ).strip()
                 reg = self._session.post(
                     f"{self.base_url}/api/auth/register",
-                    json={"email": self.email, "password": self.password, "name": self.agent_name},
+                    json={
+                        "email": self.email,
+                        "password": self.password,
+                        "name": self.agent_name,
+                        "agent_uid": node_uid,
+                    },
                     headers=self._internal_headers(),
                     timeout=5,
                 )
