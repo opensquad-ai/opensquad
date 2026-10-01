@@ -273,6 +273,7 @@ TOOL_MODULES = {
     "long_memory": "opensquad.tools.long_memory",
     "collaboration": "opensquad.tools.collaboration",
     "window_card": "opensquad.tools.window_card",
+    "invite": "opensquad.tools.invite",
     "delegate_task": "opensquad.tools.delegate",
     "workspace": "opensquad.tools.workspace",
     "task_watch": "opensquad.tools.task_watch",

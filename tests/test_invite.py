@@ -1,0 +1,171 @@
+"""Invite strings: parsing, building, and joining through one.
+
+The string lets someone on machine B join a group hosted on machine A without
+transcribing an IP, a port and a group id by hand. A wrong gateway, a private
+group and a malformed string each have to say something useful — they are the
+three ways this actually goes wrong in the field.
+"""
+
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+import pytest
+
+_BACKEND = Path(__file__).resolve().parents[1] / "src"
+if str(_BACKEND) not in sys.path:
+    sys.path.insert(0, str(_BACKEND))
+
+import opensquad.bridge as bridge_mod  # noqa: E402
+from opensquad.invite import build_invite, parse_invite  # noqa: E402
+from opensquad.tools import invite as invite_tool  # noqa: E402
+
+# ── parsing ────────────────────────────────────────────────────────────────
+
+
+def test_a_plain_invite_parses():
+    parsed = parse_invite("192.168.5.4#g-7f3a")
+
+    assert parsed["host"] == "192.168.5.4"
+    assert parsed["port"] == 9555  # the default, so the short form is enough
+    assert parsed["group_id"] == "g-7f3a"
+    assert parsed["code"] == ""
+    assert parsed["base_url"] == "http://192.168.5.4:9555"
+
+
+def test_an_explicit_port_and_code_parse():
+    parsed = parse_invite("192.168.5.4:9600#g-7f3a?code=AB12CD")
+
+    assert parsed["port"] == 9600
+    assert parsed["code"] == "AB12CD"
+
+
+def test_a_secure_host_is_reported_as_https():
+    parsed = parse_invite("https://chat.example.com#g-7f3a")
+
+    assert parsed["scheme"] == "https"
+    assert parsed["base_url"] == "https://chat.example.com:9555"
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "",
+        "192.168.5.4",  # no group
+        "#g-7f3a",  # no host
+        "192.168.5.4#",  # no group id
+        "192.168.5.4:not-a-port#g-7f3a",
+        "192.168.5.4:99999#g-7f3a",
+        "192.168.5.4#g 7f3a",  # group ids have no spaces
+    ],
+)
+def test_a_bad_string_is_refused(bad):
+    assert parse_invite(bad) is None
+
+
+def test_build_and_parse_round_trip():
+    invite = build_invite("192.168.5.4", "g-7f3a", port=9600, code="AB12CD")
+
+    parsed = parse_invite(invite)
+
+    assert (parsed["host"], parsed["port"], parsed["group_id"], parsed["code"]) == (
+        "192.168.5.4",
+        9600,
+        "g-7f3a",
+        "AB12CD",
+    )
+
+
+# ── joining ────────────────────────────────────────────────────────────────
+
+
+class _Bridge:
+    def __init__(self, *, joined: bool, detail: str = "", base_url: str = "http://192.168.5.4:9555"):
+        self.token = "t"
+        self.base_url = base_url
+        self._joined = joined
+        self._detail = detail
+
+    def join_group_api(self, group_id):
+        if self._joined:
+            return {"ok": True}
+        return {"ok": False, "detail": self._detail}
+
+
+@pytest.fixture()
+def http(monkeypatch):
+    """Route by URL; record what was asked."""
+    calls: list[str] = []
+    status = {"join_request": 200}
+
+    class _Response:
+        def __init__(self, code):
+            self.status_code = code
+            self.content = b"{}"
+
+        def json(self):
+            return {"request_id": "jr_1"}
+
+    def _post(url, **kwargs):
+        calls.append(url)
+        return _Response(status["join_request"])
+
+    monkeypatch.setattr(invite_tool, "requests", type("R", (), {"post": staticmethod(_post)}), raising=False)
+    import requests as real_requests
+
+    monkeypatch.setattr(real_requests, "post", _post)
+    return {"calls": calls, "status": status}
+
+
+def test_a_public_group_joins_directly(monkeypatch, http):
+    monkeypatch.setattr(bridge_mod, "bridge", _Bridge(joined=True))
+
+    res = invite_tool.join_by_invite("192.168.5.4#g-7f3a")
+
+    assert res["status"] == "success"
+    assert res["joined"] is True
+    assert http["calls"] == []  # no request needed
+
+
+def test_a_private_group_becomes_a_request(monkeypatch, http):
+    monkeypatch.setattr(bridge_mod, "bridge", _Bridge(joined=False, detail="Cannot join private group"))
+
+    res = invite_tool.join_by_invite("192.168.5.4#g-7f3a", note="B 机的 coder")
+
+    assert res["status"] == "pending"
+    assert res["request_id"] == "jr_1"
+    assert any("/join-request" in url for url in http["calls"])
+    assert "owner" in res["message"]
+
+
+def test_another_failure_is_reported_not_misread(monkeypatch, http):
+    monkeypatch.setattr(bridge_mod, "bridge", _Bridge(joined=False, detail="Group not found"))
+
+    res = invite_tool.join_by_invite("192.168.5.4#g-7f3a")
+
+    assert res["status"] == "error"
+    assert http["calls"] == []  # only a *private* refusal becomes a request
+
+
+def test_the_invite_must_match_the_gateway_this_agent_uses(monkeypatch, http):
+    monkeypatch.setattr(bridge_mod, "bridge", _Bridge(joined=True, base_url="http://10.0.0.9:9555"))
+
+    res = invite_tool.join_by_invite("192.168.5.4#g-7f3a")
+
+    assert res["status"] == "error"
+    assert res["code"] == "wrong_gateway"
+    assert "group_chat.base_url" in res["message"]
+
+
+def test_a_malformed_invite_says_what_it_wants(monkeypatch):
+    res = invite_tool.join_by_invite("not-an-invite")
+
+    assert res["status"] == "error"
+    assert "<host>[:port]#<group-id>" in res["message"]
+
+
+def test_the_tool_is_registered_for_agents():
+    from opensquad import agents_boot
+
+    assert agents_boot.TOOL_MODULES["invite"] == "opensquad.tools.invite"
