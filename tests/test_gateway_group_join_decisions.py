@@ -147,7 +147,7 @@ def test_approving_writes_the_membership():
     assert res["user_id"] == "7"
     assert db.commits == 1
     # the insert happened (the last statement is the membership write)
-    assert "INSERT INTO group_members" in db.statements[-1].upper().replace("GROUP_MEMBERS", "group_members").upper()
+    assert "insert into group_members" in db.statements[-1].lower()
 
 
 def test_rejecting_does_not_touch_membership():
