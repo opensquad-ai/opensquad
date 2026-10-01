@@ -2286,10 +2286,52 @@ export interface CollabBoardTask {
   item_count?: number;
 }
 
+export interface CollabTaskParticipant {
+  agent_id: string;
+  name: string;
+  state: 'invited' | 'accepted' | 'declined';
+  invited_at?: string | null;
+  responded_at?: string | null;
+}
+
+/** Payload of a [[COLLAB_TASK]] card message (group chat or DM). */
+export interface CollabTaskCardPayload {
+  v?: number;
+  id: string;
+  kind: 'invite' | 'assign' | 'progress' | 'discussion' | 'done';
+  collab_id: string;
+  title: string;
+  summary?: string;
+  card?: string;
+  card_id?: string;
+  group_id?: string;
+  status?: string;
+  participants?: CollabTaskParticipant[];
+  agent_id?: string;
+  agent_name?: string;
+}
+
+/** Everything the single-task window renders (board_summary on the backend). */
+export interface CollabBoardSummary {
+  collab_id: string;
+  task: CollabBoardTask & { extra?: Record<string, any> };
+  title: string;
+  status: string;
+  progress: number;
+  board_rev: number;
+  card: string;
+  skills: string[];
+  files: string[];
+  participants: CollabTaskParticipant[];
+  items: Record<string, CollabBoardItem[]>;
+}
+
 export const collabBoardAPI = {
   listTasks: () => {
     return apiRequest<{ tasks: CollabBoardTask[]; count: number }>(`/ai-web/collab-board/tasks`);
   },
+  taskSummary: (taskId: string) =>
+    apiRequest<CollabBoardSummary>(`/ai-web/collab-board/tasks/${encodeURIComponent(taskId)}/summary`),
   createTask: (payload: { task_name: string; created_by?: string }) =>
     apiRequest<{ ok: boolean; task: CollabBoardTask }>('/ai-web/collab-board/tasks', {
       method: 'POST',

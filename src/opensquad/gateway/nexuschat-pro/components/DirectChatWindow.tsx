@@ -14,6 +14,7 @@ import { useTranslation } from 'react-i18next';
 import { directMessageAPI, uploadAPI, type DirectMessageItem } from '../services/api';
 import { getLocalAvatarFallback } from '../utils/image';
 import { MessageBubble, type ChatMessage, type FileAttachment } from './ai-chat/MessageBubble';
+import { CollabTaskCard, openCollabTaskWindow, parseCollabTask } from './CollabTaskCard';
 import { OpenSquadLoader } from './OpenSquadLoader';
 
 export interface DirectChatWindowProps {
@@ -300,16 +301,30 @@ export const DirectChatWindow: React.FC<DirectChatWindowProps> = ({
         ) : messages.length === 0 ? (
           <div className="px-2 py-3 text-[12px] text-textMuted">{t('aiChat.chat.dmEmpty')}</div>
         ) : (
-          bubbles.map((b) => (
-            <MessageBubble
-              key={b.id}
-              message={b.message}
-              variant="messenger"
-              senderName={b.mine ? (currentUser?.name || undefined) : contactLabel}
-              senderAvatar={b.mine ? (currentUser?.avatar ?? null) : (contactAvatar ?? null)}
-              agentId={contactName}
-            />
-          ))
+          bubbles.map((b) => {
+            // Collaboration cards arrive over the DM channel too — render the
+            // same clickable card instead of a plain bubble.
+            const collabTask = parseCollabTask(b.message.content);
+            if (collabTask) {
+              return (
+                <div key={b.id} className={`mb-2 flex ${b.mine ? 'justify-end' : 'justify-start'}`}>
+                  <div className="max-w-[85%]">
+                    <CollabTaskCard payload={collabTask} onOpen={openCollabTaskWindow} />
+                  </div>
+                </div>
+              );
+            }
+            return (
+              <MessageBubble
+                key={b.id}
+                message={b.message}
+                variant="messenger"
+                senderName={b.mine ? (currentUser?.name || undefined) : contactLabel}
+                senderAvatar={b.mine ? (currentUser?.avatar ?? null) : (contactAvatar ?? null)}
+                agentId={contactName}
+              />
+            );
+          })
         )}
         <div ref={endRef} />
       </div>

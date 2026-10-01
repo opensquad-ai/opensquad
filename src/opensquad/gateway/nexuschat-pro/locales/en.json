@@ -787,6 +787,35 @@
     "lines": "lines",
     "linesLabel": "Lines to show"
   },
+  "collabTask": {
+    "title": "Collaboration task",
+    "open": "Open task window",
+    "respond": "Got it",
+    "participants": "Participants",
+    "requirement": "Requirements",
+    "plan": "Plan",
+    "assign": "Assignment",
+    "progress": "Progress",
+    "files": "Files",
+    "skills": "Skills used",
+    "discussion": "Discussion",
+    "empty": "Nothing yet",
+    "loadFailed": "Failed to load, please retry",
+    "card": "Collab card",
+    "latestTool": "Latest tool",
+    "state": {
+      "invited": "invited",
+      "accepted": "joined",
+      "declined": "declined"
+    },
+    "kind": {
+      "invite": "Invitation",
+      "assign": "Assignment",
+      "progress": "Progress",
+      "discussion": "Discussion",
+      "done": "Done"
+    }
+  },
   "aiChat": {
     "attach": {
       "hint": "Add agents, context, tools…",

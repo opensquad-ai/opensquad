@@ -72,6 +72,7 @@ const AIChatPage = React.lazy(() => import('./components/AIChatPage').then(m => 
 const MemoAIChatPage = React.memo(AIChatPage);
 const AgentManagerPage = React.lazy(() => import('./components/AgentManagerPage').then(m => ({ default: m.AgentManagerPage })));
 const CollabBoardPage = React.lazy(() => import('./components/CollabBoardPage').then(m => ({ default: m.CollabBoardPage })));
+const CollabTaskWindow = React.lazy(() => import('./components/CollabTaskWindow').then(m => ({ default: m.CollabTaskWindow })));
 const SystemConfigPage = React.lazy(() => import('./components/SystemConfigPage').then(m => ({ default: m.SystemConfigPage })));
 
 /**
@@ -368,6 +369,18 @@ const App: React.FC = () => {
   // Settings Modal State
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [isCollabBoardOpen, setIsCollabBoardOpen] = useState(false);
+  // Single-task collaboration window, opened from a [[COLLAB_TASK]] card in
+  // group chat or in a DM (both dispatch `openCollabTask`).
+  const [openCollabTaskId, setOpenCollabTaskId] = useState<string | null>(null);
+
+  useEffect(() => {
+    const onOpenCollabTask = (e: Event) => {
+      const id = (e as CustomEvent).detail?.collabId;
+      if (id) setOpenCollabTaskId(String(id));
+    };
+    window.addEventListener('openCollabTask', onOpenCollabTask);
+    return () => window.removeEventListener('openCollabTask', onOpenCollabTask);
+  }, []);
 
   useEffect(() => {
     const openTheme = () => {
@@ -1841,6 +1854,25 @@ const App: React.FC = () => {
             }
           >
             <CollabBoardPage onBack={() => setIsCollabBoardOpen(false)} />
+          </Suspense>
+        </div>
+      </SoftOverlay>
+
+      <SoftOverlay
+        open={!!openCollabTaskId}
+        onBackdrop={() => setOpenCollabTaskId(null)}
+        zClass="z-[110]"
+        panelClassName="w-full max-w-5xl h-[min(88vh,900px)]"
+      >
+        <div className="os-modal-shell flex h-full w-full flex-col overflow-hidden">
+          <Suspense
+            fallback={
+              <div className="flex flex-1 items-center justify-center text-textMuted"><OpenSquadLoader size={72} /></div>
+            }
+          >
+            {openCollabTaskId ? (
+              <CollabTaskWindow collabId={openCollabTaskId} onClose={() => setOpenCollabTaskId(null)} />
+            ) : null}
           </Suspense>
         </div>
       </SoftOverlay>

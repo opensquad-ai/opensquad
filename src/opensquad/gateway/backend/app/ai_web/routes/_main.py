@@ -1301,6 +1301,21 @@ async def get_collab_board_tasks(
     return {"tasks": tasks, "count": len(tasks)}
 
 
+@router.get("/collab-board/tasks/{task_id}/summary")
+async def get_collab_board_task_summary(
+    task_id: str,
+    current_user: User = Depends(get_current_user_dep),
+):
+    """Everything the single-task window renders, in one call: task meta, collab
+    card, skills, files, participants and items grouped by type."""
+    from opensquad import collab_board
+
+    try:
+        return collab_board.board_summary(collab_id=task_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 @router.post("/collab-board/tasks")
 async def create_collab_board_task(
     body: CollabTaskCreateRequest,

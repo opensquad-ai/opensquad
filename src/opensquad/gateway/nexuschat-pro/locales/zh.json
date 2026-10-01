@@ -787,6 +787,35 @@
     "lines": "行",
     "linesLabel": "显示行数"
   },
+  "collabTask": {
+    "title": "协作任务",
+    "open": "打开任务窗口",
+    "respond": "收到",
+    "participants": "参与人员",
+    "requirement": "需求",
+    "plan": "方案",
+    "assign": "任务分配",
+    "progress": "进度",
+    "files": "相关文件",
+    "skills": "使用的 skill",
+    "discussion": "讨论",
+    "empty": "暂无内容",
+    "loadFailed": "加载失败，请稍后重试",
+    "card": "协作卡",
+    "latestTool": "最近工具",
+    "state": {
+      "invited": "已邀请",
+      "accepted": "已参与",
+      "declined": "已拒绝"
+    },
+    "kind": {
+      "invite": "协作邀请",
+      "assign": "任务分配",
+      "progress": "任务进度",
+      "discussion": "任务讨论",
+      "done": "协作完成"
+    }
+  },
   "aiChat": {
     "attach": {
       "hint": "添加智能体、上下文、工具…",
