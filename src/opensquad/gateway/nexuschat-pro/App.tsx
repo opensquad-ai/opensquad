@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo, Suspense } from 'react';
 
-import { MessageSquare, Sun, Moon, X, Camera, Save, LogOut } from 'lucide-react';
+import { MessageSquare, Sun, Moon, X, Camera, Save, LogOut, KanbanSquare } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { ContactsRail } from './components/ContactsRail';
 import { DirectChatWindow } from './components/DirectChatWindow';
@@ -1488,12 +1488,12 @@ const App: React.FC = () => {
               railActions={
                 <button
                   type="button"
-                  onClick={handleLogout}
+                  onClick={handleOpenCollabBoard}
                   className="rounded-lg p-1.5 text-textMuted hover:bg-primary/10 hover:text-textMain"
-                  title={t('nav.logout', { defaultValue: 'Logout' })}
-                  aria-label={t('nav.logout', { defaultValue: 'Logout' })}
+                  title={t('nav.collabBoard')}
+                  aria-label={t('nav.collabBoard')}
                 >
-                  <LogOut size={16} strokeWidth={1.75} />
+                  <KanbanSquare size={16} strokeWidth={1.75} />
                 </button>
               }
               currentUser={currentUser}

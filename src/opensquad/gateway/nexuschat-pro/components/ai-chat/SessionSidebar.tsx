@@ -20,7 +20,6 @@ import {
   Archive,
   ChevronRight,
   Bot,
-  MessageCircle,
   LayoutGrid,
   Clock,
   ListTodo,
@@ -64,7 +63,6 @@ import { isSessionRowBusy } from '../../utils/sessionBusy';
 import { PulseDotsOrbit } from './PulseDotsStatus';
 import { UiModeSwitch, type UiMode } from './UiModeSwitch';
 import { AccountRailFooter, type AccountUser } from '../AccountRailFooter';
-import { AgentNavShortcutAvatars } from '../AgentNavShortcutAvatars';
 import { navigateAppView } from '../../utils/appNavItems';
 
 interface SessionSidebarProps {
@@ -1282,18 +1280,8 @@ const SessionSidebarInner: React.FC<SessionSidebarProps> = ({
           currentUser={currentUser}
           onOpenProfile={() => onOpenProfile?.()}
           onOpenSettings={() => onOpenSettings?.()}
-          shortcuts={<AgentNavShortcutAvatars />}
           actions={
             <>
-              <button
-                type="button"
-                onClick={() => navigateAppView('chat')}
-                className="rounded-lg p-1.5 text-textMuted hover:bg-primary/10 hover:text-textMain"
-                title={t('nav.chats')}
-                aria-label={t('nav.chats')}
-              >
-                <MessageCircle size={16} strokeWidth={1.75} />
-              </button>
               <button
                 type="button"
                 onClick={() => navigateAppView('admin')}
