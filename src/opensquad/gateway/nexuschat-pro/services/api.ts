@@ -535,6 +535,26 @@ export const messageAPI = {
     });
   },
 
+  /** Accept/decline a collaboration-task card ([[COLLAB_TASK]]) in group chat. */
+  respondCollabTask: async (
+    groupId: string,
+    collabId: string,
+    action: 'accept' | 'decline',
+    opts?: { messageId?: string; participantId?: string }
+  ) => {
+    return apiRequest<{ ok: boolean; collab_id: string; participant: string; state: string; message_id: string }>(
+      `/groups/${groupId}/collab-tasks/${collabId}/respond`,
+      {
+        method: 'POST',
+        body: JSON.stringify({
+          action,
+          message_id: opts?.messageId,
+          participant_id: opts?.participantId,
+        }),
+      }
+    );
+  },
+
   /** Resolve a collaboration step approval card posted in group chat (确定/拒绝). */
   resolveCollabApproval: async (
     groupId: string,

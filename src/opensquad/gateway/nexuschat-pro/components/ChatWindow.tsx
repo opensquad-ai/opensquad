@@ -460,7 +460,21 @@ const MessageRowImpl: React.FC<MessageRowProps> = ({
                 {(() => {
                   const collabTask = !msg.isDeleted ? parseCollabTask(msg.content || '') : null;
                   if (collabTask) {
-                    return <CollabTaskCard payload={collabTask} onOpen={openCollabTaskWindow} />;
+                    return (
+                      <CollabTaskCard
+                        payload={collabTask}
+                        onOpen={openCollabTaskWindow}
+                        onRespond={
+                          collabTask.kind === 'invite'
+                            ? async (action) => {
+                                await messageAPI.respondCollabTask(groupId, collabTask.collab_id, action, {
+                                  messageId: msg.id,
+                                });
+                              }
+                            : undefined
+                        }
+                      />
+                    );
                   }
                   const approval = !msg.isDeleted ? parseCollabApproval(msg.content || '') : null;
                   if (approval) {

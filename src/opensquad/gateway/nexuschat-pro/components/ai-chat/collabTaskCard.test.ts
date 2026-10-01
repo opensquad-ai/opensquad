@@ -78,6 +78,15 @@ describe('collaboration-task card', () => {
     expect(card).toMatch(/window\.dispatchEvent\(new CustomEvent\('openCollabTask'/);
   });
 
+  it('lets an invite be accepted from the card', () => {
+    const chatWindow = read('components/ChatWindow.tsx');
+    expect(chatWindow).toMatch(/respondCollabTask\(groupId, collabTask\.collab_id, action/);
+
+    const api = read('services/api.ts');
+    expect(api).toMatch(/respondCollabTask: async \(/);
+    expect(api).toMatch(/\/groups\/\$\{groupId\}\/collab-tasks\/\$\{collabId\}\/respond/);
+  });
+
   it('loads the window from the board summary endpoint', () => {
     const api = read('services/api.ts');
     expect(api).toMatch(/taskSummary: \(taskId: string\) =>/);

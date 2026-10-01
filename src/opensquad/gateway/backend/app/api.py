@@ -1758,6 +1758,89 @@ async def undo_recall(
     return {"message": "Undone"}
 
 
+@router.post("/groups/{group_id}/collab-tasks/{collab_id}/respond")
+async def respond_collab_task(
+    group_id: str,
+    collab_id: str,
+    body: dict = Body(default={}),
+    current_user: User = Depends(get_current_user_dep),
+    db: AsyncSession = Depends(get_db),
+):
+    """Accept/decline a collaboration-task card ([[COLLAB_TASK]]) in group chat.
+
+    Records the responder's state on the task board (invited → accepted /
+    declined) and rewrites the card in place so every surface — group chat, the
+    DM window, the task window — shows the same participant state.
+    """
+    from opensquad.collab_approval import (
+        PARTICIPANT_ACCEPTED,
+        PARTICIPANT_DECLINED,
+        parse_collab_task_payload,
+        patch_collab_task_participant_in_content,
+    )
+    from opensquad.collab_board import mark_participant
+
+    action = str((body or {}).get("action") or "").strip().lower()
+    if action not in ("accept", "accepted", "receive", "received", "decline", "declined", "reject"):
+        raise HTTPException(status_code=400, detail="action must be accept or decline")
+    accept_actions = ("accept", "accepted", "receive", "received")
+    state = PARTICIPANT_ACCEPTED if action in accept_actions else PARTICIPANT_DECLINED
+    # Default to the responder themselves; callers may pass another participant.
+    participant = str((body or {}).get("participant_id") or current_user.name or "").strip()
+    if not participant:
+        raise HTTPException(status_code=400, detail="participant_id is required")
+    message_id = str((body or {}).get("message_id") or "").strip() or None
+
+    member_check = await db.execute(
+        select(group_members).where(
+            and_(group_members.c.user_id == current_user.id, group_members.c.group_id == group_id)
+        )
+    )
+    if not member_check.scalar_one_or_none():
+        raise HTTPException(status_code=403, detail="Not a member of this group")
+
+    message = None
+    if message_id:
+        result = await db.execute(select(Message).where(Message.id == message_id, Message.group_id == group_id))
+        message = result.scalar_one_or_none()
+    if message is None:
+        result = await db.execute(
+            select(Message).where(Message.group_id == group_id).order_by(desc(Message.timestamp)).limit(80)
+        )
+        for m in result.scalars().all():
+            payload = parse_collab_task_payload(m.content or "")
+            if payload and str(payload.get("collab_id")) == collab_id:
+                message = m
+                break
+    if message is None:
+        raise HTTPException(status_code=404, detail="Collaboration card not found in this group")
+
+    payload = parse_collab_task_payload(message.content or "")
+    if not payload or str(payload.get("collab_id")) != collab_id:
+        raise HTTPException(status_code=400, detail="Message is not a collaboration card for this task")
+
+    message.content = patch_collab_task_participant_in_content(message.content or "", participant, state)
+    message.is_edited = True
+    await db.commit()
+    result = await db.execute(
+        select(Message)
+        .where(Message.id == message.id)
+        .options(selectinload(Message.attachments), selectinload(Message.sender))
+    )
+    message = result.scalar_one()
+    await notify_message_update(group_id, format_message_response(message).model_dump(mode="json"))
+
+    updated = mark_participant(collab_id=collab_id, agent_id=participant, state=state)
+    return {
+        "ok": True,
+        "collab_id": collab_id,
+        "participant": participant,
+        "state": state,
+        "message_id": message.id,
+        "task": updated or None,
+    }
+
+
 @router.post("/groups/{group_id}/collab-approvals/{approval_id}/resolve")
 async def resolve_collab_approval(
     group_id: str,

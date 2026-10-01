@@ -621,6 +621,26 @@ def end_collaboration(card: str, collab_id: str = "", group_id: str = "") -> dic
                     f"to unload the collab card."
                 )
                 bridge.send_message(msg, target_id=target, target_type="group")
+                try:
+                    if collab_id:
+                        from ..collab_approval import build_collab_task_payload, post_collab_task_card
+                        from ..collab_board import list_participants
+
+                        post_collab_task_card(
+                            build_collab_task_payload(
+                                collab_id=collab_id,
+                                title=card,
+                                kind="done",
+                                group_id=str(target),
+                                card=card,
+                                summary="Collaboration finished — the task window keeps the full record.",
+                                participants=list_participants(collab_id=collab_id),
+                                status="done",
+                            ),
+                            str(target),
+                        )
+                except Exception:
+                    pass
                 im_result = "End notification sent"
             else:
                 im_result = "Bridge not connected; notify members manually"
