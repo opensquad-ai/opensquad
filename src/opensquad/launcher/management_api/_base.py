@@ -29,17 +29,37 @@ from opensquad.launcher_main import (
 )
 from opensquad.system_config import syscfg
 
+_PLACEHOLDER_PREFIXES = ("change_me", "your_", "<", "replace", "example")
+
+
+def looks_like_placeholder(value: str) -> bool:
+    """A configured-but-not-really secret (``CHANGE_ME``, ``your_token`` …).
+
+    Such a value must never be treated as an enabled token: it would either be
+    guessable (if enforced) or, worse, silently look "configured" while nobody
+    ever set a real one.
+    """
+    text = (value or "").strip().lower()
+    if not text:
+        return True
+    return text.startswith(_PLACEHOLDER_PREFIXES) or "placeholder" in text
+
 
 class BaseHandlerMixin:
     """Auth, JSON/body helpers and the HTTP verb dispatch table."""
 
     @staticmethod
     def _get_launcher_token() -> str:
-        """Read launcher token from system_config, fallback to empty string."""
-        try:
-            return syscfg.get("launcher_token", "")
-        except Exception:
-            return ""
+        """Launcher token: ``auth.launcher_token`` (as documented) or the legacy
+        top-level ``launcher_token``. Placeholders count as unset."""
+        for path in (("auth", "launcher_token"), ("launcher_token",)):
+            try:
+                value = str(syscfg.get(*path, "") or "").strip()
+            except Exception:
+                value = ""
+            if value and not looks_like_placeholder(value):
+                return value
+        return ""
 
     @staticmethod
     def _encrypt_password(password: str) -> str:
@@ -57,11 +77,38 @@ class BaseHandlerMixin:
         salt, hashed = stored.split("$", 1)
         return hashlib.sha256((salt + password).encode("utf-8")).hexdigest() == hashed
 
+    def _is_local_caller(self) -> bool:
+        """True when the request came from this machine (the gateway proxies from
+        localhost; a LAN peer reaching :9600 directly is not local)."""
+        try:
+            host = str((self.client_address or ("", 0))[0])
+        except Exception:
+            return False
+        return host in ("::1", "localhost") or host.startswith("127.")
+
     def _check_auth(self) -> bool:
-        """Verify Bearer token from Authorization header. Returns True if valid or no token required."""
+        """Verify the Bearer token from the Authorization header.
+
+        With no token configured the API is *not* wide open: the launcher binds
+        0.0.0.0, so remote callers are refused while local ones (the gateway
+        proxy, the desktop UI) keep working. Configure ``auth.launcher_token`` to
+        allow remote callers.
+        """
         token = self._get_launcher_token()
         if not token:
-            return True  # No token configured, allow all
+            if self._is_local_caller():
+                return True
+            self._send_json(
+                {
+                    "error": "Forbidden",
+                    "message": (
+                        "launcher_token is not configured; remote access to the launcher API is disabled. "
+                        "Set auth.launcher_token to allow it."
+                    ),
+                },
+                403,
+            )
+            return False
         auth_header = self.headers.get("Authorization", "")
         if not auth_header.startswith("Bearer "):
             self._send_json({"error": "Unauthorized", "message": "Bearer token required"}, 401)

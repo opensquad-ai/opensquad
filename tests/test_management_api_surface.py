@@ -80,7 +80,11 @@ EXPECTED_MIXIN_CLASSES = [
 # method silently vanishing (or its module being dropped from the MRO) fails
 # loudly instead of quietly shrinking the route surface.
 EXPECTED_METHODS_PER_MODULE = {
-    "_base": 18,
+    # 19 = 18 + ``_is_local_caller``: the launcher's auth check needs to know
+    # whether a request came from this machine, because with no ``launcher_token``
+    # configured the API must stay usable from localhost (the gateway proxy) while
+    # refusing remote callers on the 0.0.0.0 bind.
+    "_base": 19,
     # 17 = 16 + ``_handle_put_agent_profile`` (PUT /api/agents/{name}/profile),
     # which backs the custom-agent-avatar upload.
     "_agents": 17,
@@ -111,7 +115,7 @@ EXPECTED_METHODS_PER_MODULE = {
     "_cards": 18,
     "_workspace": 6,
 }
-EXPECTED_TOTAL_MIXIN_METHODS = 143
+EXPECTED_TOTAL_MIXIN_METHODS = 144
 
 # ``_do_*_impl`` if/elif chain lengths -- the URL surface of each verb.
 EXPECTED_DISPATCH_BRANCHES = {
