@@ -1161,6 +1161,198 @@ def board_summary(*, collab_id: str) -> dict[str, Any]:
     }
 
 
+# ---------------------------------------------------------------------------
+# Remote boards
+#
+# A board belongs to the deployment that owns the group chat, not to each agent
+# machine: two agents in one group must share one task list, one member set and
+# one set of items. So when this agent talks to a gateway on another host
+# (``group_chat.base_url`` points somewhere that is not loopback), every board
+# call is forwarded there over HTTP — authenticated with the same
+# ``auth.node_secret`` the agent already uses for ``/ai-ws/register``.
+#
+# The local files stay the implementation of record *on the gateway* (the board
+# bridge calls the un-dispatched functions through :func:`local_call`) and stay
+# the behaviour on single-machine installs, where nothing is forwarded.
+# ---------------------------------------------------------------------------
+_BOARD_AGENT_PATH = "/api/ai-web/agent/board"
+_BOARD_TIMEOUT = 20.0
+
+# Every operation an agent may drive remotely (the public surface of this module).
+REMOTE_OPS = (
+    "create_task",
+    "update_task",
+    "list_tasks",
+    "get_task",
+    "upsert_item",
+    "list_items",
+    "append_public_discussion",
+    "update_latest_tool",
+    "delete_item",
+    "delete_task",
+    "set_card_and_skills",
+    "mark_participant",
+    "list_participants",
+    "board_summary",
+    "save_snapshot",
+    "list_snapshots",
+    "save_plan_snapshot",
+    "list_plan_snapshots",
+    "cleanup_stale_tasks",
+)
+
+_LOCAL_IMPL: dict[str, Any] = {}
+
+
+class BoardRemoteError(RuntimeError):
+    """The board lives on a remote gateway and the call could not reach it."""
+
+
+def _is_loopback(url: str) -> bool:
+    host = str(url or "").strip().lower()
+    for prefix in ("http://", "https://", "ws://", "wss://"):
+        if host.startswith(prefix):
+            host = host[len(prefix) :]
+            break
+    host = host.split("/", 1)[0].split(":", 1)[0]
+    return host in ("", "localhost", "127.0.0.1", "::1", "0.0.0.0")
+
+
+def _http_url(url: str) -> str:
+    base = str(url or "").strip()
+    if base.startswith("ws://"):
+        base = "http://" + base[len("ws://") :]
+    elif base.startswith("wss://"):
+        base = "https://" + base[len("wss://") :]
+    for suffix in ("/ws", "/ai-ws/register"):
+        if base.endswith(suffix):
+            base = base[: -len(suffix)]
+    return base.rstrip("/")
+
+
+def _agent_config() -> dict[str, Any]:
+    """This agent's config.json (``{}`` for a non-agent process such as the gateway)."""
+    try:
+        from opensquad.input_hub import input_hub
+        from opensquad.json_cache import load_json_cached
+
+        agent_dir = input_hub.agent_dir or ""
+        if not agent_dir:
+            return {}
+        cfg = load_json_cached(os.path.join(agent_dir, "config.json"))
+        return cfg if isinstance(cfg, dict) else {}
+    except Exception:
+        return {}
+
+
+def board_mode() -> str:
+    """``local`` | ``remote`` | ``auto`` (default: auto)."""
+    env = (os.environ.get("OPENSQUAD_BOARD_MODE") or "").strip().lower()
+    if env in ("local", "remote", "auto"):
+        return env
+    cfg = _agent_config().get("collab_board")
+    mode = str((cfg or {}).get("mode") or "").strip().lower() if isinstance(cfg, dict) else ""
+    return mode if mode in ("local", "remote", "auto") else "auto"
+
+
+def board_base_url() -> str:
+    """Gateway base URL owning this board, or ``""`` when the board is local."""
+    env = (os.environ.get("OPENSQUAD_BOARD_URL") or "").strip()
+    if env:
+        return _http_url(env)
+    mode = board_mode()
+    if mode == "local":
+        return ""
+    cfg = _agent_config()
+    collab_cfg = cfg.get("collab_board") if isinstance(cfg.get("collab_board"), dict) else {}
+    explicit = str((collab_cfg or {}).get("url") or "").strip()
+    if explicit:
+        return _http_url(explicit)
+    chat = cfg.get("group_chat") if isinstance(cfg.get("group_chat"), dict) else {}
+    base = str((chat or {}).get("base_url") or "").strip()
+    if mode == "remote":
+        # Explicit remote: fall back to the gateway registration URL.
+        gateway = cfg.get("gateway") if isinstance(cfg.get("gateway"), dict) else {}
+        return _http_url(base or str((gateway or {}).get("url") or ""))
+    # auto: only when the chat bridge itself points off this machine
+    if not base or _is_loopback(base):
+        return ""
+    return _http_url(base)
+
+
+def _remote_call(op: str, args: tuple, kwargs: dict) -> Any:
+    import urllib.error
+    import urllib.request
+
+    base = board_base_url()
+    if not base:
+        raise BoardRemoteError("no remote board configured")
+    try:
+        from opensquad.system_config import syscfg
+
+        secret = syscfg.node_secret()
+    except Exception:
+        secret = ""
+    payload = json.dumps({"op": op, "args": list(args), "kwargs": kwargs}).encode("utf-8")
+    req = urllib.request.Request(
+        f"{base}{_BOARD_AGENT_PATH}",
+        data=payload,
+        headers={"Content-Type": "application/json", "X-Node-Secret": secret or ""},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=_BOARD_TIMEOUT) as resp:
+            data = json.loads(resp.read().decode("utf-8") or "{}")
+    except urllib.error.HTTPError as exc:
+        body = ""
+        with suppress(Exception):
+            body = exc.read().decode("utf-8")[:300]
+        raise BoardRemoteError(f"board {op} rejected by {base}: HTTP {exc.code} {body}") from exc
+    except Exception as exc:
+        raise BoardRemoteError(f"board {op} could not reach {base}: {exc}") from exc
+    if not isinstance(data, dict) or not data.get("ok"):
+        raise BoardRemoteError(f"board {op} failed on {base}: {str(data)[:300]}")
+    return data.get("result")
+
+
+def local_call(op: str, *args: Any, **kwargs: Any) -> Any:
+    """Run a board operation against the *local* files, bypassing forwarding.
+
+    This is what the gateway's board bridge calls: the gateway owns the board,
+    so it must never forward its own requests back out.
+    """
+    fn = _LOCAL_IMPL.get(op)
+    if fn is None:
+        raise KeyError(f"unknown board op: {op}")
+    return fn(*args, **kwargs)
+
+
+def _install_remote_dispatch() -> None:
+    """Forward the public board surface to the owning gateway when remote."""
+    g = globals()
+    for op in REMOTE_OPS:
+        local_fn = g.get(op)
+        if local_fn is None or getattr(local_fn, "_board_dispatched", False):
+            continue
+        _LOCAL_IMPL[op] = local_fn
+
+        def make(local_impl, name):
+            def wrapper(*args: Any, **kwargs: Any) -> Any:
+                if board_base_url():
+                    return _remote_call(name, args, kwargs)
+                return local_impl(*args, **kwargs)
+
+            wrapper.__name__ = name
+            wrapper.__doc__ = local_impl.__doc__
+            wrapper._board_dispatched = True
+            return wrapper
+
+        g[op] = make(local_fn, op)
+
+
+_install_remote_dispatch()
+
+
 # Run WAL replay on module import — recovers data from any uncommitted WAL entries
 # that were written before a crash. Must be at end of file so all helpers are defined.
 _wal_replay()

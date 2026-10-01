@@ -1316,6 +1316,35 @@ async def get_collab_board_task_summary(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+class BoardOpRequest(BaseModel):
+    op: str
+    args: list = []
+    kwargs: dict = {}
+
+
+@router.post("/agent/board")
+async def agent_board_op(body: BoardOpRequest, request: Request):
+    """Board bridge for agents that run on another machine.
+
+    The collaboration board belongs to the deployment that owns the group chat —
+    two agents in one group must share one task list, one member set and one set
+    of items (and one id space) — so a remote agent forwards its board calls here
+    instead of keeping its own copy. Authenticated with the same
+    ``auth.node_secret`` the agent uses for ``/ai-ws/register``, and restricted to
+    the board's public operations.
+    """
+    from app.ai_web.websocket import _check_node_secret
+    from opensquad import collab_board
+
+    if not _check_node_secret(request.headers.get("X-Node-Secret", "")):
+        raise HTTPException(status_code=401, detail="Invalid or missing node secret")
+    try:
+        result = collab_board.local_call(body.op, *(body.args or []), **(body.kwargs or {}))
+    except KeyError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"ok": True, "result": result}
+
+
 @router.post("/collab-board/tasks")
 async def create_collab_board_task(
     body: CollabTaskCreateRequest,
