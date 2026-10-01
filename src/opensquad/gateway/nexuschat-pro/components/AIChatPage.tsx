@@ -2853,6 +2853,10 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
       const payload = typeof inner === 'object' && inner !== null ? inner : {};
       const messageId = String(payload.message_id || '').trim();
       const text = String(payload.content ?? '').trim();
+      // Someone else's message that arrived mid-turn travels with its origin, so
+      // the row reads 私聊消息/群消息 · sender · text instead of 插话.
+      const source = String(payload.source || '');
+      const senderName = String(payload.sender_name || '');
       const sid = String(raw?.sid || payload.session_id || '').trim();
       if (messageId) {
         setPendingMessages((prev) => prev.filter((m) => !(m.steered && m.id === messageId)));
@@ -2870,7 +2874,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
         : (timelineRef.current ?? []);
       // 插话嵌进正在跑的工具流里，不 seal、不插独立气泡 —— 否则工具流会被切成
       // 两段。只有在没有可挂载的流时（回合已收尾）才退回「封口 + 气泡」。
-      const steered = appendUserSteerToTimeline(prevBucket, text);
+      const steered = appendUserSteerToTimeline(prevBucket, { text, source, sender_name: senderName });
       const nextEntries: TimelineEntry[] = steered ?? [
         ...sealIncompleteWorkflows(prevBucket, { fallbackStartedMs: turnStartedMsRef.current }),
         { kind: 'message', data: userMsg, _uid: uid },

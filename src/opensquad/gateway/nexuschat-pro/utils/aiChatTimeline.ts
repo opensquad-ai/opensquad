@@ -1353,12 +1353,25 @@ function sealWorkflowAfterUserStop(
  * tools around it — a top-level bubble would seal the fold and cut the tool
  * stream in two (`sealIncompleteWorkflows` + message).
  */
-export function makeUserSteerEvent(text: string): WorkflowEvent {
+export function makeUserSteerEvent(payload: SteerPayload): WorkflowEvent {
+  const { text, source, sender_name } = steerParts(payload);
   return {
     _uid: genTimelineUID(),
     type: 'user_steer',
-    content: { text },
+    content: { text, source, sender_name },
     timestamp: Date.now(),
+  };
+}
+
+/** A steer's text, plus where it came from when it was someone else's message. */
+export type SteerPayload = string | { text: string; source?: string; sender_name?: string };
+
+function steerParts(payload: SteerPayload): { text: string; source: string; sender_name: string } {
+  if (typeof payload === 'string') return { text: payload, source: '', sender_name: '' };
+  return {
+    text: String(payload?.text ?? ''),
+    source: String(payload?.source ?? ''),
+    sender_name: String(payload?.sender_name ?? ''),
   };
 }
 
@@ -1371,14 +1384,14 @@ export function makeUserSteerEvent(text: string): WorkflowEvent {
  */
 export function appendUserSteerToTimeline(
   timeline: TimelineEntry[],
-  text: string,
+  payload: SteerPayload,
 ): TimelineEntry[] | null {
-  if (!formatUserSkillDisplayContent(text).trim()) return null;
+  if (!formatUserSkillDisplayContent(steerParts(payload).text).trim()) return null;
   for (let i = timeline.length - 1; i >= 0; i--) {
     const entry = timeline[i];
     if (entry.kind !== 'workflow') continue;
     if (entry.data.completed) return null;
-    const evt = makeUserSteerEvent(text);
+    const evt = makeUserSteerEvent(payload);
     return timeline.map((e, idx) =>
       idx === i
         ? { ...entry, data: { ...entry.data, events: [...entry.data.events, evt] } }

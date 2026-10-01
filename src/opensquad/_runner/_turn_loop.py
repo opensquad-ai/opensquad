@@ -833,16 +833,20 @@ class TurnLoop:
                         )
                         await self.runner._emit(
                             "user_msg",
-                            {"text": evt.content, **_chat_meta} if _chat_meta else evt.content,
+                            {"text": evt.content, "steer": True, **_chat_meta},
                         )
-                        # Steer（引导注入）消费回执：该用户插话已随本轮工具结果
-                        # 进入模型上下文。携带 client_id 供前端把引导条目挪进
-                        # 时间线（steer_consumed 在 protocol_version 注册）。
-                        if _steer_cid:
-                            await self.runner._emit(
-                                "steer_consumed",
-                                {"message_id": _steer_cid, "content": evt.content},
-                            )
+                        # Steer（引导注入）消费回执：该插话/消息已随本轮工具结果进入
+                        # 模型上下文。**所有** steer 都发，不只用户的插话——中途到达的
+                        # 群/私聊消息在实时路径上只能靠它嵌进工具流（带 source +
+                        # sender_name，前端据此按来源贴标签，而不是插气泡封口）。
+                        await self.runner._emit(
+                            "steer_consumed",
+                            {
+                                "message_id": _steer_cid,
+                                "content": evt.content,
+                                **_chat_meta,
+                            },
+                        )
 
                 if _raw_events:
                     lines = ["", "--- External Events (arrived during processing) ---"]

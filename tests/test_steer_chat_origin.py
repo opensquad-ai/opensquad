@@ -31,9 +31,23 @@ def test_the_message_text_is_not_rewritten():
 
 def test_the_meta_goes_to_both_the_session_and_the_ui():
     assert "**_chat_meta," in TURN_LOOP  # stored on the session message
-    assert '{"text": evt.content, **_chat_meta} if _chat_meta else evt.content,' in TURN_LOOP
+    assert '{"text": evt.content, "steer": True, **_chat_meta},' in TURN_LOOP
 
 
-def test_the_ui_still_receives_a_plain_string_for_user_messages():
-    """A web/gateway interjection keeps the old payload shape (a bare string)."""
-    assert "if _chat_meta else evt.content" in TURN_LOOP
+def test_every_steer_is_receipted_so_the_fold_can_render_it_live():
+    """Only client_id'd interjections used to be receipted: a DM that arrived
+    mid-turn had none, so it lived in the session but never entered the live fold
+    — it only showed up once a refresh rebuilt the timeline from disk."""
+    at = TURN_LOOP.index('"steer_consumed"')
+    receipt = TURN_LOOP[at : at + 300]
+    assert '"message_id": _steer_cid,' in receipt
+    assert '"content": evt.content,' in receipt
+    assert "**_chat_meta," in receipt
+    # Unconditional: the emit is no longer wrapped in `if _steer_cid:`.
+    assert "if _steer_cid:" not in TURN_LOOP[max(0, at - 160) : at]
+
+
+def test_the_ui_marks_steer_frames_so_no_bubble_is_finalized():
+    """The frontend returns early on these (`raw.steer`): finalizing a bubble
+    would seal the running fold and cut the tool stream in two."""
+    assert '"steer": True' in TURN_LOOP

@@ -408,7 +408,47 @@ describe('R5 — 接线', () => {
   it('the consumer nests into the fold instead of sealing', () => {
     const svc = PAGE.slice(PAGE.indexOf("svc.on('steer_consumed'"));
     // 必须是真的调用结果；`null && append…` 这种「看起来调用了」不算接线。
-    expect(svc).toMatch(/const steered = appendUserSteerToTimeline\(prevBucket, text\);/);
+    expect(svc).toMatch(
+      /const steered = appendUserSteerToTimeline\(prevBucket, \{ text, source, sender_name: senderName \}\);/,
+    );
+  });
+
+  it('an incoming message keeps its origin all the way into the fold row', () => {
+    const live = [
+      {
+        kind: 'workflow',
+        data: {
+          events: [
+            { _uid: 'c1', type: 'tool_call', content: { id: 'c1', name: 'filesystem__read_file', args: {} }, result: 'ok', resultStatus: 'success', timestamp: 1 },
+          ],
+          status: 'working',
+          completed: false,
+        },
+        _uid: 'w1',
+      },
+    ] as unknown as TimelineEntry[];
+    const after = appendUserSteerToTimeline(live, {
+      text: 'hi',
+      source: 'dm',
+      sender_name: 'ss',
+    }) as TimelineEntry[];
+    const evt = blocksOf(after)[0].data.events.at(-1) as any;
+    expect(evt.content).toMatchObject({ text: 'hi', source: 'dm', sender_name: 'ss' });
+  });
+
+  it('a steer frame never becomes a bubble live (it would seal the fold)', () => {
+    // Regression: the mid-turn message was finalized as a bubble, which sealed
+    // the running fold — so the tool flow showed nothing until a refresh.
+    const hook = fs.readFileSync(path.resolve(ROOT, 'hooks', 'useAgentWebSocket.ts'), 'utf8');
+    const at = hook.indexOf('const raw = msg as any;');
+    expect(at).toBeGreaterThan(-1);
+    expect(hook.slice(at, at + 500)).toContain('if (raw.steer === true) return;');
+  });
+
+  it('the consumer delegates the origin, and the fallback bubble stays', () => {
+    const svc = PAGE.slice(PAGE.indexOf("svc.on('steer_consumed'"));
+    expect(svc).toContain("const source = String(payload.source || '');");
+    expect(svc).toContain("const senderName = String(payload.sender_name || '');");
   });
 
   it('and keeps the bubble only as the fallback', () => {

@@ -499,6 +499,12 @@ export function useAgentWebSocket(agentId: string, ctx: AgentWebWsCtx) {
           || (finalSid === (currentSessionIdRef.current || '') ? streamingTextRef.current : ''))
         : streamingTextRef.current;
       const raw = msg as any;
+      // A steer is rendered by the fold, not as a bubble: `steer_consumed`
+      // inserts it between the tools it interrupted. Finalizing a bubble here
+      // would seal the running fold and cut the tool stream in two — which is
+      // why a message that arrived mid-turn looked missing until a refresh
+      // rebuilt the fold from the session.
+      if (raw.steer === true) return;
       const role = (raw.role === 'user' ? 'user' : 'assistant') as 'user' | 'assistant';
       const rawFinal = text || streamedForSid;
       const finalText = role === 'assistant'
