@@ -149,14 +149,36 @@ def test_another_failure_is_reported_not_misread(monkeypatch, http):
     assert http["calls"] == []  # only a *private* refusal becomes a request
 
 
-def test_the_invite_must_match_the_gateway_this_agent_uses(monkeypatch, http):
+def test_an_invite_for_an_unpaired_machine_asks_to_pair_not_to_repoint(monkeypatch, http):
+    """The old answer told the operator to point ``group_chat.base_url`` at the
+    invite and restart — which cost them their own groups. Another machine's invite
+    now means "pair with it"."""
     monkeypatch.setattr(bridge_mod, "bridge", _Bridge(joined=True, base_url="http://10.0.0.9:9555"))
 
     res = invite_tool.join_by_invite("192.168.5.4#g-7f3a")
 
     assert res["status"] == "error"
-    assert res["code"] == "wrong_gateway"
-    assert "group_chat.base_url" in res["message"]
+    assert res["code"] == "not_paired"
+    assert "pair_with_node" in res["message"]
+    assert "group_chat.base_url" not in res["message"]
+
+
+def test_an_invite_for_a_paired_machine_uses_that_peers_own_bridge(monkeypatch, http):
+    """The home bridge is not consulted (and not repointed): the join happens
+    through the peer's bridge, so the agent stays in its own groups."""
+    import opensquad.peer_bridge as peer_bridge_mod
+
+    home = _Bridge(joined=True, base_url="http://127.0.0.1:9555")
+    peer = _Bridge(joined=True, base_url="http://192.168.5.4:9555")
+    monkeypatch.setattr(bridge_mod, "bridge", home)
+    monkeypatch.setattr(peer_bridge_mod, "peer_bridge", lambda host: (peer, ""))
+    monkeypatch.setattr(peer_bridge_mod, "find_peer", lambda host: {"base_url": "http://192.168.5.4:9555"})
+
+    res = invite_tool.join_by_invite("192.168.5.4#g-7f3a")
+
+    assert res["status"] == "success"
+    assert res["host"] == "192.168.5.4"
+    assert home.token == "t"  # touched, not replaced
 
 
 def test_a_malformed_invite_says_what_it_wants(monkeypatch):

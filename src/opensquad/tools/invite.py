@@ -76,9 +76,13 @@ def pair_with_node(invite: str, name: str = "", wait_seconds: int = 20) -> dict[
                         "message": "Approved without a token; ask the owner to unpair and retry.",
                     }
                 from ..node_peers import save_local_peer
+                from ..peer_bridge import remember_peer
 
                 save_local_peer(base, token, name or parsed["host"])
-                wrote = _point_agent_at(base, token)
+                # Recorded NEXT TO this agent's own gateway, never over it: pairing a
+                # second machine must not cost the agent the groups it is in at home
+                # (that hijack is why the old flow needed a restart to switch back).
+                wrote = remember_peer(parsed["host"], base, token, name or parsed["host"])
                 return {
                     "status": "success",
                     "peer": parsed["host"],
@@ -86,8 +90,10 @@ def pair_with_node(invite: str, name: str = "", wait_seconds: int = 20) -> dict[
                     "scopes": list((body or {}).get("scopes") or []),
                     "config_updated": wrote,
                     "message": (
-                        "Paired. This machine now has its own scoped token for that gateway — restart "
-                        "the agent to use it, then join_by_invite again."
+                        f"Paired with {base}. This agent keeps its own gateway and groups — the peer was "
+                        "recorded alongside them, nothing was repointed and no restart is needed. Next: "
+                        f"im.register_account(email='<unique>@ai', password='...', host='{parsed['host']}'), "
+                        "then join_by_invite."
                     ),
                 }
             if status in ("rejected", "unknown"):
@@ -104,48 +110,21 @@ def pair_with_node(invite: str, name: str = "", wait_seconds: int = 20) -> dict[
         return {"status": "error", "message": str(e)}
 
 
-def _point_agent_at(base_url: str, token: str) -> bool:
-    """Write the gateway address + peer token into this agent's config."""
-    try:
-        import json
-        import os
-
-        from ..input_hub import input_hub
-
-        agent_dir = input_hub.agent_dir or ""
-        if not agent_dir:
-            return False
-        path = os.path.join(agent_dir, "config.json")
-        with open(path, encoding="utf-8") as fh:
-            cfg = json.load(fh)
-        if not isinstance(cfg, dict):
-            return False
-        chat = cfg.get("group_chat") if isinstance(cfg.get("group_chat"), dict) else {}
-        chat["base_url"] = base_url
-        cfg["group_chat"] = chat
-        gateway = cfg.get("gateway") if isinstance(cfg.get("gateway"), dict) else {}
-        gateway["url"] = f"{base_url.replace('https://', 'wss://').replace('http://', 'ws://')}/ai-ws/register"
-        gateway["peer_token"] = token
-        cfg["gateway"] = gateway
-        tmp = f"{path}.tmp"
-        with open(tmp, "w", encoding="utf-8") as fh:
-            json.dump(cfg, fh, ensure_ascii=False, indent=2)
-        os.replace(tmp, path)
-        return True
-    except Exception:
-        return False
-
-
 def join_by_invite(invite: str, note: str = "") -> dict[str, Any]:
     """
     [All agents] Join a group on another machine from its invite string.
 
     The string looks like ``192.168.5.4:9555#g-7f3a`` (or
     ``https://chat.example.com#g-7f3a``); the group's page on the hosting machine
-    shows it. This agent must already be bridged to that gateway (its
-    ``group_chat.base_url`` points there) with an ``@ai`` account — the tool joins
-    the group, and when the group is private it files a join request instead of
-    failing, because only the owner can let you in there.
+    shows it. The invite says which gateway the call goes to:
+
+    * this agent's **own** gateway — joined with the account it already has;
+    * a **paired** machine — joined there with the account registered for it via
+      ``im.register_account(..., host=...)``, through that peer's own bridge. This
+      agent's gateway and its groups at home are untouched.
+
+    A private group files a join request instead of failing, because only the owner
+    can let you in there.
 
     Args:
         invite: the invite string copied from the group page.
@@ -165,27 +144,41 @@ def join_by_invite(invite: str, note: str = "") -> dict[str, Any]:
             }
 
         from ..bridge import bridge
+        from ..peer_bridge import find_peer, host_key, peer_bridge
 
-        if not bridge or not bridge.token:
-            return {
-                "status": "error",
-                "message": (
-                    "Bridge not logged in. Register an account first "
-                    "(im.register_account(email='<agent>@ai', password='...')) and point this agent's "
-                    f"group_chat.base_url at {parsed['base_url']}."
-                ),
-            }
-        if not bridge.base_url.startswith(parsed["base_url"]):
-            return {
-                "status": "error",
-                "code": "wrong_gateway",
-                "message": (
-                    f"This agent is bridged to {bridge.base_url}, but the invite is for "
-                    f"{parsed['base_url']}. Point group_chat.base_url there and restart, then retry."
-                ),
-            }
+        # Is this invite about the gateway this agent already lives on, or about a
+        # machine it paired with? The second case must NOT go through the home
+        # bridge (and must not repoint it): it gets its own bridge to that peer.
+        home = host_key(getattr(bridge, "base_url", "") or "")
+        invited = host_key(parsed["base_url"])
+        is_home = bool(home) and (invited == home or host_key(parsed["host"]) == home)
 
-        result = bridge.join_group_api(parsed["group_id"])
+        if is_home:
+            if not bridge or not bridge.token:
+                return {
+                    "status": "error",
+                    "message": (
+                        "Bridge not logged in. Register an account first "
+                        "(im.register_account(email='<agent>@ai', password='...'))."
+                    ),
+                }
+            target = bridge
+        else:
+            target, why = peer_bridge(parsed["host"])
+            if target is None:
+                if find_peer(parsed["host"]):
+                    return {"status": "error", "code": "peer_not_ready", "message": why}
+                return {
+                    "status": "error",
+                    "code": "not_paired",
+                    "message": (
+                        f"{parsed['base_url']} is another machine and this agent is not paired with it. "
+                        "Ask its owner for the coded invite string ('带配对码的邀请串') and run "
+                        "pair_with_node(invite='<host>:<port>#<group>?code=XXXXXX', name='...') here first."
+                    ),
+                }
+
+        result = target.join_group_api(parsed["group_id"])
         if isinstance(result, dict) and result.get("ok"):
             return {
                 "status": "success",
@@ -204,8 +197,8 @@ def join_by_invite(invite: str, note: str = "") -> dict[str, Any]:
         import requests
 
         response = requests.post(
-            f"{bridge.base_url}/api/groups/{parsed['group_id']}/join-request",
-            params={"token": bridge.token},
+            f"{target.base_url}/api/groups/{parsed['group_id']}/join-request",
+            params={"token": target.token},
             json={"message": note or "join by invite"},
             timeout=10,
         )

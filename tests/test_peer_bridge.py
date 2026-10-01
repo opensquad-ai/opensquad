@@ -1,0 +1,175 @@
+"""Peers: bridges to other machines that never take over the agent's own gateway.
+
+Pairing used to repoint the agent's only bridge at the machine it paired with, so
+joining elsewhere meant leaving home. These cover the replacement: peers live in
+``group_chat.peers``, a call aimed at one gets its own bridge, and registration
+there uses the peer token instead of the host's node_secret.
+"""
+
+from __future__ import annotations
+
+import json
+import sys
+from pathlib import Path
+
+import pytest
+
+_BACKEND = Path(__file__).resolve().parents[1] / "src"
+if str(_BACKEND) not in sys.path:
+    sys.path.insert(0, str(_BACKEND))
+
+import opensquad.bridge as bridge_mod  # noqa: E402
+import opensquad.input_hub as input_hub_mod  # noqa: E402
+import opensquad.peer_bridge as peer_bridge_mod  # noqa: E402
+from opensquad.input_hub import input_hub  # noqa: E402
+from opensquad.tools import im as im_tool  # noqa: E402
+
+
+@pytest.fixture()
+def env(tmp_path, monkeypatch):
+    """An agent that already has its own gateway and one group at home."""
+    agent_dir = tmp_path / "agents" / "coder"
+    agent_dir.mkdir(parents=True)
+    config = {
+        "agent_name": "coder",
+        "group_chat": {
+            "base_url": "http://127.0.0.1:9555",
+            "email": "pm@ai",
+            "password": "home-pw",
+            "groups": ["g-home"],
+        },
+    }
+    (agent_dir / "config.json").write_text(json.dumps(config), encoding="utf-8")
+    monkeypatch.setattr(input_hub, "agent_dir", str(agent_dir))
+    monkeypatch.setattr(input_hub_mod.input_hub, "agent_dir", str(agent_dir))
+    peer_bridge_mod._BRIDGES.clear()
+    return agent_dir
+
+
+def _config(agent_dir) -> dict:
+    return json.loads((agent_dir / "config.json").read_text(encoding="utf-8"))
+
+
+def test_remembering_a_peer_leaves_the_home_binding_exactly_as_it_was(env):
+    peer_bridge_mod.remember_peer("192.168.5.4", "http://192.168.5.4:9555", "peer-tok", "machine-b")
+
+    cfg = _config(env)
+    assert cfg["group_chat"]["base_url"] == "http://127.0.0.1:9555"
+    assert cfg["group_chat"]["email"] == "pm@ai"
+    assert cfg["group_chat"]["groups"] == ["g-home"]
+    assert "gateway" not in cfg
+    assert cfg["group_chat"]["peers"]["192.168.5.4"]["base_url"] == "http://192.168.5.4:9555"
+
+
+def test_a_peer_is_found_by_host_or_by_gateway_address(env):
+    peer_bridge_mod.remember_peer("192.168.5.4", "http://192.168.5.4:9555", "peer-tok")
+
+    assert peer_bridge_mod.find_peer("192.168.5.4")["token"] == "peer-tok"
+    assert peer_bridge_mod.find_peer("http://192.168.5.4:9555")["token"] == "peer-tok"
+    assert peer_bridge_mod.find_peer("10.0.0.9") is None
+
+
+def test_a_peer_without_an_account_says_what_to_run(env):
+    peer_bridge_mod.remember_peer("192.168.5.4", "http://192.168.5.4:9555", "peer-tok")
+
+    bridge, why = peer_bridge_mod.peer_bridge("192.168.5.4")
+
+    assert bridge is None
+    assert "register_account" in why and "host=" in why
+
+
+def test_an_unpaired_host_says_to_pair_first(env):
+    bridge, why = peer_bridge_mod.peer_bridge("10.1.2.3")
+
+    assert bridge is None
+    assert "pair_with_node" in why
+
+
+def test_a_peer_bridge_logs_in_and_is_reused(env, monkeypatch):
+    peer_bridge_mod.remember_peer(
+        "192.168.5.4",
+        "http://192.168.5.4:9555",
+        "peer-tok",
+        account={"email": "b@ai", "password": "pw"},
+    )
+    built: list[str] = []
+
+    class _FakeBridge:
+        def __init__(self, base_url=None, email="", password="", **kwargs):
+            built.append(f"{base_url}|{email}")
+            self.base_url = base_url
+            self.token = "user-tok"
+
+        def login(self):
+            return True
+
+    monkeypatch.setattr(bridge_mod, "ChatProBridge", _FakeBridge)
+
+    first, why = peer_bridge_mod.peer_bridge("192.168.5.4")
+    second, _ = peer_bridge_mod.peer_bridge("192.168.5.4")
+
+    assert why == ""
+    assert first is second  # one bridge per peer
+    assert built == ["http://192.168.5.4:9555|b@ai"]
+
+
+def test_registering_on_a_peer_uses_the_peer_token_and_keeps_home_credentials(env, monkeypatch):
+    peer_bridge_mod.remember_peer("192.168.5.4", "http://192.168.5.4:9555", "peer-tok")
+    seen: list[dict] = []
+
+    class _Response:
+        status_code = 200
+        text = ""
+
+        def json(self):
+            return {"user": {"id": "u1"}}
+
+    def _post(url, **kwargs):
+        seen.append({"url": url, "headers": kwargs.get("headers") or {}, "json": kwargs.get("json") or {}})
+        return _Response()
+
+    import requests as real_requests
+
+    monkeypatch.setattr(real_requests, "post", _post)
+
+    res = im_tool.register_account("machine-b-agent@ai", "pw", host="192.168.5.4")
+
+    assert res["status"] == "success"
+    assert seen[0]["url"] == "http://192.168.5.4:9555/api/auth/register"
+    assert seen[0]["headers"]["X-Node-Token"] == "peer-tok"  # never the host's node_secret
+    cfg = _config(env)
+    assert cfg["group_chat"]["email"] == "pm@ai"  # home account untouched
+    assert cfg["group_chat"]["peers"]["192.168.5.4"]["account"] == {
+        "email": "machine-b-agent@ai",
+        "password": "pw",
+    }
+
+
+def test_an_existing_peer_account_with_a_wrong_password_is_reported_not_taken_over(env, monkeypatch):
+    """A peer cannot reset passwords on that machine, so silently adopting the
+    address would lock the other agent out."""
+    peer_bridge_mod.remember_peer("192.168.5.4", "http://192.168.5.4:9555", "peer-tok")
+
+    class _Response:
+        def __init__(self, status_code, payload=None):
+            self.status_code = status_code
+            self.text = ""
+            self._payload = payload or {}
+
+        def json(self):
+            return self._payload
+
+    import requests as real_requests
+
+    def _post(url, **kwargs):
+        if url.endswith("/api/auth/register"):
+            return _Response(400, {"detail": "Email already registered"})
+        return _Response(401, {"detail": "Invalid credentials"})
+
+    monkeypatch.setattr(real_requests, "post", _post)
+
+    res = im_tool.register_account("clash@ai", "pw", host="192.168.5.4")
+
+    assert res["status"] == "error"
+    assert res["code"] == "email_in_use"
+    assert "cannot reset passwords" in res["message"]

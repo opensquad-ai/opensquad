@@ -111,7 +111,92 @@ def _schedule_ws_connect(bridge_inst: Any) -> None:
         logger.debug("[im] WS connect schedule skipped: %s", e)
 
 
-def register_account(email: str, password: str, name: str = "") -> dict[str, Any]:
+def _register_on_peer(host: str, email: str, password: str, display_name: str) -> dict[str, Any]:
+    """Register an account on a PAIRED machine, not on this agent's own gateway.
+
+    Machine auth is the peer token (``X-Node-Token``, scope ``agent:register``), so
+    the host's ``node_secret`` is neither needed nor sent — and the credentials are
+    stored next to the peer entry, leaving this agent's own ``group_chat`` account
+    and groups intact. A peer cannot reset passwords there either, so an existing
+    address with a different password is reported instead of silently taken over.
+    """
+    from ..peer_bridge import find_peer, peer_token, remember_peer
+
+    entry = find_peer(host)
+    if not entry:
+        return {
+            "status": "error",
+            "code": "not_paired",
+            "message": f"Not paired with {host}. Run pair_with_node(...) with its coded invite first.",
+        }
+    base_url = str(entry.get("base_url") or "").rstrip("/")
+    if not base_url:
+        return {"status": "error", "message": f"Peer {host} has no gateway address recorded; pair again."}
+
+    token = peer_token(host)
+    headers = {"X-Node-Token": token} if token else {}
+    name = display_name or email.split("@")[0]
+    try:
+        reg = requests.post(
+            f"{base_url}/api/auth/register",
+            json={"email": email, "password": password, "name": name},
+            headers=headers,
+            timeout=10,
+        )
+    except Exception as e:
+        return {"status": "error", "message": f"Register request to {base_url} failed: {e}"}
+
+    try:
+        detail = str((reg.json() or {}).get("detail") or reg.text[:200])
+    except Exception:
+        detail = reg.text[:200]
+
+    if reg.status_code not in (200, 201):
+        already = reg.status_code == 400 and "already registered" in detail.lower()
+        if not already:
+            if reg.status_code == 409:
+                return {
+                    "status": "error",
+                    "code": "email_in_use",
+                    "message": (
+                        f"{email} is already bound to another machine on {base_url}. Give this agent its "
+                        "own unique address (e.g. '<machine>-<agent>@ai')."
+                    ),
+                    "detail": detail,
+                }
+            return {
+                "status": "error",
+                "message": f"Register on {base_url} failed (HTTP {reg.status_code}): {detail}",
+            }
+        # The address exists — only the right password proves it is this agent's.
+        login = requests.post(
+            f"{base_url}/api/auth/login",
+            json={"email": email, "password": password},
+            timeout=10,
+        )
+        if login.status_code != 200:
+            return {
+                "status": "error",
+                "code": "email_in_use",
+                "message": (
+                    f"{email} already exists on {base_url} and this password does not match. A paired "
+                    "machine cannot reset passwords there — use the right password, or another address."
+                ),
+            }
+
+    remember_peer(host, base_url, token, account={"email": email, "password": password})
+    return {
+        "status": "success",
+        "host": host,
+        "base_url": base_url,
+        "message": (
+            f"{email} is ready on {base_url}. This agent's own account and groups are unchanged; "
+            f"use host='{host}' for join_by_invite and sends there."
+        ),
+    }
+
+
+def register_account(email: str, password: str, name: str = "", host: str = "") -> dict[str, Any]:
     """
     Register (or ensure) an IM account for this agent, save credentials to config.json,
     and log the Bridge in so join/send/history work immediately.
@@ -121,11 +206,17 @@ def register_account(email: str, password: str, name: str = "") -> dict[str, Any
                (e.g. ``news2theme_agent@ai``). Do not reuse the placeholder ``ai@ai``.
         password: Login password (stored in this agent's config.json).
         name: Display name. Defaults to config ``agent_name`` when empty.
+        host: Register on a machine this agent is PAIRED with (the host of an invite
+              string) instead of its own gateway. This agent's own account and groups
+              are left alone; the credentials are kept next to that peer entry and
+              used by ``join_by_invite`` / sends aimed at that host.
     """
     email = (email or "").strip()
     password = (password or "").strip()
     if not email or not password:
         return {"status": "error", "message": "email and password are required"}
+    if (host or "").strip():
+        return _register_on_peer((host or "").strip(), email, password, (name or "").strip())
     if email.lower() == "ai@ai":
         return {
             "status": "error",

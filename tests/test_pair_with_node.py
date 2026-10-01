@@ -108,7 +108,11 @@ def test_still_waiting_says_so_instead_of_failing(env, monkeypatch):
     assert res["request_id"] == "pair_1"
 
 
-def test_approval_keeps_the_token_and_points_the_agent_at_the_host(env, monkeypatch):
+def test_approval_records_the_peer_without_taking_the_agent_off_its_own_gateway(env, monkeypatch):
+    """The whole point of the fix: pairing a second machine used to repoint the
+    agent's only bridge (``group_chat.base_url`` + ``gateway.url``), which silently
+    dropped it out of its own groups and forced a switch-back restart. The peer is
+    now written NEXT TO home, and nothing about home moves."""
     _fake_http(
         monkeypatch,
         poll={"status": "approved", "token": "peer-tok", "scopes": list(node_peers.AGENT_SCOPES)},
@@ -118,10 +122,14 @@ def test_approval_keeps_the_token_and_points_the_agent_at_the_host(env, monkeypa
 
     assert res["status"] == "success"
     assert res["config_updated"] is True
-    # the token is kept for this gateway, and spent by the board/registration paths
+    # the token is kept for this gateway, and spent by registration/board calls
     assert node_peers.load_local_peer("http://192.168.5.4:9600")["token"] == "peer-tok"
-    # and the config now points there, so a restart stays paired
+
     cfg = json.loads((env["agent_dir"] / "config.json").read_text(encoding="utf-8"))
-    assert cfg["group_chat"]["base_url"] == "http://192.168.5.4:9600"
-    assert cfg["gateway"]["peer_token"] == "peer-tok"
-    assert cfg["gateway"]["url"] == "ws://192.168.5.4:9600/ai-ws/register"
+    # the peer is remembered…
+    assert cfg["group_chat"]["peers"]["192.168.5.4"]["base_url"] == "http://192.168.5.4:9600"
+    assert cfg["group_chat"]["peers"]["192.168.5.4"]["token"] == "peer-tok"
+    # …and home was not repointed: no gateway/base_url of its own was written
+    assert "base_url" not in cfg["group_chat"]
+    assert "gateway" not in cfg
+    assert "no restart" in res["message"]
