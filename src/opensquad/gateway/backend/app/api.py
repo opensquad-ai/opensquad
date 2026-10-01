@@ -305,6 +305,15 @@ async def register(user_data: UserCreate, request: Request, db: AsyncSession = D
         and not _is_node_secret_placeholder(expected_node_secret)
         and (header_secret == expected_node_secret)
     )
+    # A paired machine registers its own agents with its scoped token instead of
+    # holding the shared node_secret (see opensquad.node_peers): it needs the
+    # agent:register scope, and a revoked or unpaired token grants nothing.
+    if not internal_call:
+        peer_token = request.headers.get("X-Node-Token", "")
+        if peer_token:
+            from opensquad import node_peers
+
+            internal_call = node_peers.has_scope(node_peers.verify(peer_token), "agent:register")
 
     # For web calls (no internal auth), enforce first-user-only.
     if not internal_call:
@@ -1192,6 +1201,103 @@ async def decide_group_join_request(
     await db.commit()
     _log.info(f"[Group] join request {request_id} on {group_id} -> {request.status} by {current_user.id}")
     return {"ok": True, "request_id": request_id, "status": request.status, "user_id": request.user_id}
+
+
+# ========== Node pairing ==========
+# A second machine asks, the owner approves, and the peer receives a token whose
+# scopes are fixed in opensquad.node_peers — never node_secret, so a paired peer
+# cannot reach password resets or the launcher.
+
+
+@router.get("/node/info")
+async def node_info():
+    """What a machine learns before asking to pair. No auth, minimal detail."""
+    from opensquad import node_peers
+
+    name = ""
+    try:
+        from opensquad.system_config import syscfg as _cfg
+
+        name = str(_cfg.get("node", "name", "") or "")
+    except Exception:
+        name = ""
+    return {"name": name, "pairing_open": bool(node_peers.list_requests())}
+
+
+@router.post("/node/pair/code")
+async def node_pair_code(current_user: User = Depends(get_current_user_dep)):
+    """Owner side: show a short-lived code for a peer to submit."""
+    from opensquad import node_peers
+
+    return node_peers.start_pairing()
+
+
+@router.get("/node/pair/requests")
+async def node_pair_requests(current_user: User = Depends(get_current_user_dep)):
+    """Owner side: the queue of machines waiting to be paired."""
+    from opensquad import node_peers
+
+    return {"requests": node_peers.list_requests()}
+
+
+@router.get("/node/pair/{request_id}")
+async def node_pair_status(request_id: str):
+    """Peer side: poll for the answer; the token is delivered exactly once."""
+    from opensquad import node_peers
+
+    return node_peers.pair_status(request_id)
+
+
+@router.post("/node/pair/request")
+async def node_pair_request(body: dict = Body(default={})):
+    """Peer side: ask to be paired, proving knowledge of the current code."""
+    from opensquad import node_peers
+
+    result = node_peers.request_pairing(str((body or {}).get("code") or ""), str((body or {}).get("name") or ""))
+    if not result.get("ok"):
+        if result.get("status") == "rate_limited":
+            raise HTTPException(status_code=429, detail="Too many pairing attempts, wait a minute")
+        raise HTTPException(status_code=403, detail="Invalid or expired pairing code")
+    return result
+
+
+@router.post("/node/pair/{request_id}/decide")
+async def node_pair_decide(
+    request_id: str,
+    body: dict = Body(default={}),
+    current_user: User = Depends(get_current_user_dep),
+):
+    """Owner side: approve (mints the scoped token) or reject."""
+    from opensquad import node_peers
+
+    action = str((body or {}).get("action") or "").strip().lower()
+    if action not in ("approve", "reject"):
+        raise HTTPException(status_code=400, detail="action must be approve or reject")
+    result = node_peers.decide_pairing(request_id, approve=action == "approve", decided_by=str(current_user.id))
+    if not result.get("ok"):
+        status = result.get("status")
+        raise HTTPException(
+            status_code=409 if status not in (None, "unknown") else 404, detail=f"Pairing request is {status}"
+        )
+    return result
+
+
+@router.get("/node/peers")
+async def node_peers_list(current_user: User = Depends(get_current_user_dep)):
+    """Owner side: who is paired."""
+    from opensquad import node_peers
+
+    return {"peers": node_peers.list_peers()}
+
+
+@router.delete("/node/peers/{peer_id}")
+async def node_peer_revoke(peer_id: str, current_user: User = Depends(get_current_user_dep)):
+    """Owner side: cut a machine off (its token stops working immediately)."""
+    from opensquad import node_peers
+
+    if not node_peers.revoke(peer_id):
+        raise HTTPException(status_code=404, detail="Peer not found or already revoked")
+    return {"ok": True, "peer_id": peer_id}
 
 
 @router.post("/groups/{group_id}/join-request")

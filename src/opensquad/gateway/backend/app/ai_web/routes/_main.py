@@ -1448,7 +1448,17 @@ async def agent_board_op(body: BoardOpRequest, request: Request):
     from app.ai_web.websocket import _check_node_secret
     from opensquad import collab_board
 
-    if not _check_node_secret(request.headers.get("X-Node-Secret", "")):
+    authorized = _check_node_secret(request.headers.get("X-Node-Secret", ""))
+    if not authorized:
+        # A paired machine drives the board with its scoped token; it never holds
+        # node_secret, so this is the only way its agents can reach the board.
+        peer_token = request.headers.get("X-Node-Token", "")
+        if peer_token:
+            from opensquad import node_peers
+
+            peer = node_peers.verify(peer_token)
+            authorized = node_peers.has_scope(peer, "board:read") or node_peers.has_scope(peer, "board:write")
+    if not authorized:
         raise HTTPException(status_code=401, detail="Invalid or missing node secret")
     try:
         result = collab_board.local_call(body.op, *(body.args or []), **(body.kwargs or {}))
