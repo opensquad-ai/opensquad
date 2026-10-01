@@ -127,6 +127,23 @@ describe('机器消息识别 —— 从落到会话里的原文还原', () => {
     expect(machineNoticeSummary(notice)).toBe('A组 · bob +1');
   });
 
+  it('R9 — a quoted private message renders as a quote, never as the raw marker', () => {
+    // The bug: the private-message card printed the marker JSON verbatim.
+    const marker = '[[DM_QUOTE]]{"id":"dm_1","name":"Agent305","text":"现在是 16:02。"}[[/DM_QUOTE]]';
+    const notice = parseMachineUserMessage(`[DM] ss: ${marker} 现在呢`).notice;
+    if (notice?.kind !== 'group') throw new Error('expected group');
+
+    expect(notice.entries[0].text).toBe('↪ Agent305: 现在是 16:02。 — 现在呢');
+    expect(machineNoticeSummary(notice)).not.toContain('DM_QUOTE');
+    expect(machineNoticeDetail(notice)).not.toContain('DM_QUOTE');
+  });
+
+  it('R10 — a private message without a quote is left alone', () => {
+    const notice = parseMachineUserMessage('[DM] ss: 普通一句').notice;
+    if (notice?.kind !== 'group') throw new Error('expected group');
+    expect(notice.entries[0].text).toBe('普通一句');
+  });
+
   it('R8 — group traffic appended to the user\'s own turn keeps the user\'s words', () => {
     const wire = `帮我把这个群里的问题整理一下\n\n[Simultaneously received group messages]\n`
       + '[A组 | group_id=g-1] bob: 请看下这个报错';

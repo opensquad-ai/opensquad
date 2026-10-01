@@ -19,7 +19,12 @@
  *   group     runner/_input_handler        `[Messages]\n[<chat> | group_id=<id>] <sender>: <text>`
  *                                          + `[Simultaneously received group messages]` append
  *             bridge (DM)                  `[DM] <sender>: <text>`
+ *
+ * A DM may carry a quote marker (`[[DM_QUOTE]]{…}[[/DM_QUOTE]]`, see utils/dmQuote)
+ * because that is how the chat window stores a reply — this module renders it as
+ * a quoted line rather than letting the marker reach the screen.
  */
+import { parseDmQuote } from './dmQuote';
 
 export interface GroupMessageEntry {
   /** Group / DM chat name, when the wire format carried one. */
@@ -126,10 +131,23 @@ function parseGroup(content: string): MachineUserMessage | null {
   return blocksToResult('', parseGroupEntries(content));
 }
 
+/**
+ * Render one DM body: a quote marker becomes a readable quoted line, and never
+ * shows up as raw JSON (the bug: the private-message card printed
+ * `[[DM_QUOTE]]{"id":…}[[/DM_QUOTE]]` verbatim after a refresh).
+ */
+function dmBodyText(raw: string): string {
+  const { quote, body } = parseDmQuote(raw);
+  if (!quote) return raw;
+  const quoted = `${quote.name ? `${quote.name}: ` : ''}${quote.text}`.trim();
+  return body ? `↪ ${quoted} — ${body}` : `↪ ${quoted}`;
+}
+
 /** No entries parsed -> not a machine message (keep the raw text rather than swallow it). */
 function blocksToResult(text: string, entries: GroupMessageEntry[]): MachineUserMessage | null {
   if (entries.length === 0) return null;
-  return { text, notice: { kind: 'group', entries } };
+  const cleaned = entries.map((e) => (e.dm ? { ...e, text: dmBodyText(e.text) } : e));
+  return { text, notice: { kind: 'group', entries: cleaned } };
 }
 
 /**
