@@ -12,7 +12,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { FileText, History, RefreshCw, Search, X } from 'lucide-react';
-import { agentSessionAPI } from '../../services/api';
+import { directMessageAPI, groupAPI } from '../../services/api';
 import { getLocalAvatarFallback } from '../../utils/image';
 import { AGENT_STATUS_DOT, AGENT_STATUS_LABEL_KEY } from '../../utils/agentStatus';
 import { ProjectFilesPanel } from './ProjectFilesPanel';
@@ -33,8 +33,6 @@ export interface ChatDetailDrawerProps {
   width: number;
   onWidthChange: (w: number) => void;
   onOpenFile: (relPath: string) => void;
-  /** Jump to a session found by the history search. */
-  onViewSession: (sessionId: string) => void;
 }
 
 interface SearchHit {
@@ -56,7 +54,6 @@ export const ChatDetailDrawer: React.FC<ChatDetailDrawerProps> = ({
   width,
   onWidthChange,
   onOpenFile,
-  onViewSession,
 }) => {
   const { t } = useTranslation();
   const [tab, setTab] = useState<'files' | 'history'>('files');
@@ -65,6 +62,25 @@ export const ChatDetailDrawer: React.FC<ChatDetailDrawerProps> = ({
   const [searching, setSearching] = useState(false);
   const [searchError, setSearchError] = useState(false);
   const seqRef = useRef(0);
+  /** agent_id → IM 显示名（默认协作群成员），只在首次搜索时取一次。 */
+  const imNamesRef = useRef<Record<string, string> | null>(null);
+
+  /** 私信地址 = 该 agent 注册的 IM User.name，来自群成员表；不可按目录名推导。 */
+  const resolveDmName = useCallback(async (): Promise<string | null> => {
+    if (!imNamesRef.current) {
+      try {
+        const g = await groupAPI.getGroup('g-default');
+        const map: Record<string, string> = {};
+        for (const m of g.members || []) {
+          if (m.is_agent && m.agent_id) map[m.agent_id] = m.name;
+        }
+        imNamesRef.current = map;
+      } catch {
+        return dirName || null;
+      }
+    }
+    return imNamesRef.current[agentId] || imNamesRef.current[fsAgentId] || null;
+  }, [agentId, fsAgentId, dirName]);
 
   useEffect(() => {
     if (!open) {
@@ -82,13 +98,31 @@ export const ChatDetailDrawer: React.FC<ChatDetailDrawerProps> = ({
         setSearchError(false);
         return;
       }
+      const contact = await resolveDmName();
+      if (!contact) {
+        setHits([]);
+        setSearchError(true);
+        return;
+      }
       const seq = (seqRef.current += 1);
       setSearching(true);
       setSearchError(false);
       try {
-        const resp = await agentSessionAPI.searchSessions(agentId, text, 50);
+        // 聊天版面的一对一会话就是私信记录 —— 历史检索搜 DM，不搜 agent-web 会话。
+        const rows = await directMessageAPI.listThread(contact, text);
         if (seq !== seqRef.current) return;
-        setHits(Array.isArray(resp?.results) ? (resp.results as SearchHit[]) : []);
+        setHits(
+          rows.map((m) => ({
+            id: m.id,
+            title: m.sender,
+            matches: [
+              {
+                role: m.is_sender ? ('user' as const) : ('assistant' as const),
+                snippet: m.content,
+              },
+            ],
+          })),
+        );
       } catch {
         if (seq !== seqRef.current) return;
         setHits([]);
@@ -97,7 +131,7 @@ export const ChatDetailDrawer: React.FC<ChatDetailDrawerProps> = ({
         if (seq === seqRef.current) setSearching(false);
       }
     },
-    [agentId],
+    [resolveDmName],
   );
 
   // Debounce: the search hits every session on disk.
@@ -223,15 +257,10 @@ export const ChatDetailDrawer: React.FC<ChatDetailDrawerProps> = ({
                 <div className="px-3 py-3 text-[11px] text-textMuted/70">{t('aiChat.chat.searchEmpty')}</div>
               ) : (
                 hits.map((hit) => (
-                  <button
+                  <div
                     key={`hit-${hit.id}`}
-                    type="button"
                     data-testid="chat-detail-search-hit"
-                    onClick={() => {
-                      onViewSession(hit.id);
-                      onClose();
-                    }}
-                    className="w-full text-left px-3 py-2 border-b border-border/40 hover:bg-black/[0.03] dark:hover:bg-white/[0.05]"
+                    className="w-full text-left px-3 py-2 border-b border-border/40"
                   >
                     <div className="truncate text-[12px] text-textMain">{hit.title || hit.id}</div>
                     {(hit.matches || []).slice(0, 3).map((m, i) => (
@@ -242,7 +271,7 @@ export const ChatDetailDrawer: React.FC<ChatDetailDrawerProps> = ({
                         <span className="min-w-0 flex-1 truncate">{m.snippet}</span>
                       </div>
                     ))}
-                  </button>
+                  </div>
                 ))
               )}
             </div>

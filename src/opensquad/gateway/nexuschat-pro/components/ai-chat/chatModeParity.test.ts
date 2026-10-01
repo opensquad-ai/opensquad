@@ -150,9 +150,16 @@ describe('C4 右栏换成「详细」抽屉', () => {
 
   it('抽屉里有 agent 信息 + 文件树 + 历史搜索', () => {
     expect(DRAWER).toMatch(/<ProjectFilesPanel[\s\S]{0,600}?treeOnly/);
-    expect(DRAWER).toMatch(/agentSessionAPI\.searchSessions/);
+    // 历史检索搜的是私信记录（一对一就是 DM），不是 agent-web 会话。
+    expect(DRAWER).toMatch(/directMessageAPI\.listThread/);
+    expect(DRAWER).not.toMatch(/agentSessionAPI/);
     expect(DRAWER).toMatch(/t\('aiChat\.chat\.files'\)/);
     expect(DRAWER).toMatch(/t\('aiChat\.chat\.history'\)/);
+  });
+
+  it('私信地址来自群成员映射，不按目录名推导', () => {
+    expect(DRAWER).toMatch(/groupAPI\.getGroup\('g-default'\)/);
+    expect(DRAWER).toMatch(/m\.is_agent && m\.agent_id/);
   });
 
   it('抽屉的文件区只要本次会话的产出，不铺整棵目录树', () => {

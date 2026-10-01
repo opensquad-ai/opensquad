@@ -6334,7 +6334,6 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
           width={chatDetailWidth}
           onWidthChange={setChatDetailWidth}
           onOpenFile={handleOpenFileInTab}
-          onViewSession={handleSidebarViewSession}
         />
       ) : (
       <div
