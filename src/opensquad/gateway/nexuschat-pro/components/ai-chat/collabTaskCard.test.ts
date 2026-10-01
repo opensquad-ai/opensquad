@@ -99,5 +99,13 @@ describe('collaboration-task card', () => {
     for (const key of ['requirement', 'plan', 'assign', 'progress', 'files', 'skills', 'discussion']) {
       expect(win).toContain(`collabTask.${key}`);
     }
+    // ...including the approval gates, resolved from inside the window
+    expect(win).toContain('collabTask.approvals');
+    expect(win).toMatch(/data-testid="collab-task-gates"/);
+    expect(win).toMatch(/data-testid="collab-task-approvals"/);
+    expect(win).toMatch(/GATES = \['确定需求', '讨论方案', '任务分配', '任务验收'\]/);
+    expect(win).toMatch(/messageAPI\.resolveCollabApproval\(groupId, approvalId, action, \{ messageId \}\)/);
+    // a gate that was never posted to a group explains itself instead of failing
+    expect(win).toContain('collabTask.approvalUnavailable');
   });
 });

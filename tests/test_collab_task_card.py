@@ -173,18 +173,42 @@ def test_board_summary_groups_items(board):
     board.append_public_discussion(
         collab_id=cid, task_name="发布流程", author_agent_id="coder", title="讨论", content="我开始做了"
     )
+    # the group the task runs in, so the window can resolve its approval gates
+    board.update_task(task_id=cid, extra={"group_id": "g-default"})
+    board.upsert_item(
+        collab_id=cid,
+        agent_id="pm",
+        item_type="approval",
+        item_key="appr_1",
+        title="确定需求",
+        content="需求已确认",
+        status="pending",
+        extra={
+            "approval": {"step": "确定需求", "collab_id": cid, "agent_name": "pm"},
+            "kind": "collab_step_approval",
+            "message_id": "m_1",
+        },
+    )
 
     summary = board.board_summary(collab_id=cid)
     assert summary["collab_id"] == cid
     assert summary["title"] == "发布流程"
     assert summary["card"] == "software_dev_team"
     assert summary["skills"] == ["python"]
+    assert summary["task"]["extra"]["group_id"] == "g-default"
     assert {p["agent_id"] for p in summary["participants"]} == {"qa"}
     assert len(summary["items"]["requirement"]) == 1
     assert len(summary["items"]["plan"]) == 1
     assert len(summary["items"]["task"]) == 1
     assert len(summary["items"]["discussion"]) == 1
     assert "src/a.py" in summary["files"] and "src/b.py" in summary["files"]
+    # approval gates reach the window with everything it needs to render and
+    # resolve them (step label, status, and the group message id)
+    assert len(summary["items"]["approval"]) == 1
+    gate = summary["items"]["approval"][0]
+    assert gate["status"] == "pending"
+    assert gate["extra"]["approval"]["step"] == "确定需求"
+    assert gate["extra"]["message_id"] == "m_1"
 
 
 def test_board_summary_requires_collab_id(board):

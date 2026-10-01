@@ -11,7 +11,7 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { CheckCircle2, Circle, Loader2, X } from 'lucide-react';
-import { collabBoardAPI, type CollabBoardItem, type CollabBoardSummary } from '../services/api';
+import { collabBoardAPI, messageAPI, type CollabBoardItem, type CollabBoardSummary } from '../services/api';
 import { OpenSquadLoader } from './OpenSquadLoader';
 
 const POLL_MS = 5000;
@@ -126,6 +126,47 @@ export const CollabTaskWindow: React.FC<CollabTaskWindowProps> = ({ collabId, on
     return Number.isNaN(d.getTime()) ? '' : d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
   };
 
+  // Approval gates (四门闸) live on the board as item_type="approval"; each item
+  // carries extra.approval.step and the group message it was posted as, so the
+  // window can both show the gate flow and resolve a pending one in place.
+  const approvals = items.approval || [];
+  const groupId = String((summary?.task?.extra as Record<string, any> | undefined)?.group_id || '');
+  const GATES = ['确定需求', '讨论方案', '任务分配', '任务验收'];
+
+  const gateOf = (item: CollabBoardItem) => String((item.extra?.approval as any)?.step || '');
+  const latestForGate = (gate: string) =>
+    approvals
+      .filter((a) => gateOf(a) === gate)
+      .sort((a, b) => String(a.updated_at || '').localeCompare(String(b.updated_at || '')))
+      .pop() || null;
+  const otherApprovals = approvals.filter((a) => !GATES.includes(gateOf(a)));
+
+  const [resolving, setResolving] = useState<string | null>(null);
+  const [resolveError, setResolveError] = useState(false);
+
+  const resolveApproval = async (item: CollabBoardItem, action: 'approve' | 'reject') => {
+    const approvalId = String(item.item_key || '');
+    const messageId = String((item.extra as any)?.message_id || '');
+    if (!groupId || !approvalId || !messageId) return;
+    setResolving(approvalId);
+    setResolveError(false);
+    try {
+      await messageAPI.resolveCollabApproval(groupId, approvalId, action, { messageId });
+      await load(true);
+    } catch {
+      setResolveError(true);
+    } finally {
+      setResolving(null);
+    }
+  };
+
+  const statusKey = (status?: string) => {
+    if (status === 'approved') return 'gateApproved';
+    if (status === 'rejected') return 'gateRejected';
+    if (status === 'pending') return 'gatePending';
+    return 'gateNone';
+  };
+
   return (
     <div className="h-full min-h-0 flex flex-col">
       <div className="shrink-0 border-b border-border px-4 py-3 flex items-center gap-2">
@@ -195,6 +236,119 @@ export const CollabTaskWindow: React.FC<CollabTaskWindowProps> = ({ collabId, on
                 </div>
               </Section>
             ) : null}
+
+            <Section title={t('collabTask.approvals')} count={approvals.length}>
+              <div className="flex flex-wrap gap-1.5" data-testid="collab-task-gates">
+                {GATES.map((gate) => {
+                  const item = latestForGate(gate);
+                  const key = statusKey(item?.status);
+                  const cls =
+                    key === 'gateApproved'
+                      ? 'border-emerald-500/40 text-emerald-600'
+                      : key === 'gateRejected'
+                        ? 'border-rose-500/40 text-rose-500'
+                        : key === 'gatePending'
+                          ? 'border-amber-500/40 text-amber-600'
+                          : 'border-border text-textMuted';
+                  return (
+                    <span
+                      key={gate}
+                      className={`inline-flex items-center gap-1 rounded-lg border px-2 py-0.5 text-[11px] ${cls}`}
+                    >
+                      {key === 'gateApproved' ? (
+                        <CheckCircle2 size={11} />
+                      ) : key === 'gatePending' ? (
+                        <Loader2 size={11} />
+                      ) : (
+                        <Circle size={11} />
+                      )}
+                      {gate}
+                      <span className="text-[10px] opacity-80">· {t(`collabTask.${key}`)}</span>
+                    </span>
+                  );
+                })}
+              </div>
+
+              {approvals.length ? (
+                <div
+                  className="mt-2 space-y-1.5"
+                  data-testid="collab-task-approvals"
+                  data-others={otherApprovals.length}
+                >
+                  {[...approvals]
+                    .sort((a, b) => {
+                      const ga = GATES.includes(gateOf(a)) ? 0 : 1;
+                      const gb = GATES.includes(gateOf(b)) ? 0 : 1;
+                      return ga - gb || String(a.updated_at || '').localeCompare(String(b.updated_at || ''));
+                    })
+                    .map((item) => {
+                      const meta = (item.extra?.approval || {}) as Record<string, any>;
+                      const approvalId = String(item.item_key || '');
+                      const messageId = String((item.extra as any)?.message_id || '');
+                      // Only a gate posted into a group can be resolved from here.
+                      const canResolve = item.status === 'pending' && !!groupId && !!messageId;
+                      return (
+                        <div key={item.id} className="rounded-lg border border-border bg-bgLight px-2.5 py-2">
+                          <div className="flex items-center gap-2">
+                            <span className="min-w-0 flex-1 truncate text-[12px] font-semibold text-textMain">
+                              {String(meta.step || item.title || '')}
+                            </span>
+                            <span className="shrink-0 rounded bg-panel px-1.5 py-0.5 text-[10px] text-textMuted">
+                              {t(`collabTask.${statusKey(item.status)}`)}
+                            </span>
+                          </div>
+                          {item.content ? (
+                            <div className="mt-1 whitespace-pre-wrap break-words text-[12px] leading-relaxed text-textMuted">
+                              {item.content}
+                            </div>
+                          ) : null}
+                          <div className="mt-1 flex flex-wrap items-center gap-2 text-[10px] text-textMuted">
+                            {meta.agent_name || meta.agent_id || item.agent_id ? (
+                              <span>
+                                {t('collabTask.requestedBy')}:{' '}
+                                {String(meta.agent_name || meta.agent_id || item.agent_id)}
+                              </span>
+                            ) : null}
+                            {meta.resolved_by_name ? (
+                              <span>
+                                {t('collabTask.resolvedBy')}: {String(meta.resolved_by_name)}
+                              </span>
+                            ) : null}
+                            {meta.resolve_note ? <span>· {String(meta.resolve_note)}</span> : null}
+                          </div>
+                          {item.status === 'pending' ? (
+                            canResolve ? (
+                              <div className="mt-1.5 flex gap-2">
+                                <button
+                                  type="button"
+                                  disabled={resolving === approvalId}
+                                  onClick={() => void resolveApproval(item, 'approve')}
+                                  className="rounded-lg bg-primary px-2.5 py-1 text-[12px] text-white hover:opacity-90 disabled:opacity-50"
+                                >
+                                  {t('collabTask.approve')}
+                                </button>
+                                <button
+                                  type="button"
+                                  disabled={resolving === approvalId}
+                                  onClick={() => void resolveApproval(item, 'reject')}
+                                  className="rounded-lg border border-border px-2.5 py-1 text-[12px] text-textMain hover:bg-primary/10 disabled:opacity-50"
+                                >
+                                  {t('collabTask.reject')}
+                                </button>
+                              </div>
+                            ) : (
+                              <div className="mt-1 text-[10px] text-textMuted">{t('collabTask.approvalUnavailable')}</div>
+                            )
+                          ) : null}
+                        </div>
+                      );
+                    })}
+                </div>
+              ) : null}
+              {resolveError ? (
+                <div className="mt-1 text-[11px] text-rose-500">{t('collabTask.resolveFailed')}</div>
+              ) : null}
+            </Section>
 
             <Section title={t('collabTask.requirement')} count={requirements.length}>
               {requirements.length ? (
