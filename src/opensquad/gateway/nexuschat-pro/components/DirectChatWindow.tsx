@@ -9,10 +9,11 @@
  * 绝不是 dir_name 推导出来的），见 App 的 `resolveDmContact`。
  */
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { FolderUp, Image as ImageIcon, Paperclip, Send, X } from 'lucide-react';
+import { FolderUp, Image as ImageIcon, Paperclip, Reply, Send, X } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { directMessageAPI, uploadAPI, type DirectMessageItem } from '../services/api';
 import { getLocalAvatarFallback } from '../utils/image';
+import { DM_QUOTE_MAX, encodeDmQuote, parseDmQuote, type DmQuote } from '../utils/dmQuote';
 import { MessageBubble, type ChatMessage, type FileAttachment } from './ai-chat/MessageBubble';
 import { CollabTaskCard, openCollabTaskWindow, parseCollabTask } from './CollabTaskCard';
 import { OpenSquadLoader } from './OpenSquadLoader';
@@ -61,6 +62,8 @@ export const DirectChatWindow: React.FC<DirectChatWindowProps> = ({
   const [pendingImages, setPendingImages] = useState<string[]>([]);
   const [uploading, setUploading] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
+  /** Message being quoted (引用) — encoded into the content on send. */
+  const [replyTo, setReplyTo] = useState<DmQuote | null>(null);
   const endRef = useRef<HTMLDivElement>(null);
   const scrollerRef = useRef<HTMLDivElement>(null);
   const seqRef = useRef(0);
@@ -207,16 +210,21 @@ export const DirectChatWindow: React.FC<DirectChatWindowProps> = ({
       })),
       ...pendingImages.map((url) => ({ url, type: 'image', name: '', size: '' })),
     ];
-    if ((!text && attachments.length === 0) || sending || uploading) return;
+    // A quote rides in the message content as a marker: direct_messages has no
+    // reply column, so there is nothing to migrate and the agent reads the
+    // quoted text as ordinary context.
+    const content = replyTo ? `${encodeDmQuote(replyTo)}${text}` : text;
+    if ((!content && attachments.length === 0) || sending || uploading) return;
     setSending(true);
     try {
       await directMessageAPI.sendDirectMessage(
         contactName,
         '',
-        text,
+        content,
         attachments.length ? attachments : undefined,
       );
       setDraft('');
+      setReplyTo(null);
       setPendingFiles([]);
       setPendingImages([]);
       await load(true);
@@ -225,12 +233,25 @@ export const DirectChatWindow: React.FC<DirectChatWindowProps> = ({
     } finally {
       setSending(false);
     }
-  }, [contactName, draft, load, pendingFiles, pendingImages, sending, uploading]);
+  }, [contactName, draft, load, pendingFiles, pendingImages, replyTo, sending, uploading]);
+
+  /** Start quoting a message (the reply button on a bubble calls this). */
+  const handleReplyStart = useCallback(
+    (m: ChatMessage) => {
+      setReplyTo({
+        id: m.message_id,
+        name: m.role === 'user' ? currentUser?.name || contactLabel : contactLabel,
+        text: (m.content || '').slice(0, DM_QUOTE_MAX),
+      });
+    },
+    [contactLabel, currentUser],
+  );
 
   const bubbles = useMemo(
     () =>
       messages.map((m) => {
         const mine = m.is_sender;
+        const { quote, body } = parseDmQuote(m.content);
         const raw = Array.isArray(m.attachments) ? (m.attachments as DmAttachment[]) : [];
         const images = raw.filter(isImageAttachment).map((a) => a.url);
         const files: FileAttachment[] = raw
@@ -238,9 +259,10 @@ export const DirectChatWindow: React.FC<DirectChatWindowProps> = ({
           .map((a) => ({ name: a.name || a.url, size: a.size || '', url: a.url, type: 'file' as const }));
         const message: ChatMessage = {
           role: mine ? 'user' : 'assistant',
-          content: m.content,
+          content: body,
           timestamp: new Date(m.timestamp).toISOString(),
           message_id: m.id,
+          ...(quote ? { quote } : {}),
           ...(images.length ? { images } : {}),
           ...(files.length ? { attachments: files } : {}),
         };
@@ -322,6 +344,7 @@ export const DirectChatWindow: React.FC<DirectChatWindowProps> = ({
                 senderName={b.mine ? (currentUser?.name || undefined) : contactLabel}
                 senderAvatar={b.mine ? (currentUser?.avatar ?? null) : (contactAvatar ?? null)}
                 agentId={contactName}
+                onReply={handleReplyStart}
               />
             );
           })
@@ -362,6 +385,26 @@ export const DirectChatWindow: React.FC<DirectChatWindowProps> = ({
             </span>
           ))}
           {uploading ? <OpenSquadLoader size={14} /> : null}
+        </div>
+      ) : null}
+
+      {replyTo ? (
+        <div
+          className="shrink-0 bg-bgLight px-3 py-1.5 flex items-center gap-2"
+          data-testid="dm-reply-banner"
+        >
+          <Reply size={12} className="shrink-0 text-textMuted" />
+          <span className="min-w-0 flex-1 truncate text-[11px] text-textMuted">
+            {t('chat.replyingTo', { name: replyTo.name })} · {replyTo.text}
+          </span>
+          <button
+            type="button"
+            onClick={() => setReplyTo(null)}
+            className="shrink-0 text-textMuted hover:text-textMain"
+            aria-label={t('common.cancel')}
+          >
+            <X size={12} />
+          </button>
         </div>
       ) : null}
 

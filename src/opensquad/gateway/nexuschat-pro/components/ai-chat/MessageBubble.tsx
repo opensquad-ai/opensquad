@@ -7,7 +7,7 @@
  * Supports file attachments displayed as cards (structured or parsed from text).
  */
 import React, { useMemo } from 'react';
-import { Copy, Check, FileText, Volume2, Square, Undo2, Ban } from 'lucide-react';
+import { Copy, Check, FileText, Volume2, Square, Undo2, Ban, Reply } from 'lucide-react';
 import { SERVER_BASE_URL, agentSessionAPI } from '../../services/api';
 import { useTranslation } from 'react-i18next';
 import { AI_MARKDOWN_CLASS, renderFencedMarkdown } from '../../utils/fencedMarkdown';
@@ -67,6 +67,8 @@ export interface ChatMessage {
   stopped?: boolean;
   /** This round's total token cost (turn_usage event), rendered as the 消耗 badge. */
   usage?: MessageUsage;
+  /** Quoted message this one replies to (DM quotes ride in the content marker). */
+  quote?: { id?: string; name: string; text: string };
 }
 
 export interface MessageBubbleProps {
@@ -93,6 +95,8 @@ export interface MessageBubbleProps {
   /** Allow withdrawing this user turn (files + conversation). */
   canWithdraw?: boolean;
   onWithdraw?: () => void;
+  /** Show a reply affordance on the message (chat/messenger layouts). */
+  onReply?: (message: ChatMessage) => void;
 }
 
 // Pattern to match:
@@ -148,6 +152,7 @@ const MessageBubbleInner: React.FC<MessageBubbleProps> = ({
   agentId,
   canWithdraw,
   onWithdraw,
+  onReply,
 }) => {
   const { t, i18n } = useTranslation();
   const [copied, setCopied] = React.useState(false);
@@ -879,6 +884,17 @@ const MessageBubbleInner: React.FC<MessageBubbleProps> = ({
               isUser ? 'bg-chatBubbleSelf rounded-tr-sm' : 'bg-chatBubbleOther rounded-tl-sm'
             }`}
           >
+            {isMessenger && message.quote ? (
+              <div
+                data-testid="msg-quote"
+                className={`mb-1.5 rounded-lg border-l-2 px-2 py-1 text-[11px] leading-snug ${
+                  isUser ? 'border-white/60 bg-white/10 text-white/80' : 'border-primary/40 bg-primary/5 text-textMuted'
+                }`}
+              >
+                {message.quote.name ? <div className="font-semibold">{message.quote.name}</div> : null}
+                <div className="whitespace-pre-wrap break-words">{message.quote.text}</div>
+              </div>
+            ) : null}
             {mediaAndBody}
           </div>
           {/* 气泡底部：时间 + 复制。聊天窗口里这两样必须常显 —— classic 的
@@ -904,6 +920,17 @@ const MessageBubbleInner: React.FC<MessageBubbleProps> = ({
                 aria-label="Copy"
               >
                 {copied ? <Check size={12} /> : <Copy size={12} />}
+              </button>
+            ) : null}
+            {onReply ? (
+              <button
+                type="button"
+                onClick={() => onReply(message)}
+                className="p-0 border-0 bg-transparent cursor-pointer text-textMuted/70 hover:text-primary"
+                title={t('chat.reply')}
+                aria-label={t('chat.reply')}
+              >
+                <Reply size={12} />
               </button>
             ) : null}
           </div>
