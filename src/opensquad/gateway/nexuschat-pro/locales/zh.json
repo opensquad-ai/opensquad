@@ -895,7 +895,6 @@
     "uiModeSoloHint": "Code：文档流布局（Codex / Cursor Agent 风格）",
     "uiModeChatHint": "聊天：像通讯软件一样，只有对话",
     "chat": {
-      "sessions": "会话",
       "contacts": "通讯录",
       "groups": "群聊",
       "agents": "智能体",
@@ -904,7 +903,6 @@
       "files": "文件",
       "history": "历史",
       "noPreview": "暂无消息",
-      "noSessions": "还没有对话",
       "searchHistoryPlaceholder": "搜索历史消息",
       "searchHistoryHint": "输入关键词，搜索这个智能体的历史会话",
       "searchEmpty": "没有匹配的历史消息",

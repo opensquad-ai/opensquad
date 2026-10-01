@@ -146,20 +146,20 @@ const App: React.FC = () => {
     return saved ? [saved] : [];
   });
 
-  // 聊天（用户）模式：Agent 管理页在这一模式下是通讯录而不是运维工作台。
-  // AIChatPage 是模式的唯一所有者（localStorage + host prefs），这里只镜像它
+  // 聊天（通讯录）版面：Agent 管理页在这一版面下是联系人列表而不是运维工作台。
+  // AIChatPage 是该开关的唯一所有者（localStorage + host prefs），这里只镜像它
   // 通过事件广播出来的值。
-  const [chatUiMode, setChatUiMode] = useState<string>(() => {
+  const [chatUi, setChatUi] = useState<boolean>(() => {
     try {
-      return localStorage.getItem('ai_chat_ui_mode') || 'classic';
+      return localStorage.getItem('ai_chat_ui') === '1';
     } catch {
-      return 'classic';
+      return false;
     }
   });
   useEffect(() => {
     const onUiMode = (e: any) => {
-      const mode = e?.detail?.uiMode;
-      if (typeof mode === 'string' && mode) setChatUiMode(mode);
+      const on = e?.detail?.chatUi;
+      if (typeof on === 'boolean') setChatUi(on);
     };
     window.addEventListener('opensquad-ui-mode-changed', onUiMode as EventListener);
     return () => window.removeEventListener('opensquad-ui-mode-changed', onUiMode as EventListener);
@@ -1600,7 +1600,7 @@ const App: React.FC = () => {
               onChat={openAgentChat}
               onOpenGroupChat={() => setCurrentView('chat')}
               onOpenSettings={() => setIsSettingsOpen(true)}
-              variant={chatUiMode === 'chat' ? 'contacts' : 'full'}
+              variant={chatUi ? 'contacts' : 'full'}
             />
           </Suspense>
         </div>

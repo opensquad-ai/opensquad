@@ -184,6 +184,7 @@ export const ChatDetailDrawer: React.FC<ChatDetailDrawerProps> = ({
             width={width}
             onWidthChange={onWidthChange}
             treeOnly
+            hideAllFiles
             onOpenFile={onOpenFile}
             uiMode="classic"
           />

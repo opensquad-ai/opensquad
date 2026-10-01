@@ -18,12 +18,15 @@ export type HostUiPrefs = {
   theme?: Partial<ThemePrefs> | null;
   lang?: string | null;
   uiMode?: string | null;
+  /** 聊天（通讯录）版面开关 —— 与 uiMode 正交，见 UiModeSwitch。 */
+  chatUi?: boolean | null;
   selectedAgent?: string | null;
   view?: string | null;
 };
 
 const LANG_KEY = 'opensquad_lang';
 const UI_MODE_KEY = 'ai_chat_ui_mode';
+const CHAT_UI_KEY = 'ai_chat_ui';
 const SELECTED_AGENT_KEY = 'nexus_selected_agent';
 const VIEW_KEY = 'nexus_view';
 
@@ -47,11 +50,13 @@ export function collectLocalHostUiPrefs(): HostUiPrefs {
   }
   let lang: string | null = null;
   let uiMode: string | null = null;
+  let chatUi: boolean | null = null;
   let selectedAgent: string | null = null;
   let view: string | null = null;
   try {
     lang = localStorage.getItem(LANG_KEY);
     uiMode = localStorage.getItem(UI_MODE_KEY);
+    chatUi = localStorage.getItem(CHAT_UI_KEY) === '1';
     selectedAgent = localStorage.getItem(SELECTED_AGENT_KEY);
     view = localStorage.getItem(VIEW_KEY);
   } catch {
@@ -62,6 +67,7 @@ export function collectLocalHostUiPrefs(): HostUiPrefs {
     theme,
     lang,
     uiMode,
+    chatUi,
     selectedAgent,
     view,
   };
@@ -73,7 +79,8 @@ export function pickHydratePrefs(host: HostUiPrefs | null, local: HostUiPrefs): 
   const out: HostUiPrefs = { ...local, savedAt: Number(host.savedAt) || local.savedAt };
   if (host.theme && typeof host.theme === 'object') out.theme = host.theme;
   if (host.lang === 'zh' || host.lang === 'en') out.lang = host.lang;
-  if (host.uiMode === 'classic' || host.uiMode === 'solo' || host.uiMode === 'chat') out.uiMode = host.uiMode;
+  if (host.uiMode === 'classic' || host.uiMode === 'solo') out.uiMode = host.uiMode;
+  if (typeof host.chatUi === 'boolean') out.chatUi = host.chatUi;
   if (typeof host.selectedAgent === 'string' && host.selectedAgent.trim()) {
     out.selectedAgent = host.selectedAgent.trim();
   }
@@ -92,8 +99,11 @@ function writeLocalPrefs(prefs: HostUiPrefs): void {
       localStorage.setItem(LANG_KEY, prefs.lang);
       void i18n.changeLanguage(prefs.lang);
     }
-    if (prefs.uiMode === 'classic' || prefs.uiMode === 'solo' || prefs.uiMode === 'chat') {
+    if (prefs.uiMode === 'classic' || prefs.uiMode === 'solo') {
       localStorage.setItem(UI_MODE_KEY, prefs.uiMode);
+    }
+    if (typeof prefs.chatUi === 'boolean') {
+      localStorage.setItem(CHAT_UI_KEY, prefs.chatUi ? '1' : '0');
     }
     if (typeof prefs.selectedAgent === 'string' && prefs.selectedAgent.trim()) {
       localStorage.setItem(SELECTED_AGENT_KEY, prefs.selectedAgent.trim());

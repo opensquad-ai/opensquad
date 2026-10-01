@@ -1118,21 +1118,28 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     [displayTimeline, shellStreams],
   );
 
-  // UI render mode: classic (Work) | solo (Code) | chat (user/messenger).
-  // Global preference — host-persisted so both the Vite and the packaged
-  // origin agree (see utils/hostUiPrefs).
+  // 版面：Work(classic) | Code(solo)。聊天是**另一套整个 Web 版面**（通讯录 +
+  // 聊天窗口），所以它是独立开关 chatUi，而不是第三个 uiMode —— 点聊天时左边
+  // 的会话列表整体换成通讯录，点回去恢复。
   type AiChatUiMode = UiMode;
   const [uiMode, setUiMode] = useState<AiChatUiMode>(() => {
     try {
       const stored = localStorage.getItem('ai_chat_ui_mode');
-      return stored === 'solo' || stored === 'chat' ? stored : 'classic';
+      return stored === 'solo' ? 'solo' : 'classic';
     } catch {
       return 'classic';
     }
   });
   const isSolo = uiMode === 'solo';
-  /** 聊天模式：messenger layout — contact rail, plain bubbles, detail drawer. */
-  const isChat = uiMode === 'chat';
+  const [chatUi, setChatUi] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem('ai_chat_ui') === '1';
+    } catch {
+      return false;
+    }
+  });
+  /** 聊天版面：通讯录左栏 + 只有对话的聊天窗口。 */
+  const isChat = chatUi;
   /** 详细抽屉（聊天模式右键栏）：文件 + 历史搜索。 */
   const [chatDetailOpen, setChatDetailOpen] = useState(false);
   const [chatDetailWidth, setChatDetailWidth] = useState(360);
@@ -1145,10 +1152,20 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
   const setUiModePersisted = useCallback((mode: AiChatUiMode) => {
     setUiMode(mode);
     try { localStorage.setItem('ai_chat_ui_mode', mode); } catch {}
-    // App 镜像这个模式来决定 Agent 管理页的形态（通讯录 / 工作台）。
-    window.dispatchEvent(new CustomEvent('opensquad-ui-mode-changed', { detail: { uiMode: mode } }));
+    // 切到 Work/Code 就是离开聊天版面。
+    setChatUi(false);
+    try { localStorage.setItem('ai_chat_ui', '0'); } catch {}
+    // App 镜像这个状态来决定 Agent 管理页的形态（通讯录 / 工作台）。
+    window.dispatchEvent(new CustomEvent('opensquad-ui-mode-changed', { detail: { uiMode: mode, chatUi: false } }));
     void import('../utils/hostUiPrefs').then((m) => m.schedulePushHostUiPrefs()).catch(() => undefined);
   }, []);
+
+  const setChatUiPersisted = useCallback((on: boolean) => {
+    setChatUi(on);
+    try { localStorage.setItem('ai_chat_ui', on ? '1' : '0'); } catch {}
+    window.dispatchEvent(new CustomEvent('opensquad-ui-mode-changed', { detail: { uiMode: uiMode, chatUi: on } }));
+    void import('../utils/hostUiPrefs').then((m) => m.schedulePushHostUiPrefs()).catch(() => undefined);
+  }, [uiMode]);
 
   // 聊天模式没有工作区/资料库那一套：切进来时收起右栏与内嵌管理页，
   // 切走时收起「详细」抽屉。否则从 Code 切过去会带着一个 project rail。
@@ -4803,6 +4820,8 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
           columnClass={soloColumnClass}
           userName={currentUser?.name || undefined}
           agentName={agentProfile?.agent_name || undefined}
+          messagesOnly={isChat}
+          agentAvatar={resolveChatAvatar(agentProfile?.chat_profile)}
           canWithdraw={!changesBusy}
           onLoadEarlier={() => loadMoreHistory(sessionId)}
           loadEarlierEnabled={
@@ -5497,14 +5516,11 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
       {isChat ? (
       <ChatModeSidebar
         agentId={agentId}
-        currentSessionId={sidebarSelectedSessionId}
-        onViewSession={handleSidebarViewSession}
         uiMode={uiMode}
         onUiModeChange={setUiModePersisted}
+        chatUi={chatUi}
+        onChatUiChange={setChatUiPersisted}
         isOpen={sessionSidebarOpen}
-        busySessionIds={busySessions}
-        streamingSessionIds={streamingSessionIds}
-        unseenCompleteSessionIds={unseenCompleteSessionIds}
         currentUser={currentUser}
         onOpenProfile={onOpenProfile}
         onOpenSettings={onOpenSettings}
@@ -5548,6 +5564,8 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
         onSessionsChange={handleSessionsChange}
         uiMode={uiMode}
         onUiModeChange={setUiModePersisted}
+        chatUi={chatUi}
+        onChatUiChange={setChatUiPersisted}
         currentUser={currentUser}
         onOpenProfile={onOpenProfile}
         onOpenSettings={onOpenSettings}
@@ -5822,17 +5840,19 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
               content={displayStreamingText}
               isComplete={!isStreaming}
               avatarSrc={resolveChatAvatar(agentProfile?.chat_profile) ?? undefined}
-              variant="classic"
+              variant={isChat ? 'messenger' : 'classic'}
               // 流式文本前若是工作流组，名字已在工作流上方显示，避免重复。
               // 中间渲染为 null 的 `prompt` 条目要跨过（见 previousRenderedEntryKind）。
+              // 聊天版面没有工作流，签名必须留着当联系人名字。
               senderName={
-                previousRenderedEntryKind(displayTimeline, displayTimeline.length) === 'workflow'
+                !isChat && previousRenderedEntryKind(displayTimeline, displayTimeline.length) === 'workflow'
                   ? undefined
                   : agentProfile?.agent_name
               }
               // 只传 undefined 不够 —— 组件会退化成兜底文案「Agent」。
               hideSenderLabel={
-                previousRenderedEntryKind(displayTimeline, displayTimeline.length) === 'workflow'
+                !isChat
+                && previousRenderedEntryKind(displayTimeline, displayTimeline.length) === 'workflow'
               }
             />
           )}
@@ -5873,6 +5893,9 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
             if (entry.kind === 'message') {
               const msgProps = {
                 message: entry.data,
+                // 聊天版面：两边都是气泡（像通讯软件），Work/Code 仍是原来的
+                // 「用户右气泡 + agent 文档流」。
+                variant: isChat ? 'messenger' as const : 'classic' as const,
                 senderName:
                   entry.data.role === 'user'
                     ? (currentUser?.name || undefined)

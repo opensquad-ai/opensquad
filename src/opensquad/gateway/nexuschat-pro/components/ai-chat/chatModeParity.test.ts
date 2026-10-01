@@ -18,9 +18,12 @@ import path from 'node:path';
 const read = (rel: string) => fs.readFileSync(path.join(process.cwd(), rel), 'utf8');
 
 const PAGE = read('components/AIChatPage.tsx');
+const PANE = read('components/ai-chat/SessionChatPane.tsx');
+const MSG_BUBBLE = read('components/ai-chat/MessageBubble.tsx');
 const MODE_SWITCH = read('components/ai-chat/UiModeSwitch.tsx');
 const RAIL = read('components/ai-chat/ChatModeSidebar.tsx');
 const DRAWER = read('components/ai-chat/ChatDetailDrawer.tsx');
+const FILES = read('components/ai-chat/ProjectFilesPanel.tsx');
 const SIDEBAR = read('components/ai-chat/SessionSidebar.tsx');
 const COMPOSER = read('components/ai-chat/AgentWebComposer.tsx');
 const HOST_PREFS = read('utils/hostUiPrefs.ts');
@@ -29,43 +32,48 @@ const APP = read('App.tsx');
 const ZH = read('locales/zh.json');
 const EN = read('locales/en.json');
 
-describe('C1 三段模式与持久化', () => {
-  it('UiModeSwitch 提供 work / code / 聊天 三段', () => {
-    expect(MODE_SWITCH).toMatch(/export type UiMode = 'classic' \| 'solo' \| 'chat'/);
+describe('C1 聊天是一个独立版面开关，不是第三段 tab', () => {
+  it('UiModeSwitch 只有 Work / Code 两段，聊天是旁边的开关', () => {
+    expect(MODE_SWITCH).toMatch(/export type UiMode = 'classic' \| 'solo'/);
+    expect(MODE_SWITCH).toMatch(/chatUi: boolean;/);
+    expect(MODE_SWITCH).toMatch(/aria-pressed=\{chatUi\}/);
     for (const key of ['aiChat.uiModeClassic', 'aiChat.uiModeSolo', 'aiChat.uiModeChat']) {
       expect(MODE_SWITCH).toContain(key);
     }
+    // 三段 tab 的老写法必须消失：聊天不再和 Work/Code 挤在一个 tablist 里。
+    expect(MODE_SWITCH).not.toMatch(/UiMode = 'classic' \| 'solo' \| 'chat'/);
   });
 
-  it('AIChatPage 能从 localStorage 恢复 chat', () => {
-    expect(PAGE).toMatch(/stored === 'solo' \|\| stored === 'chat'/);
-    expect(PAGE).toMatch(/const isChat = uiMode === 'chat'/);
+  it('AIChatPage 用独立的 chatUi 状态，localStorage 键分开', () => {
+    expect(PAGE).toMatch(/localStorage\.getItem\('ai_chat_ui'\) === '1'/);
+    expect(PAGE).toMatch(/const isChat = chatUi;/);
+    expect(PAGE).toMatch(/localStorage\.setItem\('ai_chat_ui', on \? '1' : '0'\)/);
   });
 
-  it('host prefs 白名单认 chat（读写两处）', () => {
-    const hits = HOST_PREFS.match(/uiMode === 'classic' \|\| [^\n]*'chat'/g) || [];
-    expect(hits.length).toBeGreaterThanOrEqual(2);
-  });
-
-  it('SessionSidebar 复用同一个模式开关（不各写一份）', () => {
-    expect(SIDEBAR).toMatch(/<UiModeSwitch uiMode=\{uiMode\} onUiModeChange=\{onUiModeChange\} \/>/);
+  it('host prefs 与 App 都同步这个开关', () => {
+    expect(HOST_PREFS).toMatch(/chatUi\?: boolean \| null;/);
+    expect(HOST_PREFS).toMatch(/localStorage\.setItem\(CHAT_UI_KEY, prefs\.chatUi \? '1' : '0'\)/);
+    expect(APP).toMatch(/localStorage\.getItem\('ai_chat_ui'\) === '1'/);
+    expect(APP).toMatch(/variant=\{chatUi \? 'contacts' : 'full'\}/);
   });
 });
 
-describe('C2 聊天模式左栏 = 会话 + 通讯录', () => {
+describe('C2 聊天模式左栏 = 通讯录（没有会话列表）', () => {
   it('AIChatPage 在 chat 模式换掉项目会话侧栏', () => {
     expect(PAGE).toMatch(/\{isChat \? \(\s*<ChatModeSidebar/);
   });
 
-  it('左栏有两个页签，点会话即切换整个会话页', () => {
-    expect(RAIL).toMatch(/t\('aiChat\.chat\.sessions'\)/);
+  it('左栏只列联系人：没有会话列表，也不读 session API', () => {
     expect(RAIL).toMatch(/t\('aiChat\.chat\.contacts'\)/);
-    expect(RAIL).toMatch(/onViewSession\(s\.id\)/);
+    expect(RAIL).toMatch(/t\('aiChat\.chat\.groups'\)/);
+    expect(RAIL).toMatch(/t\('aiChat\.chat\.agents'\)/);
+    // 会话列表被移除：一个联系人就一个窗口，历史走「详细 → 历史」。
+    expect(RAIL).not.toMatch(/agentSessionAPI/);
+    expect(RAIL).not.toMatch(/onViewSession/);
+    expect(RAIL).not.toMatch(/data-testid="chat-mode-session-row"/);
   });
 
-  it('通讯录列出 agent（按字母分组）与群聊', () => {
-    expect(RAIL).toMatch(/t\('aiChat\.chat\.agents'\)/);
-    expect(RAIL).toMatch(/t\('aiChat\.chat\.groups'\)/);
+  it('通讯录点 agent / 群聊各自走事件桥', () => {
     expect(RAIL).toMatch(/useChatContacts/);
     // 点击 agent 走 App 的事件桥，用 agent_id 而不是目录名
     expect(RAIL).toMatch(/detail: \{ agentId: agentIdToOpen \}/);
@@ -74,13 +82,31 @@ describe('C2 聊天模式左栏 = 会话 + 通讯录', () => {
 });
 
 describe('C3 只有对话，没有过程', () => {
-  it('时间线只渲染 message，其余条目一律不画', () => {
+  it('live 时间线只渲染 message，其余条目一律不画', () => {
     expect(PAGE).toMatch(/if \(isChat && entry\.kind !== 'message'\) return null/);
+  });
+
+  it('会话标签/历史那条渲染路径（SessionChatPane）同样只有 message', () => {
+    // 两套渲染代码：只在 AIChatPage 过滤，从历史里打开一条会话就会又看到工具流。
+    expect(PANE).toMatch(/messagesOnly\?: boolean;/);
+    expect(PANE).toMatch(/if \(messagesOnly && entry\.kind !== 'message'\) return null/);
+    expect(PAGE).toMatch(/<SessionChatPane[\s\S]{0,600}?messagesOnly=\{isChat\}/);
   });
 
   it('聊天模式不挂本次改动卡片与可视化嵌入', () => {
     expect(PAGE).toMatch(/!isChat && entry\.data\.role === 'assistant'[\s\S]{0,80}collectTurnChangedFilesBefore/);
     expect(PAGE).toMatch(/!isChat && entry\.data\.role === 'assistant'[\s\S]{0,80}htmlEmbedsByAssistantIndex/);
+  });
+
+  it('两边都是气泡：agent 的最终输出也包在气泡里（和群聊一致）', () => {
+    // 两条渲染路径都要气泡，否则从历史打开一条会话就退回文档流。
+    expect(PAGE).toMatch(/variant: isChat \? 'messenger' as const : 'classic' as const/);
+    expect(PANE).toMatch(/variant: messagesOnly \? 'messenger' as const : 'classic' as const/);
+    expect(MSG_BUBBLE).toMatch(/const isMessenger = variant === 'messenger'/);
+    expect(MSG_BUBBLE).toMatch(/bg-chatBubbleOther/);
+    expect(MSG_BUBBLE).toMatch(/bg-chatBubbleSelf/);
+    // 流式预览同样是气泡。
+    expect(PAGE).toMatch(/variant=\{isChat \? 'messenger' : 'classic'\}/);
   });
 
   it('composer 走 simple，并收起计划卡与审批卡', () => {
@@ -111,6 +137,15 @@ describe('C4 右栏换成「详细」抽屉', () => {
     expect(DRAWER).toMatch(/t\('aiChat\.chat\.files'\)/);
     expect(DRAWER).toMatch(/t\('aiChat\.chat\.history'\)/);
   });
+
+  it('抽屉的文件区只要本次会话的产出，不铺整棵目录树', () => {
+    expect(DRAWER).toMatch(/hideAllFiles/);
+    expect(FILES).toMatch(/hideAllFiles\?: boolean;/);
+    // 「所有文件」页签与整树视图都要真的被挡住，不能只藏按钮。
+    expect(FILES).toMatch(/\.filter\(\(tt\) => !\(hideAllFiles && tt\.id === 'all'\)\)/);
+    expect(FILES).toMatch(/tab === 'all' && !hideAllFiles/);
+    expect(FILES).toMatch(/if \(hideAllFiles && tab !== 'changed'\) setTab\('changed'\)/);
+  });
 });
 
 describe('C5 联系人化：Agent 管理页与群聊', () => {
@@ -121,7 +156,7 @@ describe('C5 联系人化：Agent 管理页与群聊', () => {
   });
 
   it('App 按当前模式决定 Agent 管理页形态，并接住群聊选择', () => {
-    expect(APP).toMatch(/variant=\{chatUiMode === 'chat' \? 'contacts' : 'full'\}/);
+    expect(APP).toMatch(/variant=\{chatUi \? 'contacts' : 'full'\}/);
     expect(APP).toMatch(/opensquad-select-group/);
     expect(APP).toMatch(/opensquad-ui-mode-changed/);
   });
@@ -130,7 +165,7 @@ describe('C5 联系人化：Agent 管理页与群聊', () => {
     for (const dict of [ZH, EN]) {
       expect(dict).toContain('"uiModeChat"');
       expect(dict).toContain('"uiModeChatHint"');
-      for (const k of ['sessions', 'contacts', 'groups', 'agents', 'detail', 'files', 'history', 'noPreview']) {
+      for (const k of ['contacts', 'groups', 'agents', 'detail', 'files', 'history', 'noPreview']) {
         expect(dict).toContain(`"${k}"`);
       }
     }

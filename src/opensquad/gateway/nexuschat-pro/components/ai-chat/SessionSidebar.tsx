@@ -112,9 +112,12 @@ interface SessionSidebarProps {
   onSetPrimarySession?: (sessionId: string) => void;
   /** Notify parent when the session list (titles) changes — used for L2 tab labels. */
   onSessionsChange?: (sessions: AgentSession[], complete?: boolean) => void;
-  /** Chat layout mode: classic (Work) | solo (Code) | chat (user/messenger). */
+  /** Chat layout mode: classic (Work) | solo (Code). */
   uiMode?: UiMode;
   onUiModeChange?: (mode: UiMode) => void;
+  /** 聊天版面开关（换掉整个 Web 版面，见 UiModeSwitch）。 */
+  chatUi?: boolean;
+  onChatUiChange?: (on: boolean) => void;
   currentUser?: AccountUser;
   onOpenProfile?: () => void;
   onOpenSettings?: () => void;
@@ -235,6 +238,8 @@ const SessionSidebarInner: React.FC<SessionSidebarProps> = ({
   onSessionsChange,
   uiMode = 'classic',
   onUiModeChange,
+  chatUi = false,
+  onChatUiChange,
   currentUser = null,
   onOpenProfile,
   onOpenSettings,
@@ -999,7 +1004,12 @@ const SessionSidebarInner: React.FC<SessionSidebarProps> = ({
         className="absolute right-0 top-0 bottom-0 w-1.5 translate-x-1/2 cursor-col-resize z-10 hover:bg-primary/30"
       />
       <div className="h-11 px-2 border-b border-border box-border flex items-center shrink-0">
-        <UiModeSwitch uiMode={uiMode} onUiModeChange={onUiModeChange} />
+        <UiModeSwitch
+          uiMode={uiMode}
+          onUiModeChange={onUiModeChange}
+          chatUi={chatUi}
+          onChatUiChange={onChatUiChange}
+        />
       </div>
 
       <div className="px-2 py-2 space-y-1 border-b border-border/60 shrink-0">

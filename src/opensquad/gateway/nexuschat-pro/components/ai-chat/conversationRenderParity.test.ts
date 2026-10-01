@@ -11,6 +11,9 @@
  * L2  工作流行必须显式传 classic；
  * L3  Work 模式的「变动区」= 产物视图，Code 模式仍为 git 变更视图；
  * L4  左侧会话菜单必须有「智能体」入口。
+ *
+ * 注：聊天（通讯录）版面不在这里锁 —— 它是另一套整个 Web 版面，见
+ * chatModeParity.test.ts。
  */
 import { describe, expect, it } from 'vitest';
 import fs from 'node:fs';
@@ -44,9 +47,9 @@ describe('L1 对话渲染不再按 UI 模式分叉', () => {
     }
   });
 
-  it('流式消息固定 classic 变体', () => {
+  it('流式消息只按版面取 classic / messenger，不按 Work/Code 分叉', () => {
     expect(PAGE).not.toMatch(/variant=\{isSolo/);
-    expect(PAGE).toMatch(/variant="classic"/);
+    expect(PAGE).toMatch(/variant=\{isChat \? 'messenger' : 'classic'\}/);
   });
 });
 

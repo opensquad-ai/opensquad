@@ -19,6 +19,7 @@ import { parseMachineUserMessage } from '../../utils/machineUserMessage';
 import { OpenSquadLoader } from '../OpenSquadLoader';
 import { HoverTooltip } from '../HoverTooltip';
 import { formatDuration, formatFullTimestamp, formatTokenCount, formatTokenExact } from '../../utils/usageFormat';
+import { getLocalAvatarFallback } from '../../utils/image';
 
 /** Per-round billed token usage stamped on the round's final assistant message. */
 export interface MessageUsage {
@@ -84,7 +85,7 @@ export interface MessageBubbleProps {
   /** Kept for API compatibility (classic no longer shows avatars). */
   senderAvatar?: string | null;
   /** classic = user right-bubble + agent document; solo = document-stream */
-  variant?: 'classic' | 'solo';
+  variant?: 'classic' | 'solo' | 'messenger';
   /** DOM id for Solo user-message nav jump targets */
   anchorId?: string;
   /** Agent id for TTS (voice.tts_card). When set, speak button appears next to copy. */
@@ -141,7 +142,7 @@ const MessageBubbleInner: React.FC<MessageBubbleProps> = ({
   isStreaming,
   senderName,
   hideSenderLabel,
-  senderAvatar: _senderAvatar,
+  senderAvatar,
   variant = 'classic',
   anchorId,
   agentId,
@@ -154,7 +155,8 @@ const MessageBubbleInner: React.FC<MessageBubbleProps> = ({
   const audioRef = React.useRef<HTMLAudioElement | null>(null);
   const isUser = message.role === 'user';
   const isSolo = variant === 'solo';
-  void _senderAvatar;
+  /** 聊天（用户）模式：两边都是气泡，像通讯软件一样。 */
+  const isMessenger = variant === 'messenger';
 
   // Defense in depth: non-text payloads (null, or a multimodal array) must not
   // reach `.matchAll` / `.startsWith` / React children, any of which would
@@ -838,6 +840,53 @@ const MessageBubbleInner: React.FC<MessageBubbleProps> = ({
     </div>
   ) : null;
 
+  if (isMessenger) {
+    const domId = anchorId ? `solo-msg-${anchorId}` : undefined;
+    const avatarSrc =
+      senderAvatar
+      || getLocalAvatarFallback(isUser ? 'you' : (agentId || 'agent'), senderName || label);
+    return (
+      <div
+        id={domId}
+        data-solo-msg-id={anchorId}
+        data-msg-variant="messenger"
+        className={`mb-4 w-full flex gap-2 scroll-mt-4 ${isUser ? 'flex-row-reverse' : 'flex-row'} ${
+          isStreaming ? 'ai-streaming' : ''
+        }`}
+      >
+        <img
+          src={avatarSrc}
+          alt=""
+          className="h-8 w-8 shrink-0 rounded-full object-cover bg-border"
+          loading="lazy"
+          onError={(e) => {
+            const img = e.currentTarget;
+            if (img.dataset.fallbackApplied) return;
+            img.dataset.fallbackApplied = '1';
+            img.src = getLocalAvatarFallback(isUser ? 'you' : (agentId || 'agent'), senderName || label);
+          }}
+        />
+        <div
+          className={`flex flex-col min-w-0 max-w-[min(78%,34rem)] gap-1 ${
+            isUser ? 'items-end' : 'items-start'
+          }`}
+        >
+          {!isUser && !hideSenderLabel && !machineOnly ? (
+            <div className="px-1 text-[11px] font-medium text-textMuted/80">{senderName || label}</div>
+          ) : null}
+          <div
+            className={`w-full px-3.5 py-2.5 text-[14px] leading-relaxed text-textMain break-words shadow-sm border border-border rounded-2xl ${
+              isUser ? 'bg-chatBubbleSelf rounded-tr-sm' : 'bg-chatBubbleOther rounded-tl-sm'
+            }`}
+          >
+            {mediaAndBody}
+          </div>
+          {actionRow}
+        </div>
+      </div>
+    );
+  }
+
   if (isUser && !machineOnly) {
     const domId = anchorId ? `solo-msg-${anchorId}` : undefined;
     return (
@@ -903,6 +952,7 @@ export function areMessageBubblePropsEqual(prev: MessageBubbleProps, next: Messa
   return (
     prev.isStreaming === next.isStreaming
     && prev.senderName === next.senderName
+    && prev.senderAvatar === next.senderAvatar
     && prev.hideSenderLabel === next.hideSenderLabel
     && prev.variant === next.variant
     && prev.anchorId === next.anchorId

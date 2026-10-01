@@ -79,6 +79,16 @@ export interface SessionChatPaneProps {
    */
   onLoadEarlier?: () => void;
   loadEarlierEnabled?: boolean;
+  /**
+   * 聊天（用户）模式：只画对话本身。工具流、状态提示、模型切换、任务折叠一律
+   * 不渲染 —— 用户要的是「agent 最终说了什么」，不是它怎么做的。
+   *
+   * 这个 pane 是会话标签页/历史检索的渲染路径，和 AIChatPage 的 live 槽位是两套
+   * 代码；只在那一边过滤，从侧栏或历史里打开一条会话时工具流就会重新出现。
+   */
+  messagesOnly?: boolean;
+  /** 聊天版面下气泡旁的头像（与 AIChatPage 的 live 槽位保持一致）。 */
+  agentAvatar?: string | null;
 }
 
 export const SessionChatPane: React.FC<SessionChatPaneProps> = ({
@@ -95,6 +105,8 @@ export const SessionChatPane: React.FC<SessionChatPaneProps> = ({
   onWithdrawUserMessage,
   onLoadEarlier,
   loadEarlierEnabled = false,
+  messagesOnly = false,
+  agentAvatar = null,
 }) => {
   const [prefLevel] = useWorkflowExpandLevel();
   const expandLevel = expandLevelProp ?? prefLevel;
@@ -517,12 +529,17 @@ export const SessionChatPane: React.FC<SessionChatPaneProps> = ({
           }
           footer={<div ref={endRef} />}
           renderEntry={(entry, i, entryKey, revealStyle) => {
+                // 聊天模式：过程一律不画，只留 user / assistant 的对话本身。
+                if (messagesOnly && entry.kind !== 'message') return null;
                 const lockLayout =
                   i >= timeline.length - 8
                   || (entry.kind === 'workflow' && !entry.data.completed);
                 if (entry.kind === 'message') {
                   const msgProps = {
                     message: entry.data,
+                    // 聊天版面：两边都是气泡（与 AIChatPage live 槽位一致）。
+                    variant: messagesOnly ? 'messenger' as const : 'classic' as const,
+                    senderAvatar: entry.data.role === 'user' ? null : agentAvatar,
                     senderName:
                       entry.data.role === 'user'
                         ? userName
@@ -531,8 +548,10 @@ export const SessionChatPane: React.FC<SessionChatPaneProps> = ({
                     // 只传 undefined 不够：MessageBubble 会退化成兜底文案「Agent」，
                     // 统计行和正文之间就多出一行幽灵签名。中间渲染为 null 的
                     // `prompt` 条目要跨过，否则刷新后同一条回复上会出现第二个名字。
+                    // 聊天模式没有工作流行可依赖，名字必须留着当联系人签名。
                     hideSenderLabel:
-                      entry.data.role === 'assistant'
+                      !messagesOnly
+                      && entry.data.role === 'assistant'
                       && previousRenderedEntryKind(timeline, i) === 'workflow',
                     agentId,
                     canWithdraw:

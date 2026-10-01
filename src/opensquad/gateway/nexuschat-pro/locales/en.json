@@ -895,7 +895,6 @@
     "uiModeSoloHint": "Code: document stream (Codex / Cursor Agent style)",
     "uiModeChatHint": "Chat: messenger-style, conversation only",
     "chat": {
-      "sessions": "Chats",
       "contacts": "Contacts",
       "groups": "Group chats",
       "agents": "Agents",
@@ -904,7 +903,6 @@
       "files": "Files",
       "history": "History",
       "noPreview": "No messages yet",
-      "noSessions": "No conversations yet",
       "searchHistoryPlaceholder": "Search history",
       "searchHistoryHint": "Type a keyword to search this agent's past sessions",
       "searchEmpty": "No matching history",

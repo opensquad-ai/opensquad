@@ -4,14 +4,15 @@ import { escapeHtml } from '../../utils/safeHtml';
 import { useMermaidHydration } from '../../hooks/useMermaidHydration';
 import { useTableCopyButtons } from '../../hooks/useTableCopyButtons';
 import { FollowScrollBox } from './FollowScrollBox';
+import { getLocalAvatarFallback } from '../../utils/image';
 
 interface StreamingMessageProps {
   content: string;
   isComplete?: boolean;
-  /** Kept for API compatibility; classic agent stream is document-style (no avatar). */
+  /** Avatar shown beside the bubble in the chat (messenger) layout. */
   avatarSrc?: string;
-  /** Kept for API compatibility; both modes render as document stream. */
-  variant?: 'classic' | 'solo';
+  /** classic/solo = document stream; messenger = 气泡（聊天版面）。 */
+  variant?: 'classic' | 'solo' | 'messenger';
   senderName?: string;
   /** Suppress the name line entirely (no "Agent" fallback). See MessageBubble. */
   hideSenderLabel?: boolean;
@@ -30,6 +31,8 @@ function renderMarkdownSafe(raw: string): string {
 export const StreamingMessage: React.FC<StreamingMessageProps> = ({
   content,
   isComplete,
+  avatarSrc,
+  variant = 'classic',
   senderName,
   hideSenderLabel,
 }) => {
@@ -103,6 +106,40 @@ export const StreamingMessage: React.FC<StreamingMessageProps> = ({
   );
 
   return (
+    variant === 'messenger' ? (
+      <div className="mb-4 w-full flex gap-2" data-msg-variant="messenger">
+        <img
+          src={avatarSrc || getLocalAvatarFallback('agent', senderName || 'Agent')}
+          alt=""
+          className="h-8 w-8 shrink-0 rounded-full object-cover bg-border"
+          loading="lazy"
+          onError={(e) => {
+            const img = e.currentTarget;
+            if (img.dataset.fallbackApplied) return;
+            img.dataset.fallbackApplied = '1';
+            img.src = getLocalAvatarFallback('agent', senderName || 'Agent');
+          }}
+        />
+        <div className="flex flex-col min-w-0 max-w-[min(78%,34rem)] gap-1 items-start">
+          {!hideSenderLabel ? (
+            <div className="px-1 text-[11px] font-medium text-textMuted/80">{senderName || 'Agent'}</div>
+          ) : null}
+          <div className="w-full px-3.5 py-2.5 text-[14px] leading-relaxed text-textMain break-words shadow-sm border border-border rounded-2xl rounded-tl-sm bg-chatBubbleOther">
+            {isComplete ? (
+              body
+            ) : (
+              <FollowScrollBox
+                contentKey={visibleContent.length}
+                follow
+                className="max-h-[min(40vh,280px)] overflow-y-auto"
+              >
+                {body}
+              </FollowScrollBox>
+            )}
+          </div>
+        </div>
+      </div>
+    ) : (
     <div className="mb-6 w-full">
       {!hideSenderLabel && (
         <div className="text-[11px] font-medium text-textMuted/70 mb-2">
@@ -122,5 +159,6 @@ export const StreamingMessage: React.FC<StreamingMessageProps> = ({
         </FollowScrollBox>
       )}
     </div>
+    )
   );
 };

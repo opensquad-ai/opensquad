@@ -281,6 +281,13 @@ interface ProjectFilesPanelProps {
    * solo（Code）保留 git 变更视图。默认 solo，其余调用方行为不变。
    */
   uiMode?: 'classic' | 'solo';
+  /**
+   * Drop the 「所有文件」 tab and the whole-tree view, leaving only what this
+   * session produced. The chat-mode detail drawer wants the conversation's own
+   * output — a full project tree there is a filesystem browser nobody asked
+   * for (it lists unrelated sibling projects and hits the 10000-entry cap).
+   */
+  hideAllFiles?: boolean;
 }
 
 const WIDTH_MIN = 320;
@@ -627,6 +634,7 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
   treeOnly = false,
   onOpenFile,
   uiMode = 'solo',
+  hideAllFiles = false,
 }) => {
   const { t } = useTranslation();
   /** Work(classic) 模式：变动区 = 产物（本次会话产出的文件），不展示代码变更。 */
@@ -1715,6 +1723,12 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
     void loadChanged({ silent: true });
   }, [focusChangedNonce]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // 「所有文件」被收起时把页签钉在产物上：其他代码路径（外部打开请求、刷新）
+  // 仍会 setTab('all')，只靠不渲染那个按钮不够 —— 内容分支是按 tab 选的。
+  useEffect(() => {
+    if (hideAllFiles && tab !== 'changed') setTab('changed');
+  }, [hideAllFiles, tab]);
+
   // Parent live snapshot after tool/turn/withdraw — apply in place, soft-refresh tree
   useEffect(() => {
     if (!liveChanges || !isOpen) return;
@@ -2264,12 +2278,14 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
         </div>
       ) : null}
 
-      {/* Tabs */}
+      {/* Tabs — hidden entirely when only the artifacts list remains (the chat
+          drawer), where a lone tab is just another label to read. */}
+      {hideAllFiles && isArtifactsMode ? null : (
       <div className="flex items-center gap-0 px-1.5 pt-1.5 pb-0 border-b border-border flex-shrink-0">
         {([
           { id: 'changed' as const, label: isArtifactsMode ? t('aiChat.artifacts') : t('aiChat.changedFiles') },
           { id: 'all' as const, label: t('aiChat.allFiles') },
-        ]).map((tt) => (
+        ]).filter((tt) => !(hideAllFiles && tt.id === 'all')).map((tt) => (
           <button
             key={tt.id}
             type="button"
@@ -2313,9 +2329,10 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
           </div>
         ) : null}
       </div>
+      )}
 
       {/* Tree status — all-files only */}
-      {tab === 'all' && rootPath && !listLoading ? (
+      {tab === 'all' && !hideAllFiles && rootPath && !listLoading ? (
         <div className="px-2.5 py-1 border-b border-border/40 text-[10px] text-textMuted/50 flex-shrink-0 flex items-center gap-2">
           <span>
             {t('aiChat.loadedItems', { count: treeCount.toLocaleString() })}
