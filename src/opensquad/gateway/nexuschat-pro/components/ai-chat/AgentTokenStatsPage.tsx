@@ -48,6 +48,19 @@ function formatBucket(bucket: string): string {
   return bucket;
 }
 
+/**
+ * `part` as a share of `whole`, or null when that is not a ratio yet.
+ *
+ * A zero / missing total is the common case on a fresh range, and "0.0%" next
+ * to "0" reads like a measured figure — the card shows no hint instead.
+ */
+function sharePct(part?: number | null, whole?: number | null): string | null {
+  const p = Number(part ?? 0);
+  const w = Number(whole ?? 0);
+  if (!Number.isFinite(p) || !Number.isFinite(w) || w <= 0) return null;
+  return `${((p / w) * 100).toFixed(1)}%`;
+}
+
 interface StatsTooltipProps extends Partial<Pick<TooltipContentProps<number, string>, 'active' | 'label' | 'payload'>> {
   labels: Record<string, string>;
 }
@@ -138,6 +151,17 @@ export const AgentTokenStatsPage: React.FC<AgentTokenStatsPageProps> = ({ agentI
   const byModel = data?.by_model ?? [];
   const hasData = Boolean(summary && summary.requests > 0 && timeline.length > 0);
 
+  // Card hints: the splits and shares the headline numbers do not show on
+  // their own (input = hit + miss; how much of it was served from cache; how
+  // large one request is on average).
+  const hitSharePct = sharePct(summary?.cache_read, summary?.input);
+  const missSharePct = sharePct(summary?.cache_miss, summary?.input);
+  const outputSharePct = sharePct(summary?.output, summary?.total);
+  const avgPerRequest =
+    summary && summary.requests > 0
+      ? formatTokenCount(Math.round(summary.total / summary.requests))
+      : null;
+
   return (
     <div className="flex-1 min-w-0 min-h-0 flex flex-col bg-background">
       <div className={adminHeaderBar}>
@@ -201,24 +225,46 @@ export const AgentTokenStatsPage: React.FC<AgentTokenStatsPageProps> = ({ agentI
         ) : (
           <>
             <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-3">
-              <StatCard label={t('agentTokenStats.cardInput')} value={formatTokenCount(summary?.input ?? 0)} />
+              <StatCard
+                label={t('agentTokenStats.cardInput')}
+                value={formatTokenCount(summary?.input ?? 0)}
+                hint={
+                  summary
+                    ? t('agentTokenStats.hintInputSplit', {
+                        hit: formatTokenCount(summary.cache_read ?? 0),
+                        miss: formatTokenCount(summary.cache_miss ?? 0),
+                      })
+                    : undefined
+                }
+              />
               <StatCard
                 label={t('agentTokenStats.cardCacheHit')}
                 value={formatTokenCount(summary?.cache_read ?? 0)}
                 accent={SERIES[0].color}
+                hint={hitSharePct ? t('agentTokenStats.hintShareOfInput', { pct: hitSharePct }) : undefined}
               />
               <StatCard
                 label={t('agentTokenStats.cardCacheMiss')}
                 value={formatTokenCount(summary?.cache_miss ?? 0)}
                 accent={SERIES[1].color}
+                hint={missSharePct ? t('agentTokenStats.hintShareOfInput', { pct: missSharePct }) : undefined}
               />
               <StatCard
                 label={t('agentTokenStats.cardOutput')}
                 value={formatTokenCount(summary?.output ?? 0)}
                 accent={SERIES[2].color}
+                hint={outputSharePct ? t('agentTokenStats.hintShareOfTotal', { pct: outputSharePct }) : undefined}
               />
-              <StatCard label={t('agentTokenStats.cardTotal')} value={formatTokenCount(summary?.total ?? 0)} />
-              <StatCard label={t('agentTokenStats.cardRequests')} value={(summary?.requests ?? 0).toLocaleString('en-US')} />
+              <StatCard
+                label={t('agentTokenStats.cardTotal')}
+                value={formatTokenCount(summary?.total ?? 0)}
+                hint={summary ? t('agentTokenStats.hintTotalSplit') : undefined}
+              />
+              <StatCard
+                label={t('agentTokenStats.cardRequests')}
+                value={(summary?.requests ?? 0).toLocaleString('en-US')}
+                hint={avgPerRequest ? t('agentTokenStats.hintPerRequest', { n: avgPerRequest }) : undefined}
+              />
             </div>
 
             <div className="bg-panel border border-border rounded-xl p-4">
