@@ -188,7 +188,25 @@ def register_account(email: str, password: str, name: str = "") -> dict[str, Any
                     err = (reset.json() or {}).get("detail", reset.text[:200])
                 except Exception:
                     err = reset.text[:200]
-                return {"status": "error", "message": f"Account exists but password reset failed: {err}"}
+                if reset.status_code == 409:
+                    # The gateway refused because the account is in use right now —
+                    # that is the two-machines-one-email case, and the fix is
+                    # naming, not retrying.
+                    return {
+                        "status": "error",
+                        "code": "email_in_use",
+                        "message": (
+                            f"IM account {email} is in use by another connection — most likely another "
+                            "machine is running an agent with the same @ai email. Stop that one, or "
+                            "register this agent with its own unique email (e.g. '<machine>-<agent>@ai')."
+                        ),
+                        "detail": str(err),
+                    }
+                return {
+                    "status": "error",
+                    "code": "reset_failed",
+                    "message": f"Account exists but password reset failed: {err}",
+                }
             login = requests.post(
                 f"{base_url}/api/auth/login",
                 json={"email": email, "password": password},
