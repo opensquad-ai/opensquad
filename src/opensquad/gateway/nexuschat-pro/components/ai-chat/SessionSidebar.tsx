@@ -21,6 +21,7 @@ import {
   ChevronRight,
   Bot,
   LayoutGrid,
+  KanbanSquare,
   Clock,
   ListTodo,
   Search,
@@ -1282,6 +1283,15 @@ const SessionSidebarInner: React.FC<SessionSidebarProps> = ({
           onOpenSettings={() => onOpenSettings?.()}
           actions={
             <>
+              <button
+                type="button"
+                onClick={() => navigateAppView('collab-board')}
+                className="rounded-lg p-1.5 text-textMuted hover:bg-primary/10 hover:text-textMain"
+                title={t('nav.collabBoard')}
+                aria-label={t('nav.collabBoard')}
+              >
+                <KanbanSquare size={16} strokeWidth={1.75} />
+              </button>
               <button
                 type="button"
                 onClick={() => navigateAppView('admin')}
