@@ -58,4 +58,5 @@ structure" for the full rules with examples.
 | `GITHUB_SETTINGS.md` | maintainers | EN |
 | `desktop-known-issues.md` | maintainers | EN |
 | [`rust-hybrid-refactor.md`](rust-hybrid-refactor.md) | maintainers (architecture) | ZH |
+| [`cross_machine_relay_design.md`](cross_machine_relay_design.md) | maintainers — cross-machine gateway relay design (proposal) | EN |
 | [`contracts/`](contracts/) | maintainers — Launcher/Gateway freeze contracts for the Rust hybrid plan | EN |
