@@ -1,5 +1,6 @@
 import React, { useState, useMemo, useRef, useEffect } from 'react';
 import { useTranslation } from 'react-i18next';
+import { GroupAccessPanel } from './GroupAccessPanel';
 import { X, Search, Calendar, User as UserIcon, FileText, Image as ImageIcon, Video, File, LogOut, ArrowRight, Bell, BellOff, Copy, Check, MessageSquare, Edit2, Check as CheckIcon, Camera, UserPlus } from 'lucide-react';
 import { Group, User, ChatState, Message, MessageType } from '../types';
 import { getAvatarUrl, getLocalAvatarFallback } from '../utils/image';
@@ -576,6 +577,13 @@ export const RightPanel: React.FC<RightPanelProps> = ({ isOpen, onClose, group, 
 
         {/* Actions */}
         {group && (
+            <>
+            <GroupAccessPanel
+                group={{ id: group.id, name: group.name, isPrivate: group.isPrivate }}
+                // Buttons are shown to members; the backend is the authority on who
+                // may decide (a non-owner gets 403 and the list simply stays).
+                isOwner
+            />
             <div className="mt-auto pt-4 border-t border-border">
                  <button
                     onClick={() => onLeaveGroup(group.id)}
@@ -584,6 +592,7 @@ export const RightPanel: React.FC<RightPanelProps> = ({ isOpen, onClose, group, 
                      <LogOut size={16} /> {t('rightPanel.leaveGroup')}
                  </button>
             </div>
+            </>
         )}
 
         {/* Add Agent Modal */}
