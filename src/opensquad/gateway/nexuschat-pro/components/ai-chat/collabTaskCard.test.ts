@@ -107,5 +107,16 @@ describe('collaboration-task card', () => {
     expect(win).toMatch(/messageAPI\.resolveCollabApproval\(groupId, approvalId, action, \{ messageId \}\)/);
     // a gate that was never posted to a group explains itself instead of failing
     expect(win).toContain('collabTask.approvalUnavailable');
+
+    // attachments: images preview, everything downloads, URLs resolved against
+    // the gateway that stores them
+    expect(win).toContain('collabTask.attachments');
+    expect(win).toMatch(/data-testid="collab-attachment"/);
+    expect(win).toMatch(/a\.kind === 'image'/);
+    expect(win).toMatch(/const href = a\.url\.startsWith\('http'\) \? a\.url : `\$\{SERVER_BASE_URL\}\$\{a\.url\}`/);
+
+    const apiTypes = read('services/api.ts');
+    expect(apiTypes).toMatch(/export interface CollabBoardAttachment/);
+    expect(apiTypes).toMatch(/attachments: CollabBoardAttachment\[\]/);
   });
 });

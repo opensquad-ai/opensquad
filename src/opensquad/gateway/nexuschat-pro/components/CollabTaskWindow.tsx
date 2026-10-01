@@ -11,7 +11,13 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { CheckCircle2, Circle, Loader2, X } from 'lucide-react';
-import { collabBoardAPI, messageAPI, type CollabBoardItem, type CollabBoardSummary } from '../services/api';
+import {
+  SERVER_BASE_URL,
+  collabBoardAPI,
+  messageAPI,
+  type CollabBoardItem,
+  type CollabBoardSummary,
+} from '../services/api';
 import { OpenSquadLoader } from './OpenSquadLoader';
 
 const POLL_MS = 5000;
@@ -392,6 +398,43 @@ export const CollabTaskWindow: React.FC<CollabTaskWindowProps> = ({ collabId, on
                   {statuses.map((it) => (
                     <ItemBlock key={it.id} item={it} showAssignee />
                   ))}
+                </div>
+              ) : (
+                <Empty />
+              )}
+            </Section>
+
+            <Section title={t('collabTask.attachments')} count={summary?.attachments?.length || 0}>
+              {(summary?.attachments || []).length ? (
+                <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
+                  {(summary?.attachments || []).map((a) => {
+                    const href = a.url.startsWith('http') ? a.url : `${SERVER_BASE_URL}${a.url}`;
+                    return (
+                      <a
+                        key={a.id || a.url}
+                        href={href}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        download
+                        title={t('collabTask.openAttachment')}
+                        data-testid="collab-attachment"
+                        className="flex min-w-0 flex-col gap-1 rounded-lg border border-border bg-bgLight p-2 hover:border-primary/40"
+                      >
+                        {a.kind === 'image' ? (
+                          <img
+                            src={href}
+                            alt={a.name}
+                            loading="lazy"
+                            className="h-24 w-full rounded object-cover"
+                          />
+                        ) : null}
+                        <span className="truncate text-[11px] text-textMain">{a.name}</span>
+                        <span className="truncate text-[10px] text-textMuted">
+                          {[a.size, a.uploader ? `@${a.uploader}` : ''].filter(Boolean).join(' · ')}
+                        </span>
+                      </a>
+                    );
+                  })}
                 </div>
               ) : (
                 <Empty />

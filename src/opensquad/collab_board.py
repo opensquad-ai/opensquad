@@ -1123,7 +1123,62 @@ _SUMMARY_ITEM_TYPES = (
     "discussion",
     "change_request",
     "approval",
+    "attachment",
 )
+
+
+def attach_files(
+    *,
+    collab_id: str,
+    agent_id: str,
+    files: list[dict[str, Any]] | None = None,
+    task_name: str = "",
+    note: str = "",
+) -> dict[str, Any]:
+    """Record uploaded files/images on the task.
+
+    ``files`` entries are what the gateway's upload endpoint returns:
+    ``{"url": "/uploads/xxx", "name": "...", "size": "...", "type": "image|file"}``.
+    Each becomes an ``attachment`` item, so the task window can render
+    thumbnails and downloads without re-reading the chat, and so every machine
+    sees the same file list (the URL is served by the gateway).
+    """
+    if not collab_id:
+        raise ValueError("collab_id(task_id) is required")
+    stored: list[dict[str, Any]] = []
+    for f in files or []:
+        if not isinstance(f, dict):
+            continue
+        url = str(f.get("url") or "").strip()
+        if not url:
+            continue
+        name = str(f.get("name") or url.rsplit("/", 1)[-1])
+        kind = str(f.get("type") or "").strip().lower()
+        if kind not in ("image", "video", "file", "folder", "voice"):
+            ext = name.lower().rsplit(".", 1)[-1] if "." in name else ""
+            kind = "image" if ext in ("png", "jpg", "jpeg", "gif", "webp", "bmp", "svg") else "file"
+        stored.append(
+            upsert_item(
+                collab_id=collab_id,
+                task_name=task_name,
+                agent_id=agent_id,
+                item_type="attachment",
+                item_key=url,
+                title=name,
+                content=note or "",
+                status="done",
+                visibility="public",
+                extra={
+                    "url": url,
+                    "name": name,
+                    "size": str(f.get("size") or ""),
+                    "kind": kind,
+                    "uploader": agent_id,
+                    "note": note,
+                },
+            )
+        )
+    return {"status": "success", "count": len(stored), "items": stored}
 
 
 def board_summary(*, collab_id: str) -> dict[str, Any]:
@@ -1146,6 +1201,19 @@ def board_summary(*, collab_id: str) -> dict[str, Any]:
             f = f.strip()
             if f and f not in files:
                 files.append(f)
+    attachments = [
+        {
+            "id": str(it.get("id") or ""),
+            "url": str((it.get("extra") or {}).get("url") or it.get("content") or ""),
+            "name": str((it.get("extra") or {}).get("name") or it.get("title") or ""),
+            "size": str((it.get("extra") or {}).get("size") or ""),
+            "kind": str((it.get("extra") or {}).get("kind") or "file"),
+            "uploader": str((it.get("extra") or {}).get("uploader") or it.get("agent_id") or ""),
+            "note": str((it.get("extra") or {}).get("note") or ""),
+            "created_at": str(it.get("created_at") or ""),
+        }
+        for it in grouped.get("attachment", [])
+    ]
     return {
         "collab_id": collab_id,
         "task": task,
@@ -1156,6 +1224,7 @@ def board_summary(*, collab_id: str) -> dict[str, Any]:
         "card": str(extra.get("card") or ""),
         "skills": [str(s) for s in (extra.get("skills") or []) if str(s)],
         "files": files,
+        "attachments": attachments,
         "participants": list_participants(collab_id=collab_id),
         "items": grouped,
     }
@@ -1187,6 +1256,7 @@ REMOTE_OPS = (
     "upsert_item",
     "list_items",
     "append_public_discussion",
+    "attach_files",
     "update_latest_tool",
     "delete_item",
     "delete_task",

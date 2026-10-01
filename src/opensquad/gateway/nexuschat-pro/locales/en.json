@@ -817,6 +817,8 @@
     "assign": "Assignment",
     "progress": "Progress",
     "files": "Files",
+    "attachments": "Task attachments",
+    "openAttachment": "Open attachment",
     "skills": "Skills used",
     "discussion": "Discussion",
     "empty": "Nothing yet",

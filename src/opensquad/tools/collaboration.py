@@ -2071,7 +2071,12 @@ def _task_card_throttled(collab_id: str, kind: str) -> bool:
     return False
 
 
-def post_task_message(collab_id: str, content: str, kind: str = "discussion") -> dict[str, Any]:
+def post_task_message(
+    collab_id: str,
+    content: str,
+    kind: str = "discussion",
+    attachments: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     """
     [All members] Send a message about one collaboration task (team-task chat).
 
@@ -2086,6 +2091,11 @@ def post_task_message(collab_id: str, content: str, kind: str = "discussion") ->
         collab_id: collaboration task id (from start_collaboration)
         content: the message body
         kind: 'discussion' (default) or 'progress'
+        attachments: optional uploaded files/images to attach to the task, each
+                     {"url": "/uploads/x.png", "name": "x.png", "size": "12KB",
+                      "type": "image|file"} — upload local files with
+                     collaboration.attach_file first, or reuse what a chat
+                     attachment (im.get_history) already returned
     """
     text = (content or "").strip()
     if not text:
@@ -2130,6 +2140,25 @@ def post_task_message(collab_id: str, content: str, kind: str = "discussion") ->
             content=text,
         )
 
+        # 1b. Files/images attached to this message belong to the task itself, so
+        #     they are recorded on the board (the URL is served by the gateway,
+        #     which is what makes them visible from every machine).
+        attached: list[str] = []
+        if attachments:
+            from ..collab_board import attach_files
+
+            stored = attach_files(
+                collab_id=collab_id,
+                agent_id=agent_id,
+                files=attachments,
+                task_name=task_name,
+                note=text[:200],
+            )
+            if stored.get("count"):
+                attached = [
+                    str((f or {}).get("name") or (f or {}).get("url") or "") for f in attachments if isinstance(f, dict)
+                ]
+
         # 2. Announce in the task's group. No group (task created without one) =>
         #    board only, never an error.
         group_id = str(extra.get("group_id") or "")
@@ -2144,7 +2173,7 @@ def post_task_message(collab_id: str, content: str, kind: str = "discussion") ->
                     kind=kind_n,
                     group_id=group_id,
                     card=str(extra.get("card") or ""),
-                    summary=f"{agent_id}: {text}",
+                    summary=f"{agent_id}: {text}" + (f"（附件 {len(attached)} 个）" if attached else ""),
                     participants=list_participants(collab_id=collab_id),
                     status=str(task.get("status") or "active"),
                     agent_id=agent_id,
@@ -2158,8 +2187,98 @@ def post_task_message(collab_id: str, content: str, kind: str = "discussion") ->
             "status": "success",
             "collab_id": collab_id,
             "item_id": item.get("id"),
+            "attachments": attached,
             "announced": bool(card and card.get("ok") and not card.get("throttled")),
             "card": card,
+        }
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+
+def attach_file(
+    collab_id: str,
+    file_paths: list[str] | None = None,
+    urls: list[dict[str, Any]] | None = None,
+    note: str = "",
+) -> dict[str, Any]:
+    """
+    [All members] Attach files or images to a collaboration task.
+
+    Local files are uploaded to the gateway first (plain HTTP, so this works from
+    a machine that is not running the gateway); references that are already
+    uploaded — e.g. an attachment seen in `im.get_history` — can be passed as
+    `urls`. Either way the task records the attachment, so the task window shows
+    image previews and file downloads, and every member sees the same list.
+
+    Args:
+        collab_id: collaboration task id
+        file_paths: local file paths to upload
+        urls: already-uploaded entries, each
+              {"url": "/uploads/x.png", "name": "x.png", "size": "12KB", "type": "image"}
+        note: optional note shown next to each attachment
+
+    Example:
+        attach_file(
+            collab_id="a8K2pQ",
+            file_paths=["docs/spec.pdf", "reports/result.png"],
+            note="第一版验收材料",
+        )
+    """
+    try:
+        import os
+
+        from ..bridge import bridge
+        from ..collab_board import attach_files, get_task
+        from ..input_hub import input_hub
+
+        if not collab_id:
+            return {"status": "error", "message": "collab_id is required"}
+        task = get_task(task_id=collab_id)
+        if not task:
+            return {"status": "error", "message": f"collab task '{collab_id}' not found"}
+
+        agent_dir = input_hub.agent_dir or ""
+        agent_id = os.path.basename(agent_dir) if agent_dir else "unknown_agent"
+
+        entries: list[dict[str, Any]] = []
+        failed: list[str] = []
+        for path in file_paths or []:
+            uploaded = bridge.upload_file(str(path)) if bridge and bridge.token else None
+            if not uploaded or not str(uploaded.get("url") or "").strip():
+                failed.append(str(path))
+                continue
+            entries.append(uploaded)
+        for u in urls or []:
+            if isinstance(u, dict) and str(u.get("url") or "").strip():
+                entries.append(
+                    {
+                        "url": u.get("url"),
+                        "name": u.get("name") or "",
+                        "size": u.get("size") or "",
+                        "type": u.get("type") or "",
+                    }
+                )
+
+        if not entries:
+            return {
+                "status": "error",
+                "message": "nothing to attach (upload failed or no urls given)",
+                "failed": failed,
+            }
+
+        result = attach_files(
+            collab_id=collab_id,
+            agent_id=agent_id,
+            files=entries,
+            task_name=str(task.get("task_name") or collab_id),
+            note=note,
+        )
+        return {
+            "status": "success",
+            "collab_id": collab_id,
+            "attached": result.get("count", 0),
+            "failed": failed,
+            "hint": "Attachments appear in the collaboration task window.",
         }
     except Exception as e:
         return {"status": "error", "message": str(e)}

@@ -817,6 +817,8 @@
     "assign": "任务分配",
     "progress": "进度",
     "files": "相关文件",
+    "attachments": "任务附件",
+    "openAttachment": "打开附件",
     "skills": "使用的 skill",
     "discussion": "讨论",
     "empty": "暂无内容",

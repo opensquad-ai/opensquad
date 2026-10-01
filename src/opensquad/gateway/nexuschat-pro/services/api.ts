@@ -2331,6 +2331,18 @@ export interface CollabTaskCardPayload {
   agent_name?: string;
 }
 
+/** A file or image attached to a collaboration task (stored on the board). */
+export interface CollabBoardAttachment {
+  id: string;
+  url: string;
+  name: string;
+  size: string;
+  kind: 'image' | 'file' | 'video' | 'folder' | 'voice';
+  uploader?: string;
+  note?: string;
+  created_at?: string;
+}
+
 /** Everything the single-task window renders (board_summary on the backend). */
 export interface CollabBoardSummary {
   collab_id: string;
@@ -2342,6 +2354,7 @@ export interface CollabBoardSummary {
   card: string;
   skills: string[];
   files: string[];
+  attachments: CollabBoardAttachment[];
   participants: CollabTaskParticipant[];
   items: Record<string, CollabBoardItem[]>;
 }
