@@ -27,6 +27,8 @@ interface PaneSplitLayoutProps {
   renderChatSlot: (paneId: string) => React.ReactNode;
   onResizeSplit: (splitId: string, ratio: number) => void;
   handlers: PaneLayoutHandlers;
+  /** 聊天版面：隐藏标签/窗格那一行（见 WorkspacePaneShell）。 */
+  hideTabBar?: boolean;
 }
 
 const SplitDivider: React.FC<{
@@ -125,6 +127,7 @@ function NodeView({
   onResizeSplit,
   handlers,
   leafCount,
+  hideTabBar,
 }: {
   node: SplitNode;
   depth: number;
@@ -140,6 +143,7 @@ function NodeView({
   onResizeSplit: (splitId: string, ratio: number) => void;
   handlers: PaneLayoutHandlers;
   leafCount: number;
+  hideTabBar?: boolean;
 }) {
   const ratioRef = useRef(node.type === 'split' ? node.ratio : 0.5);
   if (node.type === 'split') ratioRef.current = node.ratio;
@@ -178,6 +182,7 @@ function NodeView({
         liveSessionId={hostsLiveSession ? liveSessionId : null}
         chatSlot={hostsLiveSession ? renderChatSlot(node.id) : undefined}
         handlers={handlers.makePaneHandlers(node.id)}
+        hideTabBar={hideTabBar}
       />
     );
   }
@@ -210,6 +215,7 @@ function NodeView({
           onResizeSplit={onResizeSplit}
           handlers={handlers}
           leafCount={leafCount}
+          hideTabBar={hideTabBar}
         />
       </div>
       <SplitDivider direction={node.direction} onDrag={onDrag} />
@@ -229,6 +235,7 @@ function NodeView({
           onResizeSplit={onResizeSplit}
           handlers={handlers}
           leafCount={leafCount}
+          hideTabBar={hideTabBar}
         />
       </div>
     </div>
@@ -247,6 +254,7 @@ export const PaneSplitLayout: React.FC<PaneSplitLayoutProps> = ({
   renderChatSlot,
   onResizeSplit,
   handlers,
+  hideTabBar = false,
 }) => {
   const leafCount = collectLeaves(layout).length;
   const sid = sessionAgentId || agentId;
@@ -268,6 +276,7 @@ export const PaneSplitLayout: React.FC<PaneSplitLayoutProps> = ({
         onResizeSplit={onResizeSplit}
         handlers={handlers}
         leafCount={leafCount}
+        hideTabBar={hideTabBar}
       />
     </div>
   );

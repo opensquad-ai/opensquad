@@ -66,6 +66,11 @@ interface WorkspacePaneShellProps {
   /** Live chat UI for the focused session pane (messages + header; no composer) */
   chatSlot?: React.ReactNode;
   handlers: PaneShellHandlers;
+  /**
+   * 聊天版面：整个标签/窗格那一行都不画。那里是「多个会话标签 + 分屏」的
+   * 入口，而聊天版面一个联系人就是一个窗口 —— 留着它就不像在和人聊天了。
+   */
+  hideTabBar?: boolean;
 }
 
 export const WorkspacePaneShell: React.FC<WorkspacePaneShellProps> = ({
@@ -82,6 +87,7 @@ export const WorkspacePaneShell: React.FC<WorkspacePaneShellProps> = ({
   liveSessionId = null,
   chatSlot,
   handlers,
+  hideTabBar = false,
 }) => {
   const { t } = useTranslation();
   const labels: ContentTabLabel[] = useMemo(() => {
@@ -163,6 +169,7 @@ export const WorkspacePaneShell: React.FC<WorkspacePaneShellProps> = ({
       data-pane-id={paneId}
       data-pane-focused={focused ? '1' : '0'}
     >
+      {!hideTabBar ? (
       <div
         className="flex-shrink-0 bg-panel border-0 border-b border-border/40"
         onMouseDown={(e) => {
@@ -198,6 +205,7 @@ export const WorkspacePaneShell: React.FC<WorkspacePaneShellProps> = ({
           canClosePane={canClosePane}
         />
       </div>
+      ) : null}
       <div
         className="flex-1 min-h-0 flex flex-col overflow-hidden"
         onMouseDown={() => handlers.onFocus()}

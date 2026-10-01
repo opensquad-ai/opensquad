@@ -5771,6 +5771,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
           fileDirtyMap={fileDirtyMap}
           onResizeSplit={handleResizeSplit}
           handlers={{ makePaneHandlers }}
+          hideTabBar={isChat}
           renderChatSlot={(slotPaneId) => (
       /* Main Chat Area — live messages only (agent chrome is above the split) */
       <div className="flex-1 flex flex-col h-full min-w-0">
@@ -5859,7 +5860,8 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
           {/* 对话后续预期：贴在「最终输出」末尾，而不是输入框上方。
               仅在回合结束后出现（流式/进行中一律不渲染），因此新的工具流或
               新的消息输出一旦开始，它就先被隐藏、随后由 hook 清空。 */}
-          {followupSuggestions.length > 0
+          {!isChat
+            && followupSuggestions.length > 0
             && currentSessionId
             && !displayStreamingText
             && !isSessionBusy(currentSessionId) && (
