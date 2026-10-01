@@ -314,6 +314,12 @@ MANDATORY_TOOLS = {
     "agent_setup",
     "im",
     "collaboration",
+    # Cross-machine join. Mandatory on purpose: it is the same communication
+    # surface as `im`, and gating it behind config.json's tools list meant every
+    # agent that existed before it was added never saw pair_with_node /
+    # join_by_invite — the skill loaded, the tools it told the agent to call did
+    # not (see tests/test_invite.py).
+    "invite",
     "delegate_task",
     "workspace",
     "task_watch",

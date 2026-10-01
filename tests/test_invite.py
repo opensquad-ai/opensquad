@@ -170,3 +170,24 @@ def test_the_tool_is_registered_for_agents():
     from opensquad import agents_boot
 
     assert agents_boot.TOOL_MODULES["invite"] == "opensquad.tools.invite"
+
+
+def test_the_join_tools_reach_an_agent_that_has_no_tool_config():
+    """Regression: the namespace was reachable only through config.json's tools
+    list, so an agent created before it existed never registered it — the
+    cross_machine_join skill loaded, and the tools it tells the agent to call did
+    not exist. Mandatory is what makes the skill work on existing agents."""
+    from opensquad import agents_boot
+
+    assert "invite" in agents_boot.MANDATORY_TOOLS
+    assert "invite" in agents_boot.BOOT_PHASES.build_tool_name_list({})
+
+
+def test_the_namespace_exposes_both_join_tools():
+    from opensquad.registry import ToolRegistry
+    from opensquad.tools import invite as invite_tools
+
+    registry = ToolRegistry()
+    registry.register(invite_tools, "invite", level="extended")
+    names = {t["function"]["name"] for t in registry.generate_openai_tools()}
+    assert {"invite__pair_with_node", "invite__join_by_invite"} <= names
