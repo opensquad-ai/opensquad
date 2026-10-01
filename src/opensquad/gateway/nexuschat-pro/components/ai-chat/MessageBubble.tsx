@@ -69,6 +69,13 @@ export interface ChatMessage {
   usage?: MessageUsage;
   /** Quoted message this one replies to (DM quotes ride in the content marker). */
   quote?: { id?: string; name: string; text: string };
+  /**
+   * Origin of a machine-delivered turn: `dm` / `group` for chat that reached the
+   * agent mid-turn, with who sent it. Kept out of `content` on purpose — the text
+   * doubles as the session label, so markers there would leak into titles.
+   */
+  source?: string;
+  sender_name?: string;
 }
 
 export interface MessageBubbleProps {

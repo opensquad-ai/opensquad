@@ -3064,9 +3064,17 @@ export function buildTimelineFromSession(
     // Marked `steer` by the runner at the drain (see _turn_loop.py).
     if (m.role === 'user' && m.steer === true) {
       pullEventsBefore(mTs);
+      const steerMsg = m as { content?: unknown; source?: string; sender_name?: string };
       pendingRaw.push({
         type: 'user_steer',
-        data: { text: typeof m.content === 'string' ? m.content : '' },
+        data: {
+          text: typeof steerMsg.content === 'string' ? steerMsg.content : '',
+          // A chat message that arrived mid-turn keeps its origin here, so the
+          // rebuilt row is labelled 私聊消息/群消息 instead of 插话 (live and after
+          // a refresh agree — see _turn_loop.py).
+          source: typeof steerMsg.source === 'string' ? steerMsg.source : '',
+          sender_name: typeof steerMsg.sender_name === 'string' ? steerMsg.sender_name : '',
+        },
         timestamp: m.timestamp,
       });
       continue;
@@ -3931,12 +3939,19 @@ export function convertSessionEventsToWorkflow(rawEvents: any[]): WorkflowEvent[
     } else if (type === 'user_steer') {
       // 插话（引导注入）重建：文本保持原样，渲染时才过
       // formatUserSkillDisplayContent —— 实时与刷新走同一条路径。
-      const steerText = typeof data === 'string' ? data : (data?.text || '');
+      // 中途到达的群/私聊消息带 source + sender：它是别人说的话，不是用户插话，
+      // 折叠区据此按来源贴标签（文本本身不掺 wire 标记，否则会污染会话标题）。
+      const steerData = typeof data === 'object' && data !== null ? (data as Record<string, unknown>) : null;
+      const steerText = typeof data === 'string' ? data : ((steerData?.text as string) || '');
       if (String(steerText).trim()) {
         result.push({
           _uid: genTimelineUID(),
           type: 'user_steer',
-          content: { text: String(steerText) },
+          content: {
+            text: String(steerText),
+            source: String(steerData?.source || ''),
+            sender_name: String(steerData?.sender_name || ''),
+          },
           timestamp: eventTimestamp,
         });
       }

@@ -508,13 +508,28 @@ function eventToLines(evt: WorkflowEvent, key: string, blockCompleted: boolean, 
     // A form submission / reminder / group message that arrived mid-turn lives
     // here (inside the running tool fold) — same notice as its top-level twin.
     const parsed = parseMachineUserMessage(text);
+    // Group/DM chat carries its origin instead of a marker: render it as the
+    // labelled notice ("私聊消息 · ss · hi"), not as the user interjecting.
+    const originSource = typeof evt.content === 'object' && evt.content
+      ? String((evt.content as { source?: string }).source || '')
+      : '';
+    const originSender = typeof evt.content === 'object' && evt.content
+      ? String((evt.content as { sender_name?: string }).sender_name || '')
+      : '';
+    const chatNotice =
+      !parsed.notice && (originSource === 'dm' || originSource === 'group')
+        ? {
+            kind: 'group' as const,
+            entries: [{ dm: originSource === 'dm', sender: originSender, text }],
+          }
+        : undefined;
     lines.push({
       key,
       kind: 'steer',
       primary: '',
       secondary: '',
       detail: parsed.text,
-      machineNotice: parsed.notice || undefined,
+      machineNotice: parsed.notice || chatNotice,
     });
     return lines;
   }

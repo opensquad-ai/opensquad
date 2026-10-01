@@ -99,7 +99,7 @@ describe('表单 / 提醒 / 群消息 —— 显示为提示，而不是原文',
     // (a) the steer line carries the parsed notice…
     const steerAt = ROW.indexOf("if (evt.type === 'user_steer') {");
     expect(steerAt).toBeGreaterThan(-1);
-    const steer = ROW.slice(steerAt, steerAt + 900);
+    const steer = ROW.slice(steerAt, steerAt + 1500);
     expect(steer).toContain('parseMachineUserMessage(');
     expect(steer).toContain('machineNotice:');
     // (b) …and its row renders the notice instead of marker text.

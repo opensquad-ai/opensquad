@@ -146,6 +146,22 @@ describe('R1 — 带标记的插话留在 fold 里（刷新重建）', () => {
     const steer = blocksOf(tl)[0].data.events.find((e) => e.type === 'user_steer');
     expect(String((steer?.content as any).text)).toContain('theme-stock-miner');
   });
+
+  it('keeps a chat steer’s origin so the row is not labelled as the user interjecting', () => {
+    // The runner stores {source, sender_name} next to the steer message for a
+    // DM/group that arrived mid-turn — the rebuilt row then renders as
+    // 私聊消息 · ss · hi instead of 插话.
+    const { messages, events } = midTurnSteerSession(true);
+    const steerMsg = messages.find((m: any) => m.steer === true) as any;
+    steerMsg.content = 'hi';
+    steerMsg.source = 'dm';
+    steerMsg.sender_name = 'ss';
+
+    const tl = buildTimelineFromSession(messages, events);
+    const node = blocksOf(tl)[0].data.events.find((e: any) => e.type === 'user_steer');
+
+    expect(node?.content).toMatchObject({ text: 'hi', source: 'dm', sender_name: 'ss' });
+  });
 });
 
 describe('R1b — 没标记的同一条消息仍会切段（标记就是这件事的开关）', () => {

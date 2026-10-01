@@ -512,6 +512,10 @@ export function useAgentWebSocket(agentId: string, ctx: AgentWebWsCtx) {
           content: finalText,
           timestamp: new Date().toISOString(),
         };
+        // Mid-turn chat carries who it came from (the runner sets these on the
+        // steer); the fold labels the row by origin instead of "插话".
+        if (typeof raw.source === 'string' && raw.source) chatMsg.source = raw.source;
+        if (typeof raw.sender_name === 'string' && raw.sender_name) chatMsg.sender_name = raw.sender_name;
         if (messageId) {
           chatMsg.message_id = messageId;
         }
