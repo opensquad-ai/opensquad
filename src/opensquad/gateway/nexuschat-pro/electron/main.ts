@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, Menu, Tray, nativeImage, ipcMain, session } from 'electron'
+import { app, BrowserWindow, dialog, Menu, Tray, nativeImage, ipcMain, session, shell } from 'electron'
 import { spawn, ChildProcess } from 'child_process'
 import net from 'net'
 import path from 'path'
@@ -653,6 +653,21 @@ function waitForPort(port: number, label: string): Promise<void> {
 }
 
 // ── 创建主窗口 ────────────────────────────────────────────────────────────────
+
+/**
+ * Hand a URL to the OS browser. Only http(s): a renderer (or an embedded page) must not be
+ * able to make the shell open a local file or an arbitrary scheme.
+ */
+async function openExternal(url: string): Promise<void> {
+  try {
+    const parsed = new URL(url)
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return
+    await shell.openExternal(url)
+  } catch {
+    /* not a URL we will open */
+  }
+}
+
 async function createWindow(): Promise<void> {
   mainWindow = new BrowserWindow({
     width:     1280,
@@ -668,7 +683,24 @@ async function createWindow(): Promise<void> {
       preload:          path.join(__dirname, 'preload.cjs'),
       contextIsolation: true,
       nodeIntegration:  false,
+      // The right panel's browser tab is a real browser here; without this the <webview>
+      // element is inert (it is a no-op in the plain-browser build, where the panel falls
+      // back to a sandboxed iframe). See components/ai-chat/BrowserPanel.tsx.
+      webviewTag:       true,
     },
+  })
+
+  // Terminal/browser hardening for embedded guests: no preload, no node, and any attempt to
+  // open a window (target=_blank, or a site's own window.open) goes to the OS browser
+  // instead of an unmanaged Electron window.
+  mainWindow.webContents.on('will-attach-webview', (_event, webPreferences) => {
+    delete (webPreferences as { preloadURL?: string }).preloadURL
+    webPreferences.nodeIntegration = false
+    webPreferences.contextIsolation = true
+  })
+  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
+    void openExternal(url)
+    return { action: 'deny' }
   })
 
   if (USE_CUSTOM_TITLEBAR) {

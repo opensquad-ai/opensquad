@@ -18,6 +18,7 @@ import {
   FileType2,
   Folder,
   FolderPlus,
+  Globe,
   Image as ImageIcon,
   MoreHorizontal,
   Plus,
@@ -28,6 +29,15 @@ import {
   X,
 } from 'lucide-react';
 import { adminAPI } from '../../services/api';
+import {
+  PANEL_TAB_LABELS,
+  PANEL_TABS,
+  initialPanelTab,
+  writePanelTab,
+  type PanelTabId,
+} from '../../utils/panelTabs';
+import { BrowserPanel } from './BrowserPanel';
+import { TerminalPanel } from './TerminalPanel';
 import { getLangForFile, highlightLine, HLJS_THEME_CSS } from '../../utils/codeHighlight';
 import { FILE_MARKDOWN_CLASS, renderFencedMarkdown } from '../../utils/fencedMarkdown';
 import { FileIndentGuides } from './FileIndentGuides';
@@ -47,6 +57,13 @@ export type ProjectFileOpenRequest = {
   /** Path relative to project root, or absolute under root */
   path: string;
   nonce: number;
+};
+
+/** One icon per panel tab — the tab row is the panel's top level, so it stays icon+label. */
+const PANEL_TAB_ICONS: Record<PanelTabId, typeof Globe> = {
+  browser: Globe,
+  terminal: Terminal,
+  files: FileCode2,
 };
 
 type TreeEntry = {
@@ -650,6 +667,18 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
   const [showSearch, setShowSearch] = useState(false);
 
   const [tab, setTab] = useState<ListTab>('all');
+  /** The panel's top level: 浏览器 / 终端 / 文件. This replaced a plain title row, so the
+   *  file area is now one tab among three. The chat drawer mounts this panel with
+   *  `treeOnly` and stays a file list, whatever is remembered. */
+  const [panelTab, setPanelTabState] = useState<PanelTabId>(() => initialPanelTab(treeOnly));
+  const selectPanelTab = useCallback(
+    (id: PanelTabId) => {
+      if (treeOnly) return;
+      setPanelTabState(id);
+      writePanelTab(id);
+    },
+    [treeOnly],
+  );
   /** 改动 view: this conversation's files (session snapshot) or everything git
    *  reports as uncommitted. Defaults to the snapshot, which is what the tab has
    *  always meant. */
@@ -2752,14 +2781,50 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
         className="absolute left-0 top-0 bottom-0 w-1.5 -ml-0.5 cursor-col-resize z-10 hover:bg-primary/30"
       />
 
-      {/* Header — same h-11 band as L1 / session sidebar */}
-      <div className="h-11 px-2.5 border-b border-border box-border flex-shrink-0 flex items-center gap-1">
+      {/* Top-level tabs — this band used to be the file area's title row; it is now the
+          panel's tab row (same h-11 band as L1 / session sidebar). */}
+      <div className="h-11 px-1.5 border-b border-border box-border flex-shrink-0 flex items-center gap-1">
+        {treeOnly ? (
           <div
             className="flex-1 min-w-0 text-[13px] font-medium leading-none text-textMuted truncate"
             title={rootPath || projectLabel || undefined}
           >
             {t('aiChat.workspaceFiles')}
           </div>
+        ) : (
+          <div
+            role="tablist"
+            aria-label={t('aiChat.panelTabs.label')}
+            data-testid="panel-tabs"
+            className="flex min-w-0 flex-1 items-center gap-0.5"
+          >
+            {PANEL_TABS.map((id) => {
+              const Icon = PANEL_TAB_ICONS[id];
+              const active = panelTab === id;
+              return (
+                <button
+                  key={id}
+                  type="button"
+                  role="tab"
+                  aria-selected={active}
+                  data-testid={`panel-tab-${id}`}
+                  data-active={active ? '1' : '0'}
+                  onClick={() => selectPanelTab(id)}
+                  title={t(PANEL_TAB_LABELS[id].hintKey)}
+                  className={`flex min-w-0 items-center gap-1 rounded-md px-2 py-1 text-[11px] font-medium transition-colors ${
+                    active
+                      ? 'bg-black/[0.06] text-textMain dark:bg-white/10'
+                      : 'text-textMuted hover:text-textMain'
+                  }`}
+                >
+                  <Icon size={12} strokeWidth={1.75} className="shrink-0" />
+                  <span className="truncate">{t(PANEL_TAB_LABELS[id].labelKey)}</span>
+                </button>
+              );
+            })}
+          </div>
+        )}
+        {!treeOnly && panelTab !== 'files' ? null : (
           <div className="flex items-center gap-0.5 shrink-0">
             <button
               type="button"
@@ -2828,8 +2893,17 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
               <X size={13} className="text-textMuted" />
             </button>
           </div>
+        )}
       </div>
 
+      {/* Terminal and browser are their own tools; the file list is the third tab and keeps
+          everything it had (including the chat drawer's treeOnly usage, which never leaves
+          the files tab). */}
+      {!treeOnly && panelTab === 'terminal' ? (
+        <TerminalPanel agentId={agentId} rootPath={rootPath} />
+      ) : !treeOnly && panelTab === 'browser' ? (
+        <BrowserPanel />
+      ) : (
       <div className="flex-1 min-h-0 flex">
         {listPane}
         {useSplitPreview ? (
@@ -2901,6 +2975,7 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
           </div>
         ) : null}
       </div>
+      )}
 
       {renderCtxMenu()}
     </div>

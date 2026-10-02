@@ -420,6 +420,32 @@ class GatewayAdapter(BaseAgent):
                 )
             return
 
+        if command in ("terminal_open", "terminal_write", "terminal_interrupt", "terminal_close"):
+            # The right panel's terminal tab. A line-based shell — no PTY — so the panel
+            # streams through the existing job_stdout/job_status events and this needs no
+            # new websocket event type or gateway route. See opensquad/terminal_session.py
+            # for what "no PTY" means for the user.
+            try:
+                from opensquad import terminal_session
+
+                tid = str(cmd_data.get("terminal_id") or "").strip()
+                if command == "terminal_open":
+                    res = terminal_session.open_terminal(
+                        terminal_id=tid,
+                        cwd=str(cmd_data.get("cwd") or ""),
+                        sid=str(cmd_data.get("session_id") or ""),
+                    )
+                elif command == "terminal_write":
+                    res = terminal_session.write_terminal(tid, str(cmd_data.get("text") or ""))
+                elif command == "terminal_interrupt":
+                    res = terminal_session.interrupt_terminal(tid)
+                else:
+                    res = terminal_session.close_terminal(tid)
+                logger.info(f"[Adapter] {command} {tid} by user {user_id}: ok={res.get('ok')}")
+            except Exception:
+                logger.warning(f"[Adapter] {command} failed", exc_info=True)
+            return
+
         if command == "cancel_steer":
             # Steer（引导注入）撤回：把一条已发出但模型尚未消费的消息从
             # 注入队列移除。两段队列都可能持有它：input_hub 会话队列

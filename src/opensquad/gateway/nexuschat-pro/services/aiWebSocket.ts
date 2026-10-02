@@ -258,6 +258,31 @@ class AIWebSocketService {
     this._sendCommand('stop_session_job', data);
   }
 
+  /** Open the right-panel terminal: a persistent shell the user drives.
+   *  The id is minted by the UI so the streaming events (job_stdout/job_status keyed by
+   *  `terminal:<id>`) can be matched without a reply round-trip. */
+  openTerminal(terminalId: string, cwd?: string, sessionId?: string) {
+    const data: Record<string, unknown> = { terminal_id: terminalId };
+    if (cwd) data.cwd = cwd;
+    if (sessionId) data.session_id = sessionId;
+    this._sendCommand('terminal_open', data);
+  }
+
+  /** Send keystrokes (a whole line, or a raw sequence) to that shell's stdin. */
+  writeTerminal(terminalId: string, text: string) {
+    this._sendCommand('terminal_write', { terminal_id: terminalId, text });
+  }
+
+  /** Ctrl+C: interrupt whatever the shell is running. */
+  interruptTerminal(terminalId: string) {
+    this._sendCommand('terminal_interrupt', { terminal_id: terminalId });
+  }
+
+  /** Stop the shell and its children. */
+  closeTerminal(terminalId: string) {
+    this._sendCommand('terminal_close', { terminal_id: terminalId });
+  }
+
   /** Mark a session as the primary ingress target for external channels. */
   setPrimarySession(sessionId: string) {
     this._sendCommand('set_primary_session', { session_id: sessionId });
