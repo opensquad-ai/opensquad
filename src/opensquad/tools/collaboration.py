@@ -129,6 +129,19 @@ def start_collaboration(
     if not os.path.exists(card_file):
         return {"status": "error", "message": f"Collab card '{card}' not found in {_collab_cards_dir()}"}
 
+    # One collaboration at a time: a second live task is refused, with the steps out of
+    # it (finish/collect the one in hand, then start the next).
+    _me = _my_agent_id()
+    if _me:
+        try:
+            from ..collab_board import active_tasks_for
+
+            _busy = active_tasks_for(_me)
+            if _busy:
+                return {"status": "error", "code": "already_in_task", "message": _one_task_rule_message(_me, _busy)}
+        except Exception:
+            pass
+
     # 2. Load collab card into own prompt via skill_loader
     # NOTE: import the module itself, not `_loaded_skills` by value.
     # skill_loader.add_skill_from_file() rebinds `_loaded_skills` to a new list,
@@ -419,6 +432,19 @@ def join_collaboration(card: str, collab_id: str = "") -> dict[str, Any]:
     card_file = os.path.join(_collab_cards_dir(), f"{card}.md")
     if not os.path.exists(card_file):
         return {"status": "error", "message": f"Collab card '{card}' not found in {_collab_cards_dir()}"}
+
+    # One at a time — and re-joining the task this agent is already in stays fine
+    # (exclude it), which is what makes a retry idempotent instead of a refusal.
+    _me = _my_agent_id()
+    if _me:
+        try:
+            from ..collab_board import active_tasks_for
+
+            _busy = active_tasks_for(_me, exclude=collab_id)
+            if _busy:
+                return {"status": "error", "code": "already_in_task", "message": _one_task_rule_message(_me, _busy)}
+        except Exception:
+            pass
 
     # 2. Load collab card into own prompt
     from .. import skill_loader as _skill_loader
@@ -794,6 +820,44 @@ def list_active_collaborations() -> dict[str, Any]:
         return {"status": "error", "message": str(e)}
 
 
+def _my_agent_id() -> str:
+    """This agent's id as the board records it (config ``agent_id``, else its folder)."""
+    try:
+        from ..input_hub import input_hub
+
+        agent_dir = input_hub.agent_dir or ""
+        if not agent_dir:
+            return ""
+        try:
+            from ..json_cache import load_json_cached
+
+            cfg = load_json_cached(os.path.join(agent_dir, "config.json"))
+            if isinstance(cfg, dict) and str(cfg.get("agent_id") or "").strip():
+                return str(cfg["agent_id"]).strip()
+        except Exception:
+            pass
+        return os.path.basename(agent_dir)
+    except Exception:
+        return ""
+
+
+def _one_task_rule_message(agent_id: str, tasks: list[dict[str, Any]]) -> str:
+    """Refusal for the one-collaboration-at-a-time rule, with the steps out of it."""
+    first = tasks[0] if tasks else {}
+    lines = [f"{agent_id} 已经在一个进行中的协作任务里，不能再创建/加入另一个 —— "]
+    lines += [f"  · {t.get('task_id')}（{t.get('task_name')}，{t.get('role')}）" for t in tasks]
+    lines += [
+        "",
+        "解决步骤（按顺序）：",
+        f'1) 先收尾它：collaboration.end_collaboration(card="<卡片名>", collab_id="{first.get("task_id", "")}", '
+        f'group_id="{first.get("group_id", "")}")；',
+        "2) 或者继续那个任务（带它的 collab_id 调用工具），不要另开一个；",
+        "3) 确认它已结束（end_collaboration 成功）后，再创建/加入下一个协作任务。",
+        "同一时刻只允许一个进行中的协作任务——这是用户的要求（避免 agent 并发开坑）。",
+    ]
+    return "\n".join(lines)
+
+
 def _gate_requirement_message(collab_id: str, needed: tuple[str, ...]) -> str:
     """Why the next phase is blocked, and the exact steps that unblock it.
 
@@ -886,7 +950,7 @@ def assign_task(
       )
     """
     try:
-        from ..collab_board import accepted_members, list_participants, upsert_item
+        from ..collab_board import accepted_members, active_tasks_for, list_participants, upsert_item
 
         # The gates are the user's approvals: assigning work is phase 3, so the first
         # two must be approved first. Refuse, and say how to get there.
@@ -911,6 +975,15 @@ def assign_task(
                     "2) 它的状态变成「已参与」后再调用 assign_task；\n"
                     "3) 它一直不接受就换一个已参与的成员，或先确认它在线。"
                 ),
+            }
+
+        # …and it must not already be inside another live collaboration: one at a time.
+        _busy = active_tasks_for(worker_id, exclude=collab_id)
+        if _busy:
+            return {
+                "status": "error",
+                "code": "worker_in_another_task",
+                "message": _one_task_rule_message(worker_id, _busy),
             }
 
         if not item_key:

@@ -49,6 +49,13 @@ work into the group buries it in noise; pushing group chatter into the window ma
 task's own record unreadable. Never invent a `collab_id` — take it from the card you were
 invited under, or read it with `collaboration.board_list_my_tasks()`.
 
+**One collaboration at a time.** You may create or join one live task; while it is active
+the platform refuses a second one (creating, joining, or being assigned into another),
+because an agent in two boards updates the wrong one and answers the wrong thread. The
+refusal names the task you are in — finish it with
+`end_collaboration(card="...", collab_id="...", group_id="...")`, or keep working inside
+it — and only then start the next.
+
 ## Core Concepts
 
 ### Collaboration Board — 4 Areas

@@ -47,3 +47,13 @@ def test_the_collaboration_skill_says_where_to_talk():
     assert "Where to Talk" in text
     assert 'collab_id="<collab_id>"' in text
     assert 'target_type="group"' in text
+
+
+def test_the_one_task_at_a_time_rule_is_stated():
+    """An agent should know the rule before it hits the refusal."""
+    text = PART.read_text(encoding="utf-8")
+    assert "One collaboration at a time" in text
+    assert "end_collaboration" in text
+
+    skill = SKILL.read_text(encoding="utf-8")
+    assert "One collaboration at a time" in skill

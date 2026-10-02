@@ -27,3 +27,8 @@ message happened to arrive:
   task's own record unreadable. Choose deliberately, every time.
 - Never invent a `collab_id`: take it from the collaboration card you were invited
   under, or read it with `collaboration.board_list_my_tasks()`.
+- **One collaboration at a time.** An agent may create or join **one** live task:
+  finish it (or keep working inside it) before starting another. Creating a second one,
+  joining another task, or being assigned into one while already inside a live task is
+  refused — the refusal names the task to end first (`collaboration.end_collaboration`)
+  and how to continue the one you have.

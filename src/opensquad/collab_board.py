@@ -1114,6 +1114,42 @@ def mark_participant(*, collab_id: str, agent_id: str, state: str, name: str = "
 GATE_STEPS = ("确定需求", "讨论方案", "任务分配", "任务验收")
 
 
+def active_tasks_for(agent_id: str, *, exclude: str = "") -> list[dict[str, Any]]:
+    """Live collaborations this agent is part of — as creator or as any participant.
+
+    **One at a time.** An agent in two live tasks reports progress on the wrong board,
+    answers the wrong thread, and (from the field) starts collaborations it cannot
+    finish. A finished task — ``status`` done/failed/archived, or ``closed_at`` set —
+    stops counting, so the way out of this refusal is to end the one it is in.
+    """
+    who = str(agent_id or "").strip()
+    if not who:
+        return []
+    out: list[dict[str, Any]] = []
+    for task in _read_tasks():
+        task_id = str(task.get("task_id") or "")
+        if not task_id or task_id == str(exclude or ""):
+            continue
+        if str(task.get("status") or "active") != "active" or task.get("closed_at") or task.get("ended_at"):
+            continue
+        members = {str(m) for m in (task.get("members") or []) if str(m)}
+        extra = task.get("extra") if isinstance(task.get("extra"), dict) else {}
+        participants = extra.get("participants") if isinstance(extra.get("participants"), dict) else {}
+        creator = str(task.get("created_by") or "")
+        if who != creator and who not in members and who not in {str(k) for k in participants}:
+            continue
+        out.append(
+            {
+                "task_id": task_id,
+                "task_name": str(task.get("task_name") or task_id),
+                "status": str(task.get("status") or "active"),
+                "group_id": str(extra.get("group_id") or ""),
+                "role": "creator" if who == creator else "member",
+            }
+        )
+    return out
+
+
 def gate_states(collab_id: str) -> dict[str, str]:
     """The latest state of each collaboration gate.
 
