@@ -85,6 +85,10 @@ by volume**: separate directories, files, modules, or API interfaces, so every u
   touch, and `acceptance_criteria` must be checkable without other tasks being finished.
   Overlapping scopes mean the split is wrong — fix the split, not the conflict.
 - Prefer the smallest unit that still delivers something verifiable.
+- **Record the project directory** (`set_project_dir`, or `project_dir=` on
+  `start_collaboration`): the folder the project's files live in. The window shows it so
+  every worker writes into the same project rather than picking a directory of its own;
+  `assign_task` refuses while it is empty.
 
 ## Core Concepts
 

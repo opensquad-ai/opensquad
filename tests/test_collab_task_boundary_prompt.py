@@ -85,6 +85,25 @@ def test_the_end_of_a_task_is_announced_in_the_window():
     assert "The end of the task is announced in the window" in skill
 
 
+def test_the_pm_is_told_to_record_the_project_directory():
+    """Where the project's files live is what every worker (and the machine at the other
+    end) needs before writing anything — so the PM records it, and the window shows it."""
+    role = ROLE_CARD.read_text(encoding="utf-8")
+    assert "Record the project directory" in role
+    assert "set_project_dir" in role
+
+    card = COLLAB_CARD.read_text(encoding="utf-8")
+    assert "记录任务项目目录" in card
+    assert "set_project_dir(collab_id, project_dir)" in card
+
+    skill = SKILL.read_text(encoding="utf-8")
+    assert "Record the project directory" in skill
+
+    tool = ASSIGN_TOOL.read_text(encoding="utf-8")
+    assert "def set_project_dir" in tool
+    assert "project_dir_missing" in tool
+
+
 def test_the_team_must_have_accepted_before_assignment():
     text = PART.read_text(encoding="utf-8")
     assert "Everyone must be 已参与 before any work is handed out" in text

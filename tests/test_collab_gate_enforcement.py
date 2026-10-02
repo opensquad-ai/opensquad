@@ -70,6 +70,7 @@ def test_assign_task_refuses_while_a_member_has_not_accepted(board):
     every assignment, not just the one aimed at that invitee."""
     _approve(board, "确定需求")
     _approve(board, "讨论方案")
+    cb.set_card_and_skills(collab_id=board, project_dir="D:/work/snake")
     cb.mark_participant(collab_id=board, agent_id="coder", state="invited")
     cb.mark_participant(collab_id=board, agent_id="qa", state="accepted")
 
@@ -98,12 +99,55 @@ def test_pending_members_lists_invited_declined_and_unrecorded(board):
 def test_assign_task_proceeds_once_the_gates_pass_and_the_worker_accepted(board):
     _approve(board, "确定需求")
     _approve(board, "讨论方案")
+    cb.set_card_and_skills(collab_id=board, project_dir="D:/work/snake")
     cb.mark_participant(collab_id=board, agent_id="coder", state="accepted")
 
     res = collab_tool.assign_task(collab_id=board, worker_id="coder", task_name="写游戏")
 
     assert res.get("status") == "success", res
     assert cb.accepted_members(board) == {"pm", "coder"}
+
+
+def test_assign_task_refuses_until_the_project_dir_is_recorded(board):
+    """The window tells every worker where the project lives; without the directory each of
+    them picks one of its own, and a machine on the other end guesses too."""
+    _approve(board, "确定需求")
+    _approve(board, "讨论方案")
+    cb.mark_participant(collab_id=board, agent_id="coder", state="accepted")
+
+    res = collab_tool.assign_task(collab_id=board, worker_id="coder", task_name="写游戏")
+
+    assert res["status"] == "error"
+    assert res["code"] == "project_dir_missing"
+    assert "set_project_dir" in res["message"]
+    assert board in res["message"]
+
+
+def test_set_project_dir_records_it_and_the_summary_exposes_it(board):
+    res = collab_tool.set_project_dir(collab_id=board, project_dir=" D:/work/snake ")
+
+    assert res["status"] == "success"
+    assert res["project_dir"] == "D:/work/snake"
+    assert cb.board_summary(collab_id=board)["project_dir"] == "D:/work/snake"
+
+    # …and only then does assignment get past that gate
+    _approve(board, "确定需求")
+    _approve(board, "讨论方案")
+    cb.mark_participant(collab_id=board, agent_id="coder", state="accepted")
+    assert collab_tool.assign_task(collab_id=board, worker_id="coder", task_name="写游戏").get("status") == "success"
+
+
+def test_set_project_dir_refuses_an_empty_path_or_an_unknown_task(board):
+    empty = collab_tool.set_project_dir(collab_id=board, project_dir="   ")
+
+    assert empty["status"] == "error"
+    assert empty["code"] == "project_dir_missing"
+    assert cb.board_summary(collab_id=board)["project_dir"] == ""
+
+    missing = collab_tool.set_project_dir(collab_id="NOPE00", project_dir="D:/work/x")
+
+    assert missing["status"] == "error"
+    assert "not found" in missing["message"]
 
 
 def test_end_collaboration_refuses_without_the_acceptance_gate(board):

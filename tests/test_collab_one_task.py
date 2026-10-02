@@ -90,12 +90,12 @@ def test_assign_task_refuses_a_worker_that_is_in_another_live_task(board):
             extra={"approval": {"step": step}},
         )
     cb.create_task(task_name="贪吃蛇游戏", task_id="T1", created_by="pm", group_id="g-1")
+    cb.set_card_and_skills(collab_id="T1", project_dir="D:/work/snake")
     cb.mark_participant(collab_id="T1", agent_id="coder", state="accepted")
     cb.create_task(task_name="另一个任务", task_id="T2", created_by="other", group_id="g-1")
     cb.mark_participant(collab_id="T2", agent_id="coder", state="accepted")
 
     res = collab_tool.assign_task(collab_id="T1", worker_id="coder", task_name="写游戏")
-
     assert res["status"] == "error"
     assert res["code"] == "worker_in_another_task"
     assert "T2" in res["message"]

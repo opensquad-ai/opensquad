@@ -39,6 +39,10 @@ and its acceptance can be judged **independently**.
   touch (e.g. `src/convert/core.js`), and `acceptance_criteria` must be checkable without
   the other tasks being finished. Overlapping scopes are a decomposition error — fix the
   split, not the conflict.
+- **Record the project directory** — `set_project_dir(collab_id, project_dir)` (or
+  `project_dir=` on `start_collaboration`): the directory the project's files live in. The
+  task window shows it, so a worker — including one on a paired machine — writes into the
+  project instead of a directory of its own choosing. `assign_task` refuses until it is set.
 - **Prefer the smallest independent unit that still delivers something verifiable**; split
   further only when a unit cannot be verified on its own.
 

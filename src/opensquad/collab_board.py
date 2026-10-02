@@ -1059,12 +1059,15 @@ def set_card_and_skills(
     card: str = "",
     skills: list[str] | None = None,
     files: list[str] | None = None,
+    project_dir: str = "",
 ) -> dict[str, Any]:
-    """Record which collab card + skills (+ produced files) this task runs on."""
+    """Record which collab card + skills (+ produced files, project dir) this task runs on."""
 
     def _apply(extra: dict[str, Any]) -> None:
         if card:
             extra["card"] = str(card)
+        if project_dir:
+            extra["project_dir"] = str(project_dir).strip()
         if skills:
             merged = [str(s) for s in (extra.get("skills") or []) if str(s)]
             for s in skills:
@@ -1362,6 +1365,7 @@ def board_summary(*, collab_id: str) -> dict[str, Any]:
         "progress": task.get("progress") or 0,
         "board_rev": task.get("board_rev") or 0,
         "card": str(extra.get("card") or ""),
+        "project_dir": str(extra.get("project_dir") or ""),
         "skills": [str(s) for s in (extra.get("skills") or []) if str(s)],
         "files": files,
         "attachments": attachments,

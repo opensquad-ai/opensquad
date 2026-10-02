@@ -18,7 +18,15 @@ vi.mock('../utils/fencedMarkdown', () => ({
   renderFencedMarkdown: (text: string) => `<h2>${text}</h2>`,
 }));
 
-import { DiscussionBubble, ItemBlock, MarkdownText, ProgressBar, gateDisplayFor } from './CollabTaskWindow';
+import {
+  AssignmentGroup,
+  DiscussionBubble,
+  ItemBlock,
+  MarkdownText,
+  ProgressGroup,
+  StepRow,
+  gateDisplayFor,
+} from './CollabTaskWindow';
 
 function boardItem(over: Record<string, unknown> = {}) {
   return {
@@ -64,17 +72,6 @@ describe('collab task window', () => {
     expect(renderToStaticMarkup(React.createElement(MarkdownText, { text: '' }))).toBe('');
   });
 
-  it('draws progress as a bar and clamps what the bar can show', () => {
-    const html = renderToStaticMarkup(React.createElement(ProgressBar, { percent: 42 }));
-    expect(html).toContain('width:42%');
-
-    const over = renderToStaticMarkup(React.createElement(ProgressBar, { percent: 140 }));
-    expect(over).toContain('width:100%');
-
-    const missing = renderToStaticMarkup(React.createElement(ProgressBar, {}));
-    expect(missing).toContain('width:0%');
-  });
-
   it('draws a message as the group chat does — own on the right, others on the left', () => {
     const mine = renderToStaticMarkup(React.createElement(DiscussionBubble, { item: discussionItem(), self: true }));
     expect(mine).toContain('bg-chatBubbleSelf');
@@ -116,14 +113,88 @@ describe('collab task window', () => {
     expect(short).not.toContain('collab-item-expand');
   });
 
-  it('an entry reports its progress as a bar, not a number', () => {
-    const html = renderToStaticMarkup(React.createElement(ItemBlock, { item: boardItem({ progress: 40 }) }));
-    expect(html).toContain('width:40%');
+  it('no progress bar and no latest-tool line is left in the window', () => {
+    const src = fs.readFileSync(path.resolve(__dirname, 'CollabTaskWindow.tsx'), 'utf8');
+
+    // A bar said "100%" for a task whose steps are drawn right underneath it, and every
+    // step is already a row — so the bar is gone, not restyled.
+    expect(src).not.toContain('ProgressBar');
+    expect(src).not.toContain('width: ${pct}%');
+    // the tool stream's "最近工具: im__send_message" told the reader nothing about the work
+    expect(src).not.toContain('latestTool');
+    expect(src).not.toContain('latest_tool_name');
   });
 
-  it('assignment and progress lay out as a board, with the blocking gate flagged', () => {
+  it('draws a task step as the board does: icon, title, chevron, status', () => {
+    const done = renderToStaticMarkup(
+      React.createElement(StepRow, {
+        step: { title: '编写转换器 HTML', detail: '', status: 'done' },
+      }),
+    );
+    expect(done).toContain('collab-task-step');
+    expect(done).toContain('data-status="done"');
+    expect(done).toContain('编写转换器 HTML');
+
+    const withDetail = renderToStaticMarkup(
+      React.createElement(StepRow, {
+        step: { title: 'Playwright 自测', detail: '6 条验收标准', status: 'doing' },
+      }),
+    );
+    expect(withDetail).toContain('data-status="doing"');
+    expect(withDetail).toContain('-rotate-90'); // folded until asked for
+  });
+
+  it('groups assignments by worker, each task with its steps and its plan folded away', () => {
+    const group = renderToStaticMarkup(
+      React.createElement(AssignmentGroup, {
+        agentId: 'agent305',
+        tasks: [
+          boardItem({
+            id: 'a1',
+            agent_id: 'agent305',
+            title: '进制转换器',
+            extra: {
+              structured: true,
+              subtasks: [
+                { title: '编写 HTML', status: 'done' },
+                { title: 'Playwright 自测', status: 'doing' },
+              ],
+            },
+          }),
+        ],
+      }),
+    );
+
+    expect(group).toContain('data-testid="collab-task-group"');
+    expect(group).toContain('data-agent="agent305"');
+    expect(group).toContain('@agent305');
+    expect(group).toContain('进制转换器');
+    // each subtask is one row — not a pasted checklist plus a second list of the same items
+    expect(group.match(/collab-task-step/g)?.length).toBe(2);
+    // and the plan text stays reachable, folded
+    expect(group).toContain('collab-task-plan-toggle');
+    expect(group).toContain('data-status="done"');
+  });
+
+  it('groups progress the same way', () => {
+    const group = renderToStaticMarkup(
+      React.createElement(ProgressGroup, {
+        agentId: 'agent305',
+        items: [boardItem({ id: 's1', agent_id: 'agent305', item_type: 'status', title: '自测 6/6 通过', status: 'doing' })],
+      }),
+    );
+
+    expect(group).toContain('data-testid="collab-progress-group"');
+    expect(group).toContain('collab-progress-step');
+    expect(group).toContain('自测 6/6 通过');
+  });
+
+  it('assignment and progress lay out as the board does, with the blocking gate flagged', () => {
     const src = fs.readFileSync(path.resolve(__dirname, 'CollabTaskWindow.tsx'), 'utf8');
-    expect(src).toContain('grid gap-1.5 sm:grid-cols-2');
+    expect(src).toContain('data-testid="collab-task-assignments"');
+    expect(src).toContain('data-testid="collab-task-progress-groups"');
+    expect(src).toContain('groupByWorker(tasks)');
+    expect(src).toContain('groupByWorker(statuses)');
     expect(src).toContain('data-testid="collab-task-blocking-gate"');
   });
 
@@ -154,11 +225,26 @@ describe('collab task window', () => {
     const item = src.slice(src.indexOf('const ItemBlock'), src.indexOf('const Section'));
 
     expect(item).toContain('<MarkdownText text={item.content}');
-    expect(item).toContain('<ProgressBar percent={pct}');
-    // the task's own progress is shown next to its status in the header
-    expect(src).toContain('testId="collab-task-progress"');
+    // the step rows come from the same parser the board uses, so the two surfaces agree
+    expect(src).toContain('parseTaskSteps(task, t)');
     // approval and discussion text go through the same renderer (item rows,
-    // approvals, discussion)
+    // approvals, discussion, step detail)
     expect(src.match(/<MarkdownText /g)?.length ?? 0).toBeGreaterThanOrEqual(3);
+  });
+
+  it('shows the task project directory, and says so when the PM has not filled it in', () => {
+    const src = fs.readFileSync(path.resolve(__dirname, 'CollabTaskWindow.tsx'), 'utf8');
+
+    // filled: the path, with a copy button
+    expect(src).toContain("t('collabTask.projectDir')");
+    expect(src).toContain('data-testid="collab-project-dir"');
+    expect(src).toContain('copyProjectDir');
+    // empty: the window tells the reader who fills it, not just "暂无内容"
+    expect(src).toContain('data-testid="collab-project-dir-missing"');
+    expect(src).toContain("t('collabTask.projectDirMissing')");
+
+    // …and it reads the field the summary exposes
+    const api = fs.readFileSync(path.resolve(__dirname, '..', 'services', 'api.ts'), 'utf8');
+    expect(api).toMatch(/project_dir\?: string;/);
   });
 });

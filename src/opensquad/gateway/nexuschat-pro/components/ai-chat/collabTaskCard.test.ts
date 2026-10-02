@@ -149,4 +149,22 @@ describe('collaboration-task card', () => {
     // the soft banner remains only for notices that are not plain tips
     expect(win).toMatch(/plainTip \? \(/);
   });
+
+  it('a pinned collaboration card is drawn as the card, not as wire text', () => {
+    const win = read('components/ChatWindow.tsx');
+    const pinStart = win.indexOf('{pinnedMessages.map(pm => {');
+    // the whole pinned-row block, plain-text fallback included
+    const pinBlock = win.slice(pinStart, win.indexOf('})}', pinStart));
+
+    // pinned rows are message text, so the marker arrives raw — parse it before printing it
+    expect(pinBlock).toContain('parseCollabTask(pm.content)');
+    expect(pinBlock).toContain('data-testid="pinned-collab-task"');
+    // the same card the chat draws, opening the same window
+    expect(pinBlock).toContain('<CollabTaskCard payload={pinnedTask}');
+    expect(pinBlock).toContain('onOpen={openCollabTaskWindow}');
+    // and the card's clicks must not also jump the chat behind it
+    expect(pinBlock).toContain('stopPropagation');
+    // the plain-text fallback stays for ordinary pinned messages
+    expect(pinBlock).toContain('line-clamp-2');
+  });
 });

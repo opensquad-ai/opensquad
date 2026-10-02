@@ -2369,6 +2369,8 @@ export interface CollabBoardSummary {
   progress: number;
   board_rev: number;
   card: string;
+  /** The project's working directory, filled in by the PM — where the task's files live. */
+  project_dir?: string;
   skills: string[];
   files: string[];
   attachments: CollabBoardAttachment[];

@@ -3097,6 +3097,12 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
                             <div className="max-h-64 overflow-y-auto custom-scrollbar">
                                 {pinnedMessages.map(pm => {
                                     const pSender = users[pm.senderId];
+                                    // A pinned collaboration card is a task, not text: pinned
+                                    // rows used to print the wire marker and its JSON
+                                    // ([[COLLAB_TASK]] {"v":1,…}) because the text was
+                                    // rendered raw. Same card the chat draws, so the pinned
+                                    // row and the message agree.
+                                    const pinnedTask = parseCollabTask(pm.content);
                                     return (
                                         <div
                                             key={pm.id}
@@ -3118,9 +3124,17 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
                                                 <span className="text-xs font-semibold text-textMain">{pSender?.name}</span>
                                                 <span className="text-[10px] text-textMuted ml-auto">{new Date(pm.timestamp).toLocaleDateString('zh-CN')}</span>
                                             </div>
-                                            <p className="text-sm text-textMuted line-clamp-2">
-                                                {pm.type === MessageType.TEXT || pm.type === MessageType.SYSTEM ? pm.content.replace(/<[^>]+>/g, '') : `[${pm.type}]`}
-                                            </p>
+                                            {pinnedTask ? (
+                                                // The card's own clicks open the task window; they
+                                                // must not also jump the chat behind it.
+                                                <div onClick={(e) => e.stopPropagation()} data-testid="pinned-collab-task">
+                                                    <CollabTaskCard payload={pinnedTask} onOpen={openCollabTaskWindow} />
+                                                </div>
+                                            ) : (
+                                                <p className="text-sm text-textMuted line-clamp-2">
+                                                    {pm.type === MessageType.TEXT || pm.type === MessageType.SYSTEM ? pm.content.replace(/<[^>]+>/g, '') : `[${pm.type}]`}
+                                                </p>
+                                            )}
                                         </div>
                                     );
                                 })}

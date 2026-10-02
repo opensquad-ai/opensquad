@@ -131,6 +131,7 @@ Reproduce: POST /api/login {"password":""}
 - **沿接口缝切**：「后端实现 `POST /convert`、前端调用它、QA 通过 UI 验收」是解耦的；「两人都改 `index.html`」不是。
 - **边界写进分配里**：`file_scope` 必须写清该 worker 只能动哪些文件（如 `src/convert/core.js`），`acceptance_criteria` 必须**不依赖其他任务完成**就能验证。两个任务的 scope 重叠 = 拆分错了，改拆分，不是改冲突。
 - **先取"最小的可独立验收单元"**；只有当某个单元无法独立验证时，才继续往下拆。
+- **记录任务项目目录**：`set_project_dir(collab_id, project_dir)`（或在 start_collaboration 时带 `project_dir=`）—— 项目文件所在的那个目录。任务窗口会展示它，worker（包括远程机器上的）就写进这个项目，而不是各自挑一个目录。**没填之前 `assign_task` 会被拒绝。**
 
 PM分配任务时，**必须使用`assign_task`函数**（结构化参数方式），不要手动写Markdown content。
 

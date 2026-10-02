@@ -98,6 +98,7 @@ def start_collaboration(
     project_name: str = "",
     project_description: str = "",
     skills: list[str] | None = None,
+    project_dir: str = "",
 ) -> dict[str, Any]:
     """
     [PM only] Start a collaboration session.
@@ -123,6 +124,10 @@ def start_collaboration(
         skills: The skills this task actually needs — what you recommend the team run
                 with (e.g. ["playwright", "vcs_collaboration"]). The card itself is
                 always listed; anything else you leave out is not shown on the task.
+        project_dir: The project's working directory on disk (e.g. "D:/work/converter"),
+                which **you fill in as PM**. The task window shows it as the place the
+                team's files live, so a worker — including one on a paired machine — knows
+                where the project is. ``assign_task`` refuses until it is set.
     """
     # 1. Validate collab card exists
     card_file = os.path.join(_collab_cards_dir(), f"{card}.md")
@@ -196,7 +201,7 @@ def start_collaboration(
                 _name = str(_extra).strip()
                 if _name and _name not in _skills:
                     _skills.append(_name)
-            set_card_and_skills(collab_id=task_rec["task_id"], card=card, skills=_skills)
+            set_card_and_skills(collab_id=task_rec["task_id"], card=card, skills=_skills, project_dir=project_dir)
 
             # The creator is in the task by definition — it does not accept its own
             # invitation, so it is marked accepted at once and kept out of the invited
@@ -358,9 +363,16 @@ def start_collaboration(
         "message": f"Collaboration started with collab card '{card}'",
         "card_loaded": True,
         "task": task_rec,
+        "project_dir": str(project_dir or "").strip(),
+        # The window shows this directory as where the project lives, and assignment waits
+        # for it — so say so now rather than at the first assign_task refusal.
+        "project_dir_missing": not str(project_dir or "").strip(),
         "invitation": im_result,
         "members": members or [],
         "next_steps": (
+            '0. ⚠️ 先填写任务项目目录：set_project_dir(collab_id="<上面的 task id>", '
+            'project_dir="D:/work/你的项目目录")，或在 start_collaboration 时直接带 project_dir。'
+            "没有它 assign_task 会被拒绝。\n"
             "1. Review the collab card now loaded in your prompt\n"
             "2. ⚠️ Check skill library: use `agent_setup.list_skills()` to see if any existing skills match this task — activate them before proceeding\n"
             "3. ⚠️ Activate Task Watch: call `task_watch.start(description, check_interval=120)` to enable active supervision for your collaboration task. This prevents stalls and keeps you on track. Use `task_watch.update(progress)` after each sub-task, and `task_watch.complete(summary)` when done.\n"
@@ -438,6 +450,42 @@ def start_collaboration(
                 "5. Overall progress is auto-calculated from subtask statuses"
             ),
         },
+    }
+
+
+def set_project_dir(collab_id: str, project_dir: str) -> dict[str, Any]:
+    """
+    [PM only] Record the project's working directory for a collaboration task.
+
+    The task window shows it beside the task's files, so the team — including a member on
+    a paired machine — knows where the project lives instead of guessing a path each.
+    ``assign_task`` refuses while it is empty, so set it before handing out work.
+
+    Args:
+        collab_id: collaboration task id (from start_collaboration)
+        project_dir: the project's root directory on disk, e.g. "D:/work/converter"
+    """
+    path = str(project_dir or "").strip()
+    if not path:
+        return {
+            "status": "error",
+            "code": "project_dir_missing",
+            "message": "project_dir 不能为空：填本任务的代码/产物根目录，例如 D:/work/converter。",
+        }
+    try:
+        from ..collab_board import get_task, set_card_and_skills
+
+        if not get_task(task_id=collab_id):
+            return {"status": "error", "message": f"collaboration task not found: {collab_id}"}
+        set_card_and_skills(collab_id=collab_id, project_dir=path)
+    except Exception as exc:
+        logger.warning("[Collab] Failed to record project_dir: %s", exc)
+        return {"status": "error", "message": f"Failed to record project_dir: {exc}"}
+    return {
+        "status": "success",
+        "collab_id": collab_id,
+        "project_dir": path,
+        "message": f"任务项目目录已记录：{path}",
     }
 
 
@@ -877,6 +925,19 @@ def _not_accepted_message(collab_id: str, pending: list[dict[str, Any]], worker_
     return "\n".join(lines)
 
 
+def _project_dir_message(collab_id: str) -> str:
+    """Why assignment waits for the project directory, and how to fill it."""
+    return (
+        f"还不能分配任务：任务项目目录（project_dir）还没有填写（{collab_id}）。\n"
+        "任务窗口要用它告诉每个成员（包括远程机器上的成员）项目文件放在哪里——没填，"
+        "每个 worker 只能自己猜一个目录，产物就散在各个机器上。\n\n"
+        "解决步骤：\n"
+        f'1) 调用 set_project_dir(collab_id="{collab_id}", project_dir="D:/work/你的项目目录")；\n'
+        "2) 确认这个路径是本任务的代码/产物根目录（不要填父目录或盘符根）；\n"
+        "3) 然后再调用 assign_task。"
+    )
+
+
 def _one_task_rule_message(agent_id: str, tasks: list[dict[str, Any]]) -> str:
     """Refusal for the one-collaboration-at-a-time rule, with the steps out of it."""
     first = tasks[0] if tasks else {}
@@ -991,13 +1052,23 @@ def assign_task(
       )
     """
     try:
-        from ..collab_board import active_tasks_for, pending_members, upsert_item
+        from ..collab_board import active_tasks_for, get_task, pending_members, upsert_item
 
         # The gates are the user's approvals: assigning work is phase 3, so the first
         # two must be approved first. Refuse, and say how to get there.
         gate_msg = _gate_requirement_message(collab_id, ("确定需求", "讨论方案"))
         if gate_msg:
             return {"status": "error", "code": "gates_not_approved", "message": gate_msg}
+
+        # …and the project has a home on disk: workers read the window to find out where the
+        # files live, so an empty project_dir sends each of them somewhere of its own.
+        _extra = (get_task(task_id=collab_id) or {}).get("extra") or {}
+        if not str(_extra.get("project_dir") or "").strip():
+            return {
+                "status": "error",
+                "code": "project_dir_missing",
+                "message": _project_dir_message(collab_id),
+            }
 
         # …and the whole team has to be in before any work is handed out: a member still at
         # 已邀请 has not agreed to take anything, and assigning only to those who happened

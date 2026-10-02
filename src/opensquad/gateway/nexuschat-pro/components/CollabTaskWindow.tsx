@@ -10,9 +10,10 @@
  */
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { CheckCircle2, Circle, Loader2, X } from 'lucide-react';
+import { Check, CheckCircle2, ChevronDown, Circle, Copy, Loader2, Target, X } from 'lucide-react';
 
 import { AI_MARKDOWN_CLASS, renderFencedMarkdown } from '../utils/fencedMarkdown';
+import { type ParsedStep, PlanStatusIcon, groupByWorker, parseTaskSteps } from '../utils/taskSteps';
 import { CollabTaskComposer } from './CollabTaskComposer';
 import {
   SERVER_BASE_URL,
@@ -147,62 +148,22 @@ export const DiscussionBubble: React.FC<{ item: CollabBoardItem; self?: boolean 
   );
 };
 
-const barTone = (pct: number) => (pct >= 100 ? 'bg-emerald-500' : pct > 0 ? 'bg-amber-500' : 'bg-border');
-
 /**
- * A task's progress, at a glance. The board carries a percentage per item and one
- * for the task itself; a number in a chip ("doing · 40%") is easy to miss when what
- * the user wants is to see how far along the work is.
- */
-export const ProgressBar: React.FC<{ percent?: number; className?: string; testId?: string }> = ({
-  percent,
-  className = '',
-  testId,
-}) => {
-  const pct = Math.max(0, Math.min(100, Math.round(Number(percent) || 0)));
-  return (
-    <div className={`flex items-center gap-2 ${className}`} data-testid={testId}>
-      <div className="h-1.5 min-w-0 flex-1 overflow-hidden rounded-full bg-panel">
-        <div className={`h-full rounded-full transition-all ${barTone(pct)}`} style={{ width: `${pct}%` }} />
-      </div>
-      <span className="shrink-0 font-mono text-[10px] text-textMuted">{pct}%</span>
-    </div>
-  );
-};
-
-const subtaskProgress = (subtasks: any[]): number | null => {
-  if (!Array.isArray(subtasks) || !subtasks.length) return null;
-  const done = subtasks.filter((st) => String(st?.status || '') === 'done').length;
-  return Math.round((done / subtasks.length) * 100);
-};
-
-const SubTaskRow: React.FC<{ id: string; title: string; status: string }> = ({ title, status }) => (
-  <div className="flex items-center gap-1.5 text-[12px] text-textMain">
-    {status === 'done' ? (
-      <CheckCircle2 size={12} className="shrink-0 text-emerald-600" />
-    ) : status === 'doing' ? (
-      <Loader2 size={12} className="shrink-0 text-amber-500" />
-    ) : (
-      <Circle size={12} className="shrink-0 text-textMuted" />
-    )}
-    <span className="min-w-0 truncate">{title}</span>
-  </div>
-);
-
-/**
- * One board entry, as a card rather than a document: long agent-written Markdown is
- * clamped with an expand control, and the item's progress is drawn. A wall of text was
- * what the window looked like; a board is what it is.
+ * One board entry as a document card: agent-written Markdown, folded when long, with the
+ * item's status as a chip.
+ *
+ * No progress bar and no second list of subtasks. A bar said "40%" for a task whose steps
+ * the window was already listing underneath it, and the same subtasks were rendered twice
+ * — once inside the pasted plan text and once as rows. Steps are rows now (see StepRow),
+ * and a percentage nobody can act on is gone.
  */
 export const ItemBlock: React.FC<{ item: CollabBoardItem; showAssignee?: boolean }> = ({
   item,
   showAssignee,
 }) => {
   const { t } = useTranslation();
-  const subtasks = Array.isArray(item.extra?.subtasks) ? item.extra?.subtasks : [];
   const [open, setOpen] = useState(false);
   const long = String(item.content || '').length > 180 || String(item.content || '').split('\n').length > 4;
-  const pct = Number(item.progress) > 0 ? Number(item.progress) : subtaskProgress(subtasks);
   return (
     <div className="rounded-lg border border-border bg-bgLight px-2.5 py-2">
       <div className="flex items-center gap-2">
@@ -225,22 +186,159 @@ export const ItemBlock: React.FC<{ item: CollabBoardItem; showAssignee?: boolean
           {open ? t('collabTask.collapse', { defaultValue: '收起' }) : t('collabTask.expand', { defaultValue: '展开' })}
         </button>
       ) : null}
-      {typeof pct === 'number' && pct > 0 ? <ProgressBar percent={pct} className="mt-1.5" /> : null}
-      {subtasks.length ? (
-        <div className="mt-1.5 space-y-0.5">
-          {subtasks.map((st: any) => (
-            <SubTaskRow key={st.id} id={st.id} title={st.title} status={st.status} />
-          ))}
-        </div>
-      ) : null}
-      {item.latest_tool_name ? (
-        <div className="mt-1 truncate font-mono text-[10px] text-textMuted">
-          {t('collabTask.latestTool')}: {item.latest_tool_name}
-        </div>
-      ) : null}
     </div>
   );
 };
+
+/**
+ * One step of a task, drawn the way the collaboration board draws it: status icon, title,
+ * and a chevron that opens that step's own detail.
+ */
+export const StepRow: React.FC<{ step: ParsedStep; testId?: string }> = ({
+  step,
+  testId = 'collab-task-step',
+}) => {
+  const [open, setOpen] = useState(false);
+  const detail = String(step.detail || '').trim();
+  return (
+    <div
+      className="overflow-hidden rounded border border-border/50 bg-panel/40"
+      data-testid={testId}
+      data-status={step.status}
+    >
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className="flex w-full items-center justify-between gap-2 px-2 py-1.5 text-left hover:bg-primary/5"
+      >
+        <span className="flex min-w-0 items-center gap-1.5">
+          <PlanStatusIcon status={step.status} />
+          <span
+            className={`truncate text-[12px] ${
+              step.status === 'done'
+                ? 'text-textMuted line-through'
+                : step.status === 'doing'
+                  ? 'font-medium text-textMain'
+                  : 'text-textMuted'
+            }`}
+          >
+            {step.title}
+          </span>
+        </span>
+        {detail ? (
+          <ChevronDown
+            size={12}
+            className={`shrink-0 text-textMuted transition-transform ${open ? '' : '-rotate-90'}`}
+          />
+        ) : null}
+      </button>
+      {open && detail ? <MarkdownText text={detail} className="px-2 pb-1.5" /> : null}
+    </div>
+  );
+};
+
+/** The worker's plan text (文件范围, 依赖, 验收标准 …), kept but folded away. */
+const PlanFold: React.FC<{ item: CollabBoardItem }> = ({ item }) => {
+  const { t } = useTranslation();
+  const [open, setOpen] = useState(false);
+  const text = String(item.content || '');
+  if (!text) return null;
+  return (
+    <>
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        data-testid="collab-task-plan-toggle"
+        className="rounded border border-border px-1.5 py-0.5 text-[10px] text-textMuted hover:bg-primary/10 hover:text-textMain"
+      >
+        {open
+          ? t('collabTask.collapse', { defaultValue: '收起' })
+          : t('collabTask.planDetails', { defaultValue: '分配详情' })}
+      </button>
+      {open ? (
+        <div className="rounded border border-border/50 bg-bgLight px-2 py-1.5">
+          <MarkdownText text={text} />
+        </div>
+      ) : null}
+    </>
+  );
+};
+
+/** How many items / steps a group holds, the way the board counts them. */
+const Count: React.FC<{ n: number; suffix?: string }> = ({ n, suffix }) => {
+  const { t } = useTranslation();
+  return (
+    <span className="shrink-0 text-[10px] text-textMuted">
+      {t('collabTask.itemCount', { count: n, defaultValue: '{{count}} 项' })}
+      {suffix ? ` · ${suffix}` : ''}
+    </span>
+  );
+};
+
+/**
+ * One worker's assignments, grouped and titled like the board's 任务分配区: the worker,
+ * how many items, then per task a header with its steps underneath.
+ */
+export const AssignmentGroup: React.FC<{ agentId: string; tasks: CollabBoardItem[] }> = ({
+  agentId,
+  tasks,
+}) => {
+  const { t } = useTranslation();
+  return (
+    <div className="rounded-xl border border-border bg-panel p-3" data-testid="collab-task-group" data-agent={agentId}>
+      <div className="mb-2 flex items-center justify-between gap-2">
+        <span className="min-w-0 truncate text-[12px] font-semibold text-primary">@{agentId}</span>
+        <Count n={tasks.length} />
+      </div>
+      <div className="space-y-2">
+        {tasks.map((task) => {
+          const steps = parseTaskSteps(task, t);
+          return (
+            <div key={task.id} className="space-y-1" data-testid="collab-task-subgroup">
+              <div className="flex items-center gap-1.5">
+                <Target size={12} className="shrink-0 text-primary" />
+                <span className="min-w-0 flex-1 truncate text-[12px] font-semibold text-primary">
+                  {task.title || task.item_key}
+                </span>
+                <Count n={steps.length} />
+              </div>
+              {steps.map((step, i) => (
+                <StepRow key={`${task.id}:${i}`} step={step} />
+              ))}
+              <PlanFold item={task} />
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+};
+
+/** A worker's progress notes, grouped the same way the assignments are. */
+export const ProgressGroup: React.FC<{ agentId: string; items: CollabBoardItem[] }> = ({
+  agentId,
+  items,
+}) => (
+  <div className="rounded-xl border border-border bg-panel p-3" data-testid="collab-progress-group" data-agent={agentId}>
+    <div className="mb-2 flex items-center justify-between gap-2">
+      <span className="min-w-0 truncate text-[12px] font-semibold text-primary">@{agentId}</span>
+      <Count n={items.length} />
+    </div>
+    <div className="space-y-1">
+      {items.map((it) => (
+        <StepRow
+          key={it.id}
+          testId="collab-progress-step"
+          step={{
+            title: String(it.title || it.item_key || ''),
+            detail: String(it.content || ''),
+            status: it.status || 'doing',
+          }}
+        />
+      ))}
+    </div>
+  </div>
+);
 
 const Section: React.FC<{ title: string; count?: number; children: React.ReactNode }> = ({ title, count, children }) => (
   <div className="mt-3">
@@ -304,6 +402,15 @@ export const CollabTaskWindow: React.FC<CollabTaskWindowProps> = ({ collabId, on
   // window can both show the gate flow and resolve a pending one in place.
   const approvals = items.approval || [];
   const groupId = String((summary?.task?.extra as Record<string, any> | undefined)?.group_id || '');
+  // Where the project lives on disk — filled in by the PM, shown beside the task's files.
+  const projectDir = String(summary?.project_dir || '');
+  const [copiedPath, setCopiedPath] = useState(false);
+  const copyProjectDir = () => {
+    void navigator.clipboard?.writeText(projectDir).then(() => {
+      setCopiedPath(true);
+      window.setTimeout(() => setCopiedPath(false), 1500);
+    });
+  };
   const GATES = ['确定需求', '讨论方案', '任务分配', '任务验收'];
 
   const gateOf = (item: CollabBoardItem) => String((item.extra?.approval as any)?.step || '');
@@ -369,7 +476,6 @@ export const CollabTaskWindow: React.FC<CollabTaskWindowProps> = ({ collabId, on
             {summary.status || 'active'}
           </span>
         ) : null}
-        {summary ? <ProgressBar percent={summary.progress} className="w-28 shrink-0" testId="collab-task-progress" /> : null}
         <span className="shrink-0 font-mono text-[11px] text-textMuted">{collabId}</span>
         <button
           type="button"
@@ -567,9 +673,9 @@ export const CollabTaskWindow: React.FC<CollabTaskWindowProps> = ({ collabId, on
 
             <Section title={t('collabTask.assign')} count={tasks.length}>
               {tasks.length ? (
-                <div className="grid gap-1.5 sm:grid-cols-2">
-                  {tasks.map((it) => (
-                    <ItemBlock key={it.id} item={it} showAssignee />
+                <div className="space-y-2" data-testid="collab-task-assignments">
+                  {groupByWorker(tasks).map(({ agentId, items }) => (
+                    <AssignmentGroup key={agentId} agentId={agentId} tasks={items} />
                   ))}
                 </div>
               ) : (
@@ -590,13 +696,39 @@ export const CollabTaskWindow: React.FC<CollabTaskWindowProps> = ({ collabId, on
                 </div>
               ) : null}
               {statuses.length ? (
-                <div className="grid gap-1.5 sm:grid-cols-2">
-                  {statuses.map((it) => (
-                    <ItemBlock key={it.id} item={it} showAssignee />
+                <div className="space-y-2" data-testid="collab-task-progress-groups">
+                  {groupByWorker(statuses).map(({ agentId, items }) => (
+                    <ProgressGroup key={agentId} agentId={agentId} items={items} />
                   ))}
                 </div>
               ) : (
                 <Empty />
+              )}
+            </Section>
+
+            <Section title={t('collabTask.projectDir')} count={projectDir ? 1 : 0}>
+              {projectDir ? (
+                <div className="flex items-center gap-2">
+                  <code
+                    className="min-w-0 flex-1 truncate rounded-lg border border-border bg-bgLight px-2 py-1 font-mono text-[11px] text-textMain"
+                    data-testid="collab-project-dir"
+                    title={projectDir}
+                  >
+                    {projectDir}
+                  </code>
+                  <button
+                    type="button"
+                    onClick={copyProjectDir}
+                    className="shrink-0 rounded-lg border border-border p-1 text-textMuted hover:bg-primary/10 hover:text-textMain"
+                    aria-label={t('collabTask.copyProjectDir')}
+                  >
+                    {copiedPath ? <Check size={13} className="text-emerald-600" /> : <Copy size={13} />}
+                  </button>
+                </div>
+              ) : (
+                <div className="text-[12px] text-textMuted" data-testid="collab-project-dir-missing">
+                  {t('collabTask.projectDirMissing')}
+                </div>
               )}
             </Section>
             <Section title={t('collabTask.attachments')} count={summary?.attachments?.length || 0}>
