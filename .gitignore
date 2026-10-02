@@ -280,6 +280,9 @@ src/plugins/task_watch/ui/pnpm-lock.yaml
 .claude2/
 .ruff_cache/
 
+# ── Command Code local state (taste/preferences, per-instance, not source) ──
+.commandcode/
+
 # ── Copilot Hub local state (editor-generated, not source) ──
 .copilot-hub/
 
@@ -391,3 +394,6 @@ tests/test_ds_web_answer_clean.py
 
 # ===== Promotion materials (local only, not for public repo) =====
 promotion/
+# Underscore-prefixed variant of the same: probe/scratch scripts and captured
+# promo assets written during a recording session. Same category, same rule.
+_promo/
