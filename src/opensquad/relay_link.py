@@ -385,6 +385,15 @@ def forget_outbound(group_id: str, secret: str = "") -> bool:
         return True
 
 
+def outbound_host(group_id: str) -> str:
+    """The peer host this machine minted a subscription for ``group_id`` on.
+
+    A relayed message's ``/uploads/...`` references live on that machine, so this is
+    what tells the receiving gateway where to point them.
+    """
+    return str(_outbound_entry(group_id).get("host") or "")
+
+
 def new_secret() -> str:
     """A fresh per-subscription secret (the home gateway mints it)."""
     return secrets.token_urlsafe(24)

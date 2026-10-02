@@ -466,6 +466,19 @@ class InputHub:
         # Uploads are stored in data/uploads/ in the workspace
         uploads_dir = os.path.join(workspace_root, "data", "uploads")
 
+        # An absolute upload URL names the machine that holds the file — a relayed
+        # message from a paired machine is rewritten that way. Remember its origin and
+        # carry on with the /uploads/<file> tail, so one fetch+privatize path serves
+        # both a local reference and a remote one.
+        origin_base = ""
+        if isinstance(path, str) and path.startswith(("http://", "https://")):
+            marker = path.find("/uploads/")
+            if marker == -1:
+                logger.info(f"[InputHub] _fix_path passthrough: {path} (not an upload URL)")
+                return path
+            origin_base = path[:marker]
+            path = path[marker:]
+
         # Handle /uploads/ paths
         if path.startswith("/uploads/") or path.startswith("uploads/"):
             filename = path.split("/")[-1]  # extract just the filename
@@ -487,9 +500,14 @@ class InputHub:
 
                 from opensquad.bridge import gateway_base_url, is_loopback_url
 
-                base = gateway_base_url()
-                if not base or is_loopback_url(base):
-                    return ""
+                if origin_base:
+                    # The caller named the machine: fetch from there, even if this
+                    # agent's own gateway is loopback.
+                    base = origin_base
+                else:
+                    base = gateway_base_url()
+                    if not base or is_loopback_url(base):
+                        return ""
                 url = f"{base}{path if path.startswith('/') else '/' + path}"
                 try:
                     os.makedirs(uploads_dir, exist_ok=True)

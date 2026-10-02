@@ -418,6 +418,40 @@ def test_the_task_endpoint_relays_what_it_dispatches(store):
     assert '"event_id": uuid.uuid4().hex' in body
 
 
+def test_a_relayed_message_points_its_uploads_at_the_origin_machine(store, monkeypatch):
+    """The files stay on the machine that owns the group: a relative /uploads path
+    resolved against this gateway is a file that does not exist here."""
+    import opensquad.peer_bridge as peer_bridge_mod
+
+    secret = rl.new_secret()
+    rl.remember_outbound("g-7f3a", "192.168.5.4", secret, user_id="u-1")
+    monkeypatch.setattr(peer_bridge_mod, "find_peer", lambda host: {"base_url": "http://192.168.5.4:9555"})
+    envelope = rl.build_envelope(
+        "g-7f3a",
+        {"id": "m_1", "attachments": [{"url": "/uploads/pic.png", "type": "image"}]},
+        "machine-b",
+        user_id="u-1",
+    )
+
+    res, mgr = _deliver(monkeypatch, secret=secret, body=envelope)
+
+    assert res["delivered"] is True
+    assert mgr.personal[0][1]["data"]["attachments"][0]["url"] == "http://192.168.5.4:9555/uploads/pic.png"
+
+
+def test_uploads_are_left_alone_when_the_origin_is_unknown(store, monkeypatch):
+    secret = rl.new_secret()
+    rl.remember_outbound("g-7f3a", "", secret, user_id="u-1")  # no peer host recorded
+    envelope = rl.build_envelope(
+        "g-7f3a", {"id": "m_1", "attachments": [{"url": "/uploads/pic.png"}]}, "machine-b", user_id="u-1"
+    )
+
+    res, mgr = _deliver(monkeypatch, secret=secret, body=envelope)
+
+    assert res["delivered"] is True
+    assert mgr.personal[0][1]["data"]["attachments"][0]["url"] == "/uploads/pic.png"
+
+
 def test_a_bound_secret_only_delivers_to_its_own_user(store, monkeypatch):
     """A peer holding a valid secret cannot aim a push at another local agent."""
     secret = rl.new_secret()

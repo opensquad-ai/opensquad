@@ -96,6 +96,48 @@ async def relay_unsubscribe(request: Request, body: dict = Body(default={})):
     return {"ok": True, "removed": removed}
 
 
+def _origin_base_for(group_id: str) -> str:
+    """The gateway that owns ``group_id``'s uploads, as recorded when we subscribed."""
+    try:
+        from opensquad import peer_bridge, relay_link
+
+        host = relay_link.outbound_host(group_id)
+        if not host:
+            return ""
+        peer = peer_bridge.find_peer(host) or {}
+        return str(peer.get("base_url") or "").rstrip("/")
+    except Exception:
+        return ""
+
+
+def _with_origin_uploads(message: dict, base: str) -> dict:
+    """Point a relayed message's upload references at the machine that holds them.
+
+    Attachments and images reference ``/uploads/...`` on the **origin** gateway. Left
+    relative they resolve against this machine's gateway, where the file does not
+    exist — so a picture or a document sent from the other machine arrives broken.
+    """
+    if not base or not isinstance(message, dict):
+        return message
+
+    def _fix(value: object) -> object:
+        url = str(value or "")
+        if url.startswith("/") and not url.startswith("//"):
+            return f"{base}{url}"
+        return value
+
+    out = dict(message)
+    attachments = out.get("attachments")
+    if isinstance(attachments, list):
+        out["attachments"] = [
+            ({**att, "url": _fix(att.get("url"))} if isinstance(att, dict) else att) for att in attachments
+        ]
+    images = out.get("images")
+    if isinstance(images, list):
+        out["images"] = [_fix(img) for img in images]
+    return out
+
+
 @router.post("/relay/deliver")
 async def relay_deliver(request: Request, body: dict = Body(default={})):
     """Home side: receive a relayed group message and deliver it to the agent.
@@ -159,6 +201,10 @@ async def relay_deliver(request: Request, body: dict = Body(default={})):
     message_id = str(message.get("id") or "")
     if message_id and relay.already_seen(origin_host, message_id):
         return {"ok": True, "delivered": False, "reason": "duplicate"}
+
+    # The files stay on the machine that owns the group: make the references absolute
+    # so they resolve there rather than against this gateway.
+    message = _with_origin_uploads(message, _origin_base_for(group_id))
 
     payload = {
         "type": "new_message",

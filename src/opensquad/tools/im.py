@@ -821,7 +821,15 @@ def get_history(group_id: str, limit: int = 20, host: str = "") -> dict[str, Any
                 # remote agent would point at a file that does not exist here.
                 from ..bridge import uploads_display_prefix
 
-                prefix = uploads_display_prefix()
+                prefix = ""
+                if (host or "").strip():
+                    # History from a paired machine: its files are on *that* machine.
+                    from ..peer_bridge import find_peer
+
+                    peer = find_peer(host.strip()) or {}
+                    base = str(peer.get("base_url") or "").rstrip("/")
+                    prefix = f"{base}/uploads" if base else ""
+                prefix = prefix or uploads_display_prefix()
                 if prefix:
                     msg["content"] = msg["content"].replace("/uploads", prefix)
 

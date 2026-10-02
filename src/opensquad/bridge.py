@@ -907,15 +907,19 @@ class ChatProBridge:
             att_url = att.get("url", "")
             if att_url:
                 try:
-                    # att_url format: /uploads/xxx.jpg -- needs to be downloaded from ChatPro
-                    full_url = f"{self.base_url}{att_url}"
+                    # att_url format: /uploads/xxx.jpg -- downloaded from the gateway
+                    # that holds it. A relayed message carries an absolute URL (the
+                    # file lives on the *origin* machine), so that one is used as is.
+                    full_url = (
+                        att_url if str(att_url).startswith(("http://", "https://")) else f"{self.base_url}{att_url}"
+                    )
                     headers = {"Authorization": f"Bearer {self.token}"} if self.token else {}
                     # Wrap synchronous self._session.get with asyncio.to_thread to avoid blocking the event loop
                     r = await asyncio.to_thread(self._session.get, full_url, **{"headers": headers, "timeout": 10})
                     r.raise_for_status()
 
                     # Save locally
-                    filename = os.path.basename(att_url)
+                    filename = os.path.basename(str(att_url).split("?")[0])
                     local_path = os.path.abspath(os.path.join(upload_dir, filename))
                     # Attachment payload: write it off the event loop.
                     await blocking_io.write_bytes(local_path, r.content)

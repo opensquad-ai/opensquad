@@ -135,6 +135,50 @@ def test_fix_path_fetches_the_upload_from_the_gateway(monkeypatch, upload_server
     assert open(resolved, "rb").read() == PNG_BYTES
 
 
+def test_fix_path_fetches_an_absolute_upload_from_the_machine_it_names(monkeypatch, upload_server, workspace):
+    """A relayed message's upload references are rewritten to the *origin* machine.
+    Resolving them against this agent's own gateway (a loopback one here) would point
+    at a file that does not exist on this machine."""
+    base, server = upload_server
+    monkeypatch.setattr(bridge_mod.bridge, "base_url", "http://127.0.0.1:9555")
+    input_hub.set_agent_context(workspace["agent_dir"])
+
+    resolved = input_hub._fix_path(f"{base}/uploads/pic.png")
+
+    assert server.hits == ["/uploads/pic.png"]  # fetched from the URL's own host
+    assert (workspace["uploads"] / "pic.png").read_bytes() == PNG_BYTES
+    assert resolved.replace("\\", "/").endswith("agents/coder/data/uploads/pic.png")
+
+
+def test_fix_path_leaves_an_absolute_non_upload_url_alone(monkeypatch, workspace):
+    monkeypatch.setattr(bridge_mod.bridge, "base_url", "http://127.0.0.1:9555")
+    input_hub.set_agent_context(workspace["agent_dir"])
+
+    # not an upload reference: a URL the caller means as a URL
+    assert input_hub._fix_path("https://example.com/page.html") == "https://example.com/page.html"
+
+
+def test_history_from_a_peer_points_uploads_at_that_peer(monkeypatch):
+    """Reading a peer's history must prefix its /uploads references with *its*
+    gateway, not this agent's own."""
+    import opensquad.peer_bridge as peer_bridge_mod
+
+    class _FakeBridge:
+        token = "t"
+
+        def get_group_history(self, group_id, limit=20):
+            return [{"sender_id": "u1", "content": "看图 /uploads/pic.png", "timestamp": 1}]
+
+    monkeypatch.setattr(im_tool, "_bridge", lambda: _FakeBridge())
+    monkeypatch.setattr(peer_bridge_mod, "peer_bridge", lambda host: (_FakeBridge(), ""))
+    monkeypatch.setattr(bridge_mod, "uploads_display_prefix", lambda: "http://127.0.0.1:9555/uploads")
+    monkeypatch.setattr(peer_bridge_mod, "find_peer", lambda host: {"base_url": "http://192.168.5.4:9555"})
+
+    res = im_tool.get_history("g-7f3a", host="192.168.5.4")
+
+    assert "http://192.168.5.4:9555/uploads/pic.png" in res["history"][0]["content"]
+
+
 def test_fix_path_keeps_local_behaviour_without_a_remote_gateway(monkeypatch, workspace):
     monkeypatch.setattr(bridge_mod.bridge, "base_url", "http://127.0.0.1:9555")
     input_hub.set_agent_context(workspace["agent_dir"])
