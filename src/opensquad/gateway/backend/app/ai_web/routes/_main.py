@@ -2191,6 +2191,23 @@ async def agent_push_to_group(
     except Exception as e:
         logger.warning(f"Failed to broadcast group message: {e}")
 
+    # …and the paired machines, which this route used to skip entirely: a message
+    # pushed here reached the local UI at best, so an agent whose socket lives on
+    # another machine never saw it. The relay frame is the canonical ``data`` shape
+    # (what the agent bridge reads, unlike the ``message`` key above), and carries
+    # ``id`` because that is the identity the bridge dedupes on.
+    try:
+        from app import relay
+        from opensquad.system_config import syscfg
+
+        await relay.fan_out(
+            group_id,
+            {**response_data, "id": msg_id},
+            origin_host=str(syscfg.node_id() or ""),
+        )
+    except Exception as e:
+        logger.warning(f"Failed to relay group message: {e}")
+
     return response_data
 
 
