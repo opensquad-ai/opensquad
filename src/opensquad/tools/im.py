@@ -475,13 +475,30 @@ def join_group(group_id: str, host: str = "") -> dict[str, Any]:
         if result.get("ok"):
             if (host or "").strip():
                 # Its board belongs to that machine; record it so a collaboration
-                # task started here routes back (peer_bridge.remember_peer_group).
-                from ..peer_bridge import remember_peer_group
+                # task started here routes back (peer_bridge.remember_peer_group),
+                # and subscribe so that machine relays the group's messages to this
+                # agent's home gateway (which holds the only socket it has).
+                from ..peer_bridge import remember_peer_group, subscribe_group
 
                 remember_peer_group(host.strip(), group_id)
+                relay = subscribe_group(host.strip(), group_id)
             else:
                 _persist_group_chat(add_group=group_id, enabled=True)
-            return {"status": "success", "message": f"Successfully joined group {group_id}."}
+                relay = None
+            out = {"status": "success", "message": f"Successfully joined group {group_id}."}
+            if relay is not None:
+                if relay.get("ok"):
+                    out["relay"] = "subscribed"
+                else:
+                    # Joined, but the peer cannot push messages back yet: say so
+                    # rather than let the agent believe it will receive them.
+                    out["relay"] = "not_subscribed"
+                    out["relay_error"] = relay.get("error", "")
+                    out["message"] += (
+                        " Note: this machine did not accept the message relay, so group "
+                        "messages will NOT be delivered to this agent yet."
+                    )
+            return out
         else:
             detail = result.get("detail", "unknown error")
             hint = ""
@@ -492,9 +509,10 @@ def join_group(group_id: str, host: str = "") -> dict[str, Any]:
         # Legacy compatibility
         if result:
             if (host or "").strip():
-                from ..peer_bridge import remember_peer_group
+                from ..peer_bridge import remember_peer_group, subscribe_group
 
                 remember_peer_group(host.strip(), group_id)
+                subscribe_group(host.strip(), group_id)
             else:
                 _persist_group_chat(add_group=group_id, enabled=True)
             return {"status": "success", "message": f"Successfully joined group {group_id}."}

@@ -1,20 +1,22 @@
-# Cross-machine relay — design (proposal, not implemented)
+# Cross-machine relay — design
 
-> Audience: maintainers. Status: **design only, no code**. This is the target
-> shape for cross-machine collaboration, written so the interim arrangement is
-> not mistaken for the end state.
+> Audience: maintainers. Status: **first cut implemented** (handshake, subscribe,
+> one-hop `message:relay`, loop guard). The design below is the shape it was built
+> to; what is still open is marked.
 
 ## Problem
 
 An agent has exactly one chat bridge, and that bridge holds exactly one
-WebSocket to exactly one gateway (`opensquad.bridge.bridge`, registered on
-`/ai-ws/register`). That single socket is how it *receives*: group messages,
-task-window messages and wakeups all arrive there.
+WebSocket to exactly one gateway (`opensquad.bridge.bridge`). That single socket
+is how it *receives*: group messages, task-window messages and wakeups all arrive
+there. Note it is the **group-chat socket** (`/ws`, authenticated with the agent's
+own user JWT), not the node-secret-gated `/ai-ws/register` socket — the delivery
+path is `notify_new_message → manager.broadcast_to_group` in `app/websocket.py`.
 
 Pairing a second machine deliberately does **not** repoint that bridge — doing so
 was the old bug that dropped the agent out of its own groups. The replacement
 (`opensquad/peer_bridge.py`) gives each peer its **own outbound bridge**, no
-WebSocket. So today:
+WebSocket. So without the relay:
 
 - **Outbound to a peer works**: register there, join a group there, drive that
   group's collaboration board there (see below), send chat there
@@ -72,51 +74,67 @@ multiplies sockets per agent, and re-introduces the "which binding am I on"
 confusion that the peer-bridge work just removed. The relay keeps that complexity
 in the one place that already has an identity per machine — the gateway.
 
-## Design questions to settle before coding
+## Design questions (settled in the first cut)
 
-1. **Envelope.** Every relayed message needs `origin_host` (which gateway first
-   received it), `group_id`, the original sender identity, and a relay hop count
-   or message id for loop protection. Decide: reuse the existing group-message
-   frame plus an envelope, or a distinct `message:relay` frame.
-2. **Loop protection.** Two gateways that both relay could echo. A monotonic
-   `relay_hops` cap (drop at 1) plus a dedup on `(origin_host, message_id)` at
-   each hop is the minimum. Decide the cap and the dedup store (in-memory TTL vs
-   persisted).
-3. **Auth and scope.** The relay link is gateway-to-gateway. Reuse the peer token
-   (add a `relay` scope, or reuse `group:join` + `board:*`), or mint a distinct
-   gateway relay credential. Do **not** ship `node_secret` across the link.
-4. **Version handshake.** Gateways must agree they both speak relay before
-   forwarding, and fail closed (no relay, keep today's behaviour) when the peer
-   is older. Decide the capability flag exchanged at link setup.
-5. **Failure semantics.** A relayed send that cannot reach B must surface to the
-   sender the way `BoardRemoteError` does for the board — loud, never silently
-   written locally. Decide retry/queue policy (probably: no queue, report).
-6. **Unsubscribe / revoke.** When a peer token is revoked or a group is left, A
-   must stop subscribing to B for that group. Tie subscription lifetime to the
-   peer token and the group membership.
-7. **Multi-hop.** If X is in a group on B and B is itself paired with C, is
-   relaying transitive? Recommended first cut: **no** — one hop only, fail closed
-   beyond it.
+1. **Envelope.** A distinct `message:relay` frame carrying `origin_host`,
+   `group_id`, `target_user_id`, `relay_hops` and the original message under
+   `data`. `target_user_id` exists because the group does not live on the receiving
+   gateway, so delivery is to the subscribing *user*, not a group broadcast.
+2. **Loop protection.** `relay_hops` starts at 1 and the cap is 1: a relayed
+   message is delivered and **never forwarded again**. Plus an in-memory
+   `(origin_host, message_id)` dedup with a 300 s TTL. A missing/unparsable hop
+   count fails closed.
+3. **Auth and scope.** Subscribe reuses the paired peer token with the existing
+   `group:join` scope (no new credential, no `node_secret` on the wire). Deliver is
+   authenticated with a **per-subscription secret the home gateway mints** and the
+   owner only echoes back — so the owner holds no credential for the subscriber.
+4. **Version handshake.** Still open. The relay is opt-in (a peer only subscribes
+   if it knows the endpoint), and an older peer simply 404s the subscribe call —
+   the join still succeeds and reports `relay: not_subscribed`. A positive
+   capability exchange is still to be added.
+5. **Failure semantics.** No queue, no retry: `fan_out` reports `{delivered,
+   failed}` and logs; a failed push never becomes a local write. The joining agent
+   sees `relay: not_subscribed` in the `join_group` result when the peer refused.
+6. **Unsubscribe / revoke.** `DELETE /api/relay/subscribe` exists (by group, or by
+   `callback_url`+`user_id`). Not yet wired to peer-token revocation or to
+   `leave_group` — a revoke currently stops auth but leaves the stale subscription
+   row until an explicit unsubscribe.
+7. **Multi-hop.** Not transitive: cap is 1 hop, fail closed beyond it.
+
+## What the first cut does **not** cover (still open)
+
+- **Task-window messages and board-change notifications.** The relay carries
+  group-chat `new_message` only. Task-window messages (`POST
+  /collab-board/tasks/{id}/messages`) and `board_rev` change pings still travel
+  over the home socket and do not cross machines yet.
+- **DMs.** Out of scope (identity semantics differ from groups).
+- **Revoke-driven unsubscribe** (see 6) and the **positive version handshake**
+  (see 4).
+- **Reconnect reconciliation.** If a gateway restarts, subscriptions persist on
+  disk and are honoured again; but there is no periodic re-assert from the agent,
+  so a subscription dropped by an owner (e.g. store wiped) is not self-healing.
 
 ## Non-goals (for the first cut)
 
 - Transitive (multi-hop) relaying.
-- Relaying DMs across machines (group messages first; DMs are a later question
-  because they carry identity semantics the group path does not).
+- Relaying DMs across machines.
 - Any change to the agent's tool surface. The relay is transparent to
   `im.send_message` / receive.
 
-## Interim arrangement (until the relay ships)
+## Interim arrangement (still true for what is not covered above)
 
 **One agent per machine.** An agent that must receive on machine B is a dedicated
 agent living on machine B. The `cross_machine_join` skill states this plainly and
-must keep stating it: pairing gives outbound, not inbound.
+must keep stating it: the relay covers group chat, not yet every group feature.
 
 ## Migration path
 
 1. (done) Pairing without repointing; per-group board ownership; `host=` on
    `im.send_message` / `im.list_groups`.
-2. Gateway relay link: handshake, subscribe, one-hop `message:relay`, loop guard.
-3. Route the existing `host=` sends through the relay (agent keeps talking only to
-   home; the relay carries it).
-4. Only then consider DMs and multi-hop.
+2. (done) Gateway relay link: subscribe handshake, one-hop `message:relay`,
+   loop guard, per-subscription secret.
+3. (partial) `im.join_group(host=...)` now subscribes. The agent keeps talking only
+   to home for receive; its sends still go direct via the peer bridge, which is
+   fine (outbound already worked).
+4. (open) Task-window messages and board-change pings over the relay; then DMs and
+   multi-hop.

@@ -368,12 +368,62 @@ def test_joining_a_group_on_a_peer_records_its_owner(env, monkeypatch):
             return {"ok": True}
 
     monkeypatch.setattr(bridge_mod, "ChatProBridge", _FakeBridge)
+    monkeypatch.setattr(peer_bridge_mod, "subscribe_group", lambda host, gid: {"ok": True})
 
     res = im_tool.join_group("g-7f3a", host="192.168.5.4")
 
     assert res["status"] == "success"
     assert joined == ["g-7f3a"]
     assert peer_bridge_mod.peer_for_group("g-7f3a")["host"] == "192.168.5.4"
+    assert res["relay"] == "subscribed"
+
+
+def test_joining_a_group_on_a_peer_subscribes_for_its_messages(env, monkeypatch):
+    """The peer owns the group; it must be told where this agent's socket lives."""
+    peer_bridge_mod.remember_peer(
+        "192.168.5.4",
+        "http://192.168.5.4:9555",
+        "peer-tok",
+        account={"email": "b@ai", "password": "pw"},
+    )
+    posted: list = []
+
+    class _Resp:
+        status_code = 200
+
+    class _FakeRequests:
+        @staticmethod
+        def post(url, headers=None, json=None, timeout=None):
+            posted.append({"url": url, "headers": headers, "json": json})
+            return _Resp()
+
+    class _HomeBridge:
+        base_url = "http://127.0.0.1:9555"
+        token = "home-tok"
+        user_id = "u-home"
+
+    monkeypatch.setattr(bridge_mod, "bridge", _HomeBridge())
+    monkeypatch.setitem(sys.modules, "requests", _FakeRequests)
+    import opensquad.relay_link as relay_link
+
+    monkeypatch.setattr(relay_link, "store_file", lambda: str(env / "relay_links.json"))
+
+    res = peer_bridge_mod.subscribe_group("192.168.5.4", "g-7f3a")
+
+    assert res["ok"] is True
+    assert posted[0]["url"] == "http://192.168.5.4:9555/api/relay/subscribe"
+    assert posted[0]["headers"]["X-Node-Token"] == "peer-tok"
+    assert posted[0]["json"]["callback_url"] == "http://127.0.0.1:9555"
+    assert posted[0]["json"]["user_id"] == "u-home"
+    assert posted[0]["json"]["secret"]
+    assert relay_link.verify_inbound("g-7f3a", posted[0]["json"]["secret"])
+
+
+def test_subscribing_to_an_unpaired_host_says_to_pair_first(env):
+    res = peer_bridge_mod.subscribe_group("10.0.0.9", "g-7f3a")
+
+    assert res["ok"] is False
+    assert "Not paired" in res["error"]
 
 
 def test_reading_history_on_a_peer_host_uses_that_machine(env, monkeypatch):

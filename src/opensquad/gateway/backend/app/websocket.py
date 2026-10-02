@@ -3,6 +3,7 @@ WebSocket connection management and real-time communication
 """
 
 import asyncio
+import logging
 
 from fastapi import WebSocket, WebSocketDisconnect
 from sqlalchemy import and_, select
@@ -10,6 +11,8 @@ from sqlalchemy import and_, select
 from app.database import AsyncSessionLocal
 from app.json_utils import dumps_json_safe
 from app.models import Message, User, UserGroupSettings, UserStatus, beijing_now, beijing_timestamp
+
+logger = logging.getLogger(__name__)
 
 
 class ConnectionManager:
@@ -408,6 +411,23 @@ async def notify_new_message(group_id: str, message: dict, sender_id: str):
     await manager.broadcast_to_group(
         group_id, {"type": "new_message", "data": message, "timestamp": beijing_timestamp()}
     )
+
+    # If a paired machine has an agent in this group, its gateway subscribed for
+    # the group; push the message on so that agent's home socket delivers it.
+    # A relay failure is logged, never surfaced to the sender as a local write.
+    try:
+        from app import relay
+
+        origin = ""
+        try:
+            from opensquad.system_config import syscfg
+
+            origin = str(syscfg.node_id() or "")
+        except Exception:
+            origin = ""
+        await relay.fan_out(group_id, message, origin_host=origin)
+    except Exception as _relay_exc:
+        logger.warning("[Relay] fan_out failed for group %s: %s", group_id, _relay_exc)
 
 
 async def notify_message_update(group_id: str, message: dict):

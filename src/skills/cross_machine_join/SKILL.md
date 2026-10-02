@@ -42,13 +42,16 @@ revoke it.
   task started here routes its board calls back there (with the peer token, not a
   `node_secret`). Nothing is repointed. `im.send_message(..., host="<host>")` and
   `im.list_groups(host="<host>")` reach that machine's chat too.
-- **Inbound is not available yet**: a paired gateway is reached with a bridge that
-  holds no WebSocket, so **messages sent to that group do not arrive here**. Do not
-  promise otherwise.
+- **Inbound group chat works, one hop**: joining a group on a peer subscribes that
+  machine to relay the group's messages to this agent's own gateway, which delivers
+  them over the agent's existing socket. So messages sent to that group **do** arrive
+  here and can be answered. What still does **not** cross machines: task-window
+  messages and board-change notifications, and DMs. For those, use a dedicated agent
+  on that machine.
 
-So: when the user needs this agent to *receive and answer* on that machine, the
-supported arrangement is **one agent per machine** — a dedicated agent living there
-(or a second agent for that gateway), not this one swinging its bridge across.
+So: for receiving and answering **group chat**, this one agent now suffices. For a
+full task window or DMs, the supported arrangement is still **one agent per machine**
+— a dedicated agent living there, not this one swinging its bridge across.
 
 ## When not to use this
 
@@ -116,9 +119,11 @@ peer's bridge. Nothing is repointed either way.
 
 1. Report to the user, in their language: which machine, which group, whether they
    joined directly or are pending approval, and what they still must do.
-2. If they expect **messages from that group to arrive here**, say plainly that this
-   agent does not receive from a paired machine yet, and offer the arrangement that
-   does: a dedicated agent on that machine.
+2. If they expect **messages from that group to arrive here**: group chat does now —
+   joining subscribes the peer to relay it (check the `relay` field in the join
+   result: `subscribed` means it is wired, `not_subscribed` means it is not). Say
+   plainly that task-window messages and DMs still do not cross machines, and for
+   those offer a dedicated agent on that machine.
 3. For a collaboration task, the board now routes itself: joining the group
    recorded which machine owns it, so `start_collaboration(group_id=...)` sends its
    board calls back there. Just confirm the join succeeded (step 3) before
@@ -137,7 +142,7 @@ peer's bridge. Nothing is repointed either way.
 | `code="peer_not_ready"` | paired, but no account/password stored there | do step 2 with `host=...` |
 | `code=email_in_use` | that `@ai` address exists there | use the right password or a different address |
 | connection refused / timeout | host unreachable | confirm the invite host is a reachable LAN IP/domain (not `127.0.0.1`) and the gateway port is open |
-| joined, but no messages arrive | inbound from a peer is not implemented | use a dedicated agent on that machine for receiving |
+| joined, but no messages arrive | the peer did not accept the message relay | check `join_group`'s `relay` field; `not_subscribed` means group chat is not delivered — see the note below |
 
 ## Rules
 

@@ -89,6 +89,7 @@ from app.websocket import handle_websocket
 # Wire up WS tunnel so remote session reads go through the Launcher WS tunnel
 # instead of plain HTTP (which would be unreachable when Gateway is on cloud).
 _set_ws_handler(launcher_handler.rpc, launcher_handler.get_any_node_id)
+from app.relay_api import router as relay_router  # Gateway-to-gateway group relay
 from app.task_api import router as task_worktree_router  # M1: task worktree API
 from app.tasks_api import router as tasks_router  # M2: parallel task scheduler API
 from app.workspace_api import router as workspace_router  # Added: workspace management API
@@ -544,6 +545,7 @@ app.include_router(ai_web_router)  # AI Web API routes
 app.include_router(workspace_router)  # Workspace management API
 app.include_router(task_worktree_router)  # Task worktree (M1) API
 app.include_router(tasks_router)  # Parallel task scheduler (M2) API
+app.include_router(relay_router, prefix="/api")  # Gateway-to-gateway group relay
 
 
 # Group chat WebSocket endpoint

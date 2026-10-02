@@ -253,3 +253,75 @@ def peer_bridge(host: str) -> tuple[Any | None, str]:
         return b, ""
     except Exception as exc:  # noqa: BLE001 - report, never crash the tool
         return None, f"Could not reach {base_url}: {exc}"
+
+
+def _home_gateway_url() -> str:
+    """This machine's own gateway address — where the peer should push messages."""
+    try:
+        from opensquad.bridge import gateway_base_url
+
+        url = gateway_base_url()
+    except Exception:
+        url = ""
+    if not url:
+        try:
+            from opensquad.system_config import syscfg
+
+            url = syscfg.gateway_http()
+        except Exception:
+            url = ""
+    return str(url or "").rstrip("/")
+
+
+def subscribe_group(host: str, group_id: str, timeout: float = 10.0) -> dict[str, Any]:
+    """Ask ``host`` to push ``group_id``'s messages to this machine's gateway.
+
+    Called after this agent joins a group on a peer: the peer owns the group, but
+    this agent's socket is at home, so the peer must be told where home is. The
+    secret is minted here and recorded locally, so this gateway recognises the
+    peer's pushes; the peer only echoes it back.
+    """
+    entry = find_peer(host)
+    if not entry:
+        return {"ok": False, "error": f"Not paired with {host}."}
+    base_url = str(entry.get("base_url") or "").rstrip("/")
+    token = peer_token(host)
+    if not base_url or not token:
+        return {"ok": False, "error": f"Peer {host} is missing its address or token; pair with it again."}
+    callback_url = _home_gateway_url()
+    if not callback_url:
+        return {"ok": False, "error": "This machine's gateway address is unknown; cannot receive relayed messages."}
+
+    import requests
+
+    from opensquad import relay_link
+
+    secret = relay_link.new_secret()
+    # The home gateway must deliver to *this* agent's user, since the group itself
+    # does not exist there — the message arrives as a personal delivery.
+    user_id = ""
+    try:
+        import opensquad.bridge as bridge_module
+
+        user_id = str(getattr(getattr(bridge_module, "bridge", None), "user_id", "") or "")
+    except Exception:
+        user_id = ""
+    try:
+        resp = requests.post(
+            f"{base_url}/api/relay/subscribe",
+            headers={"X-Node-Token": token},
+            json={
+                "group_id": str(group_id),
+                "callback_url": callback_url,
+                "secret": secret,
+                "user_id": user_id,
+            },
+            timeout=timeout,
+        )
+    except Exception as exc:  # noqa: BLE001 - report, never crash the tool
+        return {"ok": False, "error": f"Could not reach {base_url}: {exc}"}
+    if resp.status_code != 200:
+        return {"ok": False, "error": f"Subscribe on {base_url} failed (HTTP {resp.status_code})."}
+
+    relay_link.remember_outbound(str(group_id), host_key(host), secret)
+    return {"ok": True, "group_id": str(group_id), "callback_url": callback_url}
