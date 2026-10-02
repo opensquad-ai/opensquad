@@ -1184,6 +1184,32 @@ def gate_states(collab_id: str) -> dict[str, str]:
     return {step: (latest.get(step) or ("missing", ""))[0] for step in GATE_STEPS}
 
 
+def pending_members(collab_id: str) -> list[dict[str, Any]]:
+    """Members who have not accepted yet — what blocks assigning work.
+
+    Invited, declined, and never-recorded (a name on the task without a participant row)
+    all count: work goes to a team that has agreed to be one. The creator is never pending
+    (it is accepted at creation).
+    """
+    task = get_task(task_id=collab_id) or {}
+    creator = str(task.get("created_by") or "")
+    out: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for part in list_participants(collab_id=collab_id):
+        agent_id = str(part.get("agent_id") or "")
+        if not agent_id:
+            continue
+        seen.add(agent_id)
+        state = str(part.get("state") or "invited")
+        if agent_id != creator and state != "accepted":
+            out.append({"agent_id": agent_id, "state": state, "name": str(part.get("name") or agent_id)})
+    for member in task.get("members") or []:
+        name = str(member if isinstance(member, str) else (member or {}).get("agent_id") or "")
+        if name and name != creator and name not in seen:
+            out.append({"agent_id": name, "state": "not_invited", "name": name})
+    return out
+
+
 def accepted_members(collab_id: str) -> set[str]:
     """Agent ids that may be given work: those who accepted, plus the task's creator.
 

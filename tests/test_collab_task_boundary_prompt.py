@@ -80,3 +80,12 @@ def test_the_end_of_a_task_is_announced_in_the_window():
 
     skill = SKILL.read_text(encoding="utf-8")
     assert "The end of the task is announced in the window" in skill
+
+
+def test_the_team_must_have_accepted_before_assignment():
+    text = PART.read_text(encoding="utf-8")
+    assert "Everyone must be 已参与 before any work is handed out" in text
+    assert "assign_task` refuses while any" in text
+
+    skill = SKILL.read_text(encoding="utf-8")
+    assert "Everyone must be 已参与 before work is handed out" in skill

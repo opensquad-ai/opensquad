@@ -33,6 +33,11 @@ message happened to arrive:
   delivery to accept). A message the user must answer that sits only in the task window is
   a message nobody answers — the user reads the group, and a task-window message is not a
   notification to them.
+- **Everyone must be 已参与 before any work is handed out.** `assign_task` refuses while any
+  member is still 已邀请 — have each one run `join_collaboration(card=..., collab_id=...)`
+  (the invite is delivered to them; @ them in the group if they are slow). A member who
+  never accepted is not somebody to assign work to, and waiting for the whole team is the
+  point of inviting it.
 - **The end of the task is announced in the window too**: `collaboration.end_collaboration`
   posts the closure into the task thread and wakes the members there. The group gets
   nothing — it only ever held the card that opens the window.

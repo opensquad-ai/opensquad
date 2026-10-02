@@ -65,17 +65,34 @@ def test_assign_task_refuses_until_the_first_two_gates_are_approved(board):
     assert "批准" in res["message"]
 
 
-def test_assign_task_refuses_a_worker_who_never_accepted(board):
+def test_assign_task_refuses_while_a_member_has_not_accepted(board):
+    """Work is handed out to a team that has assembled: one invitee still at 已邀请 blocks
+    every assignment, not just the one aimed at that invitee."""
     _approve(board, "确定需求")
     _approve(board, "讨论方案")
     cb.mark_participant(collab_id=board, agent_id="coder", state="invited")
+    cb.mark_participant(collab_id=board, agent_id="qa", state="accepted")
 
-    res = collab_tool.assign_task(collab_id=board, worker_id="coder", task_name="写游戏")
+    res = collab_tool.assign_task(collab_id=board, worker_id="qa", task_name="写游戏")
 
     assert res["status"] == "error"
-    assert res["code"] == "worker_not_accepted"
+    assert res["code"] == "members_not_accepted"
+    assert "coder" in res["message"]
     assert "join_collaboration" in res["message"]
     assert "invited" in res["message"]
+
+
+def test_pending_members_lists_invited_declined_and_unrecorded(board):
+    cb.mark_participant(collab_id=board, agent_id="coder", state="invited")
+    cb.mark_participant(collab_id=board, agent_id="qa", state="declined")
+    cb.mark_participant(collab_id=board, agent_id="ops", state="accepted")
+    cb.update_task(task_id=board, add_member="newbie")  # listed on the task, never invited
+
+    pending = {p["agent_id"]: p["state"] for p in cb.pending_members(board)}
+
+    assert pending == {"coder": "invited", "qa": "declined", "newbie": "not_invited"}
+    assert "ops" not in pending  # accepted
+    assert "pm" not in pending  # the creator is in by definition
 
 
 def test_assign_task_proceeds_once_the_gates_pass_and_the_worker_accepted(board):

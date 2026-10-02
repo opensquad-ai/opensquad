@@ -136,4 +136,17 @@ describe('collaboration-task card', () => {
     const card = read('components/CollabStepApprovalCard.tsx');
     expect(card).toContain('if (!pending) return null;');
   });
+
+  it('a gate verdict is a quiet line, not a bubble', () => {
+    const win = read('components/ChatWindow.tsx');
+
+    // the verdicts join the plain-tip branch: small, muted, no bubble
+    expect(win).toContain('✅\\s*协作环节已批准');
+    expect(win).toContain('❌\\s*协作环节已拒绝');
+    expect(win).toContain('text-[11px]');
+    // a rejection still reads as one, in a quiet rose rather than a banner
+    expect(win).toContain('text-rose-500/80');
+    // the soft banner remains only for notices that are not plain tips
+    expect(win).toMatch(/plainTip \? \(/);
+  });
 });

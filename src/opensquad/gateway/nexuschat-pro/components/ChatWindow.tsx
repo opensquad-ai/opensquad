@@ -263,14 +263,23 @@ const MessageRowImpl: React.FC<MessageRowProps> = ({
 }) => {
   const { t } = useTranslation();
 
-  // SYSTEM messages: propose-options resolve tips stay plain text;
-  // other system notes keep the soft banner.
+  // SYSTEM messages: resolve tips and gate verdicts are a quiet line — no bubble;
+  // only longer system notes keep the soft banner.
   if (msg.type === MessageType.SYSTEM) {
-    const plainTip = /^(✅\s*已选择|⏭\s*已忽略|✏️\s*自定义)/.test((msg.content || '').trim());
+    const systemText = (msg.content || '').trim();
+    const plainTip =
+      /^(✅\s*已选择|⏭\s*已忽略|✏️\s*自定义|✅\s*协作环节已批准|❌\s*协作环节已拒绝|✅\s*已批准|❌\s*已拒绝)/.test(
+        systemText,
+      );
+    const rejected = /^❌/.test(systemText);
     return (
-      <div key={msg.id} id={msg.id} data-mid={msg.id} className="flex justify-center my-2">
+      <div key={msg.id} id={msg.id} data-mid={msg.id} className="flex justify-center my-1.5">
         {plainTip ? (
-          <div className="max-w-[90%] md:max-w-[75%] px-1 py-0.5 text-xs text-textMuted whitespace-pre-wrap break-words text-center">
+          <div
+            className={`max-w-[90%] md:max-w-[75%] px-1 py-0.5 text-[11px] leading-relaxed whitespace-pre-wrap break-words text-center ${
+              rejected ? 'text-rose-500/80' : 'text-textMuted'
+            }`}
+          >
             {msg.content}
           </div>
         ) : (

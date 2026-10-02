@@ -859,6 +859,24 @@ def _my_agent_id() -> str:
         return ""
 
 
+def _not_accepted_message(collab_id: str, pending: list[dict[str, Any]], worker_id: str = "") -> str:
+    """Why assignment is blocked until the whole team is 已参与, and how to get there."""
+    lines = [f"还不能分配任务：以下成员尚未「已参与」（{collab_id}）—— "]
+    lines += [f"  · {p.get('agent_id')}：{p.get('state')}" for p in pending]
+    if worker_id and any(str(p.get("agent_id")) == worker_id for p in pending):
+        lines.append(f"（本次要派的 {worker_id} 就在其中）")
+    lines += [
+        "",
+        "解决步骤（按顺序）：",
+        f'1) 让每个成员执行 join_collaboration(card="<卡片名>", collab_id="{collab_id}") —— 邀请已定向发给'
+        "他们，在群里 @ 一下催促即可；",
+        "2) 等他们的状态变成「已参与」（任务窗口的参与人员里能看到）；",
+        "3) 全员已参与后，再调用 assign_task。",
+        "已经拒绝（declined）的成员：换人，或把它从任务里去掉后再分配——不要给没参与的人派活。",
+    ]
+    return "\n".join(lines)
+
+
 def _one_task_rule_message(agent_id: str, tasks: list[dict[str, Any]]) -> str:
     """Refusal for the one-collaboration-at-a-time rule, with the steps out of it."""
     first = tasks[0] if tasks else {}
@@ -968,7 +986,7 @@ def assign_task(
       )
     """
     try:
-        from ..collab_board import accepted_members, active_tasks_for, list_participants, upsert_item
+        from ..collab_board import active_tasks_for, pending_members, upsert_item
 
         # The gates are the user's approvals: assigning work is phase 3, so the first
         # two must be approved first. Refuse, and say how to get there.
@@ -976,23 +994,15 @@ def assign_task(
         if gate_msg:
             return {"status": "error", "code": "gates_not_approved", "message": gate_msg}
 
-        # …and an invite is a request, not a draft: work goes only to members who
-        # accepted it.
-        if worker_id and worker_id not in accepted_members(collab_id):
-            states = {
-                str(p.get("agent_id") or ""): str(p.get("state") or "missing")
-                for p in list_participants(collab_id=collab_id)
-            }
+        # …and the whole team has to be in before any work is handed out: a member still at
+        # 已邀请 has not agreed to take anything, and assigning only to those who happened
+        # to accept builds a team that never assembled.
+        pending = pending_members(collab_id)
+        if pending:
             return {
                 "status": "error",
-                "code": "worker_not_accepted",
-                "message": (
-                    f"不能给 {worker_id} 派活：它还没有接受邀请（当前状态：{states.get(worker_id, '未邀请')}）。\n\n"
-                    "解决步骤（按顺序）：\n"
-                    f'1) 在协作群里 @{worker_id}，让它执行 join_collaboration(card="<卡片名>", collab_id="{collab_id}")；\n'
-                    "2) 它的状态变成「已参与」后再调用 assign_task；\n"
-                    "3) 它一直不接受就换一个已参与的成员，或先确认它在线。"
-                ),
+                "code": "members_not_accepted",
+                "message": _not_accepted_message(collab_id, pending, worker_id),
             }
 
         # …and it must not already be inside another live collaboration: one at a time.
