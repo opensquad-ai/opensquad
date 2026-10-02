@@ -18,7 +18,23 @@ vi.mock('../utils/fencedMarkdown', () => ({
   renderFencedMarkdown: (text: string) => `<h2>${text}</h2>`,
 }));
 
-import { MarkdownText, ProgressBar } from './CollabTaskWindow';
+import { DiscussionBubble, MarkdownText, ProgressBar } from './CollabTaskWindow';
+
+function discussionItem(over: Record<string, unknown> = {}) {
+  return {
+    id: 'i1',
+    collab_id: 'T1',
+    agent_id: 'ss',
+    item_type: 'discussion',
+    title: 'User',
+    content: '这里能看到吗',
+    status: 'info',
+    progress: 0,
+    visibility: 'public',
+    created_at: '2026-10-02T10:00:00Z',
+    ...over,
+  } as never;
+}
 
 describe('collab task window', () => {
   it('renders board text through the markdown renderer, with the chat styling hook', () => {
@@ -41,6 +57,35 @@ describe('collab task window', () => {
 
     const missing = renderToStaticMarkup(React.createElement(ProgressBar, {}));
     expect(missing).toContain('width:0%');
+  });
+
+  it('draws a message as the group chat does — own on the right, others on the left', () => {
+    const mine = renderToStaticMarkup(React.createElement(DiscussionBubble, { item: discussionItem(), self: true }));
+    expect(mine).toContain('bg-chatBubbleSelf');
+    expect(mine).toContain('flex-row-reverse');
+    expect(mine).toContain('data-self="1"');
+
+    const theirs = renderToStaticMarkup(
+      React.createElement(DiscussionBubble, { item: discussionItem({ agent_id: 'agent305' }), self: false }),
+    );
+    expect(theirs).toContain('bg-chatBubbleOther');
+    expect(theirs).toContain('data-self="0"');
+    expect(theirs).not.toContain('bg-chatBubbleSelf');
+  });
+
+  it('keeps a picture inside the bubble it was sent with', () => {
+    const html = renderToStaticMarkup(
+      React.createElement(DiscussionBubble, {
+        item: discussionItem({
+          extra: { attachments: [{ url: '/uploads/pic.png', type: 'image', name: 'pic.png' }] },
+        }),
+        self: false,
+      }),
+    );
+
+    expect(html).toContain('collab-task-bubble-attachment');
+    expect(html).toContain('/uploads/pic.png');
+    expect(html).toContain('<img');
   });
 
   it('the window and its item rows actually use them', () => {

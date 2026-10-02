@@ -1333,7 +1333,7 @@ async def post_collab_task_message(
     author = current_user.name or str(current_user.id)
     task_name = str(task.get("task_name") or task_id)
     item = None
-    if content:
+    if content or attachments:
         item = collab_board.local_call(
             "append_public_discussion",
             collab_id=task_id,
@@ -1341,6 +1341,9 @@ async def post_collab_task_message(
             author_agent_id=author,
             title="User",
             content=content,
+            # kept on the message as well, so the window shows the picture with the
+            # sentence it was sent with (the task's attachment list is separate)
+            attachments=attachments,
         )
     if attachments:
         collab_board.local_call(

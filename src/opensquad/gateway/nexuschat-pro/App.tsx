@@ -1896,7 +1896,11 @@ const App: React.FC = () => {
             }
           >
             {openCollabTaskId ? (
-              <CollabTaskWindow collabId={openCollabTaskId} onClose={() => setOpenCollabTaskId(null)} />
+              <CollabTaskWindow
+                collabId={openCollabTaskId}
+                onClose={() => setOpenCollabTaskId(null)}
+                viewerName={currentUser?.name || ''}
+              />
             ) : null}
           </Suspense>
         </div>

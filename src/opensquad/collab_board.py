@@ -618,8 +618,20 @@ def list_items(*, collab_id: str, agent_id: str | None = None, visibility: str =
 
 
 def append_public_discussion(
-    *, collab_id: str, task_name: str, author_agent_id: str, title: str, content: str
+    *,
+    collab_id: str,
+    task_name: str,
+    author_agent_id: str,
+    title: str,
+    content: str,
+    attachments: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
+    """Append a message to the task's thread.
+
+    ``attachments`` stay on the message itself (``extra.attachments``), not in a
+    separate list: a picture sent with a sentence belongs beside that sentence, the way
+    it does in the group chat.
+    """
     if not collab_id:
         raise ValueError("collab_id(task_id) is required")
     with _board_lock():
@@ -642,6 +654,8 @@ def append_public_discussion(
             "created_at": now,
             "updated_at": now,
         }
+        if attachments:
+            rec["extra"] = {"attachments": [dict(a) for a in attachments if isinstance(a, dict)]}
         items.append(rec)
         _write_items(items)
         return rec

@@ -25,9 +25,18 @@ import { OpenSquadLoader } from './OpenSquadLoader';
 
 const POLL_MS = 5000;
 
+/** Local time for a board timestamp (message bubbles and gate rows both show it). */
+const fmtTime = (iso?: string) => {
+  if (!iso) return '';
+  const d = new Date(iso);
+  return Number.isNaN(d.getTime()) ? '' : d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+};
+
 export interface CollabTaskWindowProps {
   collabId: string;
   onClose: () => void;
+  /** The signed-in user's display name — their own messages bubble on the right. */
+  viewerName?: string;
 }
 
 /**
@@ -35,14 +44,84 @@ export interface CollabTaskWindowProps {
  * tables). Rendered plain it showed its own syntax — `## 主任务`, `**负责人**: pm` —
  * where the group-chat board renders it. Same renderer and class as the chat surfaces.
  */
-export const MarkdownText: React.FC<{ text?: string; className?: string }> = ({ text, className = '' }) => {
+export const MarkdownText: React.FC<{ text?: string; className?: string; tone?: 'muted' | 'main' }> = ({
+  text,
+  className = '',
+  tone = 'muted',
+}) => {
   const html = useMemo(() => renderFencedMarkdown(String(text || '')), [text]);
   if (!text) return null;
   return (
     <div
-      className={`${AI_MARKDOWN_CLASS} break-words text-[12px] leading-relaxed text-textMuted ${className}`}
+      className={`${AI_MARKDOWN_CLASS} break-words text-[12px] leading-relaxed ${
+        tone === 'main' ? 'text-textMain' : 'text-textMuted'
+      } ${className}`}
       dangerouslySetInnerHTML={{ __html: html }}
     />
+  );
+};
+
+/** An attachment as the chat draws it: pictures inline, everything else a chip. */
+const AttachmentRow: React.FC<{ attachments: any[] }> = ({ attachments }) => {
+  if (!attachments.length) return null;
+  const abs = (url: string) => (url.startsWith('http') ? url : `${SERVER_BASE_URL}${url}`);
+  return (
+    <div className="mt-1 flex flex-wrap gap-1.5">
+      {attachments.map((a, i) => {
+        const url = String(a?.url || '');
+        const name = String(a?.name || url || 'file');
+        const isImage = String(a?.type || '') === 'image';
+        return (
+          <a
+            key={`${url}:${i}`}
+            href={abs(url)}
+            target="_blank"
+            rel="noopener noreferrer"
+            download
+            data-testid="collab-task-bubble-attachment"
+            className="flex min-w-0 flex-col gap-0.5 rounded-lg border border-border/60 bg-panel/60 p-1 hover:border-primary/40"
+          >
+            {isImage ? (
+              <img src={abs(url)} alt={name} loading="lazy" className="max-h-40 w-auto rounded object-cover" />
+            ) : null}
+            <span className="max-w-[12rem] truncate text-[11px] text-textMain">{name}</span>
+          </a>
+        );
+      })}
+    </div>
+  );
+};
+
+/**
+ * One message in the task thread.
+ *
+ * Same bubble as the group chat (own on the right, everyone else on the left, the
+ * chat bubble colours), with the attachments inside it: a picture sent with a sentence
+ * belongs beside that sentence, not in a separate section at the bottom.
+ */
+export const DiscussionBubble: React.FC<{ item: CollabBoardItem; self?: boolean }> = ({ item, self = false }) => {
+  const attachments = Array.isArray(item.extra?.attachments) ? (item.extra?.attachments as any[]) : [];
+  return (
+    <div
+      className={`flex gap-2 ${self ? 'flex-row-reverse' : ''}`}
+      data-testid="collab-task-bubble"
+      data-self={self ? '1' : '0'}
+    >
+      <div
+        className={`min-w-0 max-w-[min(85%,36rem)] rounded-2xl border px-2.5 py-1.5 ${
+          self
+            ? 'rounded-tr-sm border-border bg-chatBubbleSelf'
+            : 'rounded-tl-sm border-border bg-chatBubbleOther'
+        }`}
+      >
+        <div className={`flex items-center gap-2 text-[10px] text-textMuted ${self ? 'flex-row-reverse' : ''}`}>
+          <span className="truncate font-semibold text-textMain">{item.agent_id}</span>
+          <span className="shrink-0">{fmtTime(item.created_at)}</span>
+        </div>
+        <MarkdownText text={item.content} tone="main" />
+        <AttachmentRow attachments={attachments} />
+      </div>
+    </div>
   );
 };
 
@@ -134,7 +213,7 @@ const Empty: React.FC = () => {
   return <div className="text-[12px] text-textMuted">{t('collabTask.empty')}</div>;
 };
 
-export const CollabTaskWindow: React.FC<CollabTaskWindowProps> = ({ collabId, onClose }) => {
+export const CollabTaskWindow: React.FC<CollabTaskWindowProps> = ({ collabId, onClose, viewerName = '' }) => {
   const { t } = useTranslation();
   const [summary, setSummary] = useState<CollabBoardSummary | null>(null);
   const [loading, setLoading] = useState(true);
@@ -175,12 +254,6 @@ export const CollabTaskWindow: React.FC<CollabTaskWindowProps> = ({ collabId, on
   const discussions = [...(items.discussion || [])].sort((a, b) =>
     String(a.created_at || '').localeCompare(String(b.created_at || '')),
   );
-
-  const fmtTime = (iso?: string) => {
-    if (!iso) return '';
-    const d = new Date(iso);
-    return Number.isNaN(d.getTime()) ? '' : d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-  };
 
   // Approval gates (四门闸) live on the board as item_type="approval"; each item
   // carries extra.approval.step and the group message it was posted as, so the
@@ -503,15 +576,9 @@ export const CollabTaskWindow: React.FC<CollabTaskWindowProps> = ({ collabId, on
 
             <Section title={t('collabTask.discussion')} count={discussions.length}>
               {discussions.length ? (
-                <div className="space-y-1.5">
+                <div className="space-y-2" data-testid="collab-task-thread">
                   {discussions.map((it) => (
-                    <div key={it.id} className="rounded-lg border border-border bg-bgLight px-2.5 py-2">
-                      <div className="flex items-center gap-2 text-[11px] text-textMuted">
-                        <span className="truncate font-semibold text-textMain">{it.agent_id}</span>
-                        <span className="shrink-0">{fmtTime(it.created_at)}</span>
-                      </div>
-                      <MarkdownText text={it.content} className="mt-0.5 text-textMain" />
-                    </div>
+                    <DiscussionBubble key={it.id} item={it} self={!!viewerName && it.agent_id === viewerName} />
                   ))}
                 </div>
               ) : (
