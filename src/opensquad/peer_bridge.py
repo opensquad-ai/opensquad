@@ -188,6 +188,32 @@ def remember_peer(
         return False
 
 
+def owner_bridge(group_id: str = "", collab_id: str = "") -> tuple[Any | None, str]:
+    """The bridge that owns the group a chat/notification belongs to.
+
+    Home by default; a group joined on a paired machine — or a collaboration task
+    recorded as owned by one — gets that peer's own bridge, so an invitation or a
+    task-assignment notice is posted to the group where it actually lives instead
+    of to this agent's own gateway. ``(None, why-not)`` when the owner's bridge is
+    not usable.
+    """
+    host = ""
+    try:
+        from opensquad.collab_board import board_owner
+
+        host = board_owner(collab_id=collab_id, group_id=group_id)
+    except Exception:
+        host = ""
+    if host:
+        return peer_bridge(host)
+    import opensquad.bridge as bridge_module
+
+    home = getattr(bridge_module, "bridge", None)
+    if home is None or not getattr(home, "token", ""):
+        return None, "Bridge not logged in."
+    return home, ""
+
+
 def peer_bridge(host: str) -> tuple[Any | None, str]:
     """A bridge for that peer's gateway, or ``(None, why-not)``.
 

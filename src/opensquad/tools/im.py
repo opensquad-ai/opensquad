@@ -336,16 +336,27 @@ def register_account(email: str, password: str, name: str = "", host: str = "") 
     }
 
 
-def leave_group(group_id: str) -> dict[str, Any]:
+def leave_group(group_id: str, host: str = "") -> dict[str, Any]:
     """
     Leave a group by ID. Also removes it from config.json group_chat.groups when possible.
 
     Args:
         group_id: Group ID (e.g. g1, gcmsu1).
+        host: Optional peer host (a machine this agent paired with). When set, leave the
+              group on THAT machine through its own bridge.
     """
-    result = _bridge().leave_group_api(group_id)
+    bridge_inst = _bridge()
+    if (host or "").strip():
+        from ..peer_bridge import peer_bridge
+
+        bridge_inst, why = peer_bridge(host.strip())
+        if bridge_inst is None:
+            return {"status": "error", "code": "peer_not_ready", "message": why}
+
+    result = bridge_inst.leave_group_api(group_id)
     if isinstance(result, dict) and result.get("ok"):
-        _persist_group_chat(remove_group=group_id)
+        if not (host or "").strip():
+            _persist_group_chat(remove_group=group_id)
         return {"status": "success", "message": f"Left group {group_id}."}
     detail = result.get("detail", "unknown error") if isinstance(result, dict) else "unknown error"
     return {"status": "error", "message": f"Failed to leave group {group_id}: {detail}"}
@@ -437,7 +448,7 @@ def list_groups(host: str = "") -> dict[str, Any]:
         return {"status": "error", "message": str(e)}
 
 
-def join_group(group_id: str) -> dict[str, Any]:
+def join_group(group_id: str, host: str = "") -> dict[str, Any]:
     """
     Let the agent join a specific group by group ID.
     After joining, the agent will start listening to messages from that group.
@@ -446,12 +457,30 @@ def join_group(group_id: str) -> dict[str, Any]:
 
     Args:
         group_id: Unique identifier of the group (e.g. g1, g2).
+        host: Optional peer host (a machine this agent paired with). When set, join the
+              group on THAT machine through its own bridge; the group is then remembered
+              as belonging to it, so its board and chat route back there.
     """
-    result = _bridge().join_group_api(group_id)
+    bridge_inst = _bridge()
+    if (host or "").strip():
+        from ..peer_bridge import peer_bridge
+
+        bridge_inst, why = peer_bridge(host.strip())
+        if bridge_inst is None:
+            return {"status": "error", "code": "peer_not_ready", "message": why}
+
+    result = bridge_inst.join_group_api(group_id)
     # Compatible with both old bool return and new dict return
     if isinstance(result, dict):
         if result.get("ok"):
-            _persist_group_chat(add_group=group_id, enabled=True)
+            if (host or "").strip():
+                # Its board belongs to that machine; record it so a collaboration
+                # task started here routes back (peer_bridge.remember_peer_group).
+                from ..peer_bridge import remember_peer_group
+
+                remember_peer_group(host.strip(), group_id)
+            else:
+                _persist_group_chat(add_group=group_id, enabled=True)
             return {"status": "success", "message": f"Successfully joined group {group_id}."}
         else:
             detail = result.get("detail", "unknown error")
@@ -462,7 +491,12 @@ def join_group(group_id: str) -> dict[str, Any]:
     else:
         # Legacy compatibility
         if result:
-            _persist_group_chat(add_group=group_id, enabled=True)
+            if (host or "").strip():
+                from ..peer_bridge import remember_peer_group
+
+                remember_peer_group(host.strip(), group_id)
+            else:
+                _persist_group_chat(add_group=group_id, enabled=True)
             return {"status": "success", "message": f"Successfully joined group {group_id}."}
         else:
             return {
@@ -649,7 +683,12 @@ def send_message(
 
 
 def send_file(
-    file_paths: list[str], target_id: str, target_type: str = "group", message: str = "", cooldown: float = 10
+    file_paths: list[str],
+    target_id: str,
+    target_type: str = "group",
+    message: str = "",
+    cooldown: float = 10,
+    host: str = "",
 ) -> dict[str, Any]:
     """
     Send one or more files to a specific target. Files are first uploaded to the server
@@ -662,6 +701,8 @@ def send_file(
         target_type: Target type, options: 'group' (group chat), 'dm' (direct message). Default: 'group'.
         message: Accompanying text message. Defaults to "Sent a file" if empty.
         cooldown: Cooldown seconds after sending a group message, default 10 seconds. Set to 0 for no cooldown.
+        host: Optional peer host (a machine this agent paired with). When set, the file is
+              uploaded to and sent through that peer's own bridge.
     """
     if not file_paths:
         return {"status": "error", "message": "No file paths provided."}
@@ -674,7 +715,7 @@ def send_file(
         return {"status": "error", "message": f"Files not found: {missing}"}
 
     content = message if message else "Sent a file"
-    return send_message(content=content, target_id=target_id, target_type=target_type, file_paths=file_paths)
+    return send_message(content=content, target_id=target_id, target_type=target_type, file_paths=file_paths, host=host)
 
 
 def set_cooldown(seconds: float = 10) -> dict[str, Any]:
@@ -705,7 +746,7 @@ def set_cooldown(seconds: float = 10) -> dict[str, Any]:
         return {"status": "error", "message": str(e)}
 
 
-def get_history(group_id: str, limit: int = 20) -> dict[str, Any]:
+def get_history(group_id: str, limit: int = 20, host: str = "") -> dict[str, Any]:
     """
     Get message history for a specified group.
 
@@ -717,9 +758,18 @@ def get_history(group_id: str, limit: int = 20) -> dict[str, Any]:
     Args:
         group_id: Group ID.
         limit: Number of messages to retrieve, default 20.
+        host: Optional peer host (a machine this agent paired with). When set, read the
+              history from THAT machine through its own bridge.
     """
     try:
-        history = _bridge().get_group_history(group_id, limit)
+        bridge_inst = _bridge()
+        if (host or "").strip():
+            from ..peer_bridge import peer_bridge
+
+            bridge_inst, why = peer_bridge(host.strip())
+            if bridge_inst is None:
+                return {"status": "error", "code": "peer_not_ready", "message": why}
+        history = bridge_inst.get_group_history(group_id, limit)
         if not history:
             return {"status": "success", "history": []}
         messages = []

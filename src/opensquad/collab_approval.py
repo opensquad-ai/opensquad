@@ -624,10 +624,16 @@ def patch_collab_task_participant_in_content(content: str, agent_id: str, state:
 
 
 def post_collab_task_card(payload: dict[str, Any], group_id: str) -> dict[str, Any]:
-    """Send a collaboration-task card to a group. Returns {ok, group_id, message_id}."""
-    from opensquad.bridge import bridge
+    """Send a collaboration-task card to a group. Returns {ok, group_id, message_id}.
 
-    if not bridge or not bridge.token:
+    The card goes to the group where it lives: a group joined on a paired machine
+    is posted through that peer's bridge, not this agent's own gateway.
+    """
+    from opensquad.peer_bridge import owner_bridge
+
+    bridge, _why = owner_bridge(group_id=group_id)
+
+    if bridge is None:
         return {"ok": False, "error": "Bridge not connected"}
 
     target = group_id

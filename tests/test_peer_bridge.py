@@ -277,3 +277,129 @@ def test_a_send_without_a_host_still_uses_the_home_bridge(env, monkeypatch):
 
     assert res["status"] == "success"
     assert sent == ["g-home"]
+
+
+# ── owner_bridge: which gateway a group's chat/notifications belong to ──────
+
+
+def test_owner_bridge_is_home_for_a_group_with_no_peer_owner(env, monkeypatch):
+    import opensquad.collab_board as cb
+
+    class _Home:
+        token = "home-tok"
+
+    home = _Home()
+    monkeypatch.setattr(bridge_mod, "bridge", home)
+    monkeypatch.setattr(cb, "board_owner", lambda **kwargs: "")
+
+    got, why = peer_bridge_mod.owner_bridge(group_id="g-home")
+
+    assert got is home
+    assert why == ""
+
+
+def test_owner_bridge_returns_the_peer_for_a_group_joined_there(env, monkeypatch):
+    import opensquad.collab_board as cb
+
+    peer = object()
+    monkeypatch.setattr(cb, "board_owner", lambda **kwargs: "192.168.5.4")
+    monkeypatch.setattr(peer_bridge_mod, "peer_bridge", lambda host: (peer, ""))
+
+    got, why = peer_bridge_mod.owner_bridge(group_id="g-7f3a")
+
+    assert got is peer
+    assert why == ""
+
+
+def test_owner_bridge_reports_why_a_peer_bridge_is_unusable(env, monkeypatch):
+    import opensquad.collab_board as cb
+
+    monkeypatch.setattr(cb, "board_owner", lambda **kwargs: "192.168.5.4")
+    monkeypatch.setattr(peer_bridge_mod, "peer_bridge", lambda host: (None, "not paired"))
+
+    got, why = peer_bridge_mod.owner_bridge(collab_id="AB12CD")
+
+    assert got is None
+    assert why == "not paired"
+
+
+def test_owner_bridge_is_home_for_a_task_with_no_recorded_owner(env, monkeypatch):
+    """A task not recorded as a peer's stays on this machine's bridge."""
+    import opensquad.collab_board as cb
+
+    class _Home:
+        token = "home-tok"
+
+    home = _Home()
+    monkeypatch.setattr(bridge_mod, "bridge", home)
+    monkeypatch.setattr(cb, "board_owner", lambda **kwargs: "")
+
+    got, why = peer_bridge_mod.owner_bridge(collab_id="LOCAL1")
+
+    assert got is home
+    assert why == ""
+
+
+# ── the remaining im methods take host= too ────────────────────────────────
+
+
+def test_joining_a_group_on_a_peer_records_its_owner(env, monkeypatch):
+    peer_bridge_mod.remember_peer(
+        "192.168.5.4",
+        "http://192.168.5.4:9555",
+        "peer-tok",
+        account={"email": "b@ai", "password": "pw"},
+    )
+    joined: list = []
+
+    class _FakeBridge:
+        base_url = "http://192.168.5.4:9555"
+        token = "user-tok"
+        user_id = "u-1"
+
+        def __init__(self, **kwargs):
+            pass
+
+        def login(self):
+            return True
+
+        def join_group_api(self, group_id):
+            joined.append(group_id)
+            return {"ok": True}
+
+    monkeypatch.setattr(bridge_mod, "ChatProBridge", _FakeBridge)
+
+    res = im_tool.join_group("g-7f3a", host="192.168.5.4")
+
+    assert res["status"] == "success"
+    assert joined == ["g-7f3a"]
+    assert peer_bridge_mod.peer_for_group("g-7f3a")["host"] == "192.168.5.4"
+
+
+def test_reading_history_on_a_peer_host_uses_that_machine(env, monkeypatch):
+    peer_bridge_mod.remember_peer(
+        "192.168.5.4",
+        "http://192.168.5.4:9555",
+        "peer-tok",
+        account={"email": "b@ai", "password": "pw"},
+    )
+
+    class _FakeBridge:
+        base_url = "http://192.168.5.4:9555"
+        token = "user-tok"
+
+        def __init__(self, **kwargs):
+            pass
+
+        def login(self):
+            return True
+
+        def get_group_history(self, group_id, limit):
+            return [{"sender_id": "u1", "content": "hello", "timestamp": 1}]
+
+    monkeypatch.setattr(bridge_mod, "ChatProBridge", _FakeBridge)
+
+    res = im_tool.get_history("g-7f3a", limit=5, host="192.168.5.4")
+
+    assert res["status"] == "success"
+    assert res["history"][0]["content"] == "hello"

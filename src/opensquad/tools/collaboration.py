@@ -233,9 +233,13 @@ def start_collaboration(
         )
 
         try:
-            from ..bridge import bridge
+            # The invitation belongs in the group where it lives: a group joined on
+            # a paired machine is posted there, not on this agent's own gateway.
+            from ..peer_bridge import owner_bridge
 
-            if bridge and bridge.token:
+            bridge, _why = owner_bridge(group_id=group_id)
+
+            if bridge is not None:
                 # Resolve group name -> ID if a name was passed instead of an ID
                 target = group_id
                 groups = bridge.list_groups_api()
@@ -549,9 +553,11 @@ def end_collaboration(card: str, collab_id: str = "", group_id: str = "") -> dic
         im_result = "No group_id provided; notify members manually"
     else:
         try:
-            from ..bridge import bridge
+            from ..peer_bridge import owner_bridge
 
-            if bridge and bridge.token:
+            bridge, _why = owner_bridge(group_id=group_id, collab_id=collab_id)
+
+            if bridge is not None:
                 # Resolve group name -> ID if needed
                 target = group_id
                 groups = bridge.list_groups_api()
@@ -585,10 +591,9 @@ def end_collaboration(card: str, collab_id: str = "", group_id: str = "") -> dic
 
                 if not mentioned_members:
                     try:
-                        from ..bridge import bridge as _bridge
-
-                        if _bridge and _bridge.token:
-                            detail = _bridge.get_group_detail_api(target)
+                        # Same owner bridge: the member roster is that gateway's.
+                        if bridge is not None:
+                            detail = bridge.get_group_detail_api(target)
                             if detail:
                                 raw_members = detail.get("members", [])
                                 member_map: dict[str, str] = {}
@@ -921,9 +926,12 @@ def assign_task(
                 _extra = _my_task.get("extra") or {}
                 _group_id = _extra.get("group_id", "")
                 if _group_id:
-                    from ..bridge import bridge
+                    # Post the assignment where the group lives (peer-aware).
+                    from ..peer_bridge import owner_bridge
 
-                    if bridge and bridge.token:
+                    bridge, _why = owner_bridge(group_id=str(_group_id), collab_id=collab_id)
+
+                    if bridge is not None:
                         _sub_lines = "\n".join(f"  - {st['title']}" for st in subtask_records)
                         _assign_msg = (
                             f"@{worker_id}\n"
@@ -1675,9 +1683,13 @@ def get_group_roster(group_id: str) -> dict[str, Any]:
         agents: list of dicts with name, agent_dir, role, status, capabilities
     """
     try:
-        from ..bridge import bridge as _bridge
+        # The roster is the owning gateway's: a group joined on a paired machine
+        # is queried there, not on this agent's own gateway.
+        from ..peer_bridge import owner_bridge
 
-        if not _bridge or not _bridge.token:
+        _bridge, _why = owner_bridge(group_id=group_id)
+
+        if _bridge is None:
             return {"status": "error", "message": "Bridge not connected"}
 
         # 1. Resolve group name -> ID if needed
@@ -1941,9 +1953,12 @@ def request_step_approval(
         message_id = None
         im_result = None
         try:
-            from opensquad.bridge import bridge
+            # The approval card belongs to the group, wherever that group lives.
+            from opensquad.peer_bridge import owner_bridge
 
-            if not bridge or not bridge.token:
+            bridge, _why = owner_bridge(group_id=target_group, collab_id=str(collab_id))
+
+            if bridge is None:
                 return {
                     "status": "error",
                     "message": "Bridge not connected; cannot post approval card to group chat.",
@@ -2193,9 +2208,9 @@ def attach_file(
     try:
         import os
 
-        from ..bridge import bridge
         from ..collab_board import attach_files, get_task
         from ..input_hub import input_hub
+        from ..peer_bridge import owner_bridge
 
         if not collab_id:
             return {"status": "error", "message": "collab_id is required"}
@@ -2203,13 +2218,17 @@ def attach_file(
         if not task:
             return {"status": "error", "message": f"collab task '{collab_id}' not found"}
 
+        # Upload to the gateway that owns the task's board: the returned /uploads
+        # URL must resolve on the machine the task window is served from.
+        bridge, _why = owner_bridge(collab_id=collab_id)
+
         agent_dir = input_hub.agent_dir or ""
         agent_id = os.path.basename(agent_dir) if agent_dir else "unknown_agent"
 
         entries: list[dict[str, Any]] = []
         failed: list[str] = []
         for path in file_paths or []:
-            uploaded = bridge.upload_file(str(path)) if bridge and bridge.token else None
+            uploaded = bridge.upload_file(str(path)) if bridge is not None else None
             if not uploaded or not str(uploaded.get("url") or "").strip():
                 failed.append(str(path))
                 continue
