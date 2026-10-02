@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from typing import Any
 
 _BRIDGES: dict[str, Any] = {}
@@ -53,15 +54,37 @@ def load_peers() -> dict[str, Any]:
     return {k: v for k, v in peers.items() if isinstance(v, dict)}
 
 
+def _entry_stamp(entry: dict[str, Any]) -> float:
+    """When this peer entry was written — the freshest wins when two resolve alike."""
+    for field in ("paired_at", "added_at", "at"):
+        try:
+            value = float(entry.get(field) or 0)
+        except (TypeError, ValueError):
+            value = 0.0
+        if value:
+            return value
+    return 0.0
+
+
 def find_peer(host: str) -> dict[str, Any] | None:
-    """The remembered peer for ``host`` — by host name or by gateway address."""
+    """The remembered peer for ``host`` — by host name or by gateway address.
+
+    More than one entry can resolve to the same machine (an early pairing keyed by
+    ``host:port`` beside a later one keyed by ``host``), so the **most recently
+    paired** entry wins: returning the first match by insertion order let a stale
+    entry shadow the fresh token, and the only symptom was a 401 from the peer.
+    """
     wanted = host_key(host)
     if not wanted:
         return None
-    for key, entry in load_peers().items():
-        if host_key(key) == wanted or host_key(str(entry.get("base_url") or "")) == wanted:
-            return entry
-    return None
+    matches = [
+        entry
+        for key, entry in load_peers().items()
+        if host_key(key) == wanted or host_key(str(entry.get("base_url") or "")) == wanted
+    ]
+    if not matches:
+        return None
+    return max(matches, key=_entry_stamp)
 
 
 def peer_token(host: str) -> str:
@@ -166,8 +189,27 @@ def remember_peer(
         key = host_key(host) or host_key(base_url)
         if not key:
             return False
+        # One machine, one entry. An earlier pairing could have left a twin keyed by
+        # ``host:port`` next to this ``host``, and keeping both is what let a stale
+        # token shadow the fresh one (find_peer used to take the first match). Merge
+        # anything worth keeping, then drop the twin.
+        authority = host_key(str(base_url or ""))
         entry = dict(peers.get(key) or {})
+        for other in list(peers):
+            if other == key:
+                continue
+            candidate = peers.get(other)
+            if not isinstance(candidate, dict):
+                continue
+            same = host_key(other) == key or (authority and host_key(str(candidate.get("base_url") or "")) == authority)
+            if not same:
+                continue
+            for field in ("account", "groups", "name"):
+                if not entry.get(field) and candidate.get(field):
+                    entry[field] = candidate[field]
+            peers.pop(other, None)
         entry["host"] = key
+        entry["paired_at"] = time.time()
         if base_url:
             entry["base_url"] = str(base_url).rstrip("/")
         if token:
@@ -321,7 +363,13 @@ def subscribe_group(host: str, group_id: str, timeout: float = 10.0) -> dict[str
     except Exception as exc:  # noqa: BLE001 - report, never crash the tool
         return {"ok": False, "error": f"Could not reach {base_url}: {exc}"}
     if resp.status_code != 200:
-        return {"ok": False, "error": f"Subscribe on {base_url} failed (HTTP {resp.status_code})."}
+        hint = ""
+        if resp.status_code == 401:
+            hint = (
+                f" The token stored for {host_key(host)} was refused — it is usually stale (from an "
+                "earlier pairing). Run pair_with_node again with a fresh code."
+            )
+        return {"ok": False, "error": f"Subscribe on {base_url} failed (HTTP {resp.status_code}).{hint}"}
 
     # Bound to the user it was minted for: the owner echoes this secret back on
     # every push, and a push aimed at another local user is refused rather than

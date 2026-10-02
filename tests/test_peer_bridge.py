@@ -50,6 +50,51 @@ def _config(agent_dir) -> dict:
     return json.loads((agent_dir / "config.json").read_text(encoding="utf-8"))
 
 
+def test_a_stale_twin_entry_cannot_shadow_the_fresh_token(env):
+    """Regression: an old entry keyed by ``host:port`` could sit next to the new one
+    keyed by ``host``, and find_peer returned the first match — so subscribe used the
+    old token and the peer answered 401."""
+    cfg = _config(env)
+    cfg["group_chat"]["peers"] = {
+        "192.168.5.4:9555": {
+            "host": "192.168.5.4:9555",
+            "base_url": "http://192.168.5.4:9555",
+            "token": "old-token",
+            "paired_at": 100.0,
+        },
+        "192.168.5.4": {
+            "host": "192.168.5.4",
+            "base_url": "http://192.168.5.4:9555",
+            "token": "fresh-token",
+            "paired_at": 200.0,
+        },
+    }
+    (env / "config.json").write_text(json.dumps(cfg), encoding="utf-8")
+
+    assert peer_bridge_mod.find_peer("192.168.5.4")["token"] == "fresh-token"
+
+
+def test_remembering_a_peer_collapses_the_twin(env):
+    """One machine, one entry: re-pairing must not leave a stale twin behind."""
+    cfg = _config(env)
+    cfg["group_chat"]["peers"] = {
+        "192.168.5.4:9555": {
+            "host": "192.168.5.4:9555",
+            "base_url": "http://192.168.5.4:9555",
+            "token": "old-token",
+            "groups": ["g-kept"],
+        },
+    }
+    (env / "config.json").write_text(json.dumps(cfg), encoding="utf-8")
+
+    peer_bridge_mod.remember_peer("192.168.5.4", "http://192.168.5.4:9555", "fresh-token", "machine-b")
+
+    peers = _config(env)["group_chat"]["peers"]
+    assert list(peers) == ["192.168.5.4"]
+    assert peers["192.168.5.4"]["token"] == "fresh-token"
+    assert peers["192.168.5.4"]["groups"] == ["g-kept"]  # merged, not dropped
+
+
 def test_remembering_a_peer_leaves_the_home_binding_exactly_as_it_was(env):
     peer_bridge_mod.remember_peer("192.168.5.4", "http://192.168.5.4:9555", "peer-tok", "machine-b")
 

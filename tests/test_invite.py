@@ -119,6 +119,23 @@ def http(monkeypatch):
     return {"calls": calls, "status": status}
 
 
+@pytest.fixture(autouse=True)
+def _isolate_peer_state(tmp_path, monkeypatch):
+    """These tests must not touch the live workspace: joining a peer writes the
+    agent's config (peer entry) and the relay store, and both exist for real on this
+    machine."""
+    import opensquad.input_hub as input_hub_mod
+    import opensquad.peer_bridge as peer_bridge_mod
+    import opensquad.relay_link as relay_link
+
+    agent_dir = tmp_path / "agent"
+    agent_dir.mkdir(parents=True, exist_ok=True)
+    (agent_dir / "config.json").write_text('{"agent_name": "test"}', encoding="utf-8")
+    monkeypatch.setattr(input_hub_mod.input_hub, "agent_dir", str(agent_dir))
+    monkeypatch.setattr(peer_bridge_mod, "_config_path", lambda: str(agent_dir / "config.json"))
+    monkeypatch.setattr(relay_link, "store_dir", lambda: str(tmp_path / "relay"))
+
+
 def test_a_public_group_joins_directly(monkeypatch, http):
     monkeypatch.setattr(bridge_mod, "bridge", _Bridge(joined=True))
 
@@ -217,6 +234,71 @@ def test_joining_a_home_group_records_nothing(monkeypatch, http):
 
     assert res["status"] == "success"
     assert recorded == []
+
+
+def test_a_peer_join_subscribes_to_the_relay(monkeypatch, http):
+    """Regression: joining by invite recorded the board owner but never subscribed to
+    the relay, so the membership was send-only and nothing ever came back."""
+    import opensquad.peer_bridge as peer_bridge_mod
+
+    home = _Bridge(joined=True, base_url="http://127.0.0.1:9555")
+    peer = _Bridge(joined=True, base_url="http://192.168.5.4:9555")
+    seen: list[tuple] = []
+    monkeypatch.setattr(bridge_mod, "bridge", home)
+    monkeypatch.setattr(peer_bridge_mod, "peer_bridge", lambda host: (peer, ""))
+    monkeypatch.setattr(peer_bridge_mod, "find_peer", lambda host: {"base_url": "http://192.168.5.4:9555"})
+    monkeypatch.setattr(
+        peer_bridge_mod, "remember_peer_group", lambda host, gid: seen.append(("group", host, gid)) or True
+    )
+    monkeypatch.setattr(
+        peer_bridge_mod, "subscribe_group", lambda host, gid: seen.append(("relay", host, gid)) or {"ok": True}
+    )
+
+    res = invite_tool.join_by_invite("192.168.5.4#g-7f3a")
+
+    assert res["status"] == "success"
+    assert res["relay"] == "subscribed"
+    assert seen == [("group", "192.168.5.4", "g-7f3a"), ("relay", "192.168.5.4", "g-7f3a")]
+
+
+def test_already_a_member_still_subscribes(monkeypatch, http):
+    """The 400 "already a member" answer used to be reported as a failure, which
+    skipped the subscription entirely — the exact shape of the field bug."""
+    import opensquad.peer_bridge as peer_bridge_mod
+
+    peer = _Bridge(joined=False, detail="Already a member", base_url="http://192.168.5.4:9555")
+    monkeypatch.setattr(bridge_mod, "bridge", _Bridge(joined=True, base_url="http://127.0.0.1:9555"))
+    monkeypatch.setattr(peer_bridge_mod, "peer_bridge", lambda host: (peer, ""))
+    monkeypatch.setattr(peer_bridge_mod, "find_peer", lambda host: {"base_url": "http://192.168.5.4:9555"})
+    monkeypatch.setattr(peer_bridge_mod, "remember_peer_group", lambda host, gid: True)
+    monkeypatch.setattr(peer_bridge_mod, "subscribe_group", lambda host, gid: {"ok": True})
+
+    res = invite_tool.join_by_invite("192.168.5.4#g-7f3a")
+
+    assert res["status"] == "success"
+    assert res["already_member"] is True
+    assert res["relay"] == "subscribed"
+
+
+def test_a_refused_subscription_is_reported_not_hidden(monkeypatch, http):
+    import opensquad.peer_bridge as peer_bridge_mod
+
+    peer = _Bridge(joined=True, base_url="http://192.168.5.4:9555")
+    monkeypatch.setattr(bridge_mod, "bridge", _Bridge(joined=True, base_url="http://127.0.0.1:9555"))
+    monkeypatch.setattr(peer_bridge_mod, "peer_bridge", lambda host: (peer, ""))
+    monkeypatch.setattr(peer_bridge_mod, "find_peer", lambda host: {"base_url": "http://192.168.5.4:9555"})
+    monkeypatch.setattr(peer_bridge_mod, "remember_peer_group", lambda host, gid: True)
+    monkeypatch.setattr(
+        peer_bridge_mod,
+        "subscribe_group",
+        lambda host, gid: {"ok": False, "error": "Subscribe on http://192.168.5.4:9555 failed (HTTP 401). stale"},
+    )
+
+    res = invite_tool.join_by_invite("192.168.5.4#g-7f3a")
+
+    assert res["status"] == "success" and res["joined"] is True
+    assert res["relay"] == "not_subscribed"
+    assert "will\nNOT" not in res["message"] and "NOT be delivered" in res["message"]
 
 
 def test_a_malformed_invite_says_what_it_wants(monkeypatch):

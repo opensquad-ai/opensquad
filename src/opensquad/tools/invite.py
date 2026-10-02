@@ -110,6 +110,35 @@ def pair_with_node(invite: str, name: str = "", wait_seconds: int = 20) -> dict[
         return {"status": "error", "message": str(e)}
 
 
+def _after_peer_join(host: str, group_id: str) -> dict:
+    """Bookkeeping once this agent is a member of a group on a peer.
+
+    Two things, both needed before the membership is usable:
+
+    * the group's **owner** is recorded, so board calls about it route back (the board
+      lives on the machine that owns the group);
+    * a **relay subscription** is opened, so that machine pushes the group's messages
+      to this one — without it the membership is send-only, and nothing arrives.
+
+    ``im.join_group(host=...)`` did this; ``join_by_invite`` (the documented entry
+    point) did not, which is how an agent ended up able to send but never receive.
+    """
+    from ..peer_bridge import remember_peer_group, subscribe_group
+
+    remember_peer_group(host, group_id)
+    relay = subscribe_group(host, group_id)
+    if relay.get("ok"):
+        return {"relay": "subscribed"}
+    return {
+        "relay": "not_subscribed",
+        "relay_error": str(relay.get("error") or ""),
+        "message": (
+            " Joined, but that machine did not accept the message relay, so its group messages will "
+            "NOT be delivered here yet — re-pair with pair_with_node if the peer token is stale."
+        ),
+    }
+
+
 def join_by_invite(invite: str, note: str = "") -> dict[str, Any]:
     """
     [All agents] Join a group on another machine from its invite string.
@@ -180,20 +209,28 @@ def join_by_invite(invite: str, note: str = "") -> dict[str, Any]:
 
         result = target.join_group_api(parsed["group_id"])
         if isinstance(result, dict) and result.get("ok"):
-            # The group lives on that peer, so its board does too: remember it now,
-            # while the invite string is in hand, so a collaboration task started
-            # here routes its board calls back to that machine.
-            if not is_home:
-                from ..peer_bridge import remember_peer_group
-
-                remember_peer_group(parsed["host"], parsed["group_id"])
+            extra = {} if is_home else _after_peer_join(parsed["host"], parsed["group_id"])
             return {
                 "status": "success",
                 "joined": True,
                 "group_id": parsed["group_id"],
                 "host": parsed["host"],
+                **extra,
             }
         detail = str((result or {}).get("detail", "") if isinstance(result, dict) else result)
+
+        # Already in the group: do the peer bookkeeping anyway. A join that merely
+        # looks like a failure is how a member ended up send-only in the field — the
+        # relay was never subscribed and nothing ever arrived.
+        if not is_home and ("already a member" in detail.lower() or "already joined" in detail.lower()):
+            return {
+                "status": "success",
+                "joined": True,
+                "already_member": True,
+                "group_id": parsed["group_id"],
+                "host": parsed["host"],
+                **_after_peer_join(parsed["host"], parsed["group_id"]),
+            }
 
         # A private group refuses self-join by design — ask the owner instead.
         lowered = detail.lower()
