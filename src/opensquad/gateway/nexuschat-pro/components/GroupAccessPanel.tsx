@@ -6,11 +6,11 @@
  * for private groups, the queue of machines waiting to be let in. Both are
  * backend-driven; this only presents them.
  */
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Check, Copy, UserPlus } from 'lucide-react';
 
-import { GATEWAY_ENDPOINT, groupsAPI } from '../services/api';
+import { GATEWAY_ENDPOINT, groupsAPI, nodesAPI } from '../services/api';
 import { buildInviteString } from '../utils/invite';
 import { NodePairingPanel } from './NodePairingPanel';
 
@@ -30,11 +30,31 @@ export const GroupAccessPanel: React.FC<Props> = ({ group, isOwner }) => {
   // browser happens to use: under Vite DEV the page sits on :5173 while agents
   // talk to the gateway on :9555 — the invite used to read "127.0.0.1:5173".
   const [inviteHost, setInviteHost] = useState(GATEWAY_ENDPOINT.host);
+  const inviteHostEdited = useRef(false);
   const hostIsLoopback = /^(localhost|127\.|0\.0\.0\.0|\[?::1\]?)/i.test(inviteHost.trim());
   const invite = buildInviteString(inviteHost.trim(), group.id, {
     port: GATEWAY_ENDPOINT.port,
     secure: GATEWAY_ENDPOINT.secure,
   });
+
+  // A page served from 127.0.0.1 yields an invite no other machine can dial, and the
+  // browser cannot read this host's interfaces — so ask the backend for this machine's own
+  // LAN address and use it, unless the operator has already typed one.
+  useEffect(() => {
+    if (inviteHostEdited.current) return;
+    if (!/^(localhost|127\.|0\.0\.0\.0|\[?::1\]?)/i.test(GATEWAY_ENDPOINT.host)) return;
+    let alive = true;
+    void nodesAPI
+      .localAddresses()
+      .then((res) => {
+        const best = String((res?.addresses || [])[0] || '');
+        if (alive && best && !inviteHostEdited.current) setInviteHost(best);
+      })
+      .catch(() => undefined);
+    return () => {
+      alive = false;
+    };
+  }, []);
 
   const load = useCallback(async () => {
     if (!group.isPrivate) return;
@@ -68,7 +88,10 @@ export const GroupAccessPanel: React.FC<Props> = ({ group, isOwner }) => {
         </div>
         <input
           value={inviteHost}
-          onChange={(e) => setInviteHost(e.target.value)}
+          onChange={(e) => {
+            inviteHostEdited.current = true;
+            setInviteHost(e.target.value);
+          }}
           placeholder={t('groupAccess.hostLabel')}
           aria-label={t('groupAccess.hostLabel')}
           data-testid="group-invite-host"

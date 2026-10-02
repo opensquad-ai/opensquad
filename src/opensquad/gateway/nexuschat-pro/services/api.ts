@@ -2377,6 +2377,9 @@ export interface CollabBoardSummary {
 }
 
 export const nodesAPI = {
+  /** This machine's own LAN addresses (the invite panel names one of them). */
+  localAddresses: () =>
+    apiRequest<{ ok: boolean; addresses: string[]; hostname?: string }>('/node/local-addresses'),
   /** Show a short-lived pairing code for another machine to submit. */
   startPairing: () => apiRequest<{ code: string; expires_in: number }>('/node/pair/code', { method: 'POST' }),
 

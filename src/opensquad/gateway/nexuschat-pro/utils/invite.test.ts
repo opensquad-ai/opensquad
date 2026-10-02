@@ -65,4 +65,20 @@ describe('invite strings', () => {
     expect(pairing).toContain('buildInviteString(host.trim(), groupId');
     expect(pairing).toContain('data-testid="node-pairing-coded-invite"');
   });
+
+  it('fills a reachable host from the backend when the page address is loopback', () => {
+    const panel = fs.readFileSync(
+      path.resolve(__dirname, '..', 'components', 'GroupAccessPanel.tsx'),
+      'utf8',
+    );
+
+    // the browser cannot read this host's interfaces: the backend detects them
+    expect(panel).toContain('nodesAPI');
+    expect(panel).toContain('.localAddresses()');
+    // only when the page's own address is loopback…
+    expect(panel).toMatch(/if \(!\/\^\(localhost\|127\\\./);
+    // …and never over what the operator typed
+    expect(panel).toContain('if (inviteHostEdited.current) return;');
+    expect(panel).toContain('inviteHostEdited.current = true;');
+  });
 });

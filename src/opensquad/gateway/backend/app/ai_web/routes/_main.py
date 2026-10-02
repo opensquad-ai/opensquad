@@ -11,6 +11,7 @@ HTTP APIs for the frontend:
 import logging
 import os
 import re
+import socket
 import time
 import uuid
 from typing import Any
@@ -1519,6 +1520,24 @@ async def agent_board_op(body: BoardOpRequest, request: Request):
     except KeyError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {"ok": True, "result": result}
+
+
+@router.get("/node/local-addresses")
+async def node_local_addresses(current_user: User = Depends(get_current_user_dep)):
+    """This machine's own LAN addresses, so the invite panel can name a reachable host.
+
+    The page the panel is served from is often ``127.0.0.1`` (or a LAN IP the browser does
+    know, but a dev server port), and a browser cannot read the host's interfaces — so the
+    address an invite should carry has to be detected on this side.
+    """
+    from opensquad.net_addresses import lan_addresses
+
+    try:
+        addresses = lan_addresses()
+    except Exception as exc:  # noqa: BLE001 - the panel falls back to the editable field
+        logger.warning("[API] LAN address detection failed: %s", exc)
+        addresses = []
+    return {"ok": bool(addresses), "addresses": addresses, "hostname": socket.gethostname()}
 
 
 class CollabInviteRequest(BaseModel):
