@@ -927,6 +927,7 @@
       "title": "尚未打开任何内容",
       "subtitle": "选择视图或按对应快捷键。"
     },
+    "openView": "打开视图",
     "views": {
       "changes": "更改",
       "changesHint": "逐个文件查看未提交的更改",

@@ -15,10 +15,9 @@ import type { SoloTokenStats } from './SoloContextFooter';
 import type { TimelineEntry } from '../../utils/aiChatTimeline';
 import type { ContentTab, PaneTabs } from '../../utils/workspaceStore';
 import { parseContentTabKey } from '../../utils/workspaceStore';
-import { PANE_VIEW_SHORTCUT, type PaneViewId } from '../../utils/paneViews';
+import { PANE_VIEWS, type PaneViewId } from '../../utils/paneViews';
 import { BrowserPanel } from './BrowserPanel';
 import { TerminalPanel } from './TerminalPanel';
-import { FileDiff, FileCode2, Files, Globe, Terminal } from 'lucide-react';
 
 /** Optional Agent Web session bridge for scheduled-task exec UI (stay on scheduled-tasks tab). */
 export type PaneSessionBridge = {
@@ -64,52 +63,9 @@ export type PaneShellHandlers = {
 } & PaneSessionBridge;
 
 /**
- * The welcome rows: everything that can be opened in a pane. Declared here (not inline in
- * the JSX) so the shortcut printed on the row and the handler that opens it cannot drift —
- * and so a test can assert the set without parsing markup.
+ * The welcome rows' shortcuts come from utils/paneViews, so the rows, the tab bar's "open"
+ * menu and the shortcut binder all offer exactly the same set.
  */
-const PANE_VIEWS: Array<{
-  id: PaneViewId;
-  Icon: typeof FileCode2;
-  labelKey: string;
-  hintKey: string;
-  shortcut?: string;
-  handler: 'onOpenChanges' | 'onOpenFiles' | 'onOpenTerminal' | 'onOpenBrowser';
-}> = [
-  {
-    id: 'changes',
-    Icon: FileDiff,
-    labelKey: 'aiChat.views.changes',
-    hintKey: 'aiChat.views.changesHint',
-    shortcut: PANE_VIEW_SHORTCUT.changes,
-    handler: 'onOpenChanges',
-  },
-  {
-    id: 'files',
-    Icon: Files,
-    labelKey: 'aiChat.views.files',
-    hintKey: 'aiChat.views.filesHint',
-    shortcut: PANE_VIEW_SHORTCUT.files,
-    handler: 'onOpenFiles',
-  },
-  {
-    id: 'terminal',
-    Icon: Terminal,
-    labelKey: 'aiChat.views.terminal',
-    hintKey: 'aiChat.views.terminalHint',
-    shortcut: PANE_VIEW_SHORTCUT.terminal,
-    handler: 'onOpenTerminal',
-  },
-  {
-    id: 'browser',
-    Icon: Globe,
-    labelKey: 'aiChat.views.browser',
-    hintKey: 'aiChat.views.browserHint',
-    shortcut: PANE_VIEW_SHORTCUT.browser,
-    handler: 'onOpenBrowser',
-  },
-];
-
 interface WorkspacePaneShellProps {
   paneId: string;
   tabs: PaneTabs;
@@ -223,6 +179,14 @@ export const WorkspacePaneShell: React.FC<WorkspacePaneShellProps> = ({
   const showTerminal = !!active && active.kind === 'terminal';
   const showBrowser = !!active && active.kind === 'browser';
 
+  // One place from which both the welcome rows and the tab bar's menu take their action.
+  const viewHandlers: Record<PaneViewId, (() => void) | undefined> = {
+    changes: handlers.onOpenChanges,
+    files: handlers.onOpenFiles,
+    terminal: handlers.onOpenTerminal,
+    browser: handlers.onOpenBrowser,
+  };
+
   // A terminal is a live process, not a view: it stays mounted once opened, hidden when
   // another tab is active. Without this, switching tabs would kill the shell and start a
   // new one on the way back (losing the cwd, the history and anything still running).
@@ -295,6 +259,7 @@ export const WorkspacePaneShell: React.FC<WorkspacePaneShellProps> = ({
           onCloseAll={handlers.onCloseAll}
           onClosePane={handlers.onClosePane}
           canClosePane={canClosePane}
+          onOpenView={(view) => viewHandlers[view]?.()}
         />
       </div>
       ) : null}
@@ -316,7 +281,7 @@ export const WorkspacePaneShell: React.FC<WorkspacePaneShellProps> = ({
             <div className="mt-3 space-y-0.5" data-testid="pane-welcome-rows">
               {PANE_VIEWS.map((view) => {
                 const Icon = view.Icon;
-                const onClick = handlers[view.handler];
+                const onClick = viewHandlers[view.id];
                 return (
                   <button
                     key={view.id}

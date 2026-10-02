@@ -13,7 +13,14 @@ import path from 'node:path';
 
 import { describe, expect, it } from 'vitest';
 
-import { PANE_VIEW_IDS, PANE_VIEW_SHORTCUT, RAIL_VIEWS, matchesPaneViewShortcut, paneViewForKey } from '../../utils/paneViews';
+import {
+  PANE_VIEWS,
+  PANE_VIEW_IDS,
+  PANE_VIEW_SHORTCUT,
+  RAIL_VIEWS,
+  matchesPaneViewShortcut,
+  paneViewForKey,
+} from '../../utils/paneViews';
 import { parseContentTabKey } from '../../utils/workspaceStore';
 
 const read = (rel: string) => fs.readFileSync(path.resolve(__dirname, rel), 'utf8');
@@ -37,6 +44,14 @@ describe('pane views', () => {
     expect(PANE_VIEW_IDS).toEqual(['changes', 'files', 'terminal', 'browser']);
     // the two file-ish views live in the right-hand rail, the other two are pane tabs
     expect(RAIL_VIEWS).toEqual(['changes', 'files']);
+    // …and the rendered list is the same list, so no entry can exist in one and not the other
+    expect(PANE_VIEWS.map((v) => v.id)).toEqual(PANE_VIEW_IDS);
+    for (const view of PANE_VIEWS) {
+      expect(view.labelKey, view.id).toBeTruthy();
+      expect(view.hintKey, view.id).toBeTruthy();
+      expect(view.Icon, view.id).toBeTruthy();
+      expect(view.shortcut).toBe(PANE_VIEW_SHORTCUT[view.id]);
+    }
   });
 
   it('matches exactly the shortcut it prints', () => {
@@ -115,15 +130,23 @@ describe('the pane renders them', () => {
     expect(SHELL).toContain('PANE_VIEWS.map');
     expect(SHELL).toContain('data-testid={`pane-view-${view.id}`}');
     expect(SHELL).toContain('{view.shortcut}');
-    expect(SHELL).toContain('PANE_VIEW_SHORTCUT');
-    for (const view of PANE_VIEW_IDS) {
-      expect(SHELL, view).toContain(`'${view}'`);
-    }
-    // the rows ask the page (the rail is not reachable from the pane directly)
+    // the view ids come from the shared list (asserted above), not from literals in here
     for (const handler of ['onOpenChanges', 'onOpenFiles', 'onOpenTerminal', 'onOpenBrowser']) {
       expect(SHELL, handler).toContain(`${handler}?:`);
-      expect(SHELL, handler).toContain(`handler: '${handler}'`);
     }
+    expect(SHELL).toContain('viewHandlers[view.id]');
+  });
+
+  it('the tab bar menu offers the same views — the only place a user with tabs open looks', () => {
+    // the welcome rows only exist while the pane is EMPTY, and a shortcut is invisible: the
+    // overflow menu is what makes the two tools findable in normal use
+    expect(TAB_BAR).toContain('onOpenView?: (view: PaneViewId) => void');
+    expect(TAB_BAR).toContain('data-testid={`tabbar-open-${view.id}`}');
+    expect(TAB_BAR).toContain('PANE_VIEWS.map');
+    expect(TAB_BAR).toContain('PANE_VIEW_SHORTCUT[view.id]');
+    expect(TAB_BAR).toContain("t('aiChat.openView')");
+    // …and the pane hands it the actions
+    expect(SHELL).toContain('onOpenView={(view) => viewHandlers[view]?.()}');
   });
 });
 

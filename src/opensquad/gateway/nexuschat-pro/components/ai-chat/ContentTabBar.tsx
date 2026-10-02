@@ -9,6 +9,8 @@ import {
   Clock,
   Columns2,
   FileCode2,
+  FileDiff,
+  Files,
   FileText,
   Globe,
   ListTodo,
@@ -21,6 +23,7 @@ import {
 } from 'lucide-react';
 import type { ContentTab } from '../../utils/workspaceStore';
 import { contentTabKey } from '../../utils/workspaceStore';
+import { PANE_VIEWS, PANE_VIEW_SHORTCUT, type PaneViewId } from '../../utils/paneViews';
 
 export const OPENSQUAD_TAB_MIME = 'application/x-opensquad-tab';
 
@@ -46,6 +49,8 @@ interface ContentTabBarProps {
   onCloseAll?: () => void;
   onClosePane?: () => void;
   canClosePane?: boolean;
+  /** Open one of the pane's views (terminal, browser, …) from the overflow menu. */
+  onOpenView?: (view: PaneViewId) => void;
 }
 
 function TabIcon({ kind }: { kind: ContentTab['kind'] }) {
@@ -82,6 +87,7 @@ export const ContentTabBar: React.FC<ContentTabBarProps> = ({
   onCloseAll,
   onClosePane,
   canClosePane = false,
+  onOpenView,
 }) => {
   const { t } = useTranslation();
   const [menuOpen, setMenuOpen] = useState(false);
@@ -423,7 +429,39 @@ export const ContentTabBar: React.FC<ContentTabBarProps> = ({
             <MoreHorizontal size={14} />
           </button>
           {menuOpen ? (
-            <div className="absolute right-0 top-full mt-1 z-[90] min-w-[140px] py-1 rounded-lg bg-bgLight border border-border shadow-xl text-[12px]">
+            <div className="absolute right-0 top-full mt-1 z-[90] min-w-[180px] py-1 rounded-lg bg-bgLight border border-border shadow-xl text-[12px]">
+              {/* The views this pane can open. The welcome rows only exist while the pane is
+                  empty, and a shortcut is invisible — so they are also here, where a user
+                  with tabs open actually looks. */}
+              {onOpenView ? (
+                <>
+                  <div className="px-3 py-1 text-[10px] uppercase tracking-wide text-textMuted">
+                    {t('aiChat.openView')}
+                  </div>
+                  {PANE_VIEWS.map((view) => {
+                    const Icon = view.Icon;
+                    return (
+                      <button
+                        key={view.id}
+                        type="button"
+                        data-testid={`tabbar-open-${view.id}`}
+                        className="w-full flex items-center gap-2 px-3 py-1.5 text-left hover:bg-primary/10"
+                        onClick={() => {
+                          setMenuOpen(false);
+                          onOpenView(view.id);
+                        }}
+                      >
+                        <Icon size={12} className="shrink-0 text-textMuted" />
+                        <span className="min-w-0 flex-1 truncate">{t(view.labelKey)}</span>
+                        <kbd className="shrink-0 font-mono text-[10px] text-textMuted">
+                          {PANE_VIEW_SHORTCUT[view.id]}
+                        </kbd>
+                      </button>
+                    );
+                  })}
+                  <div className="my-1 h-px bg-border/60" />
+                </>
+              ) : null}
               <button
                 type="button"
                 className="w-full px-3 py-1.5 text-left hover:bg-primary/10"

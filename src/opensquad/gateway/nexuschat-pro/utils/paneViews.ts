@@ -5,6 +5,8 @@
  * page binds them, so a row can never advertise a key that does nothing — and a test can
  * assert both sides from a single source.
  */
+import { FileDiff, Files, Globe, Terminal } from 'lucide-react';
+
 export type PaneViewId = 'changes' | 'files' | 'terminal' | 'browser';
 
 export const PANE_VIEW_IDS: PaneViewId[] = ['changes', 'files', 'terminal', 'browser'];
@@ -22,6 +24,47 @@ export const PANE_VIEW_SHORTCUT: Record<PaneViewId, string> = {
 
 /** The two views that live in the right-hand files rail rather than in a pane tab. */
 export const RAIL_VIEWS: PaneViewId[] = ['changes', 'files'];
+
+/**
+ * The view list, once: the pane's welcome rows, the tab bar's "open" menu and the shortcut
+ * binder all read it, so none of them can offer an entry the others do not have.
+ */
+export const PANE_VIEWS: Array<{
+  id: PaneViewId;
+  Icon: typeof FileDiff;
+  labelKey: string;
+  hintKey: string;
+  shortcut: string;
+}> = [
+  {
+    id: 'changes',
+    Icon: FileDiff,
+    labelKey: 'aiChat.views.changes',
+    hintKey: 'aiChat.views.changesHint',
+    shortcut: PANE_VIEW_SHORTCUT.changes,
+  },
+  {
+    id: 'files',
+    Icon: Files,
+    labelKey: 'aiChat.views.files',
+    hintKey: 'aiChat.views.filesHint',
+    shortcut: PANE_VIEW_SHORTCUT.files,
+  },
+  {
+    id: 'terminal',
+    Icon: Terminal,
+    labelKey: 'aiChat.views.terminal',
+    hintKey: 'aiChat.views.terminalHint',
+    shortcut: PANE_VIEW_SHORTCUT.terminal,
+  },
+  {
+    id: 'browser',
+    Icon: Globe,
+    labelKey: 'aiChat.views.browser',
+    hintKey: 'aiChat.views.browserHint',
+    shortcut: PANE_VIEW_SHORTCUT.browser,
+  },
+];
 
 interface Combo {
   ctrl: boolean;

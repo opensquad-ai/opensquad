@@ -927,6 +927,7 @@
       "title": "Nothing open yet",
       "subtitle": "Pick a view, or press its shortcut."
     },
+    "openView": "Open view",
     "views": {
       "changes": "Changes",
       "changesHint": "Review uncommitted changes file by file",
