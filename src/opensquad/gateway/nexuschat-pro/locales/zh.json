@@ -923,6 +923,20 @@
       "files": "文件",
       "filesHint": "工作区文件与本次会话的改动"
     },
+    "welcome": {
+      "title": "尚未打开任何内容",
+      "subtitle": "选择视图或按对应快捷键。"
+    },
+    "views": {
+      "changes": "更改",
+      "changesHint": "逐个文件查看未提交的更改",
+      "files": "文件",
+      "filesHint": "浏览和打开项目文件",
+      "terminal": "终端",
+      "terminalHint": "此项目中的 shell",
+      "browser": "浏览器",
+      "browserHint": "预览开发服务器"
+    },
     "browser": {
       "hint": "在内置浏览器里打开网页（桌面端是真正的浏览器，网页端受目标网站是否允许被嵌入限制）",
       "back": "后退",

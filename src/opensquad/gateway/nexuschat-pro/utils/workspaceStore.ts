@@ -12,7 +12,7 @@ export type Workspace = {
   createdAt: number;
 };
 
-export type ContentTabKind = 'session' | 'file' | 'scheduled-tasks' | 'tasks';
+export type ContentTabKind = 'session' | 'file' | 'scheduled-tasks' | 'tasks' | 'terminal' | 'browser';
 
 export type ContentTab = {
   kind: ContentTabKind;
@@ -84,13 +84,27 @@ export function contentTabKey(tab: ContentTab): string {
   return `${tab.kind}:${tab.id}`;
 }
 
+/**
+ * Every kind a pane can hold. A kind that is missing here parses to `null`, and the pane
+ * then shows the "nothing open" hint with the tab still sitting in its list — so a new kind
+ * must be added here, not just to the type.
+ */
+const CONTENT_TAB_KINDS: readonly ContentTabKind[] = [
+  'session',
+  'file',
+  'scheduled-tasks',
+  'tasks',
+  'terminal',
+  'browser',
+];
+
 export function parseContentTabKey(key: string | null): ContentTab | null {
   if (!key) return null;
   const i = key.indexOf(':');
   if (i < 0) return null;
   const kind = key.slice(0, i) as ContentTabKind;
   const id = key.slice(i + 1);
-  if ((kind !== 'session' && kind !== 'file' && kind !== 'scheduled-tasks' && kind !== 'tasks') || !id) return null;
+  if (!id || !CONTENT_TAB_KINDS.includes(kind)) return null;
   return { kind, id };
 }
 

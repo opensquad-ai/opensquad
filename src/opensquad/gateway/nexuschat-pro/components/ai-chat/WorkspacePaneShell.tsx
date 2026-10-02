@@ -15,6 +15,10 @@ import type { SoloTokenStats } from './SoloContextFooter';
 import type { TimelineEntry } from '../../utils/aiChatTimeline';
 import type { ContentTab, PaneTabs } from '../../utils/workspaceStore';
 import { parseContentTabKey } from '../../utils/workspaceStore';
+import { PANE_VIEW_SHORTCUT, type PaneViewId } from '../../utils/paneViews';
+import { BrowserPanel } from './BrowserPanel';
+import { TerminalPanel } from './TerminalPanel';
+import { FileDiff, FileCode2, Files, Globe, Terminal } from 'lucide-react';
 
 /** Optional Agent Web session bridge for scheduled-task exec UI (stay on scheduled-tasks tab). */
 export type PaneSessionBridge = {
@@ -48,7 +52,63 @@ export type PaneShellHandlers = {
   /** True while hydrating after refresh/connect — show loading, not New Chat. */
   isSessionLoading?: (sessionId: string) => boolean;
   sessionLoadingLabel?: string;
+  /**
+   * The welcome rows (shown while the pane has no tab open) and the header's view entries.
+   * The two file-ish rows open the right-hand files rail; terminal and browser open a tab
+   * in this pane. Optional so the shell still renders in tests and in drawers.
+   */
+  onOpenChanges?: () => void;
+  onOpenFiles?: () => void;
+  onOpenTerminal?: () => void;
+  onOpenBrowser?: () => void;
 } & PaneSessionBridge;
+
+/**
+ * The welcome rows: everything that can be opened in a pane. Declared here (not inline in
+ * the JSX) so the shortcut printed on the row and the handler that opens it cannot drift —
+ * and so a test can assert the set without parsing markup.
+ */
+const PANE_VIEWS: Array<{
+  id: PaneViewId;
+  Icon: typeof FileCode2;
+  labelKey: string;
+  hintKey: string;
+  shortcut?: string;
+  handler: 'onOpenChanges' | 'onOpenFiles' | 'onOpenTerminal' | 'onOpenBrowser';
+}> = [
+  {
+    id: 'changes',
+    Icon: FileDiff,
+    labelKey: 'aiChat.views.changes',
+    hintKey: 'aiChat.views.changesHint',
+    shortcut: PANE_VIEW_SHORTCUT.changes,
+    handler: 'onOpenChanges',
+  },
+  {
+    id: 'files',
+    Icon: Files,
+    labelKey: 'aiChat.views.files',
+    hintKey: 'aiChat.views.filesHint',
+    shortcut: PANE_VIEW_SHORTCUT.files,
+    handler: 'onOpenFiles',
+  },
+  {
+    id: 'terminal',
+    Icon: Terminal,
+    labelKey: 'aiChat.views.terminal',
+    hintKey: 'aiChat.views.terminalHint',
+    shortcut: PANE_VIEW_SHORTCUT.terminal,
+    handler: 'onOpenTerminal',
+  },
+  {
+    id: 'browser',
+    Icon: Globe,
+    labelKey: 'aiChat.views.browser',
+    hintKey: 'aiChat.views.browserHint',
+    shortcut: PANE_VIEW_SHORTCUT.browser,
+    handler: 'onOpenBrowser',
+  },
+];
 
 interface WorkspacePaneShellProps {
   paneId: string;
@@ -102,6 +162,14 @@ export const WorkspacePaneShell: React.FC<WorkspacePaneShellProps> = ({
       if (tab.kind === 'tasks') {
         return { tab, title: tabTitles[tab.id]?.trim() || t('taskPanel.title') };
       }
+      // A terminal and a browser view are singletons per pane, so their tab title is just
+      // what they are (the reference shows `cmd` / `Browser`).
+      if (tab.kind === 'terminal') {
+        return { tab, title: tabTitles[tab.id]?.trim() || t('aiChat.panelTabs.terminal') };
+      }
+      if (tab.kind === 'browser') {
+        return { tab, title: tabTitles[tab.id]?.trim() || t('aiChat.panelTabs.browser') };
+      }
       const title = tabTitles[tab.id]?.trim() || tab.id;
       return { tab, title };
     });
@@ -152,6 +220,30 @@ export const WorkspacePaneShell: React.FC<WorkspacePaneShellProps> = ({
   const showFiles = !!active && active.kind === 'file';
   const showScheduled = !!active && active.kind === 'scheduled-tasks';
   const showTasks = !!active && active.kind === 'tasks';
+  const showTerminal = !!active && active.kind === 'terminal';
+  const showBrowser = !!active && active.kind === 'browser';
+
+  // A terminal is a live process, not a view: it stays mounted once opened, hidden when
+  // another tab is active. Without this, switching tabs would kill the shell and start a
+  // new one on the way back (losing the cwd, the history and anything still running).
+  const [terminalMounted, setTerminalMounted] = useState(false);
+  useEffect(() => {
+    if (showTerminal) setTerminalMounted(true);
+  }, [showTerminal]);
+  // Closing the terminal tab ends the process: nothing should keep a hidden shell alive.
+  useEffect(() => {
+    if (terminalMounted && !tabs.open.some((t) => t.kind === 'terminal')) setTerminalMounted(false);
+  }, [tabs.open, terminalMounted]);
+
+  // The browser is kept mounted for the same reason: remounting a webview reloads the page
+  // (losing a login, a form, a scroll position) every time the user glances at another tab.
+  const [browserMounted, setBrowserMounted] = useState(false);
+  useEffect(() => {
+    if (showBrowser) setBrowserMounted(true);
+  }, [showBrowser]);
+  useEffect(() => {
+    if (browserMounted && !tabs.open.some((t) => t.kind === 'browser')) setBrowserMounted(false);
+  }, [tabs.open, browserMounted]);
 
   // Active session tab → claim watch + refresh token stats for this sid.
   useEffect(() => {
@@ -211,11 +303,73 @@ export const WorkspacePaneShell: React.FC<WorkspacePaneShellProps> = ({
         onMouseDown={() => handlers.onFocus()}
       >
         {!active ? (
+          /* The pane's welcome: what can be opened here, with the shortcut that opens it.
+             The rows are the entry point the reference shows, so nothing is reachable
+             only by knowing a key. */
           <div
-            className="flex-1 flex items-center justify-center text-[12px] text-textMuted px-4 text-center"
+            className="flex-1 min-h-0 overflow-auto px-4 py-5"
+            data-testid="pane-welcome"
             onClick={handlers.onFocus}
           >
-            {t('aiChat.noOpenTabsHint')}
+            <div className="text-[13px] font-medium text-textMain">{t('aiChat.welcome.title')}</div>
+            <div className="mt-0.5 text-[11px] text-textMuted">{t('aiChat.welcome.subtitle')}</div>
+            <div className="mt-3 space-y-0.5" data-testid="pane-welcome-rows">
+              {PANE_VIEWS.map((view) => {
+                const Icon = view.Icon;
+                const onClick = handlers[view.handler];
+                return (
+                  <button
+                    key={view.id}
+                    type="button"
+                    disabled={!onClick}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onClick?.();
+                    }}
+                    data-testid={`pane-view-${view.id}`}
+                    className="flex w-full items-center gap-2.5 rounded-lg px-2 py-1.5 text-left hover:bg-primary/10 disabled:opacity-40"
+                  >
+                    <Icon size={13} className="shrink-0 text-textMuted" />
+                    <span className="min-w-0 flex-1 truncate text-[12px] text-textMain">
+                      {t(view.labelKey)}
+                    </span>
+                    <span className="min-w-0 flex-[2] truncate text-[11px] text-textMuted">
+                      {t(view.hintKey)}
+                    </span>
+                    {view.shortcut ? (
+                      <kbd className="shrink-0 rounded border border-border px-1 py-0.5 font-mono text-[10px] text-textMuted">
+                        {view.shortcut}
+                      </kbd>
+                    ) : null}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        ) : null}
+
+        {/* Terminal (hidden while another tab is active — the shell keeps running). */}
+        {terminalMounted ? (
+          <div
+            className={showTerminal ? 'flex-1 min-h-0 flex flex-col' : 'hidden'}
+            aria-hidden={!showTerminal}
+            data-testid="pane-terminal"
+          >
+            <ErrorBoundary label="terminal" resetKey={`${agentId}:terminal`}>
+              <TerminalPanel agentId={agentId} rootPath={rootPath} />
+            </ErrorBoundary>
+          </div>
+        ) : null}
+
+        {browserMounted ? (
+          <div
+            className={showBrowser ? 'flex-1 min-h-0 flex flex-col' : 'hidden'}
+            aria-hidden={!showBrowser}
+            data-testid="pane-browser"
+          >
+            <ErrorBoundary label="browser" resetKey={`${agentId}:browser`}>
+              <BrowserPanel />
+            </ErrorBoundary>
           </div>
         ) : null}
 

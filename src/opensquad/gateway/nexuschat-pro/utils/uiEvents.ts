@@ -36,3 +36,19 @@ export const openSessionTab = (sessionId: string | null | undefined): boolean =>
   window.dispatchEvent(new CustomEvent(OPEN_SESSION_TAB_EVENT, { detail: { sessionId: id } }));
   return true;
 };
+
+/** `detail: { tab: 'changed' | 'all' }` — show the right-hand files rail on one of its tabs. */
+export const OPEN_FILES_RAIL_EVENT = 'opensquad-open-files-rail';
+
+export type FilesRailTab = 'changed' | 'all';
+
+/**
+ * Ask the workspace to show the files rail, focused on `tab`.
+ *
+ * The rail is a sibling of the panes (not a content tab), so the pane's 更改 / 文件 rows and
+ * their shortcuts cannot open it directly — they announce it instead. The page opens the
+ * rail, the rail picks the tab.
+ */
+export const openFilesRail = (tab: FilesRailTab = 'all'): void => {
+  window.dispatchEvent(new CustomEvent(OPEN_FILES_RAIL_EVENT, { detail: { tab } }));
+};

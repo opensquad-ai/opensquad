@@ -10,11 +10,13 @@ import {
   Columns2,
   FileCode2,
   FileText,
+  Globe,
   ListTodo,
   MoreHorizontal,
   MessageSquare,
   Plus,
   Rows2,
+  Terminal,
   X,
 } from 'lucide-react';
 import type { ContentTab } from '../../utils/workspaceStore';
@@ -50,6 +52,9 @@ function TabIcon({ kind }: { kind: ContentTab['kind'] }) {
   if (kind === 'session') return <MessageSquare size={12} className="text-sky-500 shrink-0" />;
   if (kind === 'scheduled-tasks') return <Clock size={12} className="text-primary shrink-0" />;
   if (kind === 'tasks') return <ListTodo size={12} className="text-primary shrink-0" />;
+  // The two tools that live beside the files: a shell and a browser view.
+  if (kind === 'terminal') return <Terminal size={12} className="text-emerald-500 shrink-0" />;
+  if (kind === 'browser') return <Globe size={12} className="text-indigo-500 shrink-0" />;
   return <FileCode2 size={12} className="text-amber-500 shrink-0" />;
 }
 

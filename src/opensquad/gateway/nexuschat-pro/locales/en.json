@@ -923,6 +923,20 @@
       "files": "Files",
       "filesHint": "Workspace files and this session's changes"
     },
+    "welcome": {
+      "title": "Nothing open yet",
+      "subtitle": "Pick a view, or press its shortcut."
+    },
+    "views": {
+      "changes": "Changes",
+      "changesHint": "Review uncommitted changes file by file",
+      "files": "Files",
+      "filesHint": "Browse and open project files",
+      "terminal": "Terminal",
+      "terminalHint": "A shell in this project",
+      "browser": "Browser",
+      "browserHint": "Preview the dev server"
+    },
     "browser": {
       "hint": "Open a page in the built-in browser (a real browser in the desktop app; in the web build it depends on whether the site allows framing)",
       "back": "Back",

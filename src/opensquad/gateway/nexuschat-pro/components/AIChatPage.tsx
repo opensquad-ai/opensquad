@@ -139,7 +139,8 @@ import {
   type SplitDirection,
 } from '../utils/workspaceStore';
 // Cross-surface event names — shared with the panels that ask for a tab.
-import { OPEN_SESSION_TAB_EVENT } from '../utils/uiEvents';
+import { OPEN_SESSION_TAB_EVENT, openFilesRail } from '../utils/uiEvents';
+import { paneViewForKey, type PaneViewId } from '../utils/paneViews';
 
 // AI Chat sub-components
 import { MessageBubble, ChatMessage, FileAttachment } from './ai-chat/MessageBubble';
@@ -4676,6 +4677,12 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     onSplitCol: () => handleSplitPane(paneId, 'col'),
     onCloseAll: () => handleCloseAllInPane(paneId),
     onClosePane: () => handleClosePane(paneId),
+    // The pane's welcome rows (and the shortcuts above): terminal and browser open a tab in
+    // THIS pane; 更改 / 文件 open the right-hand rail on the matching tab.
+    onOpenChanges: () => openPaneView('changes'),
+    onOpenFiles: () => openPaneView('files'),
+    onOpenTerminal: () => openPaneView('terminal'),
+    onOpenBrowser: () => openPaneView('browser'),
     onFocus: () => {
       // Click = only change the anchor (focusedPaneId). Do NOT switch the global
       // live session — that remounted chatSlot/history and made sibling panes'
@@ -5186,6 +5193,61 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     if (pane) setFocusedPane(agentId, pane);
     refreshWsSnap();
   };
+
+  /**
+   * Open one of the pane's views — the welcome rows and the shortcuts both land here.
+   *
+   * Terminal and browser are content tabs (their own process / their own page). 更改 and 文件
+   * are the right-hand files rail, which owns its own two tabs: open it and name the tab.
+   */
+  const openPaneView = (view: PaneViewId) => {
+    if (view === 'changes' || view === 'files') {
+      setFilesPanelOpen(true);
+      try {
+        localStorage.setItem('opensquad.filesPanel.open', 'true');
+      } catch {
+        /* storage unavailable: the rail still opens for this session */
+      }
+      openFilesRail(view === 'changes' ? 'changed' : 'all');
+      return;
+    }
+    if (!activeWorkspace) return;
+    setLibraryView(null);
+    if (isCompactLayout) {
+      setSessionSidebarOpen(false);
+      setFilesPanelOpen(false);
+    }
+    const pane = focusedPaneId;
+    openContentTab(agentId, activeWorkspace.id, { kind: view, id: view }, pane);
+    if (pane) setFocusedPane(agentId, pane);
+    refreshWsSnap();
+  };
+
+  const handleOpenTerminal = () => openPaneView('terminal');
+  const handleOpenBrowser = () => openPaneView('browser');
+
+  // The shortcuts the welcome rows print. Bound once here so a row can never advertise a key
+  // that does nothing; typing in a field is never intercepted.
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      const target = event.target as HTMLElement | null;
+      if (
+        target &&
+        (target.tagName === 'INPUT' ||
+          target.tagName === 'TEXTAREA' ||
+          target.tagName === 'SELECT' ||
+          target.isContentEditable)
+      ) {
+        return;
+      }
+      const view = paneViewForKey(event);
+      if (!view) return;
+      event.preventDefault();
+      openPaneView(view);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  });
 
   const toggleSessionSidebar = useCallback(() => {
     setSessionSidebarOpen((open) => {
