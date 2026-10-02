@@ -7,18 +7,22 @@ joining elsewhere meant leaving home. Peers are remembered instead —
 peer store — and a call aimed at a peer gets its **own** bridge. The home binding
 is never touched.
 
-Inbound is deliberately not part of this: a peer bridge holds no WebSocket, so
-nothing is *received* from that gateway (that is the gateway relay project). While
-that is missing, an agent that must receive on another machine should be a
-dedicated agent living there — see the cross_machine_join skill.
+Inbound: a paired machine pushes a group's messages to this agent's **own** gateway over
+the relay (see ``docs/cross_machine_relay_design.md``), and that gateway delivers them to
+the agent's socket — so a group joined over there is received here. At boot,
+:func:`restore_peer_state` logs in to each peer again and re-asserts those subscriptions,
+so a restart resumes them instead of starting from nothing.
 """
 
 from __future__ import annotations
 
 import json
+import logging
 import os
 import time
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 _BRIDGES: dict[str, Any] = {}
 
@@ -451,6 +455,60 @@ def _local_agent_id() -> str:
     except Exception:
         pass
     return os.path.basename(os.path.dirname(path))
+
+
+def restore_peer_state() -> dict[str, Any]:
+    """Re-establish what this agent already had on paired machines.
+
+    A restart used to mean "start from nothing": the peer bridge was rebuilt lazily on the
+    first remote call, and a relay subscription the owner had dropped — a wiped store, a
+    re-paired peer — was never re-asserted, so the agent stayed **silently** cut off from a
+    group it is in. At boot this logs in to each paired machine (a stale token surfaces in
+    the log now rather than on the first send) and re-asserts the subscription for every
+    group it remembers there. The owner answering "already subscribed" is fine; the missing
+    case is what this is for.
+
+    Never raises: a restart must not fail because one peer is unreachable.
+    """
+    summary: dict[str, Any] = {"peers": [], "errors": []}
+    try:
+        peers = load_peers()
+    except Exception as exc:  # noqa: BLE001
+        summary["errors"].append(f"could not read peers: {exc}")
+        return summary
+
+    for host, entry in peers.items():
+        account = entry.get("account") if isinstance(entry.get("account"), dict) else {}
+        record: dict[str, Any] = {
+            "host": host,
+            "base_url": entry.get("base_url") or "",
+            "logged_in": False,
+            "groups": {},
+        }
+        if not account.get("email") or not account.get("password"):
+            record["note"] = "no account on that machine; im.register_account(..., host=...) first"
+            summary["peers"].append(record)
+            continue
+
+        bridge, why = peer_bridge(host)
+        if bridge is None:
+            record["note"] = why
+            summary["errors"].append(f"{host}: {why}")
+            summary["peers"].append(record)
+            continue
+        record["logged_in"] = True
+
+        for group_id in [str(g) for g in (entry.get("groups") or []) if str(g)]:
+            relay = subscribe_group(host, group_id)
+            record["groups"][group_id] = "subscribed" if relay.get("ok") else "not_subscribed"
+            if not relay.get("ok"):
+                summary["errors"].append(f"{host}/{group_id}: {relay.get('error')}")
+        summary["peers"].append(record)
+
+    for peer in summary["peers"]:
+        if peer.get("groups") or peer.get("note"):
+            logger.info("[PeerBridge] restored %s: %s", peer["host"], peer)
+    return summary
 
 
 def subscribe_group(host: str, group_id: str, timeout: float = 10.0) -> dict[str, Any]:

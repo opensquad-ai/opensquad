@@ -873,6 +873,17 @@ class AgentBootPhases:
                         import opensquad.bridge as bridge_module
 
                         bridge_module.bridge = agent_bridge
+                        # Paired machines: log in again and re-assert the relay
+                        # subscriptions, so a restart resumes the remote groups this agent
+                        # was in instead of silently starting from nothing.
+                        try:
+                            from opensquad.peer_bridge import restore_peer_state
+
+                            restored = await asyncio.to_thread(restore_peer_state)
+                            if restored.get("peers"):
+                                logger.info(f"[Boot] Paired machines restored: {restored}")
+                        except Exception as exc:
+                            logger.warning(f"[Boot] Peer restore skipped: {exc}")
                         return  # success — exit retry loop
                     else:
                         logger.error("[Boot] ChatPro Bridge login failed after 5 attempts")
