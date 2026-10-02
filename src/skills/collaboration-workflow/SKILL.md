@@ -32,6 +32,10 @@ Phase 4: 完成验收 ──→ 向用户交付成果 ──→ 用户确认 ─
 
 ## Where to Talk: the Task Window, not the Group
 
+**Rule: task-related communication stays in the task window. Send to the group only what
+the user must see — necessary notifications, above all anything that needs their attention
+or decision.**
+
 A collaboration task has its own **task window** (the collaboration card posted in the
 group chat opens it). Everything about the task happens there, not in the group:
 
@@ -44,6 +48,9 @@ group chat opens it). Everything about the task happens there, not in the group:
 - **Anything the user must see or decide goes to the group**, not the window: a question,
   a choice, an approval to give, a blocker, a delivery to accept. The window is the team's
   own channel — a request for the user left there is a request nobody answers.
+- **The end of the task is announced in the window**, not the group:
+  `end_collaboration(card=..., collab_id=...)` posts the closure into the task thread and
+  wakes the members there. The group only ever held the card that opens the window.
 - **Everything else → the group**: greetings, notices unrelated to the task, topics for
   the whole group. Send it as `im.send_message(content=..., target_id="<group_id>",
   target_type="group")`.

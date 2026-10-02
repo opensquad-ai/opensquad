@@ -65,6 +65,18 @@ def test_the_window_is_the_teams_channel_and_the_user_gets_the_group():
     text = PART.read_text(encoding="utf-8")
     assert "team's own channel" in text
     assert "Anything the **user** needs to see" in text
+    # the rule of thumb leads the section instead of being buried in the bullets
+    assert "Rule of thumb: everything about a collaboration task is communicated inside" in text
+    assert "above all\nanything that needs their attention or decision" in text
 
     skill = SKILL.read_text(encoding="utf-8")
     assert "Anything the user must see or decide goes to the group" in skill
+    assert "Rule: task-related communication stays in the task window" in skill
+
+
+def test_the_end_of_a_task_is_announced_in_the_window():
+    text = PART.read_text(encoding="utf-8")
+    assert "The end of the task is announced in the window too" in text
+
+    skill = SKILL.read_text(encoding="utf-8")
+    assert "The end of the task is announced in the window" in skill

@@ -588,14 +588,16 @@ def end_collaboration(card: str, collab_id: str = "", group_id: str = "") -> dic
 
     This will:
     1. Unload the collab card from your prompt
-    2. Notify all members via group chat to leave
+    2. Post the closure **in the task window** and wake the members — the group gets
+       nothing: the end notice is task talk, and the window is where its record lives.
 
-    IMPORTANT: Only call this AFTER the user has confirmed project completion.
+    IMPORTANT: Only call this AFTER the user has confirmed project completion (the
+    任务验收 gate) — that is what unlocks this call.
 
     Args:
         card: Collab card name to end
-        group_id: ID or name of the group to send the end notification to.
-                  Should be the same group used in start_collaboration().
+        collab_id: the task being closed (its thread receives the notice)
+        group_id: kept for compatibility; the notice no longer goes to the group
     """
     # 0. The last gate is the user's sign-off: a task cannot be closed without it.
     gate_msg = _gate_requirement_message(collab_id, ("任务验收",))
@@ -607,121 +609,48 @@ def end_collaboration(card: str, collab_id: str = "", group_id: str = "") -> dic
 
     unload_result = remove_skill(f"collab_{card}")
 
-    # 2. Notify group chat
+    # 2. The closure is task talk: it goes into the task window, not the group. Members are
+    # woken by the same directed delivery (so they know to unload the card) and the window
+    # keeps the record; the group is left alone — it only ever held the card that opens it.
     im_result = None
-    if not group_id:
-        im_result = "No group_id provided; notify members manually"
+    if not collab_id:
+        im_result = "No collab_id; members must be told by other means"
     else:
         try:
-            from ..peer_bridge import owner_bridge
+            from ..collab_board import append_public_discussion, get_task, list_participants
 
-            bridge, _why = owner_bridge(group_id=group_id, collab_id=collab_id)
-
-            if bridge is not None:
-                # Resolve group name -> ID if needed
-                target = group_id
-                groups = bridge.list_groups_api()
-                if not any(g.get("id") == group_id for g in groups if isinstance(g, dict)):
-                    for g in groups:
-                        if isinstance(g, dict) and g.get("name") == group_id:
-                            target = g.get("id", group_id)
-                            break
-                mention_str = ""
-                mentioned_members = []
-                current_agent_id = ""
-                try:
-                    from ..input_hub import input_hub
-
-                    _dir = input_hub.agent_dir or ""
-                    current_agent_id = os.path.basename(_dir) if _dir else ""
-                except Exception:
-                    current_agent_id = ""
-
-                if collab_id:
-                    try:
-                        from ..collab_board import list_tasks
-
-                        tasks = list_tasks()
-                        target_task = next((t for t in tasks if str(t.get("task_id", "")) == collab_id), None)
-                        members = target_task.get("members", []) if isinstance(target_task, dict) else []
-                        if members:
-                            mentioned_members.extend(members)
-                    except Exception as e:
-                        logger.warning(f"[Collab] Failed to get members from collab_board: {e}")
-
-                if not mentioned_members:
-                    try:
-                        # Same owner bridge: the member roster is that gateway's.
-                        if bridge is not None:
-                            detail = bridge.get_group_detail_api(target)
-                            if detail:
-                                raw_members = detail.get("members", [])
-                                member_map: dict[str, str] = {}
-                                for m in raw_members:
-                                    if isinstance(m, dict):
-                                        uid = str(m.get("id", ""))
-                                        if uid:
-                                            member_map[uid] = m.get("name", "")
-
-                                agents_base = _agents_dir()
-                                if os.path.isdir(agents_base):
-                                    for entry in sorted(os.listdir(agents_base)):
-                                        agent_path = os.path.join(agents_base, entry)
-                                        config_path = os.path.join(agent_path, "config.json")
-                                        if not os.path.isdir(agent_path) or not os.path.exists(config_path):
-                                            continue
-                                        from opensquad.json_cache import load_json_cached
-
-                                        cfg = load_json_cached(config_path)
-                                        if not cfg:
-                                            continue
-
-                                        agent_id = str(cfg.get("agent_id", ""))
-                                        if agent_id in member_map:
-                                            mentioned_members.append(agent_id)
-                    except Exception as e:
-                        logger.warning(f"[Collab] Failed to get group members for mention: {e}")
-
-                # Exclude self from the mention list — PM doesn't need to be reminded
-                # that they ended the collaboration themselves.
-                unique_members = []
-                if mentioned_members:
-                    unique_members = [m for m in dict.fromkeys(mentioned_members) if m and m != current_agent_id]
-                    mention_str = " ".join([f"@{m}" for m in unique_members]) + "\n" if unique_members else ""
-
-                msg = (
-                    f"{mention_str}"
-                    f"[Collaboration Ended] Collab Card: {card}\n"
-                    f"Task ID: {collab_id or '(not provided)'}\n"
-                    f'Project completed. Please call leave_collaboration(card="{card}") '
-                    f"to unload the collab card."
+            me = _my_agent_id() or "unknown_agent"
+            task = get_task(task_id=collab_id) or {}
+            task_name = str(task.get("task_name") or collab_id)
+            note = (
+                f"协作任务已结束（{card}）。不要再拿这个 collab_id 更新看板；"
+                f'需要退出协作请调用 leave_collaboration(card="{card}")。'
+            )
+            append_public_discussion(
+                collab_id=collab_id,
+                task_name=task_name,
+                author_agent_id=me,
+                title="协作结束",
+                content=note,
+            )
+            recipients = [
+                str(part.get("agent_id") or "")
+                for part in list_participants(collab_id=collab_id)
+                if str(part.get("agent_id") or "") and str(part.get("agent_id")) != me
+            ]
+            if recipients:
+                _deliver_to_agents(
+                    collab_id=collab_id,
+                    card=card,
+                    group_id=str((task.get("extra") or {}).get("group_id") or group_id or ""),
+                    members=recipients,
+                    message=f"[Task window] 协作任务 {collab_id}（{task_name}）已结束：{note}",
+                    title=task_name,
                 )
-                bridge.send_message(msg, target_id=target, target_type="group")
-                try:
-                    if collab_id:
-                        from ..collab_approval import build_collab_task_payload, post_collab_task_card
-                        from ..collab_board import list_participants
-
-                        post_collab_task_card(
-                            build_collab_task_payload(
-                                collab_id=collab_id,
-                                title=card,
-                                kind="done",
-                                group_id=str(target),
-                                card=card,
-                                summary="Collaboration finished — the task window keeps the full record.",
-                                participants=list_participants(collab_id=collab_id),
-                                status="done",
-                            ),
-                            str(target),
-                        )
-                except Exception:
-                    pass
-                im_result = "End notification sent"
-            else:
-                im_result = "Bridge not connected; notify members manually"
+            im_result = "End notice posted in the task window"
         except Exception as e:
-            logger.warning(f"[Collab] Failed to send end notification: {e}")
+            logger.warning(f"[Collab] Failed to post the end notice: {e}")
+            im_result = f"Failed to post the end notice: {e}"
 
     if collab_id:
         try:
