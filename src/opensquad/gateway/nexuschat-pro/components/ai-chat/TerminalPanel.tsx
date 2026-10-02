@@ -97,9 +97,47 @@ export const TerminalPanel: React.FC<TerminalPanelProps> = ({ agentId, rootPath 
     setState('connecting');
     const svc = getAiWsService(agentId);
     setConnected(svc.isConnected);
+    if (!svc.isConnected) {
+      // Nothing else dials this agent's socket for us: without this the command below goes
+      // nowhere and the panel waits forever.
+      try {
+        svc.connect(agentId);
+      } catch {
+        /* already connecting */
+      }
+    }
     svc.openTerminal(terminalId, rootPath || undefined, sessionId || undefined);
     window.setTimeout(() => inputRef.current?.focus(), 0);
   }, [agentId, rootPath, sessionId, terminalId]);
+
+  /**
+   * The socket may not be up yet when the tab opens (lazily dialled, or the agent is still
+   * starting) — and a command sent on a closed socket is dropped, which left the panel saying
+   * "正在启动 shell…" forever. So: dial it, keep the indicator honest, and re-ask for the shell
+   * once the socket is there.
+   */
+  useEffect(() => {
+    if (!agentId || state !== 'connecting') return;
+    let tries = 0;
+    const timer = window.setInterval(() => {
+      const svc = getAiWsService(agentId);
+      const live = svc.isConnected;
+      setConnected(live);
+      if (!live) {
+        try {
+          svc.connect(agentId);
+        } catch {
+          /* already connecting */
+        }
+        return;
+      }
+      // connected: ask again (idempotent — the agent reuses a live terminal with the same id)
+      tries += 1;
+      svc.openTerminal(terminalId, rootPath || undefined, sessionId || undefined);
+      if (tries >= 3) window.clearInterval(timer);
+    }, 1000);
+    return () => window.clearInterval(timer);
+  }, [agentId, state, terminalId, rootPath, sessionId]);
 
   /** Open on mount; stop the shell when the panel goes away. */
   useEffect(() => {
@@ -235,7 +273,7 @@ export const TerminalPanel: React.FC<TerminalPanelProps> = ({ agentId, rootPath 
       </div>
 
       <div className="flex-shrink-0 px-2 pb-1 text-[10px] leading-snug text-textMuted/70">
-        {t('aiChat.terminal.noTtyNote')}
+        {connected ? t('aiChat.terminal.noTtyNote') : t('aiChat.terminal.needAgent')}
       </div>
     </div>
   );

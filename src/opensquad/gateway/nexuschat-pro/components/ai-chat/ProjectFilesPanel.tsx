@@ -284,6 +284,12 @@ interface ProjectFilesPanelProps {
   }) => void;
   /** Tree-only mode: no inline preview; open files via onOpenFile. */
   treeOnly?: boolean;
+  /**
+   * Show the rail's top-level tabs (浏览器 / 终端 / 文件) in the title row instead of the
+   * plain title. Passed by the Agent Web workspace rail; the chat drawer does not pass it, so
+   * it stays a plain file list.
+   */
+  viewTabs?: boolean;
   /** Called when user opens a file (treeOnly or when provided). */
   onOpenFile?: (relPath: string) => void;
   /**
@@ -646,6 +652,12 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
   onOpenFile,
   uiMode = 'solo',
   hideAllFiles = false,
+  /**
+   * Show the rail's top-level tabs (浏览器 / 终端 / 文件) in the title row. Set by the Agent
+   * Web workspace rail; the chat drawer (which mounts this same panel as a plain list) does
+   * not pass it, so it keeps the title.
+   */
+  viewTabs = false,
 }) => {
   const { t } = useTranslation();
   /** Work(classic) 模式：变动区 = 产物（本次会话产出的文件），不展示代码变更。 */
@@ -667,7 +679,7 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
    * interactive shell for this workspace. (`treeOnly` = the chat drawer, which stays a list.)
    */
   const [railTab, setRailTabState] = useState<PaneViewId>(() => {
-    if (treeOnly) return 'files';
+    if (!viewTabs) return 'files';
     try {
       const stored = window.localStorage.getItem(RAIL_TAB_KEY);
       return stored === 'browser' || stored === 'terminal' ? stored : 'files';
@@ -689,13 +701,13 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
     const onRail = (event: Event) => {
       const wanted = (event as CustomEvent<{ tab?: FilesRailTab }>).detail?.tab;
       // A 更改 / 文件 row means "show me the list", whatever tab the rail was on.
-      if (!treeOnly) selectRailTab('files');
+      if (viewTabs) selectRailTab('files');
       setTab(wanted === 'changed' ? 'changed' : 'all');
       if (wanted === 'changed') setChangedScope('session');
     };
     window.addEventListener(OPEN_FILES_RAIL_EVENT, onRail);
     return () => window.removeEventListener(OPEN_FILES_RAIL_EVENT, onRail);
-  }, [selectRailTab, treeOnly]);
+  }, [selectRailTab, viewTabs]);
   /** 改动 view: this conversation's files (session snapshot) or everything git
    *  reports as uncommitted. Defaults to the snapshot, which is what the tab has
    *  always meant. */
@@ -2801,14 +2813,7 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
       {/* Top-level tabs — the row that used to be this panel's title. 浏览器 / 终端 / 文件 sit
           side by side here; the chat drawer (treeOnly) keeps the plain title. */}
       <div className="h-11 px-1.5 border-b border-border box-border flex-shrink-0 flex items-center gap-1">
-        {treeOnly ? (
-          <div
-            className="flex-1 min-w-0 text-[13px] font-medium leading-none text-textMuted truncate"
-            title={rootPath || projectLabel || undefined}
-          >
-            {t('aiChat.workspaceFiles')}
-          </div>
-        ) : (
+        {viewTabs ? (
           <div
             role="tablist"
             aria-label={t('aiChat.workspaceViews')}
@@ -2845,8 +2850,15 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
               );
             })}
           </div>
+        ) : (
+          <div
+            className="flex-1 min-w-0 text-[13px] font-medium leading-none text-textMuted truncate"
+            title={rootPath || projectLabel || undefined}
+          >
+            {t('aiChat.workspaceFiles')}
+          </div>
         )}
-        {!treeOnly && railTab !== 'files' ? null : (
+        {viewTabs && railTab !== 'files' ? null : (
           <div className="flex items-center gap-0.5 shrink-0">
             <button
               type="button"
@@ -2920,9 +2932,9 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
 
       {/* 浏览器 / 终端 are the other two tabs; the file list (below) is the third and is
           unchanged, including the chat drawer's treeOnly usage. */}
-      {!treeOnly && railTab === 'browser' ? (
+      {viewTabs && railTab === 'browser' ? (
         <BrowserPanel />
-      ) : !treeOnly && railTab === 'terminal' ? (
+      ) : viewTabs && railTab === 'terminal' ? (
         <TerminalPanel agentId={agentId} rootPath={rootPath} />
       ) : (
       <div className="flex-1 min-h-0 flex">

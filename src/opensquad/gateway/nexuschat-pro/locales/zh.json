@@ -964,6 +964,7 @@
       "clear": "清屏",
       "restart": "重启 shell",
       "placeholder": "输入命令后回车…",
+      "needAgent": "终端由 agent 进程托管：agent 未连接时无法启动 shell（已改为自动重连，连上后会立刻起 shell）。",
       "noTtyNote": "说明：这不是完整的终端（无 TTY）。git / npm / python / 构建 / 测试等行式命令可用；vim、top 这类全屏程序与交互式密码提示不可用。"
     },
     "changedFiles": "变动文件",

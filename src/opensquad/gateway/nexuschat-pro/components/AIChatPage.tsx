@@ -6325,6 +6325,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
         liveChanges={filesLiveChanges}
         onSessionChanges={onSessionChangesStable}
         treeOnly
+        viewTabs
         onOpenFile={handleOpenFileInTab}
         uiMode={uiMode === 'solo' ? 'solo' : 'classic'}
       />
