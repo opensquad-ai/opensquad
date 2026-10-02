@@ -500,7 +500,14 @@ def restore_peer_state() -> dict[str, Any]:
 
         for group_id in [str(g) for g in (entry.get("groups") or []) if str(g)]:
             relay = subscribe_group(host, group_id)
+            backfilled = int(relay.get("backfilled") or 0)
             record["groups"][group_id] = "subscribed" if relay.get("ok") else "not_subscribed"
+            if backfilled:
+                # The owner was holding frames for this machine while it was down, and
+                # handed them over as part of the re-assert: worth saying in the boot
+                # summary, because it is the difference between "up again" and "caught
+                # up again".
+                record["backfilled"] = int(record.get("backfilled") or 0) + backfilled
             if not relay.get("ok"):
                 summary["errors"].append(f"{host}/{group_id}: {relay.get('error')}")
         summary["peers"].append(record)
@@ -574,4 +581,17 @@ def subscribe_group(host: str, group_id: str, timeout: float = 10.0) -> dict[str
     # every push, and a push aimed at another local user is refused rather than
     # delivered (see relay_link.verify_inbound_user).
     relay_link.remember_outbound(str(group_id), host_key(host), secret, user_id=user_id)
-    return {"ok": True, "group_id": str(group_id), "callback_url": callback_url}
+    # (Re)subscribing also says "I am back": the owner hands over whatever it could not
+    # deliver while this machine was away and answers with the count, so a reconnect
+    # catches up at once instead of waiting for the owner's retry tick.
+    backfilled = 0
+    try:
+        backfilled = int((resp.json() or {}).get("backfilled") or 0)
+    except Exception:
+        backfilled = 0
+    return {
+        "ok": True,
+        "group_id": str(group_id),
+        "callback_url": callback_url,
+        "backfilled": backfilled,
+    }

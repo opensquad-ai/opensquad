@@ -17,8 +17,16 @@ from opensquad.relay_link import (  # noqa: F401  (re-exported for gateway calle
     RELAY_MAX_HOPS,
     already_seen,
     build_envelope,
+    clear_outbox,
+    drop_outbox,
+    due_outbox,
+    enqueue_outbox,
     forget_outbound,
     new_secret,
+    outbox_entries,
+    outbox_size,
+    prune_outbox,
+    record_outbox_attempt,
     remember_outbound,
     reset_seen,
     status,
@@ -40,34 +48,22 @@ def _deliver_url(callback_url: str) -> str:
     return f"{base}/api/relay/deliver"
 
 
-async def _push_one(
-    client,
-    sub: dict,
-    group_id: str,
-    payload: dict,
-    origin_host: str,
-    timeout: float,
-    kind: str = "message:relay",
-) -> bool:
-    """One subscriber's push. True on 200; never raises."""
+async def _push_envelope(client, sub: dict, envelope: dict, timeout: float) -> tuple[bool, str]:
+    """One subscriber's push. ``(delivered, error)``; never raises.
+
+    The caller builds the envelope so a failed push can be queued **exactly as it was
+    attempted**: a retry must send the identical frame, or the receiving gateway
+    cannot recognise it as the same message and would deliver it twice.
+    """
+    group_id = str(envelope.get("group_id") or "")
     url = _deliver_url(sub.get("callback_url", ""))
-    envelope = build_envelope(
-        group_id,
-        payload,
-        origin_host,
-        user_id=sub.get("user_id", ""),
-        kind=kind,
-        # A task event is delivered to the agent's control channel, so the receiving
-        # gateway needs to know which agent it is for.
-        target_agent_id=str(sub.get("agent_id") or "") if kind.startswith("task") else "",
-    )
     try:
         resp = await client.post(
             url,
             json=envelope,
             headers={
                 "X-Relay-Secret": sub.get("secret", ""),
-                "X-Relay-Origin": str(origin_host or ""),
+                "X-Relay-Origin": str(envelope.get("origin_host") or ""),
             },
             timeout=timeout,
         )
@@ -78,14 +74,30 @@ async def _push_one(
             except Exception:
                 body = {}
             # The home gateway answers 200 even when it could not hand the frame to
-            # anyone ("delivered": false) — reporting that as a success would hide an
-            # agent that is simply offline.
-            return bool(body.get("delivered", True))
+            # anyone ("delivered": false) — that is the agent being offline, which is
+            # precisely what the queue is for.
+            if bool(body.get("delivered", True)):
+                return True, ""
+            return False, str(body.get("reason") or "receiver delivered to nobody")
         logger.warning("[Relay] push to %s returned %s for group %s", url, resp.status_code, group_id)
-        return False
+        return False, f"HTTP {resp.status_code}"
     except Exception as exc:
         logger.warning("[Relay] push to %s failed for group %s: %s", url, group_id, exc)
-        return False
+        return False, str(exc)
+
+
+def _envelope_for(sub: dict, group_id: str, payload: dict, origin_host: str, kind: str) -> dict:
+    """The frame one subscriber receives — carrying its own user (and agent) id."""
+    return build_envelope(
+        group_id,
+        payload,
+        origin_host,
+        user_id=sub.get("user_id", ""),
+        kind=kind,
+        # A task event is delivered to the agent's control channel, so the receiving
+        # gateway needs to know which agent it is for.
+        target_agent_id=str(sub.get("agent_id") or "") if kind.startswith("task") else "",
+    )
 
 
 async def _fan_out_kind(
@@ -107,21 +119,25 @@ async def _fan_out_kind(
     The pushes are independent, so they run together: doing them one by one added a
     dead peer's whole timeout to the *sender's* request, N subscribers worst case.
     ``budget`` caps the whole fan-out; whatever is still in flight is cancelled and
-    counted failed. Never raises, and a failure is reported, not retried and never
-    written locally — a relayed event that cannot be delivered must surface, not
-    silently become a local one.
+    counted failed.
+
+    **A failure is queued, not dropped.** The group lives here, so a subscriber that
+    did not hear a message has no way to fetch it (its own history is this machine's
+    history) — a task event is not in any history at all. Queued frames are retried by
+    :func:`_retry_loop` and flushed the moment the subscriber comes back.
     """
     subs = subscribers(group_id)
     if not subs:
-        return {"ok": True, "delivered": 0, "failed": 0}
+        return {"ok": True, "delivered": 0, "failed": 0, "queued": 0}
     dedupe_id = str((payload or {}).get("id") or (payload or {}).get("event_id") or "")
     if dedupe_id and already_seen(origin_host, dedupe_id):
-        return {"ok": True, "delivered": 0, "failed": 0, "skipped": "duplicate"}
+        return {"ok": True, "delivered": 0, "failed": 0, "queued": 0, "skipped": "duplicate"}
 
     from app.http_clients import get_local_http_client
 
     client = get_local_http_client()
-    tasks = [asyncio.create_task(_push_one(client, sub, group_id, payload, origin_host, timeout, kind)) for sub in subs]
+    pairs = [(sub, _envelope_for(sub, group_id, payload, origin_host, kind)) for sub in subs]
+    tasks = [asyncio.create_task(_push_envelope(client, sub, envelope, timeout)) for sub, envelope in pairs]
     done, pending = await asyncio.wait(tasks, timeout=max(0.01, float(budget)))
     for task in pending:
         task.cancel()
@@ -134,13 +150,168 @@ async def _fan_out_kind(
             budget,
         )
     delivered = 0
+    failed = 0
+    queued = 0
+    for (sub, envelope), task in zip(pairs, tasks, strict=True):
+        if task in pending:
+            ok, error = False, "peer did not answer within the fan-out budget"
+        else:
+            try:
+                ok, error = task.result()
+            except Exception as exc:
+                ok, error = False, str(exc)
+        if ok:
+            delivered += 1
+            continue
+        failed += 1
+        if enqueue_outbox(
+            group_id=group_id,
+            envelope=envelope,
+            callback_url=str(sub.get("callback_url") or ""),
+            user_id=str(sub.get("user_id") or ""),
+            error=error,
+        ).get("ok"):
+            queued += 1
+    if queued:
+        logger.warning(
+            "[Relay] %d push(es) for group %s could not be delivered and are queued for retry",
+            queued,
+            group_id,
+        )
+    return {"ok": failed == 0, "delivered": delivered, "failed": failed, "queued": queued}
+
+
+async def flush_outbox(
+    *,
+    group_id: str = "",
+    callback_url: str = "",
+    user_id: str = "",
+    now: float | None = None,
+    timeout: float = 8.0,
+    budget: float = 5.0,
+    limit: int = 50,
+) -> dict:
+    """Retry what is queued: on a tick, and the moment a subscriber (re)subscribes.
+
+    An entry whose subscriber is gone — unsubscribed, or its peer was revoked — is
+    dropped without a push: nobody is listening, and retrying would keep a dead
+    peer's traffic forever.
+
+    Bounded like the first attempt, so a slow peer costs the budget and not the
+    caller (a subscribe request flushes the backlog before it answers).
+    """
+    from opensquad import relay_link
+
+    # Expired entries are dropped here, not merely skipped: this is what stops a peer
+    # that never comes back from leaving its stale frames in the file forever.
+    relay_link.prune_outbox(now=now)
+    entries = relay_link.due_outbox(now=now, limit=limit)
+    if group_id:
+        entries = [e for e in entries if str(e.get("group_id") or "") == str(group_id)]
+    if callback_url:
+        wanted = str(callback_url).rstrip("/")
+        entries = [e for e in entries if str(e.get("callback_url") or "") == wanted]
+    if user_id:
+        entries = [e for e in entries if str(e.get("user_id") or "") == str(user_id)]
+    if not entries:
+        return {"ok": True, "delivered": 0, "failed": 0, "dropped": 0}
+
+    from app.http_clients import get_local_http_client
+
+    client = get_local_http_client()
+
+    async def _retry_one(entry: dict) -> str:
+        key = str(entry.get("key") or "")
+        live = [
+            s
+            for s in subscribers(str(entry.get("group_id") or ""))
+            if str(s.get("callback_url") or "").rstrip("/") == str(entry.get("callback_url") or "")
+            and str(s.get("user_id") or "") == str(entry.get("user_id") or "")
+        ]
+        if not live:
+            relay_link.drop_outbox(key)
+            return "dropped"
+        ok, error = await _push_envelope(client, live[0], entry.get("envelope") or {}, timeout)
+        if ok:
+            relay_link.drop_outbox(key)
+            return "delivered"
+        relay_link.record_outbox_attempt(key, error, now=now)
+        return "failed"
+
+    # One task per subscriber, its entries in arrival order inside it. A machine that
+    # comes back should receive what it missed in the order it was sent — pushing a
+    # subscriber's backlog concurrently would shuffle it. Different subscribers still
+    # run together, so one slow peer delays neither another peer nor the caller.
+    series: dict[tuple[str, str], list[dict]] = {}
+    for entry in entries:
+        series.setdefault((str(entry.get("callback_url") or ""), str(entry.get("user_id") or "")), []).append(entry)
+
+    async def _retry_series(queue: list[dict]) -> list[str]:
+        outcomes = []
+        for entry in queue:
+            outcomes.append(await _retry_one(entry))
+        return outcomes
+
+    tasks = [asyncio.create_task(_retry_series(queue)) for queue in series.values()]
+    done, pending = await asyncio.wait(tasks, timeout=max(0.01, float(budget)))
+    for task in pending:
+        task.cancel()
+    if pending:
+        await asyncio.gather(*pending, return_exceptions=True)
+    counts = {"delivered": 0, "failed": 0, "dropped": 0}
     for task in done:
         try:
-            delivered += 1 if task.result() else 0
+            outcomes = list(task.result())
         except Exception:
-            pass
-    failed = len(done) - delivered + len(pending)
-    return {"ok": failed == 0, "delivered": delivered, "failed": failed}
+            outcomes = ["failed"]
+        for outcome in outcomes:
+            counts[outcome] = counts.get(outcome, 0) + 1
+    # A cancelled series leaves its remaining entries queued and untouched: they are
+    # retried on the next pass, which is the point of a queue.
+    counts["failed"] += len(pending)
+    return {"ok": counts["failed"] == 0, **counts}
+
+
+# How often the queue is retried. Long enough to be cheap, short enough that a peer
+# that comes back is served without a human doing anything.
+RETRY_INTERVAL_S = 20.0
+
+_retry_task: asyncio.Task | None = None
+
+
+async def _retry_loop(interval: float = RETRY_INTERVAL_S, first_delay: float = 3.0) -> None:
+    """Retry the queue forever, once the app has finished starting."""
+    delay = first_delay
+    while True:
+        try:
+            await asyncio.sleep(delay)
+            res = await flush_outbox()
+            if res.get("delivered") or res.get("failed") or res.get("dropped"):
+                logger.info("[Relay] outbox retry: %s", res)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # one bad pass must not end the loop
+            logger.debug("[Relay] outbox retry pass failed: %s", exc)
+        delay = interval
+
+
+def ensure_retry_loop(loop: asyncio.AbstractEventLoop | None = None) -> dict:
+    """Start the retry loop once (idempotent, like the agent liveness sweeper)."""
+    global _retry_task
+    if _retry_task is not None and not _retry_task.done():
+        return {"started": False, "running": True}
+    try:
+        running = loop or asyncio.get_running_loop()
+    except RuntimeError:
+        return {"started": False, "running": False}
+    _retry_task = running.create_task(_retry_loop(), name="relay-outbox-retry")
+    logger.info("[Relay] outbox retry loop started (every %.0fs)", RETRY_INTERVAL_S)
+    return {"started": True, "running": True}
+
+
+def retry_loop_running() -> bool:
+    """Diagnostics/tests: is the retry loop alive?"""
+    return _retry_task is not None and not _retry_task.done()
 
 
 async def fan_out(

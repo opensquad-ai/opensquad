@@ -74,7 +74,21 @@ async def relay_subscribe(request: Request, body: dict = Body(default={})):
         # …and so a task-window event can be handed to that agent's control channel.
         agent_id=agent_id,
     )
-    return {**result, "origin_host": _origin_host()}
+    # (Re)subscribing is also "I am back": anything the owner could not deliver while
+    # this machine was away is pushed now, instead of waiting for the retry tick.
+    backfilled = {"delivered": 0, "failed": 0, "dropped": 0}
+    try:
+        backfilled = await relay.flush_outbox(
+            group_id=group_id, callback_url=callback_url, user_id=user_id, timeout=6.0, budget=4.0
+        )
+    except Exception as exc:  # a failed backfill must not fail the subscription
+        logger.warning("[Relay] backfill after subscribe failed: %s", exc)
+    return {
+        **result,
+        "origin_host": _origin_host(),
+        "backfilled": int(backfilled.get("delivered") or 0),
+        "backfill_failed": int(backfilled.get("failed") or 0),
+    }
 
 
 @router.delete("/relay/subscribe")

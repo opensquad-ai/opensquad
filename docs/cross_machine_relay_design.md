@@ -96,41 +96,72 @@ in the one place that already has an identity per machine — the gateway.
    if it knows the endpoint), and an older peer simply 404s the subscribe call —
    the join still succeeds and reports `relay: not_subscribed`. A positive
    capability exchange is still to be added.
-5. **Failure semantics.** No queue, no retry: `fan_out` reports `{delivered,
-   failed}` and logs; a failed push never becomes a local write. The joining agent
-   sees `relay: not_subscribed` in the `join_group` result when the peer refused.
-   Pushes run **concurrently under one total budget** (`budget`, 5 s by default):
-   `fan_out` is awaited from `notify_new_message`, which sits in the send-message
-   handler, so doing them one at a time let a single dead peer add its whole
-   timeout to the *sender's* request. Whatever is still in flight when the budget
-   expires is cancelled and counted as failed.
+5. **Failure semantics: a failed push is queued, retried, and backfilled.** A push
+   fails for reasons the peer cannot help — its gateway is restarting, its agent is
+   offline, the LAN hiccuped. Counting the failure and dropping the frame loses the
+   message for good: the group lives on the **owner** machine, so a subscriber that
+   never heard a message has no way to fetch it (its history *is* the owner's
+   history) and a task event is in no history at all. So:
+   - **Queue.** A failed push is written to a gateway-owned, **on-disk** outbox
+     (`relay_outbox.json`) holding the identical envelope that was attempted. On disk
+     because the failures that matter include *this* machine restarting. Keyed by
+     message as well as subscriber, so the same frame never stacks twice. A frame with
+     no `id`/`event_id` is **not** queued — a retry could not be deduplicated, so it is
+     logged and dropped rather than guessed at.
+   - **Retry.** Backoff 20/40/80/160/240 s (capped), at most 6 attempts, and entries
+     expire after 10 minutes; the waits sum to less than the TTL, so the last attempt
+     always runs before the entry expires. The retry loop starts at gateway boot
+     (`ensure_retry_loop`, idempotent, 20 s tick) and drops entries whose subscriber is
+     gone (unsubscribed, or the peer was revoked) without pushing.
+   - **Backfill.** `POST /api/relay/subscribe` *is* "I am back": the owner flushes that
+     subscriber's backlog before answering, and reports `backfilled` /
+     `backfill_failed`. This is what makes a machine that was off for an hour catch up
+     in one round trip rather than one message per tick.
+   - **Retry safety.** A push that arrived but whose answer was lost is retried too, so
+     the receiving gateway must still recognise the second copy: hence
+     **`DEDUP_TTL_S` (900 s) > `OUTBOX_TTL_S` (600 s)**, asserted by a test. The queue
+     can never outlive the window that makes its retries idempotent.
+   - **Bounded.** The queue is capped (500 entries, oldest dropped loudly), and both
+     the first attempt and every retry run concurrently under one budget: a dead peer
+     costs the budget, never the sender's request. `relay.status()["outbox"]` reports
+     what is waiting and how old the oldest is.
+   An older peer that does not subscribe simply never gets a queue entry (nothing was
+   attempted), and the joining agent still sees `relay: not_subscribed`.
 6. **Unsubscribe / revoke.** `DELETE /api/relay/subscribe` exists (by group, or by
-   `callback_url`+`user_id`). Not yet wired to peer-token revocation or to
-   `leave_group` — a revoke currently stops auth but leaves the stale subscription
-   row until an explicit unsubscribe.
+   `callback_url`+`user_id`), and revoking a peer now cascades to the rows it created
+   (`unsubscribe_peer`) — a revoked peer stops being pushed to instead of leaving the
+   rows behind. `leave_group(host=...)` unsubscribes too.
 7. **Multi-hop.** Not transitive: cap is 1 hop, fail closed beyond it.
 8. **Store layout.** One file per writer: the **gateway** process owns
-   `relay_subscribers.json` (who wants a group pushed, and the secret they minted),
-   the **agent** process owns `relay_outbound.json` (the secrets this machine minted
-   for subscriptions it created elsewhere). They used to share one file, which meant
-   read-whole-file / write-whole-file from two processes with only a `threading.Lock`
-   — a last-writer-wins window that silently dropped the other side and surfaced
-   later as an unexplained 401 on the next push. Reads cross processes freely (every
-   write is an atomic rename). A legacy combined `relay_links.json` is migrated once,
-   under an `O_EXCL` lock file, and renamed to `relay_links.json.migrated`.
+   `relay_subscribers.json` (who wants a group pushed, and the secret they minted)
+   **and `relay_outbox.json`** (the pushes it could not deliver — the fan-out runs in
+   the gateway), the **agent** process owns `relay_outbound.json` (the secrets this
+   machine minted for subscriptions it created elsewhere). They used to share one
+   file, which meant read-whole-file / write-whole-file from two processes with only a
+   `threading.Lock` — a last-writer-wins window that silently dropped the other side
+   and surfaced later as an unexplained 401 on the next push. Reads cross processes
+   freely (every write is an atomic rename). A legacy combined `relay_links.json` is
+   migrated once, under an `O_EXCL` lock file, and renamed to
+   `relay_links.json.migrated`.
 
-## What the first cut does **not** cover (still open)
+## What this cut does **not** cover (still open)
 
-- **Task-window messages and board-change notifications.** The relay carries
-  group-chat `new_message` only. Task-window messages (`POST
-  /collab-board/tasks/{id}/messages`) and `board_rev` change pings still travel
-  over the home socket and do not cross machines yet.
+- **board_rev change pings.** A task window still polls the board (5 s) instead of
+  being pushed; only task *messages* cross machines.
 - **DMs.** Out of scope (identity semantics differ from groups).
-- **Revoke-driven unsubscribe** (see 6) and the **positive version handshake**
-  (see 4).
-- **Reconnect reconciliation.** If a gateway restarts, subscriptions persist on
-  disk and are honoured again; but there is no periodic re-assert from the agent,
-  so a subscription dropped by an owner (e.g. store wiped) is not self-healing.
+- **The positive version handshake** (see 4). A peer that is too old to know
+  `/api/relay/subscribe` is still detected by its 404.
+- **Periodic re-assert.** A subscription dropped by an owner (store wiped, peer
+  revoked and re-paired) is not self-healing while both machines keep running: the
+  agent re-asserts at boot (`restore_peer_state`) and on re-join, not on a timer.
+  Note this is about a *dropped subscription*, not lost messages — the queue covers
+  those while it holds them.
+- **An outage longer than the queue's 10 minutes.** Past the TTL the queued frames are
+  given up (loudly). For a group that is acceptable — the owner's history is the
+  recovery path — but a **task-window event has no history to fetch**, so a task event
+  missed during a >10 min outage is gone. Closing that needs either a longer TTL with a
+  matching dedupe window, or a task-event backlog the agent pulls on reconnect; until
+  then, a task event is only as durable as the queue.
 
 ## Non-goals (for the first cut)
 
@@ -151,8 +182,10 @@ must keep stating it: the relay covers group chat, not yet every group feature.
    `im.send_message` / `im.list_groups`.
 2. (done) Gateway relay link: subscribe handshake, one-hop `message:relay`,
    loop guard, per-subscription secret.
-3. (partial) `im.join_group(host=...)` now subscribes. The agent keeps talking only
-   to home for receive; its sends still go direct via the peer bridge, which is
-   fine (outbound already worked).
-4. (open) Task-window messages and board-change pings over the relay; then DMs and
-   multi-hop.
+3. (done) `im.join_group(host=...)` subscribes, and a restart re-asserts it
+   (`restore_peer_state`). The agent keeps talking only to home for receive.
+4. (done) Task-window messages cross machines (`fan_out_task` → the agent's control
+   channel), and a push that fails is **queued, retried, and backfilled** on
+   re-subscribe (see 5).
+5. (open) `board_rev` pings; DMs; the positive version handshake; periodic re-assert;
+   durable task events beyond the queue's TTL; multi-hop.

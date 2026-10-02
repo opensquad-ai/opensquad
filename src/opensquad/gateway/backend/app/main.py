@@ -351,6 +351,15 @@ async def lifespan(app: FastAPI):
         _agent_registry.ensure_liveness_loop(asyncio.get_running_loop())
     except Exception as _e:
         _startup_log.warning(f"agent liveness sweeper start failed: {_e}")
+    # Relay outbox retry: pushes a paired machine could not receive are queued on
+    # disk, so this resumes them after a restart of this machine (and keeps trying
+    # while the peer is off — the message no longer disappears).
+    try:
+        from app import relay as _relay
+
+        _relay.ensure_retry_loop(asyncio.get_running_loop())
+    except Exception as _e:
+        _startup_log.warning(f"relay outbox retry start failed: {_e}")
     # Initialize database in the background — the TCP port and ready-lite
     # become available immediately; DB-backed lite endpoints wait on
     # _db_ready in ReadinessMiddleware.

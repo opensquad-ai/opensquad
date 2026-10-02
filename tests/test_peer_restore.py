@@ -60,6 +60,19 @@ def test_a_restart_logs_in_again_and_re_asserts_every_remembered_group(env, monk
     assert summary["errors"] == []
 
 
+def test_the_boot_summary_says_how_much_was_caught_up(env, monkeypatch):
+    """A re-assert is also a backfill: whatever the owner was holding for this machine
+    while it was down is pushed as part of the reconnect, so the summary reports it."""
+    _peer("192.168.5.4", "g-7f3a")
+    monkeypatch.setattr(peer_bridge_mod, "peer_bridge", lambda host: (object(), ""))
+    monkeypatch.setattr(peer_bridge_mod, "subscribe_group", lambda host, gid: {"ok": True, "backfilled": 2})
+
+    summary = peer_bridge_mod.restore_peer_state()
+
+    assert summary["peers"][0]["groups"] == {"g-7f3a": "subscribed"}
+    assert summary["peers"][0]["backfilled"] == 2
+
+
 def test_a_peer_without_an_account_is_reported_not_guessed(env, monkeypatch):
     _peer("192.168.5.4", "g-7f3a", with_account=False)
     called: list[str] = []

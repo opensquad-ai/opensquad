@@ -128,7 +128,14 @@ def _after_peer_join(host: str, group_id: str) -> dict:
     remember_peer_group(host, group_id)
     relay = subscribe_group(host, group_id)
     if relay.get("ok"):
-        return {"relay": "subscribed"}
+        out = {"relay": "subscribed"}
+        # What the owner was holding for this machine: a reconnect that catches up
+        # says so, rather than leaving the agent to wonder what it missed.
+        backfilled = int(relay.get("backfilled") or 0)
+        if backfilled:
+            out["backfilled"] = backfilled
+            out["backfill_note"] = f"{backfilled} 条离线期间的消息已补投"
+        return out
     return {
         "relay": "not_subscribed",
         "relay_error": str(relay.get("error") or ""),

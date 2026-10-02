@@ -238,7 +238,9 @@ def test_fan_out_posts_the_envelope_to_each_subscriber(store, monkeypatch):
 def test_fan_out_to_nobody_is_a_no_op(store, monkeypatch):
     res = asyncio.run(gw_relay.fan_out("g-nobody", {"id": "m_1"}))
 
-    assert res == {"ok": True, "delivered": 0, "failed": 0}
+    # nothing to deliver, and nothing to queue for a retry either
+    assert res == {"ok": True, "delivered": 0, "failed": 0, "queued": 0}
+    assert gw_relay.outbox_size() == 0
 
 
 def test_fan_out_reports_a_failure_instead_of_raising(store, monkeypatch):

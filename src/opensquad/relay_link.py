@@ -34,21 +34,48 @@ each must be delivered to its own user.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import secrets
 import threading
 import time
 from typing import Any
 
+logger = logging.getLogger(__name__)
+
 # One hop only: a relayed message is delivered and never forwarded again.
 RELAY_MAX_HOPS = 1
 
 # A relayed message is dropped when the same (origin_host, message_id) was already
 # seen within this window — belt to the hop cap's braces.
-DEDUP_TTL_S = 300.0
+#
+# **Invariant: this window must outlive the outbox** (``DEDUP_TTL_S > OUTBOX_TTL_S``).
+# A queued push is retried, and a push that actually arrived but whose answer was
+# lost is retried too — the receiving gateway recognises that second copy only while
+# the window is open. If the queue outlived the window, a late retry would be
+# delivered twice. ``tests/test_relay_outbox.py`` asserts the invariant.
+DEDUP_TTL_S = 900.0
 
 _SUBSCRIBERS_FILE = "relay_subscribers.json"
 _OUTBOUND_FILE = "relay_outbound.json"
+_OUTBOX_FILE = "relay_outbox.json"
+
+# ── the delivery queue ──────────────────────────────────────────────────────
+#
+# A push fails for reasons the peer cannot help: its gateway is restarting, its
+# agent is offline, the LAN hiccuped. Counting the failure and dropping the frame
+# loses the message for good — the group lives *here*, so the subscriber has no
+# other way to learn about it (its own history fetch is the only recovery, and a
+# task event or a DM is not in its history at all). So a failed push is written
+# down, retried with a backoff, and flushed at once when the subscriber comes back.
+OUTBOX_MAX_ATTEMPTS = 6
+# Past this age an entry is dropped: the message is stale by then.
+OUTBOX_TTL_S = 600.0
+# A long outage of the only peer must not grow the file without bound.
+OUTBOX_MAX_ENTRIES = 500
+# First retry soon enough to feel immediate, then back off to the ceiling.
+OUTBOX_BASE_DELAY_S = 20.0
+OUTBOX_MAX_DELAY_S = 240.0
 # What both branches shared before the split, and the lock that keeps the one-time
 # migration from running twice at once.
 _LEGACY_FILE = "relay_links.json"
@@ -298,6 +325,214 @@ def subscribers(group_id: str) -> list[dict]:
     return out
 
 
+# ── owner side: pushes that failed and are waiting for a retry ───────────────
+
+
+def outbox_file() -> str:
+    """Gateway-owned: pushes that failed and are waiting for a retry.
+
+    One writer per file, like the other two halves: the fan-out runs in the gateway
+    process, so the gateway owns this file. It is on disk rather than in memory so a
+    restart of *this* machine resumes the retries instead of losing them.
+    """
+    return os.path.join(store_dir(), _OUTBOX_FILE)
+
+
+def _outbox_entries() -> dict:
+    entries = _branch(outbox_file(), "outbox")
+    return entries if isinstance(entries, dict) else {}
+
+
+def _outbox_write(entries: dict) -> None:
+    _write_path(outbox_file(), {"links": {"outbox": entries}})
+
+
+def _outbox_key(group_id: str, callback_url: str, user_id: str, dedupe_id: str) -> str:
+    return f"{group_id}|{_sub_key(callback_url, user_id)}|{dedupe_id}"
+
+
+def _outbox_dedupe_id(envelope: dict) -> str:
+    """The identity of the queued frame — what the receiver dedupes a retry by."""
+    data = envelope.get("data") if isinstance(envelope.get("data"), dict) else {}
+    return str(data.get("id") or data.get("event_id") or envelope.get("event_id") or "")
+
+
+def _backoff_delay(attempts: int) -> float:
+    """Seconds to wait after ``attempts`` failed attempts (first wait = the base).
+
+    The curve is chosen to fit inside the TTL: with the defaults the waits are
+    20+40+80+160+240 = 540s, so the last of ``OUTBOX_MAX_ATTEMPTS`` attempts lands
+    before the entry expires. ``tests/test_relay_outbox.py`` holds that sum to the TTL.
+    """
+    step = max(0, min(int(attempts) - 1, 8))
+    return min(OUTBOX_BASE_DELAY_S * (2**step), OUTBOX_MAX_DELAY_S)
+
+
+def _prune_outbox(entries: dict, now: float) -> dict:
+    """Drop what is too old or too much. Loudly: these are messages going missing."""
+    for key, entry in list(entries.items()):
+        first = float((entry or {}).get("first_at") or 0.0)
+        if first and now - first > OUTBOX_TTL_S:
+            logger.warning(
+                "[Relay] dropping an undelivered %s message (queued %.0fs, %s attempts): %s",
+                (entry or {}).get("group_id"),
+                now - first,
+                (entry or {}).get("attempts"),
+                (entry or {}).get("last_error"),
+            )
+            entries.pop(key, None)
+    overflow = len(entries) - OUTBOX_MAX_ENTRIES
+    if overflow > 0:
+        oldest = sorted(entries.items(), key=lambda kv: float((kv[1] or {}).get("first_at") or 0.0))
+        for key, entry in oldest[:overflow]:
+            logger.warning(
+                "[Relay] outbox over %d entries; dropping the oldest undelivered %s message",
+                OUTBOX_MAX_ENTRIES,
+                (entry or {}).get("group_id"),
+            )
+            entries.pop(key, None)
+    return entries
+
+
+def enqueue_outbox(
+    *,
+    group_id: str,
+    envelope: dict,
+    callback_url: str,
+    user_id: str = "",
+    error: str = "",
+    now: float | None = None,
+) -> dict:
+    """Remember a push that failed, so it can be retried.
+
+    Keyed by the message as well as the subscriber, so re-queueing the same frame
+    refreshes one entry instead of stacking a second copy of it.
+
+    A frame with no message id is **not** queued: the receiver dedupes a retry by that
+    id, so retrying without one could deliver twice. It is logged instead.
+    """
+    if not group_id or not callback_url or not isinstance(envelope, dict):
+        return {"ok": False, "error": "group_id, callback_url and envelope are required"}
+    dedupe_id = _outbox_dedupe_id(envelope)
+    if not dedupe_id:
+        logger.warning("[Relay] not queueing an undelivered %s push with no message id: %s", group_id, error)
+        return {"ok": False, "error": "no_message_id"}
+    at = time.time() if now is None else float(now)
+    with _LOCK:
+        entries = _outbox_entries()
+        key = _outbox_key(group_id, callback_url, user_id, dedupe_id)
+        existing = entries.get(key) if isinstance(entries.get(key), dict) else {}
+        entries[key] = {
+            "group_id": str(group_id),
+            "callback_url": str(callback_url or "").rstrip("/"),
+            "user_id": str(user_id or ""),
+            "dedupe_id": dedupe_id,
+            "kind": str(envelope.get("type") or "message:relay"),
+            "envelope": envelope,
+            "first_at": float(existing.get("first_at") or at),
+            "last_at": at,
+            "attempts": int(existing.get("attempts") or 0),
+            # The failed push just counted as an attempt, so the first retry is due now.
+            "next_at": at,
+            "last_error": str(error or ""),
+        }
+        entries = _prune_outbox(entries, at)
+        _outbox_write(entries)
+        queued = len(entries)
+    return {"ok": True, "key": key, "queued": queued}
+
+
+def outbox_entries() -> list[dict]:
+    """Everything queued, oldest first (diagnostics and the retry loop)."""
+    out = []
+    for key, entry in _outbox_entries().items():
+        if isinstance(entry, dict):
+            out.append({**entry, "key": key})
+    out.sort(key=lambda e: float(e.get("first_at") or 0.0))
+    return out
+
+
+def due_outbox(now: float | None = None, limit: int = 0) -> list[dict]:
+    """Queued pushes ready for another attempt — not backing off, not expired."""
+    at = time.time() if now is None else float(now)
+    out = [
+        entry
+        for entry in outbox_entries()
+        if float(entry.get("next_at") or 0.0) <= at
+        and int(entry.get("attempts") or 0) < OUTBOX_MAX_ATTEMPTS
+        and at - float(entry.get("first_at") or 0.0) <= OUTBOX_TTL_S
+    ]
+    return out[:limit] if limit and limit > 0 else out
+
+
+def record_outbox_attempt(key: str, error: str = "", now: float | None = None) -> dict:
+    """Count one failed retry and schedule the next — or give up on the entry."""
+    at = time.time() if now is None else float(now)
+    with _LOCK:
+        entries = _outbox_entries()
+        entry = entries.get(key)
+        if not isinstance(entry, dict):
+            return {"ok": False, "error": "unknown entry"}
+        attempts = int(entry.get("attempts") or 0) + 1
+        entry["attempts"] = attempts
+        entry["last_at"] = at
+        entry["last_error"] = str(error or "")
+        if attempts >= OUTBOX_MAX_ATTEMPTS:
+            logger.warning(
+                "[Relay] giving up on an undelivered %s message after %d attempts: %s",
+                entry.get("group_id"),
+                attempts,
+                error,
+            )
+            entries.pop(key, None)
+            _outbox_write(entries)
+            return {"ok": True, "attempts": attempts, "dropped": True}
+        entry["next_at"] = at + _backoff_delay(attempts)
+        entries[key] = entry
+        _outbox_write(entries)
+        return {"ok": True, "attempts": attempts, "next_at": entry["next_at"]}
+
+
+def drop_outbox(key: str) -> bool:
+    """Forget a queued push: it was delivered, or nobody is subscribed to it any more."""
+    with _LOCK:
+        entries = _outbox_entries()
+        if key not in entries:
+            return False
+        entries.pop(key, None)
+        _outbox_write(entries)
+        return True
+
+
+def outbox_size() -> int:
+    """How many pushes are waiting (diagnostics)."""
+    return len(_outbox_entries())
+
+
+def prune_outbox(now: float | None = None) -> int:
+    """Drop expired (and over-cap) entries from the file. Returns how many went.
+
+    Expiry is enforced where the queue is read, but something has to *remove* the
+    entry, or a peer that never comes back leaves its stale frames in the file
+    forever. The retry loop calls this on every pass.
+    """
+    at = time.time() if now is None else float(now)
+    with _LOCK:
+        entries = _outbox_entries()
+        before = len(entries)
+        entries = _prune_outbox(entries, at)
+        gone = before - len(entries)
+        if gone:
+            _outbox_write(entries)
+        return gone
+
+
+def clear_outbox() -> None:
+    """Test helper: empty the queue."""
+    with _LOCK:
+        _outbox_write({})
+
+
 # ── home side: the secrets this gateway expects on inbound pushes ────────────
 
 
@@ -507,6 +742,7 @@ def status() -> dict[str, Any]:
     """A read-only view for diagnostics: who we push to, what we expect inbound."""
     groups = _branch(subscribers_file(), "subscribers") or _branch(_legacy_file(), "subscribers")
     outbound = _branch(outbound_file(), "outbound") or _branch(_legacy_file(), "outbound")
+    queued = outbox_entries()
     return {
         "subscribers": {
             gid: [{"callback_url": s.get("callback_url"), "user_id": s.get("user_id")} for s in entries.values()]
@@ -515,4 +751,13 @@ def status() -> dict[str, Any]:
         },
         "outbound": sorted(outbound.keys()),
         "max_hops": RELAY_MAX_HOPS,
+        # Undelivered pushes waiting for a retry: the number to watch when a paired
+        # machine has been off (a value that only grows is a peer that is not coming
+        # back, and the entries expire rather than accumulate).
+        "outbox": {
+            "queued": len(queued),
+            "oldest_age_s": (round(time.time() - float(queued[0].get("first_at") or 0.0), 1) if queued else 0.0),
+            "max_attempts": OUTBOX_MAX_ATTEMPTS,
+            "ttl_s": OUTBOX_TTL_S,
+        },
     }
