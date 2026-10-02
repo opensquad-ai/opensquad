@@ -916,6 +916,7 @@
     "newSession": "新建会话",
     "newChat": "新建对话",
     "workspaceFiles": "工作区文件",
+    "workspaceViews": "工作区视图",
     "panelTabs": {
       "label": "右侧面板",
       "browser": "浏览器",

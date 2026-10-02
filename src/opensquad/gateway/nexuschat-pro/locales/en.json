@@ -916,6 +916,7 @@
     "newSession": "New Session",
     "newChat": "New Chat",
     "workspaceFiles": "Workspace Files",
+    "workspaceViews": "Workspace views",
     "panelTabs": {
       "label": "Right panel",
       "browser": "Browser",

@@ -30,6 +30,9 @@ import {
 } from 'lucide-react';
 import { adminAPI } from '../../services/api';
 import { OPEN_FILES_RAIL_EVENT, type FilesRailTab } from '../../utils/uiEvents';
+import { PANE_VIEWS, type PaneViewId } from '../../utils/paneViews';
+import { BrowserPanel } from './BrowserPanel';
+import { TerminalPanel } from './TerminalPanel';
 import { getLangForFile, highlightLine, HLJS_THEME_CSS } from '../../utils/codeHighlight';
 import { FILE_MARKDOWN_CLASS, renderFencedMarkdown } from '../../utils/fencedMarkdown';
 import { FileIndentGuides } from './FileIndentGuides';
@@ -50,6 +53,12 @@ export type ProjectFileOpenRequest = {
   path: string;
   nonce: number;
 };
+
+/** Which of the rail's top-level tabs is showing (remembered per browser). */
+const RAIL_TAB_KEY = 'opensquad.filesRail.tab';
+
+/** The rail's tabs, in the order they are shown: browser, terminal, files. */
+const RAIL_TABS: PaneViewId[] = ['browser', 'terminal', 'files'];
 
 type TreeEntry = {
   path: string;
@@ -652,17 +661,41 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
   const [showSearch, setShowSearch] = useState(false);
 
   const [tab, setTab] = useState<ListTab>('all');
+  /**
+   * The rail's top-level tabs: 浏览器 / 终端 / 文件, side by side in the row that used to be
+   * the panel's title. The file list is one of them; the other two are the browser view and an
+   * interactive shell for this workspace. (`treeOnly` = the chat drawer, which stays a list.)
+   */
+  const [railTab, setRailTabState] = useState<PaneViewId>(() => {
+    if (treeOnly) return 'files';
+    try {
+      const stored = window.localStorage.getItem(RAIL_TAB_KEY);
+      return stored === 'browser' || stored === 'terminal' ? stored : 'files';
+    } catch {
+      return 'files';
+    }
+  });
+  const selectRailTab = useCallback((id: PaneViewId) => {
+    setRailTabState(id);
+    try {
+      window.localStorage.setItem(RAIL_TAB_KEY, id);
+    } catch {
+      /* storage unavailable: the choice is simply not remembered */
+    }
+  }, []);
   // The pane's welcome rows (更改 / 文件) and their shortcuts point this rail at one of its
   // tabs; the rail is a sibling of the panes, so it is told which one.
   useEffect(() => {
     const onRail = (event: Event) => {
       const wanted = (event as CustomEvent<{ tab?: FilesRailTab }>).detail?.tab;
+      // A 更改 / 文件 row means "show me the list", whatever tab the rail was on.
+      if (!treeOnly) selectRailTab('files');
       setTab(wanted === 'changed' ? 'changed' : 'all');
       if (wanted === 'changed') setChangedScope('session');
     };
     window.addEventListener(OPEN_FILES_RAIL_EVENT, onRail);
     return () => window.removeEventListener(OPEN_FILES_RAIL_EVENT, onRail);
-  }, []);
+  }, [selectRailTab, treeOnly]);
   /** 改动 view: this conversation's files (session snapshot) or everything git
    *  reports as uncommitted. Defaults to the snapshot, which is what the tab has
    *  always meant. */
@@ -2765,14 +2798,55 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
         className="absolute left-0 top-0 bottom-0 w-1.5 -ml-0.5 cursor-col-resize z-10 hover:bg-primary/30"
       />
 
-      {/* Header — same h-11 band as L1 / session sidebar */}
-      <div className="h-11 px-2.5 border-b border-border box-border flex-shrink-0 flex items-center gap-1">
+      {/* Top-level tabs — the row that used to be this panel's title. 浏览器 / 终端 / 文件 sit
+          side by side here; the chat drawer (treeOnly) keeps the plain title. */}
+      <div className="h-11 px-1.5 border-b border-border box-border flex-shrink-0 flex items-center gap-1">
+        {treeOnly ? (
           <div
             className="flex-1 min-w-0 text-[13px] font-medium leading-none text-textMuted truncate"
             title={rootPath || projectLabel || undefined}
           >
             {t('aiChat.workspaceFiles')}
           </div>
+        ) : (
+          <div
+            role="tablist"
+            aria-label={t('aiChat.workspaceViews')}
+            data-testid="rail-tabs"
+            className="flex min-w-0 flex-1 items-center gap-0.5"
+          >
+            {RAIL_TABS.map((id) => {
+              const view = PANE_VIEWS.find((v) => v.id === id);
+              const Icon = view?.Icon ?? FileText;
+              const active = railTab === id;
+              return (
+                <button
+                  key={id}
+                  type="button"
+                  role="tab"
+                  aria-selected={active}
+                  data-testid={`rail-tab-${id}`}
+                  data-active={active ? '1' : '0'}
+                  onClick={() => selectRailTab(id)}
+                  title={t('aiChat.panelTabs.filesHint')}
+                  className={`flex min-w-0 items-center gap-1 rounded-md px-2 py-1 text-[11px] font-medium transition-colors ${
+                    active
+                      ? 'bg-black/[0.06] text-textMain dark:bg-white/10'
+                      : 'text-textMuted hover:text-textMain'
+                  }`}
+                >
+                  <Icon size={12} strokeWidth={1.75} className="shrink-0" />
+                  <span className="truncate">
+                    {id === 'files'
+                      ? t('aiChat.panelTabs.files')
+                      : t(id === 'browser' ? 'aiChat.panelTabs.browser' : 'aiChat.panelTabs.terminal')}
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+        )}
+        {!treeOnly && railTab !== 'files' ? null : (
           <div className="flex items-center gap-0.5 shrink-0">
             <button
               type="button"
@@ -2841,8 +2915,16 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
               <X size={13} className="text-textMuted" />
             </button>
           </div>
+        )}
       </div>
 
+      {/* 浏览器 / 终端 are the other two tabs; the file list (below) is the third and is
+          unchanged, including the chat drawer's treeOnly usage. */}
+      {!treeOnly && railTab === 'browser' ? (
+        <BrowserPanel />
+      ) : !treeOnly && railTab === 'terminal' ? (
+        <TerminalPanel agentId={agentId} rootPath={rootPath} />
+      ) : (
       <div className="flex-1 min-h-0 flex">
         {listPane}
         {useSplitPreview ? (
@@ -2914,6 +2996,7 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
           </div>
         ) : null}
       </div>
+      )}
 
       {renderCtxMenu()}
     </div>
