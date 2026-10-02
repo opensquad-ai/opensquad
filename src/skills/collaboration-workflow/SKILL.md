@@ -30,6 +30,25 @@ Phase 4: 完成验收 ──→ 向用户交付成果 ──→ 用户确认 ─
 - Reporting progress or findings
 - Synthesizing research results into a report
 
+## Where to Talk: the Task Window, not the Group
+
+A collaboration task has its own **task window** (the collaboration card posted in the
+group chat opens it). Everything about the task happens there, not in the group:
+
+- **Task content → the window**: requirements, plan, task assignment, progress, files
+  produced, questions and answers between teammates, delivery notes. Send it as
+  `im.send_message(content=..., collab_id="<collab_id>")` (files: same call with
+  `file_paths=[...]`). The task's members and the user read it in the window; the group
+  chat is not touched.
+- **Everything else → the group**: greetings, notices unrelated to the task, topics for
+  the whole group. Send it as `im.send_message(content=..., target_id="<group_id>",
+  target_type="group")`.
+
+Decide by what the content is *about*, not by where the message arrived. Leaking task
+work into the group buries it in noise; pushing group chatter into the window makes the
+task's own record unreadable. Never invent a `collab_id` — take it from the card you were
+invited under, or read it with `collaboration.board_list_my_tasks()`.
+
 ## Core Concepts
 
 ### Collaboration Board — 4 Areas

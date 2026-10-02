@@ -8,10 +8,11 @@
  * group-chat history, so it stays complete no matter how chat pages or what the
  * group announcement throttled.
  */
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { CheckCircle2, Circle, Loader2, X } from 'lucide-react';
 
+import { AI_MARKDOWN_CLASS, renderFencedMarkdown } from '../utils/fencedMarkdown';
 import { CollabTaskComposer } from './CollabTaskComposer';
 import {
   SERVER_BASE_URL,
@@ -28,6 +29,51 @@ export interface CollabTaskWindowProps {
   collabId: string;
   onClose: () => void;
 }
+
+/**
+ * The board's text is written by agents, so it is Markdown (headings, bold, lists,
+ * tables). Rendered plain it showed its own syntax — `## 主任务`, `**负责人**: pm` —
+ * where the group-chat board renders it. Same renderer and class as the chat surfaces.
+ */
+export const MarkdownText: React.FC<{ text?: string; className?: string }> = ({ text, className = '' }) => {
+  const html = useMemo(() => renderFencedMarkdown(String(text || '')), [text]);
+  if (!text) return null;
+  return (
+    <div
+      className={`${AI_MARKDOWN_CLASS} break-words text-[12px] leading-relaxed text-textMuted ${className}`}
+      dangerouslySetInnerHTML={{ __html: html }}
+    />
+  );
+};
+
+const barTone = (pct: number) => (pct >= 100 ? 'bg-emerald-500' : pct > 0 ? 'bg-amber-500' : 'bg-border');
+
+/**
+ * A task's progress, at a glance. The board carries a percentage per item and one
+ * for the task itself; a number in a chip ("doing · 40%") is easy to miss when what
+ * the user wants is to see how far along the work is.
+ */
+export const ProgressBar: React.FC<{ percent?: number; className?: string; testId?: string }> = ({
+  percent,
+  className = '',
+  testId,
+}) => {
+  const pct = Math.max(0, Math.min(100, Math.round(Number(percent) || 0)));
+  return (
+    <div className={`flex items-center gap-2 ${className}`} data-testid={testId}>
+      <div className="h-1.5 min-w-0 flex-1 overflow-hidden rounded-full bg-panel">
+        <div className={`h-full rounded-full transition-all ${barTone(pct)}`} style={{ width: `${pct}%` }} />
+      </div>
+      <span className="shrink-0 font-mono text-[10px] text-textMuted">{pct}%</span>
+    </div>
+  );
+};
+
+const subtaskProgress = (subtasks: any[]): number | null => {
+  if (!Array.isArray(subtasks) || !subtasks.length) return null;
+  const done = subtasks.filter((st) => String(st?.status || '') === 'done').length;
+  return Math.round((done / subtasks.length) * 100);
+};
 
 const SubTaskRow: React.FC<{ id: string; title: string; status: string }> = ({ title, status }) => (
   <div className="flex items-center gap-1.5 text-[12px] text-textMain">
@@ -52,9 +98,11 @@ const ItemBlock: React.FC<{ item: CollabBoardItem; showAssignee?: boolean }> = (
         {showAssignee ? <span className="shrink-0 text-[11px] text-textMuted">@{item.agent_id}</span> : null}
         <span className="shrink-0 rounded bg-panel px-1.5 py-0.5 text-[10px] text-textMuted">{item.status}</span>
       </div>
-      {item.content ? (
-        <div className="mt-1 whitespace-pre-wrap break-words text-[12px] leading-relaxed text-textMuted">{item.content}</div>
-      ) : null}
+      {item.content ? <MarkdownText text={item.content} className="mt-1" /> : null}
+      {(() => {
+        const pct = Number(item.progress) > 0 ? Number(item.progress) : subtaskProgress(subtasks);
+        return typeof pct === 'number' && pct > 0 ? <ProgressBar percent={pct} className="mt-1.5" /> : null;
+      })()}
       {subtasks.length ? (
         <div className="mt-1.5 space-y-0.5">
           {subtasks.map((st: any) => (
@@ -183,9 +231,10 @@ export const CollabTaskWindow: React.FC<CollabTaskWindowProps> = ({ collabId, on
         </span>
         {summary ? (
           <span className="shrink-0 rounded-md bg-bgLight px-1.5 py-0.5 text-[11px] text-textMuted">
-            {summary.status || 'active'} · {summary.progress}%
+            {summary.status || 'active'}
           </span>
         ) : null}
+        {summary ? <ProgressBar percent={summary.progress} className="w-28 shrink-0" testId="collab-task-progress" /> : null}
         <span className="shrink-0 font-mono text-[11px] text-textMuted">{collabId}</span>
         <button
           type="button"
@@ -305,11 +354,7 @@ export const CollabTaskWindow: React.FC<CollabTaskWindowProps> = ({ collabId, on
                               {t(`collabTask.${statusKey(item.status)}`)}
                             </span>
                           </div>
-                          {item.content ? (
-                            <div className="mt-1 whitespace-pre-wrap break-words text-[12px] leading-relaxed text-textMuted">
-                              {item.content}
-                            </div>
-                          ) : null}
+                          {item.content ? <MarkdownText text={item.content} className="mt-1" /> : null}
                           <div className="mt-1 flex flex-wrap items-center gap-2 text-[10px] text-textMuted">
                             {meta.agent_name || meta.agent_id || item.agent_id ? (
                               <span>
@@ -405,7 +450,6 @@ export const CollabTaskWindow: React.FC<CollabTaskWindowProps> = ({ collabId, on
                 <Empty />
               )}
             </Section>
-
             <Section title={t('collabTask.attachments')} count={summary?.attachments?.length || 0}>
               {(summary?.attachments || []).length ? (
                 <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
@@ -466,9 +510,7 @@ export const CollabTaskWindow: React.FC<CollabTaskWindowProps> = ({ collabId, on
                         <span className="truncate font-semibold text-textMain">{it.agent_id}</span>
                         <span className="shrink-0">{fmtTime(it.created_at)}</span>
                       </div>
-                      <div className="mt-0.5 whitespace-pre-wrap break-words text-[12px] leading-relaxed text-textMain">
-                        {it.content}
-                      </div>
+                      <MarkdownText text={it.content} className="mt-0.5 text-textMain" />
                     </div>
                   ))}
                 </div>
