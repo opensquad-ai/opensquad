@@ -1111,6 +1111,62 @@ def mark_participant(*, collab_id: str, agent_id: str, state: str, name: str = "
     return _mutate_task_extra(collab_id, _apply)
 
 
+GATE_STEPS = ("确定需求", "讨论方案", "任务分配", "任务验收")
+
+
+def gate_states(collab_id: str) -> dict[str, str]:
+    """The latest state of each collaboration gate.
+
+    The four gates (四门闸) live on the board as ``item_type="approval"`` items carrying
+    ``extra.approval.step``; the user approving one from the task window (or the group
+    card) flips that item's ``status``. Returns ``approved`` / ``pending`` /
+    ``rejected`` / ``missing`` per gate, newest item wins.
+    """
+    from opensquad.collab_approval import normalize_step
+
+    latest: dict[str, tuple[str, str]] = {}
+    for item in _read_items():
+        if str(item.get("collab_id") or "") != str(collab_id):
+            continue
+        if str(item.get("item_type") or "") != "approval":
+            continue
+        extra = item.get("extra") if isinstance(item.get("extra"), dict) else {}
+        approval = extra.get("approval") if isinstance(extra.get("approval"), dict) else {}
+        try:
+            step = normalize_step(str(approval.get("step") or item.get("title") or ""))
+        except Exception:
+            step = str(approval.get("step") or "")
+        if step not in GATE_STEPS:
+            continue
+        stamp = str(item.get("updated_at") or item.get("created_at") or "")
+        state = str(item.get("status") or "pending").strip().lower()
+        if state not in ("approved", "pending", "rejected"):
+            state = "pending"
+        current = latest.get(step)
+        if current is None or stamp >= current[1]:
+            latest[step] = (state, stamp)
+    return {step: (latest.get(step) or ("missing", ""))[0] for step in GATE_STEPS}
+
+
+def accepted_members(collab_id: str) -> set[str]:
+    """Agent ids that may be given work: those who accepted, plus the task's creator.
+
+    An invite is a request, not a draft: until the invitee runs ``join_collaboration``
+    it is ``invited``, and assigning work to it either fails or quietly gets done by an
+    agent that never agreed to be part of the task.
+    """
+    task = get_task(task_id=collab_id) or {}
+    out: set[str] = set()
+    creator = str(task.get("created_by") or "")
+    if creator:
+        out.add(creator)
+    for part in list_participants(collab_id=collab_id):
+        if str(part.get("state") or "") == "accepted":
+            out.add(str(part.get("agent_id") or ""))
+    out.discard("")
+    return out
+
+
 def list_participants(*, collab_id: str) -> list[dict[str, Any]]:
     """Participants in insertion order (invited first), for card rendering."""
     task = get_task(task_id=collab_id)

@@ -18,7 +18,23 @@ vi.mock('../utils/fencedMarkdown', () => ({
   renderFencedMarkdown: (text: string) => `<h2>${text}</h2>`,
 }));
 
-import { DiscussionBubble, MarkdownText, ProgressBar } from './CollabTaskWindow';
+import { DiscussionBubble, ItemBlock, MarkdownText, ProgressBar } from './CollabTaskWindow';
+
+function boardItem(over: Record<string, unknown> = {}) {
+  return {
+    id: 'a1',
+    collab_id: 'T1',
+    agent_id: 'pm',
+    item_type: 'task',
+    title: '贪吃蛇游戏实现',
+    content: '## 主任务\n**负责人**: pm',
+    status: 'pending',
+    progress: 0,
+    visibility: 'public',
+    created_at: '2026-10-02T10:00:00Z',
+    ...over,
+  } as never;
+}
 
 function discussionItem(over: Record<string, unknown> = {}) {
   return {
@@ -86,6 +102,29 @@ describe('collab task window', () => {
     expect(html).toContain('collab-task-bubble-attachment');
     expect(html).toContain('/uploads/pic.png');
     expect(html).toContain('<img');
+  });
+
+  it('a board entry is a card: long text clamps, the reader expands it', () => {
+    const long = renderToStaticMarkup(
+      React.createElement(ItemBlock, { item: boardItem({ content: 'x'.repeat(400) }) }),
+    );
+    expect(long).toContain('max-h-24');
+    expect(long).toContain('collab-item-expand');
+
+    const short = renderToStaticMarkup(React.createElement(ItemBlock, { item: boardItem() }));
+    expect(short).not.toContain('max-h-24');
+    expect(short).not.toContain('collab-item-expand');
+  });
+
+  it('an entry reports its progress as a bar, not a number', () => {
+    const html = renderToStaticMarkup(React.createElement(ItemBlock, { item: boardItem({ progress: 40 }) }));
+    expect(html).toContain('width:40%');
+  });
+
+  it('assignment and progress lay out as a board, with the blocking gate flagged', () => {
+    const src = fs.readFileSync(path.resolve(__dirname, 'CollabTaskWindow.tsx'), 'utf8');
+    expect(src).toContain('grid gap-1.5 sm:grid-cols-2');
+    expect(src).toContain('data-testid="collab-task-blocking-gate"');
   });
 
   it('the window and its item rows actually use them', () => {

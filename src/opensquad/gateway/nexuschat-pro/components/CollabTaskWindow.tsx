@@ -167,9 +167,20 @@ const SubTaskRow: React.FC<{ id: string; title: string; status: string }> = ({ t
   </div>
 );
 
-const ItemBlock: React.FC<{ item: CollabBoardItem; showAssignee?: boolean }> = ({ item, showAssignee }) => {
+/**
+ * One board entry, as a card rather than a document: long agent-written Markdown is
+ * clamped with an expand control, and the item's progress is drawn. A wall of text was
+ * what the window looked like; a board is what it is.
+ */
+export const ItemBlock: React.FC<{ item: CollabBoardItem; showAssignee?: boolean }> = ({
+  item,
+  showAssignee,
+}) => {
   const { t } = useTranslation();
   const subtasks = Array.isArray(item.extra?.subtasks) ? item.extra?.subtasks : [];
+  const [open, setOpen] = useState(false);
+  const long = String(item.content || '').length > 180 || String(item.content || '').split('\n').length > 4;
+  const pct = Number(item.progress) > 0 ? Number(item.progress) : subtaskProgress(subtasks);
   return (
     <div className="rounded-lg border border-border bg-bgLight px-2.5 py-2">
       <div className="flex items-center gap-2">
@@ -177,11 +188,22 @@ const ItemBlock: React.FC<{ item: CollabBoardItem; showAssignee?: boolean }> = (
         {showAssignee ? <span className="shrink-0 text-[11px] text-textMuted">@{item.agent_id}</span> : null}
         <span className="shrink-0 rounded bg-panel px-1.5 py-0.5 text-[10px] text-textMuted">{item.status}</span>
       </div>
-      {item.content ? <MarkdownText text={item.content} className="mt-1" /> : null}
-      {(() => {
-        const pct = Number(item.progress) > 0 ? Number(item.progress) : subtaskProgress(subtasks);
-        return typeof pct === 'number' && pct > 0 ? <ProgressBar percent={pct} className="mt-1.5" /> : null;
-      })()}
+      {item.content ? (
+        <div className={long && !open ? 'max-h-24 overflow-hidden' : undefined} data-testid="collab-item-body">
+          <MarkdownText text={item.content} className="mt-1" />
+        </div>
+      ) : null}
+      {long ? (
+        <button
+          type="button"
+          onClick={() => setOpen((v) => !v)}
+          data-testid="collab-item-expand"
+          className="mt-1 rounded border border-border px-1.5 py-0.5 text-[10px] text-textMuted hover:bg-primary/10 hover:text-textMain"
+        >
+          {open ? t('collabTask.collapse', { defaultValue: '收起' }) : t('collabTask.expand', { defaultValue: '展开' })}
+        </button>
+      ) : null}
+      {typeof pct === 'number' && pct > 0 ? <ProgressBar percent={pct} className="mt-1.5" /> : null}
       {subtasks.length ? (
         <div className="mt-1.5 space-y-0.5">
           {subtasks.map((st: any) => (
@@ -269,6 +291,10 @@ export const CollabTaskWindow: React.FC<CollabTaskWindowProps> = ({ collabId, on
       .sort((a, b) => String(a.updated_at || '').localeCompare(String(b.updated_at || '')))
       .pop() || null;
   const otherApprovals = approvals.filter((a) => !GATES.includes(gateOf(a)));
+  // What the task is waiting on: the first gate the user has not approved. Shown in the
+  // progress section so "nothing has started" reads as a gate, not as an empty board.
+  const blockingGate =
+    GATES.find((gate) => String(latestForGate(gate)?.status || '') !== 'approved') || '';
 
   const [resolving, setResolving] = useState<string | null>(null);
   const [resolveError, setResolveError] = useState(false);
@@ -502,7 +528,7 @@ export const CollabTaskWindow: React.FC<CollabTaskWindowProps> = ({ collabId, on
 
             <Section title={t('collabTask.assign')} count={tasks.length}>
               {tasks.length ? (
-                <div className="space-y-1.5">
+                <div className="grid gap-1.5 sm:grid-cols-2">
                   {tasks.map((it) => (
                     <ItemBlock key={it.id} item={it} showAssignee />
                   ))}
@@ -513,8 +539,19 @@ export const CollabTaskWindow: React.FC<CollabTaskWindowProps> = ({ collabId, on
             </Section>
 
             <Section title={t('collabTask.progress')} count={statuses.length}>
+              {blockingGate ? (
+                <div
+                  className="mb-1.5 rounded-lg border border-amber-500/40 bg-amber-500/5 px-2.5 py-1 text-[11px] text-amber-600"
+                  data-testid="collab-task-blocking-gate"
+                >
+                  {t('collabTask.waitingGate', {
+                    defaultValue: '任务尚未开始：等待「{{gate}}」获批',
+                    gate: blockingGate,
+                  })}
+                </div>
+              ) : null}
               {statuses.length ? (
-                <div className="space-y-1.5">
+                <div className="grid gap-1.5 sm:grid-cols-2">
                   {statuses.map((it) => (
                     <ItemBlock key={it.id} item={it} showAssignee />
                   ))}

@@ -546,6 +546,11 @@ def end_collaboration(card: str, collab_id: str = "", group_id: str = "") -> dic
         group_id: ID or name of the group to send the end notification to.
                   Should be the same group used in start_collaboration().
     """
+    # 0. The last gate is the user's sign-off: a task cannot be closed without it.
+    gate_msg = _gate_requirement_message(collab_id, ("任务验收",))
+    if gate_msg:
+        return {"status": "error", "code": "gates_not_approved", "message": gate_msg}
+
     # 1. Unload collab card
     from ..skill_loader import remove_skill
 
@@ -789,6 +794,39 @@ def list_active_collaborations() -> dict[str, Any]:
         return {"status": "error", "message": str(e)}
 
 
+def _gate_requirement_message(collab_id: str, needed: tuple[str, ...]) -> str:
+    """Why the next phase is blocked, and the exact steps that unblock it.
+
+    The four gates (确定需求 / 讨论方案 / 任务分配 / 任务验收) are the user's approvals. This
+    refuses to move past an unapproved one — the field report was a task that ran to
+    completion with all four still 未开始 — and it names what to call, in order, instead
+    of only saying that something is missing.
+    """
+    if not collab_id:
+        return ""
+    try:
+        from ..collab_board import gate_states
+
+        states = gate_states(collab_id)
+    except Exception:
+        return ""
+    blockers = [step for step in needed if states.get(step) != "approved"]
+    if not blockers:
+        return ""
+    lines = [f"协作任务 {collab_id} 不能进入下一步：以下门尚未获得用户批准 —— "]
+    lines += [f"  · {step}：{states.get(step, 'missing')}" for step in blockers]
+    lines += [
+        "",
+        "解决步骤（按顺序）：",
+        f'1) 调用 collaboration.request_step_approval(collab_id="{collab_id}", step="{blockers[0]}", '
+        'summary="<给用户看的需求/方案要点>")，把审批卡发到协作群；',
+        "2) 让用户在协作任务窗口（或群里的卡）上点「批准」；",
+        "3) 收到批准后，再重新调用刚刚被拒的这个工具。",
+        "门通过之前不要分配任务、也不要推进进度——分步确认是用户的要求。",
+    ]
+    return "\n".join(lines)
+
+
 def assign_task(
     collab_id: str,
     worker_id: str,
@@ -848,7 +886,32 @@ def assign_task(
       )
     """
     try:
-        from ..collab_board import upsert_item
+        from ..collab_board import accepted_members, list_participants, upsert_item
+
+        # The gates are the user's approvals: assigning work is phase 3, so the first
+        # two must be approved first. Refuse, and say how to get there.
+        gate_msg = _gate_requirement_message(collab_id, ("确定需求", "讨论方案"))
+        if gate_msg:
+            return {"status": "error", "code": "gates_not_approved", "message": gate_msg}
+
+        # …and an invite is a request, not a draft: work goes only to members who
+        # accepted it.
+        if worker_id and worker_id not in accepted_members(collab_id):
+            states = {
+                str(p.get("agent_id") or ""): str(p.get("state") or "missing")
+                for p in list_participants(collab_id=collab_id)
+            }
+            return {
+                "status": "error",
+                "code": "worker_not_accepted",
+                "message": (
+                    f"不能给 {worker_id} 派活：它还没有接受邀请（当前状态：{states.get(worker_id, '未邀请')}）。\n\n"
+                    "解决步骤（按顺序）：\n"
+                    f'1) 在协作群里 @{worker_id}，让它执行 join_collaboration(card="<卡片名>", collab_id="{collab_id}")；\n'
+                    "2) 它的状态变成「已参与」后再调用 assign_task；\n"
+                    "3) 它一直不接受就换一个已参与的成员，或先确认它在线。"
+                ),
+            }
 
         if not item_key:
             item_key = f"task_{worker_id}_{task_name[:20].replace(' ', '_').replace('/', '_')}"
