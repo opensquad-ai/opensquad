@@ -384,6 +384,39 @@ export const ContentTabBar: React.FC<ContentTabBarProps> = ({
         <Plus size={14} />
       </button>
 
+      {/* The two tools sit next to `+`, always visible: the welcome rows only exist while the
+          pane is empty and a menu entry has to be hunted for. */}
+      {onOpenView ? (
+        <>
+          <button
+            type="button"
+            data-testid="tabbar-terminal"
+            onMouseDown={(e) => e.stopPropagation()}
+            onClick={(e) => {
+              e.stopPropagation();
+              onOpenView('terminal');
+            }}
+            className="p-1 rounded-md text-textMuted hover:bg-primary/10"
+            title={`${t('aiChat.panelTabs.terminal')} (${PANE_VIEW_SHORTCUT.terminal})`}
+          >
+            <Terminal size={14} />
+          </button>
+          <button
+            type="button"
+            data-testid="tabbar-browser"
+            onMouseDown={(e) => e.stopPropagation()}
+            onClick={(e) => {
+              e.stopPropagation();
+              onOpenView('browser');
+            }}
+            className="p-1 rounded-md text-textMuted hover:bg-primary/10"
+            title={`${t('aiChat.panelTabs.browser')} (${PANE_VIEW_SHORTCUT.browser})`}
+          >
+            <Globe size={14} />
+          </button>
+        </>
+      ) : null}
+
       <div className="flex items-center gap-0.5 shrink-0 pl-1 border-l border-border/50">
         <button
           type="button"

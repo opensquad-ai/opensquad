@@ -148,6 +148,20 @@ describe('the pane renders them', () => {
     // …and the pane hands it the actions
     expect(SHELL).toContain('onOpenView={(view) => viewHandlers[view]?.()}');
   });
+
+  it('terminal and browser are visible in the tab bar, not only inside the menu', () => {
+    // Hidden entry points are the failure this test exists for: a menu nobody opens is the
+    // same as no entry at all.
+    expect(TAB_BAR).toContain('data-testid="tabbar-terminal"');
+    expect(TAB_BAR).toContain('data-testid="tabbar-browser"');
+    expect(TAB_BAR).toContain("onOpenView('terminal')");
+    expect(TAB_BAR).toContain("onOpenView('browser')");
+    expect(TAB_BAR).toContain('PANE_VIEW_SHORTCUT.terminal');
+    expect(TAB_BAR).toContain('PANE_VIEW_SHORTCUT.browser');
+    // and the labels they carry are the same ones the tabs use
+    expect(TAB_BAR).toContain("t('aiChat.panelTabs.terminal')");
+    expect(TAB_BAR).toContain("t('aiChat.panelTabs.browser')");
+  });
 });
 
 describe('the page wires them', () => {
