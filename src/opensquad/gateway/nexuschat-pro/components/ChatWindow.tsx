@@ -13,6 +13,7 @@ import { OpenSquadLoader } from './OpenSquadLoader';
 import { playGentleNotificationSound } from '../utils/sounds';
 import {
   CollabStepApprovalCard,
+  isResolvedApprovalMessage,
   parseCollabApproval,
 } from './CollabStepApprovalCard';
 import {
@@ -1333,6 +1334,9 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
 
   // Filter messages logic including Date Range — memoized to avoid re-filter on every render
   const filteredMessages = useMemo(() => messages.filter(m => {
+    // A decided approval card leaves the chat: the card *was* the question, and the
+    // answer lives on the board. Keeping it left one full card ("已确定 ✓") per gate.
+    if (isResolvedApprovalMessage(m.content || '')) return false;
     const matchesText = m.content.toLowerCase().includes(filter.text.toLowerCase());
     const matchesUser = filter.userId ? m.senderId === filter.userId : true;
 

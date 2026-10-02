@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 import { parseCollabTask, stripCollabTaskMarker } from '../CollabTaskCard';
-import { parseCollabApproval } from '../CollabStepApprovalCard';
+import { isResolvedApprovalMessage, parseCollabApproval } from '../CollabStepApprovalCard';
 
 const cardContent = (overrides: Record<string, unknown> = {}) => {
   const payload = {
@@ -73,7 +73,9 @@ describe('collaboration-task card', () => {
   it('opens the task window from the card through the host', () => {
     const app = read('App.tsx');
     expect(app).toMatch(/window\.addEventListener\('openCollabTask'/);
-    expect(app).toMatch(/<CollabTaskWindow collabId=\{openCollabTaskId\}/);
+    // the window is mounted with the id it was opened for (props may span lines)
+    expect(app).toMatch(/<CollabTaskWindow[\s\S]{0,120}?collabId=\{openCollabTaskId\}/);
+    expect(app).toContain('viewerName={currentUser?.name');
 
     const card = read('components/CollabTaskCard.tsx');
     expect(card).toMatch(/window\.dispatchEvent\(new CustomEvent\('openCollabTask'/);
@@ -118,5 +120,20 @@ describe('collaboration-task card', () => {
     const apiTypes = read('services/api.ts');
     expect(apiTypes).toMatch(/export interface CollabBoardAttachment/);
     expect(apiTypes).toMatch(/attachments: CollabBoardAttachment\[\]/);
+  });
+
+  it('an answered approval leaves the chat, a pending one stays', () => {
+    const marker = (status: string) =>
+      `[[COLLAB_APPROVAL]]${JSON.stringify({ id: 'a1', kind: 'collab_step', title: '任务验收', status })}[[/COLLAB_APPROVAL]]`;
+
+    expect(isResolvedApprovalMessage(marker('pending'))).toBe(false);
+    expect(isResolvedApprovalMessage(marker('approved'))).toBe(true);
+    expect(isResolvedApprovalMessage(marker('rejected'))).toBe(true);
+    expect(isResolvedApprovalMessage('普通消息')).toBe(false);
+
+    const chatWindow = read('components/ChatWindow.tsx');
+    expect(chatWindow).toContain('isResolvedApprovalMessage(m.content');
+    const card = read('components/CollabStepApprovalCard.tsx');
+    expect(card).toContain('if (!pending) return null;');
   });
 });

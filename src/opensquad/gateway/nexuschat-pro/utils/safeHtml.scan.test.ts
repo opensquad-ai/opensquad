@@ -310,6 +310,9 @@ const EXPECTED_SITES: Record<string, number> = {
   'components/ChatList.tsx': 1,
   'components/ChatWindow.tsx': 2,
   'components/CollabBoardPage.tsx': 1,
+  // The task window renders board text through renderFencedMarkdown (MarkdownText);
+  // R2/R3 keep that producer honest, so this site is classified like the others.
+  'components/CollabTaskWindow.tsx': 1,
   'components/MessageInput.tsx': 1,
   'components/RichTextEditor.tsx': 1,
   'components/RightPanel.tsx': 1,

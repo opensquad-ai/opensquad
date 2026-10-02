@@ -81,6 +81,20 @@ function kindMeta(kind: string | undefined) {
   return { label: '批准请求', Icon: Hand };
 }
 
+/**
+ * True when the message is an approval card the user has already answered.
+ *
+ * A decided card is not history worth keeping — the answer is on the board (the gate
+ * chip, the task window) — and leaving it in the group chat kept a full card and a
+ * "已确定 ✓" line per gate. Answered cards leave the chat, like an answered
+ * propose-options card does.
+ */
+export function isResolvedApprovalMessage(content: string): boolean {
+  const payload = parseCollabApproval(content || '');
+  if (!payload) return false;
+  return String(payload.status || 'pending') !== 'pending';
+}
+
 export const CollabStepApprovalCard: React.FC<CollabStepApprovalCardProps> = ({
   payload,
   onResolve,
@@ -111,6 +125,10 @@ export const CollabStepApprovalCard: React.FC<CollabStepApprovalCardProps> = ({
       setBusy(false);
     }
   };
+
+  // Answered: the card is done and gone (the caller also filters these out of the list,
+  // this is the guarantee when a resolved one reaches the renderer some other way).
+  if (!pending) return null;
 
   return (
     <div className="my-1 rounded-xl border border-border bg-panel px-3.5 py-3 shadow-sm min-w-[220px] max-w-[360px]">

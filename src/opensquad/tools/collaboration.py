@@ -323,6 +323,22 @@ def start_collaboration(
             logger.warning(f"[Collab] Failed to send group invitation: {e}")
             im_result = f"Failed to send invitation: {e}"
 
+        # …and hand it to each invitee directly, so a member actually receives it and can
+        # confirm (join_collaboration) instead of staying 已邀请 because the @name in the
+        # group post did not match its IM name.
+        _direct = _deliver_invite_directly(
+            collab_id=str(_task_id),
+            card=card,
+            group_id=str(group_id),
+            members=[str(m) for m in members],
+            message=invite_msg,
+            title=project_name or card,
+        )
+        if _direct.get("ok"):
+            im_result = f"{im_result}; directed to {len(_direct.get('notified') or [])} agent(s)"
+        else:
+            logger.info("[Collab] direct invite delivery skipped: %s", _direct.get("error"))
+
     # 5. Auto-inject collaboration board protocol as runtime guidance
     try:
         from ..input_hub import input_hub
@@ -829,6 +845,69 @@ def list_active_collaborations() -> dict[str, Any]:
         return {"status": "error", "message": str(e)}
 
 
+def _deliver_invite_directly(
+    *,
+    collab_id: str,
+    card: str,
+    group_id: str,
+    members: list[str],
+    message: str,
+    title: str = "",
+) -> dict[str, Any]:
+    """Hand the invitation to each invitee's own control channel.
+
+    The group post is mention-based, so an invitation whose @name does not match the
+    agent's IM name never wakes it — the invitee stays 已邀请 with nobody to blame. This
+    asks the gateway that owns the group to deliver it as a directed, wake-worthy frame
+    (and to relay it to paired machines), which is what makes 收到 → 确认 possible.
+    """
+    if not collab_id or not members:
+        return {"ok": False, "error": "no invitation to deliver"}
+    try:
+        from ..bridge import gateway_base_url
+        from ..peer_bridge import owner_bridge, peer_token
+
+        bridge, _why = owner_bridge(group_id=group_id, collab_id=collab_id)
+        base = str(getattr(bridge, "base_url", "") or gateway_base_url() or "").rstrip("/")
+        if not base:
+            return {"ok": False, "error": "the group's gateway address is unknown"}
+
+        headers = {"Content-Type": "application/json"}
+        try:
+            from opensquad.system_config import syscfg
+
+            secret = syscfg.node_secret() or ""
+            if secret and secret not in ("YOUR_NODE_SECRET_HERE", "opensquad-gateway-simple-token"):
+                headers["X-Node-Secret"] = secret
+        except Exception:
+            pass
+        token = peer_token(base)
+        if token:
+            headers["X-Node-Token"] = token
+
+        import requests
+
+        resp = requests.post(
+            f"{base}/api/ai-web/collab/invite",
+            headers=headers,
+            json={
+                "collab_id": collab_id,
+                "card": card,
+                "group_id": group_id,
+                "title": title,
+                "message": message,
+                "agents": [str(m) for m in members],
+            },
+            timeout=10,
+        )
+        if resp.status_code != 200:
+            return {"ok": False, "error": f"invite delivery failed (HTTP {resp.status_code})"}
+        body = resp.json() if resp.content else {}
+        return {"ok": True, "notified": list((body or {}).get("notified") or [])}
+    except Exception as exc:  # noqa: BLE001 - best effort; the group post still went out
+        return {"ok": False, "error": str(exc)}
+
+
 def _my_agent_id() -> str:
     """This agent's id as the board records it (config ``agent_id``, else its folder)."""
     try:
@@ -1089,25 +1168,11 @@ def assign_task(
                             f"Subtasks:\n{_sub_lines}"
                         )
                         bridge.send_message(_assign_msg, target_id=_group_id, target_type="group")
-                        try:
-                            from ..collab_approval import build_collab_task_payload, post_collab_task_card
-                            from ..collab_board import list_participants
-
-                            post_collab_task_card(
-                                build_collab_task_payload(
-                                    collab_id=collab_id,
-                                    title=task_name,
-                                    kind="assign",
-                                    group_id=str(_group_id),
-                                    summary=f"@{worker_id} · {len(subtask_records)} subtasks",
-                                    participants=list_participants(collab_id=collab_id),
-                                    agent_id=worker_id,
-                                    agent_name=worker_id,
-                                ),
-                                str(_group_id),
-                            )
-                        except Exception:
-                            pass
+                        # No assignment *card* in the group: a task can be assigned many
+                        # times, and each card was another "打开任务窗口" bubble in the
+                        # group chat. The assignment itself is on the board (and in the
+                        # task window); the group only needs the @mention that wakes the
+                        # worker and tells it where to look.
         except Exception:
             pass
 

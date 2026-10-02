@@ -41,6 +41,20 @@ def test_build_parse_round_trip():
     assert states == {"coder-001": "accepted", "qa": "invited"}
 
 
+def test_an_assignment_does_not_post_a_card_to_the_group():
+    """Assignments are board items: a card per assignment filled the group with
+    '打开任务窗口' bubbles. The group keeps the @mention that wakes the worker."""
+    from pathlib import Path
+
+    source = (Path(__file__).resolve().parents[1] / "src" / "opensquad" / "tools" / "collaboration.py").read_text(
+        encoding="utf-8"
+    )
+
+    assert 'kind="assign"' not in source
+    # the notification itself stays (the worker must be woken and told where to look)
+    assert "[Task Assigned]" in source
+
+
 def test_kind_and_state_normalization():
     assert ca.normalize_task_kind("END") == "done"
     assert ca.normalize_task_kind("weird") == "discussion"

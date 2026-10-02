@@ -1521,6 +1521,84 @@ async def agent_board_op(body: BoardOpRequest, request: Request):
     return {"ok": True, "result": result}
 
 
+class CollabInviteRequest(BaseModel):
+    collab_id: str
+    card: str = ""
+    group_id: str = ""
+    title: str = ""
+    message: str = ""
+    agents: list[str] = []
+
+
+@router.post("/collab/invite")
+async def collab_invite(body: CollabInviteRequest, request: Request):
+    """Hand a collaboration invitation *to* each invited agent.
+
+    A group post is not enough to invite an agent: a strict-mode agent wakes only on a
+    real mention of its own name, so an invitation whose @name does not match the
+    agent's IM name is never seen and the invitee stays 已邀请 forever. This delivers the
+    same text to every named agent's control channel with `wake` set — the gateway saying
+    "this one is for you" — and relays it to the group's subscribers on paired machines.
+    """
+    from app.ai_web.websocket import _check_node_secret
+    from opensquad import node_peers
+
+    authorized = _check_node_secret(request.headers.get("X-Node-Secret", ""))
+    if not authorized:
+        peer_token = request.headers.get("X-Node-Token", "")
+        if peer_token:
+            peer = node_peers.verify(peer_token)
+            authorized = node_peers.has_scope(peer, "group:join")
+    if not authorized:
+        raise HTTPException(status_code=401, detail="Invalid or missing node secret")
+
+    collab_id = str(body.collab_id or "").strip()
+    message = str(body.message or "").strip()
+    invited = [str(a).strip() for a in (body.agents or []) if str(a).strip()]
+    if not collab_id or not message or not invited:
+        raise HTTPException(status_code=400, detail="collab_id, message and agents are required")
+
+    from app.ai_web.registry import registry as agent_registry
+
+    notified: list[str] = []
+    for agent_id in invited:
+        payload = {
+            "type": "chat",
+            "content": message,
+            "channel": "task",
+            "collab_id": collab_id,
+            "sender_name": str(body.title or body.card or "collaboration"),
+            "mentions": [agent_id],
+            "wake": True,
+        }
+        if await agent_registry.send_to_agent(agent_id, payload):
+            notified.append(agent_id)
+
+    relayed: dict = {}
+    if str(body.group_id or "").strip():
+        try:
+            from app import relay
+            from opensquad.system_config import syscfg
+
+            relayed = await relay.fan_out_task(
+                str(body.group_id),
+                {
+                    "type": "chat",
+                    "content": message,
+                    "channel": "task",
+                    "collab_id": collab_id,
+                    "mentions": invited,
+                    "wake": True,
+                    "event_id": uuid.uuid4().hex,
+                },
+                origin_host=str(syscfg.node_id() or ""),
+            )
+        except Exception as exc:  # noqa: BLE001 - a failed relay must not fail the invite
+            logger.warning("[Collab] invite relay failed for %s: %s", collab_id, exc)
+
+    return {"ok": True, "notified": notified, "relayed": relayed}
+
+
 @router.post("/collab-board/tasks")
 async def create_collab_board_task(
     body: CollabTaskCreateRequest,
