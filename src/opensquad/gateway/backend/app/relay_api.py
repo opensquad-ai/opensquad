@@ -61,7 +61,16 @@ async def relay_subscribe(request: Request, body: dict = Body(default={})):
     if not group_id or not callback_url:
         raise HTTPException(status_code=400, detail="group_id and callback_url are required")
 
-    result = relay.subscribe(group_id, callback_url, secret, user_id=user_id, host=str(peer.get("name") or ""))
+    result = relay.subscribe(
+        group_id,
+        callback_url,
+        secret,
+        user_id=user_id,
+        host=str(peer.get("name") or ""),
+        # Stored so revoking this peer can drop the rows it created (the token check
+        # alone leaves them behind, still being pushed to).
+        peer_id=str(peer.get("id") or ""),
+    )
     return {**result, "origin_host": _origin_host()}
 
 

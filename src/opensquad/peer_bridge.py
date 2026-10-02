@@ -168,6 +168,100 @@ def own_account_ids(host: str = "") -> set[str]:
     return out
 
 
+def forget_peer_group(host: str, group_id: str) -> bool:
+    """Drop ``group_id`` from a peer's recorded list (after leaving it there)."""
+    group = str(group_id or "").strip()
+    if not group:
+        return False
+    path = _config_path()
+    if not path:
+        return False
+    try:
+        with open(path, encoding="utf-8") as fh:
+            cfg = json.load(fh)
+        if not isinstance(cfg, dict):
+            return False
+        chat = cfg.get("group_chat") if isinstance(cfg.get("group_chat"), dict) else {}
+        peers = chat.get("peers") if isinstance(chat.get("peers"), dict) else {}
+        wanted = host_key(host)
+        entry = peers.get(wanted) if isinstance(peers.get(wanted), dict) else None
+        if entry is None:
+            entry = next(
+                (v for v in peers.values() if isinstance(v, dict) and host_key(str(v.get("base_url") or "")) == wanted),
+                None,
+            )
+        if entry is None:
+            return False
+        groups = [str(g) for g in (entry.get("groups") or []) if str(g) != group]
+        entry["groups"] = groups
+        tmp = f"{path}.tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(cfg, fh, ensure_ascii=False, indent=2)
+        os.replace(tmp, path)
+        return True
+    except Exception:
+        return False
+
+
+def unsubscribe_group(host: str, group_id: str, timeout: float = 10.0) -> dict[str, Any]:
+    """Tell ``host`` to stop pushing ``group_id`` here, and forget the local secret.
+
+    Leaving a group on a peer otherwise leaves the peer pushing its messages at this
+    machine for good: the subscription row on the owner's side is not tied to
+    membership, and the token that authorised it stays valid. Idempotent — a peer
+    that no longer has the row answers 200 with ``removed: 0``.
+    """
+    entry = find_peer(host)
+    if not entry:
+        return {"ok": False, "error": f"Not paired with {host}."}
+    base_url = str(entry.get("base_url") or "").rstrip("/")
+    token = peer_token(host)
+    if not base_url or not token:
+        return {"ok": False, "error": f"Peer {host} is missing its address or token; pair with it again."}
+
+    user_id = ""
+    try:
+        import opensquad.bridge as bridge_module
+
+        user_id = str(getattr(getattr(bridge_module, "bridge", None), "user_id", "") or "")
+    except Exception:
+        user_id = ""
+
+    result: dict[str, Any] = {"ok": False}
+    try:
+        import requests
+
+        resp = requests.delete(
+            f"{base_url}/api/relay/subscribe",
+            headers={"X-Node-Token": token},
+            json={
+                "group_id": str(group_id),
+                "callback_url": _home_gateway_url(),
+                "user_id": user_id,
+            },
+            timeout=timeout,
+        )
+        if resp.status_code == 200:
+            body = resp.json() if resp.content else {}
+            result = {"ok": True, "removed": int((body or {}).get("removed") or 0)}
+        else:
+            result = {"ok": False, "error": f"Unsubscribe on {base_url} failed (HTTP {resp.status_code})."}
+    except Exception as exc:  # noqa: BLE001 - report, never crash the tool
+        result = {"ok": False, "error": f"Could not reach {base_url}: {exc}"}
+
+    # Forget the local half whatever the peer answered: a stale inbound secret would
+    # let a push we no longer want be accepted, and if the owner never got the delete
+    # its pushes now fail closed (401) instead of arriving.
+    try:
+        from opensquad import relay_link
+
+        relay_link.forget_outbound(str(group_id))
+    except Exception:
+        pass
+    forget_peer_group(host, str(group_id))
+    return result
+
+
 def peer_for_group(group_id: str) -> dict[str, Any] | None:
     """The remembered peer that owns ``group_id``, or ``None`` when it is local.
 

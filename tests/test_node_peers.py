@@ -98,6 +98,24 @@ def test_a_revoked_token_stops_working(store):
     assert store.list_peers()[0]["revoked"] is True
 
 
+def test_revoking_a_peer_drops_the_relay_rows_it_created(store):
+    """Revocation is an auth change; the subscription rows the peer created live in
+    the relay store and would otherwise keep being pushed to forever."""
+    from opensquad import relay_link
+
+    relay_link.subscribe("g-7f3a", "http://home-a:9555", "s1", user_id="u-1", peer_id="peer_other")
+    code = store.start_pairing()["code"]
+    request_id = store.request_pairing(code, name="machine-b")["request_id"]
+    approved = store.decide_pairing(request_id, approve=True)
+    relay_link.subscribe("g-7f3a", "http://home-b:9555", "s2", user_id="u-2", peer_id=approved["peer_id"])
+    relay_link.subscribe("g-other", "http://home-b:9555", "s3", user_id="u-2", peer_id=approved["peer_id"])
+
+    assert store.revoke(approved["peer_id"]) is True
+
+    assert [s["user_id"] for s in relay_link.subscribers("g-7f3a")] == ["u-1"]
+    assert relay_link.subscribers("g-other") == []
+
+
 def test_deciding_twice_is_refused(store):
     code = store.start_pairing()["code"]
     request_id = store.request_pairing(code, name="machine-b")["request_id"]

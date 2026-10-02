@@ -504,6 +504,67 @@ def test_joining_a_group_on_a_peer_subscribes_for_its_messages(env, monkeypatch)
     assert relay_link.verify_inbound_user("g-7f3a", posted[0]["json"]["secret"]) == "u-home"
 
 
+def test_leaving_a_peer_group_unsubscribes_and_forgets_the_secret(env, monkeypatch):
+    """Leaving is only complete when the relay subscription goes with it: otherwise
+    the peer keeps pushing a group this agent has left."""
+    from opensquad import relay_link
+
+    peer_bridge_mod.remember_peer("192.168.5.4", "http://192.168.5.4:9555", "peer-tok")
+    peer_bridge_mod.remember_peer_group("192.168.5.4", "g-7f3a")
+    monkeypatch.setattr(relay_link, "store_dir", lambda: str(env / "relay"))
+    relay_link.remember_outbound("g-7f3a", "192.168.5.4", "sekret", user_id="u-1")
+    seen: list[dict] = []
+
+    class _Resp:
+        status_code = 200
+        content = b"{}"
+
+        def json(self):
+            return {"ok": True, "removed": 1}
+
+    class _Requests:
+        @staticmethod
+        def delete(url, **kwargs):
+            seen.append({"url": url, "headers": kwargs.get("headers") or {}, "json": kwargs.get("json") or {}})
+            return _Resp()
+
+    monkeypatch.setitem(sys.modules, "requests", _Requests)
+
+    res = peer_bridge_mod.unsubscribe_group("192.168.5.4", "g-7f3a")
+
+    assert res["ok"] is True and res["removed"] == 1
+    assert seen[0]["url"] == "http://192.168.5.4:9555/api/relay/subscribe"
+    assert seen[0]["headers"]["X-Node-Token"] == "peer-tok"
+    assert seen[0]["json"]["group_id"] == "g-7f3a"
+    # our half goes even if the peer answered oddly: a secret we no longer want must
+    # not keep accepting its pushes
+    assert not relay_link.verify_inbound("g-7f3a", "sekret")
+    assert peer_bridge_mod.find_peer("192.168.5.4")["groups"] == []
+
+
+def test_the_leave_tool_unsubscribes_on_the_peer(env, monkeypatch):
+    """im.leave_group(host=...) must not stop at leaving the group — the peer would
+    keep pushing its messages here."""
+    calls: list[tuple] = []
+
+    class _PeerBridge:
+        def leave_group_api(self, group_id):
+            return {"ok": True}
+
+    monkeypatch.setattr(peer_bridge_mod, "peer_bridge", lambda host: (_PeerBridge(), ""))
+    monkeypatch.setattr(
+        peer_bridge_mod,
+        "unsubscribe_group",
+        lambda host, gid: calls.append((host, gid)) or {"ok": True},
+    )
+
+    res = im_tool.leave_group("g-7f3a", host="192.168.5.4")
+
+    assert res["status"] == "success"
+    assert res["relay"] == "unsubscribed"
+    assert calls == [("192.168.5.4", "g-7f3a")]
+
+
 def test_subscribing_to_an_unpaired_host_says_to_pair_first(env):
     res = peer_bridge_mod.subscribe_group("10.0.0.9", "g-7f3a")
 

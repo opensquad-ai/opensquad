@@ -302,20 +302,20 @@ def test_fan_out_is_bounded_by_its_budget(store, monkeypatch):
     assert elapsed < 3.0  # far below 3 × 5s (the old serial worst case)
 
 
-def test_the_agent_push_route_relays_too(store):
+def test_the_agent_push_route_uses_the_canonical_broadcast(store):
     """Regression: `POST /agent-push/group` (the server/agent-side push, and the
-    file-push path behind it) broadcast for the local UI only, so a group's messages
-    reached a paired machine's agent only when they happened to be sent through
-    /api/groups/{id}/messages. The relay lives in notify_new_message, which this
-    route never called."""
+    file-push path behind it) broadcast a {type: new_message, message: ...} frame by
+    itself. Both the web UI (App.tsx) and the agent bridge read `data`, so the frame
+    reached no live subscriber, and the relay — which lives in notify_new_message —
+    never ran, so a paired machine's agent never saw it either."""
     route = (_BACKEND_DIR / "app" / "ai_web" / "routes" / "_main.py").read_text(encoding="utf-8")
     at = route.index("async def agent_push_to_group")
     body = route[at : at + 6000]
 
-    assert "await relay.fan_out(" in body
-    # and the relayed frame must carry `id`: the agent bridge dedupes on it, and the
-    # push response names the message `message_id` instead.
-    assert '{**response_data, "id": msg_id}' in body
+    assert "await notify_new_message(group_id, response_data" in body
+    assert '"message": response_data' not in body
+    # the identity every consumer keys on (the UI's message list, the bridge's dedupe)
+    assert '"id": msg_id' in body
 
 
 def test_a_bound_secret_only_delivers_to_its_own_user(store, monkeypatch):

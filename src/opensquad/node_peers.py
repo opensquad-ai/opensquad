@@ -12,10 +12,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import secrets
 import threading
 import time
+
+logger = logging.getLogger(__name__)
 
 _LOCK = threading.Lock()
 _FILE = "peers.json"
@@ -214,6 +217,17 @@ def revoke(peer_id: str) -> bool:
         peers[peer_id] = peer
         data["peers"] = peers
         _write(data)
+    # Revocation has to be a complete shut-off, not only an auth change: the
+    # subscriptions this peer created live in the relay store and would otherwise
+    # keep being pushed to forever.
+    try:
+        from opensquad import relay_link
+
+        removed = relay_link.unsubscribe_peer(peer_id)
+        if removed:
+            logger.info("[NodePeers] Revoked %s: dropped %d relay subscription(s)", peer_id, removed)
+    except Exception:
+        logger.debug("[NodePeers] Revoked %s: relay cleanup skipped", peer_id, exc_info=True)
     return True
 
 

@@ -170,6 +170,18 @@ def test_the_gateway_and_the_agent_write_different_files(store):
     assert set(out_doc["links"]) == {"outbound"}
 
 
+def test_unsubscribing_a_peer_drops_only_the_rows_it_created(store):
+    """Revoking a peer must not leave its rows behind, still being pushed to."""
+    rl.subscribe("g-7f3a", "http://home-a:9555", "s1", user_id="u-1", peer_id="peer_a")
+    rl.subscribe("g-7f3a", "http://home-b:9555", "s2", user_id="u-2", peer_id="peer_b")
+    rl.subscribe("g-other", "http://home-a:9555", "s3", user_id="u-1", peer_id="peer_a")
+
+    assert rl.unsubscribe_peer("peer_a") == 2
+    assert [s["user_id"] for s in rl.subscribers("g-7f3a")] == ["u-2"]
+    assert rl.subscribers("g-other") == []
+    assert rl.unsubscribe_peer("peer_missing") == 0
+
+
 def test_a_legacy_combined_store_is_migrated_not_lost(store):
     """Installs that already have relay_links.json must not lose their
     subscriptions to the new layout — and the old file is kept for forensics."""
@@ -233,6 +245,21 @@ def test_a_fresh_migration_lock_is_respected(store):
 
     assert rl.verify_inbound("g-local", "s1")  # legacy fallback, not a failure
     assert (store / "relay_links.json").is_file()  # left for the lock holder
+
+
+def test_forgetting_without_a_secret_drops_the_whole_subscription(store):
+    """Regression: the no-secret form (what leaving a group calls) kept every entry,
+    so the group was never forgotten and its pushes kept being accepted."""
+    s1 = rl.new_secret()
+    s2 = rl.new_secret()
+    rl.remember_outbound("g-7f3a", "machine-b", s1)
+    rl.remember_outbound("g-7f3a", "machine-b", s2)
+
+    assert rl.forget_outbound("g-7f3a") is True
+
+    assert not rl.verify_inbound("g-7f3a", s1)
+    assert not rl.verify_inbound("g-7f3a", s2)
+    assert rl.status()["outbound"] == []
 
 
 def test_an_inbound_secret_is_bound_to_the_user_it_was_minted_for(store):

@@ -2166,6 +2166,10 @@ async def agent_push_to_group(
         # Build response BEFORE commit (async SQLAlchemy golden rule)
         response_data = {
             "ok": True,
+            # `id` is the identity every consumer keys on (the web UI's message list,
+            # the agent bridge's dedupe); this route used to name it `message_id`
+            # only, so the frame it broadcast could not be merged by anyone.
+            "id": msg_id,
             "message_id": msg_id,
             "group_id": group_id,
             "sender_id": agent_user.id,
@@ -2177,36 +2181,18 @@ async def agent_push_to_group(
 
         await db.commit()
 
-    # Notify group chat WebSocket subscribers
+    # Notify group chat WebSocket subscribers — and the paired machines — through the
+    # one path every other message takes. This route used to broadcast a
+    # {"message": ...} frame by itself: both the web UI (App.tsx) and the agent bridge
+    # read `data`, so a server/agent-side push reached no live subscriber at all (the
+    # sender saw only its own HTTP response), and it never crossed to a peer because
+    # the relay lives inside notify_new_message.
     try:
-        from app.websocket import manager as ws_manager
+        from app.websocket import notify_new_message
 
-        await ws_manager.broadcast_to_group(
-            group_id,
-            {
-                "type": "new_message",
-                "message": response_data,
-            },
-        )
+        await notify_new_message(group_id, response_data, str(getattr(agent_user, "id", "") or ""))
     except Exception as e:
         logger.warning(f"Failed to broadcast group message: {e}")
-
-    # …and the paired machines, which this route used to skip entirely: a message
-    # pushed here reached the local UI at best, so an agent whose socket lives on
-    # another machine never saw it. The relay frame is the canonical ``data`` shape
-    # (what the agent bridge reads, unlike the ``message`` key above), and carries
-    # ``id`` because that is the identity the bridge dedupes on.
-    try:
-        from app import relay
-        from opensquad.system_config import syscfg
-
-        await relay.fan_out(
-            group_id,
-            {**response_data, "id": msg_id},
-            origin_host=str(syscfg.node_id() or ""),
-        )
-    except Exception as e:
-        logger.warning(f"Failed to relay group message: {e}")
 
     return response_data
 

@@ -164,12 +164,20 @@ def _sub_key(callback_url: str, user_id: str) -> str:
 # ── owner side: who wants this group pushed to them ────────────────────────
 
 
-def subscribe(group_id: str, callback_url: str, secret: str, user_id: str = "", host: str = "") -> dict:
+def subscribe(
+    group_id: str,
+    callback_url: str,
+    secret: str,
+    user_id: str = "",
+    host: str = "",
+    peer_id: str = "",
+) -> dict:
     """Record that ``callback_url`` wants messages for ``group_id`` pushed to it.
 
     ``secret`` is minted by the *subscriber* and echoed back on every push, so the
     owner never needs a credential of its own to reach the subscriber. ``user_id``
     is the subscriber's user on its own gateway — where the message must land.
+    ``peer_id`` is the paired machine that asked, so revoking it can drop its rows.
     """
     if not group_id or not callback_url:
         return {"ok": False, "error": "group_id and callback_url are required"}
@@ -187,6 +195,7 @@ def subscribe(group_id: str, callback_url: str, secret: str, user_id: str = "", 
         subs[_sub_key(callback_url, user_id)] = {
             "secret": str(secret or ""),
             "host": str(host or ""),
+            "peer_id": str(peer_id or ""),
             "user_id": str(user_id or ""),
             "callback_url": str(callback_url or "").rstrip("/"),
             "added_at": time.time(),
@@ -220,6 +229,42 @@ def unsubscribe(group_id: str, callback_url: str = "", user_id: str = "") -> int
             groups[group_id] = subs
         else:
             groups.pop(group_id, None)
+        links["subscribers"] = groups
+        data["links"] = links
+        _write_path(path, data)
+        return removed
+
+
+def unsubscribe_peer(peer_id: str) -> int:
+    """Drop every subscription a revoked peer created. Returns how many went.
+
+    Revoking a peer stops it authenticating, but the rows it created keep being
+    pushed to — so revocation is not a complete shut-off until they go too.
+    """
+    wanted = str(peer_id or "")
+    if not wanted:
+        return 0
+    with _LOCK:
+        _migrate_once()
+        path = subscribers_file()
+        data = _read_path(path)
+        links = data.get("links") if isinstance(data.get("links"), dict) else {}
+        groups = links.get("subscribers")
+        if not isinstance(groups, dict):
+            return 0
+        removed = 0
+        for gid in list(groups):
+            subs = groups.get(gid)
+            if not isinstance(subs, dict):
+                continue
+            keep = {k: v for k, v in subs.items() if str((v or {}).get("peer_id") or "") != wanted}
+            removed += len(subs) - len(keep)
+            if keep:
+                groups[gid] = keep
+            else:
+                groups.pop(gid, None)
+        if not removed:
+            return 0
         links["subscribers"] = groups
         data["links"] = links
         _write_path(path, data)
@@ -305,6 +350,12 @@ def remember_outbound(group_id: str, host: str, secret: str, user_id: str = "") 
 
 
 def forget_outbound(group_id: str, secret: str = "") -> bool:
+    """Drop one secret, or the whole subscription for ``group_id`` when none is given.
+
+    The no-secret case is what leaving a group uses, and it used to be unreachable:
+    the comprehension that filtered the list kept every entry when the secret was
+    empty, so the group was never actually forgotten.
+    """
     with _LOCK:
         _migrate_once()
         path = outbound_file()
@@ -313,13 +364,16 @@ def forget_outbound(group_id: str, secret: str = "") -> bool:
         out = links.get("outbound")
         if not isinstance(out, dict) or group_id not in out:
             return False
-        entry = out.get(group_id)
-        secrets_list = [item for item in _entry_secrets(entry) if not (secret and item["secret"] == str(secret))]
-        if secrets_list:
-            entry["secrets"] = secrets_list
-            out[group_id] = entry
-        else:
+        if not secret:
             out.pop(group_id, None)
+        else:
+            entry = out.get(group_id)
+            secrets_list = [item for item in _entry_secrets(entry) if item["secret"] != str(secret)]
+            if secrets_list:
+                entry["secrets"] = secrets_list
+                out[group_id] = entry
+            else:
+                out.pop(group_id, None)
         links["outbound"] = out
         data["links"] = links
         _write_path(path, data)

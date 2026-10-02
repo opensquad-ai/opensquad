@@ -357,7 +357,19 @@ def leave_group(group_id: str, host: str = "") -> dict[str, Any]:
     if isinstance(result, dict) and result.get("ok"):
         if not (host or "").strip():
             _persist_group_chat(remove_group=group_id)
-        return {"status": "success", "message": f"Left group {group_id}."}
+            return {"status": "success", "message": f"Left group {group_id}."}
+        # Leaving a group on a peer is only complete when the relay subscription goes
+        # with it: otherwise that machine keeps pushing this group here and the agent
+        # keeps "hearing" a group it is no longer in.
+        from ..peer_bridge import unsubscribe_group
+
+        relay = unsubscribe_group(host.strip(), group_id)
+        out = {"status": "success", "message": f"Left group {group_id}."}
+        out["relay"] = "unsubscribed" if relay.get("ok") else "still_subscribed"
+        if not relay.get("ok"):
+            out["relay_error"] = str(relay.get("error") or "")
+            out["message"] += " Note: that machine may still push this group's messages here."
+        return out
     detail = result.get("detail", "unknown error") if isinstance(result, dict) else "unknown error"
     return {"status": "error", "message": f"Failed to leave group {group_id}: {detail}"}
 
