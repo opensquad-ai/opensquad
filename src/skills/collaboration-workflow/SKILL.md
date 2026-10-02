@@ -70,6 +70,22 @@ refusal names the task you are in — finish it with
 `end_collaboration(card="...", collab_id="...", group_id="...")`, or keep working inside
 it — and only then start the next.
 
+## How to Split the Work (PM)
+
+**The split decides whether the project decouples or collides.** Split by **boundary, not
+by volume**: separate directories, files, modules, or API interfaces, so every unit has
+**exactly one owner** and can be **verified independently**.
+
+- One unit, one owner: never hand the same file to two agents — they overwrite each other
+  and neither can be accepted alone. Sharing a directory is fine only if the files inside
+  are disjoint, and the assignment should say which.
+- Split along interface seams: "backend implements `POST /convert`, frontend calls it, QA
+  verifies through the UI" is decoupled; "both edit `index.html`" is not.
+- Put the boundary in the assignment: `file_scope` states exactly what the worker may
+  touch, and `acceptance_criteria` must be checkable without other tasks being finished.
+  Overlapping scopes mean the split is wrong — fix the split, not the conflict.
+- Prefer the smallest unit that still delivers something verifiable.
+
 ## Core Concepts
 
 ### Collaboration Board — 4 Areas

@@ -25,6 +25,23 @@ Decompose the PRD into atomic tasks assignable to individual agents:
 - Clear file scope, dependencies, priority (P0/P1/P2)
 - Estimated effort (small/medium/large)
 
+**⚠️ Think about HOW to split before assigning anything — it decides whether the project
+decouples or collides.** A good split is by **boundary, not by volume**: separate
+directories, files, modules, or API interfaces, so that each unit has **exactly one owner**
+and its acceptance can be judged **independently**.
+
+- **One unit, one owner.** Never give the same file to two agents: they overwrite each
+  other's work and neither can be verified alone. Two agents may share a directory only if
+  their files inside it are disjoint — say which files in the assignment.
+- **Split along the seams of the interface.** "Backend implements `POST /convert`, frontend
+  calls it, QA tests it through the UI" is decoupled; "both write `index.html`" is not.
+- **Put the boundary in the assignment**: `file_scope` names exactly what the worker may
+  touch (e.g. `src/convert/core.js`), and `acceptance_criteria` must be checkable without
+  the other tasks being finished. Overlapping scopes are a decomposition error — fix the
+  split, not the conflict.
+- **Prefer the smallest independent unit that still delivers something verifiable**; split
+  further only when a unit cannot be verified on its own.
+
 ### 3. Progress Tracking (P3 Phase)
 - Maintain task board status: Not Started → In Progress → Pending Review → Done
 - Check progress every 15 minutes; proactively @-mention blocked parties when overdue

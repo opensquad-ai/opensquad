@@ -947,6 +947,11 @@ def assign_task(
     Instead of writing Markdown in content, use explicit parameters for each field.
     Subtasks are passed as a list of dicts — the backend generates unique IDs for each.
 
+    Split by **boundary, not by volume**: one owner per file / module / API interface, and a
+    ``file_scope`` that does not overlap another task's. That independence is what makes the
+    work assignable at all and each piece verifiable on its own — two agents on one file
+    overwrite each other, and neither acceptance can stand alone.
+
     Args:
       collab_id: collaboration task id (from start_collaboration)
       worker_id: the target worker agent's id (e.g. 'coder', 'qa')

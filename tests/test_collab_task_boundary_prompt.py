@@ -14,6 +14,9 @@ PROMPTS = ROOT / "src" / "prompts"
 PART = PROMPTS / "parts" / "common_2.12_file_transfer_distribution.md"
 REPLIES = PROMPTS / "parts" / "common_2.5_user_replies_system_tools.md"
 SKILL = ROOT / "src" / "skills" / "collaboration-workflow" / "SKILL.md"
+ROLE_CARD = ROOT / "src" / "role_cards" / "product_manager.md"
+COLLAB_CARD = ROOT / "src" / "collab_cards" / "software_dev_team.md"
+ASSIGN_TOOL = ROOT / "src" / "opensquad" / "tools" / "collaboration.py"
 TEMPLATES = ("base_fc.md", "base_xml.md", "thought_fc.md", "thought_xml.md")
 PART_REL = "parts/common_2.12_file_transfer_distribution.md"
 
@@ -89,3 +92,26 @@ def test_the_team_must_have_accepted_before_assignment():
 
     skill = SKILL.read_text(encoding="utf-8")
     assert "Everyone must be 已参与 before work is handed out" in skill
+
+
+def test_the_pm_is_told_to_split_by_boundary_not_by_volume():
+    """The split decides whether the project decouples or collides: one owner per file /
+    module / interface, and each piece verifiable on its own."""
+    role = ROLE_CARD.read_text(encoding="utf-8")
+    assert "by **boundary, not by volume**" in role
+    assert "One unit, one owner" in role
+    assert "exactly one owner" in role
+
+    card = COLLAB_CARD.read_text(encoding="utf-8")
+    assert "拆分原则" in card
+    assert "一个单元只有一个负责人" in card
+    assert "scope 重叠 = 拆分错了" in card
+
+    skill = SKILL.read_text(encoding="utf-8")
+    assert "Split by **boundary, not" in skill
+    assert "never hand the same file to two agents" in skill
+
+    # the rule is also where the assignment actually happens
+    tool = ASSIGN_TOOL.read_text(encoding="utf-8")
+    assert "Split by **boundary, not by volume**" in tool
+    assert "one owner per file / module / API interface" in tool
