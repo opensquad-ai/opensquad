@@ -39,7 +39,11 @@ group chat opens it). Everything about the task happens there, not in the group:
   produced, questions and answers between teammates, delivery notes. Send it as
   `im.send_message(content=..., collab_id="<collab_id>")` (files: same call with
   `file_paths=[...]`). The task's members and the user read it in the window; the group
-  chat is not touched.
+  chat is not touched. Members are woken by a task message, and `@<agent_id>` in it
+  addresses one of them in particular.
+- **Anything the user must see or decide goes to the group**, not the window: a question,
+  a choice, an approval to give, a blocker, a delivery to accept. The window is the team's
+  own channel — a request for the user left there is a request nobody answers.
 - **Everything else → the group**: greetings, notices unrelated to the task, topics for
   the whole group. Send it as `im.send_message(content=..., target_id="<group_id>",
   target_type="group")`.

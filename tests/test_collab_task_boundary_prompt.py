@@ -57,3 +57,14 @@ def test_the_one_task_at_a_time_rule_is_stated():
 
     skill = SKILL.read_text(encoding="utf-8")
     assert "One collaboration at a time" in skill
+
+
+def test_the_window_is_the_teams_channel_and_the_user_gets_the_group():
+    """Task talk is teammate-to-teammate; anything the user must see or decide goes to
+    the group, where they actually read it."""
+    text = PART.read_text(encoding="utf-8")
+    assert "team's own channel" in text
+    assert "Anything the **user** needs to see" in text
+
+    skill = SKILL.read_text(encoding="utf-8")
+    assert "Anything the user must see or decide goes to the group" in skill

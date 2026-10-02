@@ -20,7 +20,15 @@ message happened to arrive:
 | Anything else: greetings, notices unrelated to a task, group-wide announcements, someone else's topic | the **group chat** | `im.send_message(content=..., target_id="<group_id>", target_type="group")` |
 
 - With `collab_id`, the message (and its files) stays in the task window: the task's
-  members and the user read it there, and **the group chat is not touched at all**.
+  members and the user read it there, and **the group chat is not touched at all**. The
+  task's members are woken by it — mention one with `@<agent_id>` when it is addressed to
+  that teammate in particular.
+- **The task window is the team's own channel — teammate to teammate about this task.**
+  Anything the **user** needs to see, decide, or act on does **not** belong there: send it
+  to the **group** (a question, a choice to make, an approval to give, a blocker, a
+  delivery to accept). A message the user must answer that sits only in the task window is
+  a message nobody answers — the user reads the group, and a task-window message is not a
+  notification to them.
 - Without `collab_id`, it is ordinary group chat and **the task's thread never sees it**.
 - Both directions of leakage are visible mistakes: task content posted into the group
   buries the group in work noise, and group chatter pushed into the window makes the

@@ -326,7 +326,7 @@ def start_collaboration(
         # …and hand it to each invitee directly, so a member actually receives it and can
         # confirm (join_collaboration) instead of staying 已邀请 because the @name in the
         # group post did not match its IM name.
-        _direct = _deliver_invite_directly(
+        _direct = _deliver_to_agents(
             collab_id=str(_task_id),
             card=card,
             group_id=str(group_id),
@@ -845,7 +845,7 @@ def list_active_collaborations() -> dict[str, Any]:
         return {"status": "error", "message": str(e)}
 
 
-def _deliver_invite_directly(
+def _deliver_to_agents(
     *,
     collab_id: str,
     card: str,
@@ -854,15 +854,16 @@ def _deliver_invite_directly(
     message: str,
     title: str = "",
 ) -> dict[str, Any]:
-    """Hand the invitation to each invitee's own control channel.
+    """Hand a collaboration message to each named agent's own control channel.
 
-    The group post is mention-based, so an invitation whose @name does not match the
-    agent's IM name never wakes it — the invitee stays 已邀请 with nobody to blame. This
-    asks the gateway that owns the group to deliver it as a directed, wake-worthy frame
-    (and to relay it to paired machines), which is what makes 收到 → 确认 possible.
+    A group post is mention-based, so a message whose @name does not match the agent's IM
+    name never wakes it — which is how an invitee stayed 已邀请 and how an agent's task
+    message went unnoticed until somebody polled the board. This asks the gateway that
+    owns the group to deliver it as a directed, wake-worthy frame (and to relay it to
+    paired machines), which is what makes 收到 → 确认 and task talk actually live.
     """
     if not collab_id or not members:
-        return {"ok": False, "error": "no invitation to deliver"}
+        return {"ok": False, "error": "no message to deliver"}
     try:
         from ..bridge import gateway_base_url
         from ..peer_bridge import owner_bridge, peer_token
@@ -2373,6 +2374,39 @@ def post_task_message(
                 attached = [
                     str((f or {}).get("name") or (f or {}).get("url") or "") for f in attachments if isinstance(f, dict)
                 ]
+
+        # Wake the other members — task talk must be live, not something they find by
+        # polling the board. Progress pings stay board-only unless they name someone
+        # (they are status updates, and waking everyone per tick is noise); a discussion
+        # message or any message that @mentions a member is delivered with `wake` set.
+        try:
+            from ..collab_board import list_participants
+
+            participants = list_participants(collab_id=collab_id)
+            recipients: list[str] = []
+            for part in participants:
+                aid = str(part.get("agent_id") or "")
+                if aid and str(part.get("state") or "") == "accepted" and aid not in recipients:
+                    recipients.append(aid)
+            for member in task.get("members") or []:
+                name = str(member if isinstance(member, str) else (member or {}).get("agent_id") or "")
+                if name and name not in recipients:
+                    recipients.append(name)
+            recipients = [r for r in recipients if r and r != agent_id]
+
+            should_deliver = kind_n != TASK_KIND_PROGRESS or "@" in text
+            group_id = str((task.get("extra") or {}).get("group_id") or "")
+            if recipients and should_deliver:
+                _deliver_to_agents(
+                    collab_id=collab_id,
+                    card=str((task.get("extra") or {}).get("card") or ""),
+                    group_id=group_id,
+                    members=recipients,
+                    message=f"[Task window] @{agent_id}: {text}",
+                    title=task_name,
+                )
+        except Exception as exc:  # noqa: BLE001 - delivery is best effort, the board has it
+            logger.info("[Collab] task-message delivery skipped: %s", exc)
 
         return {
             "status": "success",
