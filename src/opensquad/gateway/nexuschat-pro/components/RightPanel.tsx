@@ -565,7 +565,17 @@ export const RightPanel: React.FC<RightPanelProps> = ({ isOpen, onClose, group, 
                       <div className={`absolute bottom-0 right-0 w-2.5 h-2.5 border-2 border-white rounded-full ${user.status === 'online' ? 'bg-green-500' : user.status === 'busy' ? 'bg-red-500' : 'bg-gray-400'}`}></div>
                     </div>
                     <div className="flex-1 min-w-0">
-                      <p className="text-sm font-medium text-textMain truncate">{user.name}</p>
+                      <div className="flex items-center gap-1.5">
+                        <p className="text-sm font-medium text-textMain truncate">{user.name}</p>
+                        {user.is_remote && (
+                          <span
+                            className="text-[9px] px-1.5 py-0.5 bg-primary/10 text-primary rounded-full truncate max-w-[80px] shrink-0"
+                            title={user.remote_label || t('rightPanel.remoteMember')}
+                          >
+                            {user.remote_label || t('rightPanel.remoteMember')}
+                          </span>
+                        )}
+                      </div>
                       <p className="text-xs text-gray-400 capitalize">{user.status}</p>
                     </div>
                   </div>

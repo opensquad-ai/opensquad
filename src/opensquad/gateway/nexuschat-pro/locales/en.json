@@ -1748,6 +1748,7 @@
     "noMessagesFound": "No messages found",
     "members": "Members ({{count}})",
     "add": "Add",
+    "remoteMember": "Remote machine",
     "leaveGroup": "Leave Group",
     "searchFailed": "Search failed",
     "changeGroupAvatar": "Change Group Avatar",

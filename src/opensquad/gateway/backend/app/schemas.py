@@ -128,6 +128,8 @@ class GroupMemberInfo(BaseModel):
     status: str
     is_agent: bool = False
     agent_id: str | None = None
+    is_remote: bool = False
+    remote_label: str | None = None
 
 
 class GroupResponse(GroupBase):

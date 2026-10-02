@@ -614,7 +614,9 @@ const App: React.FC = () => {
             old.avatar === (m.avatar || '') &&
             old.status === m.status &&
             old.is_agent === (m.is_agent ?? false) &&
-            old.agent_id === (m.agent_id ?? undefined);
+            old.agent_id === (m.agent_id ?? undefined) &&
+            old.is_remote === (m.is_remote ?? false) &&
+            old.remote_label === (m.remote_label ?? undefined);
           if (unchanged) continue;
           users[m.id] = {
             id: m.id,
@@ -623,6 +625,8 @@ const App: React.FC = () => {
             status: m.status as 'online' | 'offline' | 'busy',
             is_agent: m.is_agent ?? false,
             agent_id: m.agent_id ?? undefined,
+            is_remote: m.is_remote ?? false,
+            remote_label: m.remote_label ?? undefined,
           };
           usersChanged = true;
         }

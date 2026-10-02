@@ -188,6 +188,43 @@ _EMAIL_AGENT_ID_CACHE: dict[str, str] = {}
 _EMAIL_AGENT_ID_CACHE_TS: float = 0.0
 
 
+_REMOTE_ORIGIN_CACHE: dict[str, str] = {}
+_REMOTE_ORIGIN_CACHE_TS: float = 0.0
+
+
+def _remote_origin_map() -> dict[str, str]:
+    """chat_email -> origin machine name for accounts registered from a peer.
+
+    Cached 60s: the member list is built on every group fetch, and this store only
+    changes when a remote machine registers an agent.
+    """
+    global _REMOTE_ORIGIN_CACHE, _REMOTE_ORIGIN_CACHE_TS
+    now = time.time()
+    if _REMOTE_ORIGIN_CACHE and (now - _REMOTE_ORIGIN_CACHE_TS) < 60:
+        return _REMOTE_ORIGIN_CACHE
+    from opensquad import remote_members
+
+    try:
+        origins = {
+            str(email).lower(): str((entry or {}).get("peer_name") or "")
+            for email, entry in (remote_members.all_origins() or {}).items()
+            if isinstance(entry, dict) and entry.get("peer_id")
+        }
+    except Exception:
+        origins = {}
+    _REMOTE_ORIGIN_CACHE = origins
+    _REMOTE_ORIGIN_CACHE_TS = now
+    return origins
+
+
+def _remote_label_for(user: User) -> str | None:
+    """The origin machine's name for a remotely-registered member, else None."""
+    email = str(getattr(user, "email", "") or "").lower()
+    if not email:
+        return None
+    return _remote_origin_map().get(email)
+
+
 async def _build_email_agent_id_map() -> dict[str, str]:
     """Build chat_email -> agent_id map from launcher /api/agents. Cached 60s.
 
@@ -218,6 +255,7 @@ async def _build_email_agent_id_map() -> dict[str, str]:
 
 
 def _member_info(user: User, status: str | None = None, agent_id: str | None = None) -> GroupMemberInfo:
+    remote_label = _remote_label_for(user)
     return GroupMemberInfo(
         id=user.id,
         name=user.name,
@@ -225,6 +263,8 @@ def _member_info(user: User, status: str | None = None, agent_id: str | None = N
         status=status if status is not None else user.status.value,
         is_agent=_is_agent_email(getattr(user, "email", None)),
         agent_id=agent_id,
+        is_remote=remote_label is not None,
+        remote_label=remote_label,
     )
 
 
@@ -308,12 +348,16 @@ async def register(user_data: UserCreate, request: Request, db: AsyncSession = D
     # A paired machine registers its own agents with its scoped token instead of
     # holding the shared node_secret (see opensquad.node_peers): it needs the
     # agent:register scope, and a revoked or unpaired token grants nothing.
+    # The verified peer is kept, not just used for the check: it is the one
+    # authoritative moment we learn this account came from another machine.
+    register_peer: dict | None = None
     if not internal_call:
         peer_token = request.headers.get("X-Node-Token", "")
         if peer_token:
             from opensquad import node_peers
 
-            internal_call = node_peers.has_scope(node_peers.verify(peer_token), "agent:register")
+            register_peer = node_peers.verify(peer_token)
+            internal_call = node_peers.has_scope(register_peer, "agent:register")
 
     # For web calls (no internal auth), enforce first-user-only.
     if not internal_call:
@@ -366,6 +410,20 @@ async def register(user_data: UserCreate, request: Request, db: AsyncSession = D
         from opensquad import agent_identity
 
         agent_identity.bind(user_data.email, agent_uid)
+
+    # Remember which paired machine this account came from, so the member list can
+    # tell a remotely-joined agent from a local one (see opensquad.remote_members).
+    if register_peer:
+        try:
+            from opensquad import remote_members
+
+            remote_members.remember(
+                user_data.email,
+                str(register_peer.get("id") or ""),
+                str(register_peer.get("name") or ""),
+            )
+        except Exception as e:
+            _log.warning("[register] Recording remote origin failed: %s", e)
 
     # First-registration bootstrap: create the default collaboration group
     # (and pinned welcome message) using the language the user just chose

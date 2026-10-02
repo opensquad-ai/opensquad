@@ -1746,6 +1746,7 @@
     "noMessagesFound": "未找到消息",
     "members": "成员 ({{count}})",
     "add": "添加",
+    "remoteMember": "远程机器",
     "leaveGroup": "退出群组",
     "searchFailed": "搜索失败",
     "changeGroupAvatar": "更换群组头像",

@@ -398,7 +398,7 @@ export interface GroupResponse {
   description: string | null;
   avatar: string | null;
   is_private: boolean;
-  members: Array<{ id: string; name: string; avatar: string | null; status: string; is_agent?: boolean; agent_id?: string }>;
+  members: Array<{ id: string; name: string; avatar: string | null; status: string; is_agent?: boolean; agent_id?: string; is_remote?: boolean; remote_label?: string | null }>;
   pinned_message_id: string | null;
   unread_count: number;
   has_unread_mention: boolean;

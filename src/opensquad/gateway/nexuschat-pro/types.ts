@@ -16,6 +16,8 @@ export interface User {
   status: 'online' | 'offline' | 'busy';
   is_agent?: boolean;
   agent_id?: string;
+  is_remote?: boolean;
+  remote_label?: string;
 }
 
 export interface Attachment {
