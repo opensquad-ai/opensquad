@@ -836,6 +836,8 @@
     "gateRejected": "已拒绝",
     "gatePending": "待审批",
     "gateNone": "未开始",
+    "gateDoing": "已有内容",
+    "gateAssigned": "已分配 {{n}} 项",
     "approve": "确定",
     "reject": "拒绝",
     "requestedBy": "发起人",

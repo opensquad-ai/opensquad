@@ -836,6 +836,8 @@
     "gateRejected": "rejected",
     "gatePending": "awaiting approval",
     "gateNone": "not started",
+    "gateDoing": "in progress",
+    "gateAssigned": "{{n}} assigned",
     "approve": "Approve",
     "reject": "Reject",
     "requestedBy": "Requested by",

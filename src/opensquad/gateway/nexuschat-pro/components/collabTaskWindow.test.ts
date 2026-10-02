@@ -18,7 +18,7 @@ vi.mock('../utils/fencedMarkdown', () => ({
   renderFencedMarkdown: (text: string) => `<h2>${text}</h2>`,
 }));
 
-import { DiscussionBubble, ItemBlock, MarkdownText, ProgressBar } from './CollabTaskWindow';
+import { DiscussionBubble, ItemBlock, MarkdownText, ProgressBar, gateDisplayFor } from './CollabTaskWindow';
 
 function boardItem(over: Record<string, unknown> = {}) {
   return {
@@ -124,6 +124,28 @@ describe('collab task window', () => {
   it('assignment and progress lay out as a board, with the blocking gate flagged', () => {
     const src = fs.readFileSync(path.resolve(__dirname, 'CollabTaskWindow.tsx'), 'utf8');
     expect(src).toContain('grid gap-1.5 sm:grid-cols-2');
+    expect(src).toContain('data-testid="collab-task-blocking-gate"');
+  });
+
+  it('an assigned task does not report its gate as not started', () => {
+    // The field report: three assignments on the board, and the 任务分配 gate said 未开始
+    // because nobody had posted an approval card for that step.
+    expect(gateDisplayFor('任务分配', { counts: { 任务分配: 3 } })).toEqual({ key: 'gateDoing', count: 3 });
+
+    // a gate the user actually decided keeps the verdict
+    expect(gateDisplayFor('任务分配', { approval: { status: 'approved' } as never, counts: {} }).key).toBe(
+      'gateApproved',
+    );
+    expect(gateDisplayFor('任务分配', { approval: { status: 'pending' } as never, counts: {} }).key).toBe(
+      'gatePending',
+    );
+    // and an empty board still reads as not started
+    expect(gateDisplayFor('讨论方案', { counts: {} }).key).toBe('gateNone');
+  });
+
+  it('the not-started notice only shows while the board is empty', () => {
+    const src = fs.readFileSync(path.resolve(__dirname, 'CollabTaskWindow.tsx'), 'utf8');
+    expect(src).toContain('const boardStarted =');
     expect(src).toContain('data-testid="collab-task-blocking-gate"');
   });
 

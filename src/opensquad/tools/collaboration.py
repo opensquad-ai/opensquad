@@ -198,7 +198,15 @@ def start_collaboration(
                     _skills.append(_name)
             set_card_and_skills(collab_id=task_rec["task_id"], card=card, skills=_skills)
 
+            # The creator is in the task by definition — it does not accept its own
+            # invitation, so it is marked accepted at once and kept out of the invited
+            # list below (it used to show up as 已邀请 in its own task window).
+            _creator = _my_agent_id() or "unknown_agent"
+            mark_participant(collab_id=task_rec["task_id"], agent_id=_creator, state="accepted")
+
             for m in members or []:
+                if str(m) == _creator:
+                    continue
                 _name = m
                 _cfg_path = os.path.join(_agents_dir(), m, "config.json")
                 if os.path.exists(_cfg_path):
@@ -245,7 +253,8 @@ def start_collaboration(
             f"Task ID: {_task_id}\n"
             f"Collab Card: {card}\n"
             f"{project_description or ''}\n"
-            f'You\'re invited to join -- consider calling: join_collaboration(card="{card}")\n'
+            f'确认参与（必须）：调用 join_collaboration(card="{card}", collab_id="{_task_id}") —— '
+            f"确认之后你才是「已参与」；在你确认之前，不会被派活，也读不到任务窗口里的消息。\n"
             f'All board updates/reads must include collab_id="{_task_id}"'
         )
 

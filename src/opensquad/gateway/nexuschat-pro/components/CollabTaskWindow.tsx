@@ -23,6 +23,28 @@ import {
 } from '../services/api';
 import { OpenSquadLoader } from './OpenSquadLoader';
 
+/**
+ * What a gate should say.
+ *
+ * The approval item is the user's verdict, but a gate with **no** approval card is not
+ * "not started": a task can be fully assigned while nobody posted a card for 任务分配,
+ * and the window used to claim 未开始 next to the assignments it was showing. With no
+ * card, read the board instead.
+ */
+export function gateDisplayFor(
+  gate: string,
+  ctx: { approval?: CollabBoardItem | null; counts: Record<string, number>; taskDone?: boolean },
+): { key: 'gateApproved' | 'gateRejected' | 'gatePending' | 'gateDoing' | 'gateNone'; count?: number } {
+  const status = String(ctx.approval?.status || '').toLowerCase();
+  if (status === 'approved') return { key: 'gateApproved' };
+  if (status === 'rejected') return { key: 'gateRejected' };
+  if (status === 'pending') return { key: 'gatePending' };
+  const n = Number(ctx.counts?.[gate] || 0);
+  if (n > 0) return { key: 'gateDoing', count: n };
+  if (ctx.taskDone && (gate === '任务验收' || gate === '确定需求')) return { key: 'gateApproved' };
+  return { key: 'gateNone' };
+}
+
 const POLL_MS = 5000;
 
 /** Local time for a board timestamp (message bubbles and gate rows both show it). */
@@ -291,10 +313,24 @@ export const CollabTaskWindow: React.FC<CollabTaskWindowProps> = ({ collabId, on
       .sort((a, b) => String(a.updated_at || '').localeCompare(String(b.updated_at || '')))
       .pop() || null;
   const otherApprovals = approvals.filter((a) => !GATES.includes(gateOf(a)));
-  // What the task is waiting on: the first gate the user has not approved. Shown in the
-  // progress section so "nothing has started" reads as a gate, not as an empty board.
-  const blockingGate =
-    GATES.find((gate) => String(latestForGate(gate)?.status || '') !== 'approved') || '';
+  // Content on the board per gate, for the gates nobody posted a card for.
+  const gateCounts: Record<string, number> = {
+    确定需求: requirements.length,
+    讨论方案: plans.length,
+    任务分配: tasks.length,
+  };
+  const gateDisplay = (gate: string) =>
+    gateDisplayFor(gate, {
+      approval: latestForGate(gate),
+      counts: gateCounts,
+      taskDone: ['done', 'archived'].includes(String(summary?.status || '')),
+    });
+  // The "nothing has started" notice is only true while the board is empty: with
+  // requirements, a plan or assignments on it, a missing gate card is not a blocker.
+  const boardStarted = requirements.length + plans.length + tasks.length + statuses.length > 0;
+  const blockingGate = boardStarted
+    ? ''
+    : GATES.find((gate) => gateDisplay(gate).key !== 'gateApproved') || '';
 
   const [resolving, setResolving] = useState<string | null>(null);
   const [resolveError, setResolveError] = useState(false);
@@ -396,8 +432,8 @@ export const CollabTaskWindow: React.FC<CollabTaskWindowProps> = ({ collabId, on
             <Section title={t('collabTask.approvals')} count={approvals.length}>
               <div className="flex flex-wrap gap-1.5" data-testid="collab-task-gates">
                 {GATES.map((gate) => {
-                  const item = latestForGate(gate);
-                  const key = statusKey(item?.status);
+                  const display = gateDisplay(gate);
+                  const key = display.key;
                   const cls =
                     key === 'gateApproved'
                       ? 'border-emerald-500/40 text-emerald-600'
@@ -405,21 +441,24 @@ export const CollabTaskWindow: React.FC<CollabTaskWindowProps> = ({ collabId, on
                         ? 'border-rose-500/40 text-rose-500'
                         : key === 'gatePending'
                           ? 'border-amber-500/40 text-amber-600'
-                          : 'border-border text-textMuted';
+                          : key === 'gateDoing'
+                            ? 'border-sky-500/40 text-sky-600'
+                            : 'border-border text-textMuted';
+                  const label =
+                    key === 'gateDoing'
+                      ? gate === '任务分配'
+                        ? t('collabTask.gateAssigned', { defaultValue: '已分配 {{n}} 项', n: display.count })
+                        : t('collabTask.gateDoing', { defaultValue: '已有内容' })
+                      : t(`collabTask.${key}`);
+                  const Icon = key === 'gateApproved' ? CheckCircle2 : key === 'gateNone' ? Circle : Loader2;
                   return (
                     <span
                       key={gate}
                       className={`inline-flex items-center gap-1 rounded-lg border px-2 py-0.5 text-[11px] ${cls}`}
                     >
-                      {key === 'gateApproved' ? (
-                        <CheckCircle2 size={11} />
-                      ) : key === 'gatePending' ? (
-                        <Loader2 size={11} />
-                      ) : (
-                        <Circle size={11} />
-                      )}
+                      <Icon size={11} />
                       {gate}
-                      <span className="text-[10px] opacity-80">· {t(`collabTask.${key}`)}</span>
+                      <span className="text-[10px] opacity-80">· {label}</span>
                     </span>
                   );
                 })}
