@@ -98,7 +98,11 @@ class MessageRouter:
         wake_mode = await state_manager.get_wake_mode()
 
         # Check whether the message @-mentions the AI
-        is_mentioned = MessageRouter._check_mention(msg_data)
+        # A frame the gateway marked `wake` is already addressed to this agent (a
+        # message in one of its collaboration task windows, for instance): it carries
+        # no @mention of its own, and under strict mode that made the user's words in a
+        # task invisible until the agent happened to poll the board.
+        is_mentioned = MessageRouter._check_mention(msg_data) or bool(msg_data.get("wake"))
         sender_name = msg_data.get("sender_name", "Unknown user")
         group_name = msg_data.get("group_name") or msg_data.get("source_name", "Unknown group")
         content = msg_data.get("content", "")[:50]  # first 50 chars

@@ -1363,6 +1363,9 @@ async def post_collab_task_message(
         except Exception:
             participants = []
         candidates: list[str] = []
+        creator = str(task.get("created_by") or "")
+        if creator:
+            candidates.append(creator)
         for member in list(task.get("members") or []):
             name = str(member if isinstance(member, str) else (member or {}).get("agent_id") or "")
             if name:
@@ -1372,8 +1375,36 @@ async def post_collab_task_message(
                 value = str((part or {}).get(key) or "")
                 if value:
                     candidates.append(value)
+        # …and whoever has actually written to this board. An agent that picked up work
+        # and reports progress is on the task even if it never appears in `members` or
+        # `participants` (the PM may assign by name in the group), and it used to be
+        # silently left out — the user spoke and that agent never heard it.
+        try:
+            summary = collab_board.local_call("board_summary", collab_id=task_id) or {}
+            for entries in (summary.get("items") or {}).values():
+                for item in entries or []:
+                    owner = str((item or {}).get("agent_id") or "")
+                    if owner:
+                        candidates.append(owner)
+        except Exception:
+            pass
         # de-duplicate, keep order
         candidates = list(dict.fromkeys(candidates))
+
+        # One payload per recipient: a task message is addressed *to* that agent, and a
+        # strict-mode agent discards anything that does not mention it — which is
+        # exactly how the user's words in the window went unread. `mentions` carries
+        # the agent id and its display name, and `wake` states what the gateway already
+        # decided: this frame is for you (the router honours it as a mention).
+        mention_names: dict[str, str] = {}
+        for part in participants:
+            aid = str((part or {}).get("agent_id") or "")
+            if aid:
+                mention_names[aid] = str((part or {}).get("name") or aid)
+        for member in list(task.get("members") or []):
+            name = str(member if isinstance(member, str) else (member or {}).get("agent_id") or "")
+            if name and name not in mention_names:
+                mention_names[name] = name
 
         names = [str(a.get("name") or a.get("url") or "") for a in attachments]
         lines = [
@@ -1390,14 +1421,18 @@ async def post_collab_task_message(
             f'Reply with im.send_message(content=..., collab_id="{task_id}") so it stays '
             "in the task window; do not post this task's conversation into the group."
         )
-        chat_payload = {
+        base_payload = {
             "type": "chat",
             "user_id": current_user.id,
             "content": "\n".join(lines),
-            "channel": "gateway",
+            "channel": "task",
             "sender_name": author,
+            "collab_id": task_id,
+            "wake": True,
         }
         for candidate in candidates:
+            display = mention_names.get(candidate) or candidate
+            chat_payload = {**base_payload, "mentions": [candidate, display]}
             if await agent_registry.send_to_agent(candidate, chat_payload):
                 notified.append(candidate)
 
@@ -1413,7 +1448,7 @@ async def post_collab_task_message(
 
             await relay.fan_out_task(
                 task_group,
-                {**chat_payload, "event_id": uuid.uuid4().hex, "collab_id": task_id},
+                {**base_payload, "mentions": list(mention_names.keys()), "event_id": uuid.uuid4().hex},
                 origin_host=str(syscfg.node_id() or ""),
             )
     except Exception as exc:  # pragma: no cover - notification is best effort

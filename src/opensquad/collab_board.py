@@ -1479,7 +1479,7 @@ def _remote_call(op: str, args: tuple, kwargs: dict) -> Any:
         secret = ""
     headers = {"Content-Type": "application/json", "X-Node-Secret": secret or ""}
     # A paired machine does not hold this gateway's node_secret: it authenticates
-    # with the scoped token it was given for that host (opensquad.node_peers).
+    # with the scoped token it was given for that host.
     try:
         from opensquad import node_peers
 
@@ -1488,6 +1488,19 @@ def _remote_call(op: str, args: tuple, kwargs: dict) -> Any:
             headers["X-Node-Token"] = str(peer["token"])
     except Exception:
         pass
+    if not headers.get("X-Node-Token"):
+        # Pairing records the token in the agent's own config as well, and the workspace
+        # store is not always where it ends up (a re-pairing, a migrated install). Read
+        # it from either, or the board answers 401 "Invalid or missing node secret" and
+        # the write silently lands on this machine's board instead of the owner's.
+        try:
+            from opensquad import peer_bridge
+
+            token = peer_bridge.peer_token(base)
+            if token:
+                headers["X-Node-Token"] = str(token)
+        except Exception:
+            pass
     payload = json.dumps({"op": op, "args": list(args), "kwargs": kwargs}).encode("utf-8")
     req = urllib.request.Request(
         f"{base}{_BOARD_AGENT_PATH}",

@@ -97,6 +97,7 @@ def start_collaboration(
     group_id: str = "",
     project_name: str = "",
     project_description: str = "",
+    skills: list[str] | None = None,
 ) -> dict[str, Any]:
     """
     [PM only] Start a collaboration session.
@@ -119,6 +120,9 @@ def start_collaboration(
                   Required if members is provided.
         project_name: Human-readable project name
         project_description: Brief description of the project goal
+        skills: The skills this task actually needs — what you recommend the team run
+                with (e.g. ["playwright", "vcs_collaboration"]). The card itself is
+                always listed; anything else you leave out is not shown on the task.
     """
     # 1. Validate collab card exists
     card_file = os.path.join(_collab_cards_dir(), f"{card}.md")
@@ -170,15 +174,15 @@ def start_collaboration(
         try:
             from ..collab_board import mark_participant, set_card_and_skills
 
+            # The card, plus whatever the PM names explicitly. This used to add every
+            # skill the agent happened to have loaded (playwright, cross_machine_join,
+            # _smoke_skill, …), so the window listed 19 entries that said nothing about
+            # the task instead of the ones the project lead chose to run with.
             _skills = [f"collab_{card}"]
-            try:
-                for _s in _skill_loader.get_loaded_skills():
-                    if _s.name not in _skills:
-                        _skills.append(_s.name)
-                    if len(_skills) >= 20:
-                        break
-            except Exception:
-                pass
+            for _extra in skills or []:
+                _name = str(_extra).strip()
+                if _name and _name not in _skills:
+                    _skills.append(_name)
             set_card_and_skills(collab_id=task_rec["task_id"], card=card, skills=_skills)
 
             for m in members or []:
