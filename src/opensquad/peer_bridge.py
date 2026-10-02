@@ -437,6 +437,22 @@ def _home_gateway_url() -> str:
     return str(url or "").rstrip("/")
 
 
+def _local_agent_id() -> str:
+    """This agent's id as the gateway's registry knows it (config ``agent_id``,
+    else the agent directory's name)."""
+    path = _config_path()
+    if not path:
+        return ""
+    try:
+        with open(path, encoding="utf-8") as fh:
+            cfg = json.load(fh)
+        if isinstance(cfg, dict) and str(cfg.get("agent_id") or "").strip():
+            return str(cfg["agent_id"]).strip()
+    except Exception:
+        pass
+    return os.path.basename(os.path.dirname(path))
+
+
 def subscribe_group(host: str, group_id: str, timeout: float = 10.0) -> dict[str, Any]:
     """Ask ``host`` to push ``group_id``'s messages to this machine's gateway.
 
@@ -479,6 +495,9 @@ def subscribe_group(host: str, group_id: str, timeout: float = 10.0) -> dict[str
                 "callback_url": callback_url,
                 "secret": secret,
                 "user_id": user_id,
+                # So a task-window event can be delivered to this agent's control
+                # channel at home (that is where the owning gateway dispatches it).
+                "agent_id": _local_agent_id(),
             },
             timeout=timeout,
         )

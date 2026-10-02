@@ -58,6 +58,7 @@ async def relay_subscribe(request: Request, body: dict = Body(default={})):
     callback_url = str((body or {}).get("callback_url") or "").strip()
     secret = str((body or {}).get("secret") or "")
     user_id = str((body or {}).get("user_id") or "").strip()
+    agent_id = str((body or {}).get("agent_id") or "").strip()
     if not group_id or not callback_url:
         raise HTTPException(status_code=400, detail="group_id and callback_url are required")
 
@@ -70,6 +71,8 @@ async def relay_subscribe(request: Request, body: dict = Body(default={})):
         # Stored so revoking this peer can drop the rows it created (the token check
         # alone leaves them behind, still being pushed to).
         peer_id=str(peer.get("id") or ""),
+        # …and so a task-window event can be handed to that agent's control channel.
+        agent_id=agent_id,
     )
     return {**result, "origin_host": _origin_host()}
 
@@ -130,6 +133,29 @@ async def relay_deliver(request: Request, body: dict = Body(default={})):
 
     origin_host = str(envelope.get("origin_host") or request.headers.get("X-Relay-Origin") or "")
     message = envelope.get("data") if isinstance(envelope.get("data"), dict) else {}
+    kind = str(envelope.get("type") or "message:relay")
+
+    if kind == "task:relay":
+        # A task-window event. It belongs on the agent's control channel — the very
+        # place the owning gateway's local dispatch puts it — so the remote agent
+        # behaves exactly as it does when the user talks in a local task window.
+        event_id = str(message.get("event_id") or "")
+        if event_id and relay.already_seen(origin_host, event_id):
+            return {"ok": True, "delivered": False, "reason": "duplicate"}
+        target_agent = str(envelope.get("target_agent_id") or "")
+        if not target_agent:
+            return {"ok": True, "delivered": False, "reason": "no_agent"}
+        try:
+            from app.ai_web.registry import registry as agent_registry
+
+            delivered = await agent_registry.send_to_agent(
+                target_agent, {**message, "relayed": True, "origin_host": origin_host}
+            )
+        except Exception as exc:  # noqa: BLE001 - a failed notification must not break the push
+            logger.warning("[Relay] task delivery to agent %s failed: %s", target_agent, exc)
+            delivered = False
+        return {"ok": True, "delivered": bool(delivered)}
+
     message_id = str(message.get("id") or "")
     if message_id and relay.already_seen(origin_host, message_id):
         return {"ok": True, "delivered": False, "reason": "duplicate"}

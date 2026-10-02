@@ -123,6 +123,27 @@ def test_the_envelope_carries_the_origin_and_one_hop(store):
     assert env["relay_hops"] == 1
 
 
+def test_a_subscription_carries_the_agent_and_peer_that_made_it(store):
+    """The agent id is what a task-window event is delivered to, and the peer id is
+    what revocation drops."""
+    rl.subscribe("g-7f3a", "http://home-a:9555", "s1", user_id="u-1", peer_id="peer_a", agent_id="pm")
+
+    assert rl.subscribers("g-7f3a")[0]["agent_id"] == "pm"
+    assert rl.unsubscribe_peer("peer_a") == 1
+
+
+def test_a_task_envelope_says_what_it_is_and_who_it_is_for(store):
+    env = rl.build_envelope(
+        "g-7f3a", {"event_id": "e1"}, "machine-b", user_id="u-1", kind="task:relay", target_agent_id="pm"
+    )
+
+    assert env["type"] == "task:relay"
+    assert env["target_agent_id"] == "pm"
+    assert env["data"] == {"event_id": "e1"}
+    # a message envelope stays the default shape
+    assert rl.build_envelope("g-7f3a", {"id": "m1"}, "machine-b")["type"] == "message:relay"
+
+
 def test_one_hop_is_the_limit(store):
     assert rl.within_hop_limit({"relay_hops": 1})
     assert not rl.within_hop_limit({"relay_hops": 2})

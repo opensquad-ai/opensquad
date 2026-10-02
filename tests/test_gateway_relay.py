@@ -318,6 +318,106 @@ def test_the_agent_push_route_uses_the_canonical_broadcast(store):
     assert '"id": msg_id' in body
 
 
+def test_fan_out_task_targets_the_agent_on_the_other_machine(store, monkeypatch):
+    """A task-window event must reach the agent's control channel, not its group chat
+    socket — so the envelope names it, and the subscriber's agent id is what is used."""
+    rl.subscribe("g-7f3a", "http://home-a:9555", "s1", user_id="u-1", agent_id="pm")
+    client = _Client()
+    import app.http_clients as hc
+
+    monkeypatch.setattr(hc, "get_local_http_client", lambda: client)
+
+    res = asyncio.run(
+        gw_relay.fan_out_task("g-7f3a", {"event_id": "e1", "type": "chat", "content": "hi"}, origin_host="machine-b")
+    )
+
+    assert res["delivered"] == 1
+    assert client.posts[0]["json"]["type"] == "task:relay"
+    assert client.posts[0]["json"]["target_agent_id"] == "pm"
+    assert client.posts[0]["json"]["data"]["event_id"] == "e1"
+
+
+def test_an_undelivered_push_is_reported_as_a_failure(store, monkeypatch):
+    """The home gateway answers 200 with delivered:false when nobody was handed the
+    frame (agent offline). Counting that as a success hides a silent black hole."""
+    rl.subscribe("g-7f3a", "http://home-a:9555", "s1", user_id="u-1")
+
+    class _Client:
+        async def post(self, url, json=None, headers=None, timeout=None):
+            return _Body({"ok": True, "delivered": False})
+
+    import app.http_clients as hc
+
+    monkeypatch.setattr(hc, "get_local_http_client", lambda: _Client())
+
+    res = asyncio.run(gw_relay.fan_out("g-7f3a", {"id": "m_1"}, origin_host="machine-b"))
+
+    assert res["ok"] is False and res["failed"] == 1
+
+
+class _Body:
+    def __init__(self, body):
+        self.status_code = 200
+        self._body = body
+
+    def json(self):
+        return self._body
+
+
+def test_a_relayed_task_event_goes_to_the_agent_control_channel(store, monkeypatch):
+    secret = rl.new_secret()
+    rl.remember_outbound("g-7f3a", "machine-b", secret, user_id="u-1")
+    sent: list[tuple] = []
+
+    import app.ai_web.registry as registry_mod
+
+    async def _send(agent_id, message):
+        sent.append((agent_id, message))
+        return True
+
+    # `app.ai_web.registry` resolves to the AgentRegistry *instance* (the module name
+    # is rebound by the package), which is exactly what relay_api calls into.
+    monkeypatch.setattr(registry_mod, "send_to_agent", _send, raising=False)
+    envelope = rl.build_envelope(
+        "g-7f3a",
+        {"event_id": "e1", "type": "chat", "content": "[System] the user spoke"},
+        "machine-b",
+        user_id="u-1",
+        kind="task:relay",
+        target_agent_id="pm",
+    )
+
+    res = asyncio.run(relay_api.relay_deliver(_request({"X-Relay-Secret": secret}), body=envelope))
+
+    assert res["delivered"] is True
+    assert sent[0][0] == "pm"
+    assert sent[0][1]["content"] == "[System] the user spoke"
+    assert sent[0][1]["relayed"] is True
+
+
+def test_a_task_event_for_an_unknown_agent_is_not_claimed_as_delivered(store, monkeypatch):
+    secret = rl.new_secret()
+    rl.remember_outbound("g-7f3a", "machine-b", secret, user_id="u-1")
+    envelope = rl.build_envelope(
+        "g-7f3a", {"event_id": "e1"}, "machine-b", user_id="u-1", kind="task:relay", target_agent_id=""
+    )
+
+    res = asyncio.run(relay_api.relay_deliver(_request({"X-Relay-Secret": secret}), body=envelope))
+
+    assert res == {"ok": True, "delivered": False, "reason": "no_agent"}
+
+
+def test_the_task_endpoint_relays_what_it_dispatches(store):
+    """Regression: the task window's message was given only to the agents connected
+    here, so a participant on a paired machine never heard the user at all."""
+    route = (_BACKEND_DIR / "app" / "ai_web" / "routes" / "_main.py").read_text(encoding="utf-8")
+    at = route.index("async def post_collab_task_message")
+    body = route[at : at + 8000]
+
+    assert "await relay.fan_out_task(" in body
+    assert '"event_id": uuid.uuid4().hex' in body
+
+
 def test_a_bound_secret_only_delivers_to_its_own_user(store, monkeypatch):
     """A peer holding a valid secret cannot aim a push at another local agent."""
     secret = rl.new_secret()

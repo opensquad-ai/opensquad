@@ -171,6 +171,7 @@ def subscribe(
     user_id: str = "",
     host: str = "",
     peer_id: str = "",
+    agent_id: str = "",
 ) -> dict:
     """Record that ``callback_url`` wants messages for ``group_id`` pushed to it.
 
@@ -178,6 +179,8 @@ def subscribe(
     owner never needs a credential of its own to reach the subscriber. ``user_id``
     is the subscriber's user on its own gateway — where the message must land.
     ``peer_id`` is the paired machine that asked, so revoking it can drop its rows.
+    ``agent_id`` is the agent there, which is what a *task* event is delivered to
+    (those travel on the agent's control channel, not the group chat socket).
     """
     if not group_id or not callback_url:
         return {"ok": False, "error": "group_id and callback_url are required"}
@@ -196,6 +199,7 @@ def subscribe(
             "secret": str(secret or ""),
             "host": str(host or ""),
             "peer_id": str(peer_id or ""),
+            "agent_id": str(agent_id or ""),
             "user_id": str(user_id or ""),
             "callback_url": str(callback_url or "").rstrip("/"),
             "added_at": time.time(),
@@ -288,6 +292,7 @@ def subscribers(group_id: str) -> list[dict]:
                 "secret": str(entry.get("secret") or ""),
                 "user_id": str(entry.get("user_id") or ""),
                 "host": str(entry.get("host") or ""),
+                "agent_id": str(entry.get("agent_id") or ""),
             }
         )
     return out
@@ -444,16 +449,32 @@ def reset_seen() -> None:
 # ── envelope ───────────────────────────────────────────────────────────────
 
 
-def build_envelope(group_id: str, message: dict, origin_host: str, user_id: str = "", hops: int = 1) -> dict:
-    """The frame pushed to a subscriber. ``hops`` starts at 1 (first and only hop)."""
-    return {
-        "type": "message:relay",
+def build_envelope(
+    group_id: str,
+    message: dict,
+    origin_host: str,
+    user_id: str = "",
+    hops: int = 1,
+    kind: str = "message:relay",
+    target_agent_id: str = "",
+) -> dict:
+    """The frame pushed to a subscriber. ``hops`` starts at 1 (first and only hop).
+
+    ``kind`` says what is being relayed: a group message (delivered to the chat
+    socket) or a task-window event (delivered to the agent's control channel, which
+    is where the owning gateway dispatches it locally too).
+    """
+    envelope = {
+        "type": str(kind or "message:relay"),
         "group_id": group_id,
         "origin_host": str(origin_host or ""),
         "target_user_id": str(user_id or ""),
         "relay_hops": int(hops),
         "data": message,
     }
+    if target_agent_id:
+        envelope["target_agent_id"] = str(target_agent_id)
+    return envelope
 
 
 def within_hop_limit(envelope: dict) -> bool:

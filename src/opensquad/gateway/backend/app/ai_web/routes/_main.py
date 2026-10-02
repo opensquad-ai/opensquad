@@ -1400,6 +1400,22 @@ async def post_collab_task_message(
         for candidate in candidates:
             if await agent_registry.send_to_agent(candidate, chat_payload):
                 notified.append(candidate)
+
+        # A participant can be an agent whose socket lives on a paired machine: the
+        # local registry cannot reach it, so the very payload the agents here received
+        # goes over the relay and lands on that agent's control channel at its home
+        # gateway (deduped on event_id). Without this, "the user said something in the
+        # task window" reached only the agents on this machine.
+        task_group = str((task.get("extra") or {}).get("group_id") or "")
+        if task_group:
+            from app import relay
+            from opensquad.system_config import syscfg
+
+            await relay.fan_out_task(
+                task_group,
+                {**chat_payload, "event_id": uuid.uuid4().hex, "collab_id": task_id},
+                origin_host=str(syscfg.node_id() or ""),
+            )
     except Exception as exc:  # pragma: no cover - notification is best effort
         logging.getLogger(__name__).warning("[API] Task message notify failed: %s", exc)
 
