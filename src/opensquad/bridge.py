@@ -670,6 +670,20 @@ class ChatProBridge:
             if sender_id == self.user_id:
                 return
 
+            # A relayed copy of our OWN message arrives here too: the peer pushes a
+            # group's messages to every subscriber, including the machine that sent
+            # it. That copy's `sender_id` is this agent's account *there*, so the
+            # check above cannot see it — consult the ids this agent owns on peers.
+            if data.get("relayed") and sender_id:
+                try:
+                    from opensquad.peer_bridge import own_account_ids
+
+                    if str(sender_id) in own_account_ids():
+                        logger.info(f"[Bridge] Relayed copy of our own message ignored: {msg_id or sender_id}")
+                        return
+                except Exception:
+                    pass
+
             # Supplement group_name and sender_name (ChatPro WS messages don't include these fields)
             group_id = msg_data.get("group_id", "")
             if group_id and not msg_data.get("group_name"):

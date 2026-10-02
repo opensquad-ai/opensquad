@@ -148,6 +148,26 @@ def remember_peer_group(host: str, group_id: str) -> bool:
         return False
 
 
+def own_account_ids(host: str = "") -> set[str]:
+    """This agent's account ids ON paired machines (all peers when ``host`` is empty).
+
+    A relayed copy of a message this agent sent carries **that** machine's sender id,
+    not our home ``bridge.user_id``, so the bridge's own-message filter cannot
+    recognise it and the agent ends up answering itself. These are the ids it must
+    filter as well.
+    """
+    wanted = host_key(host)
+    out: set[str] = set()
+    for key, entry in load_peers().items():
+        if wanted and host_key(key) != wanted and host_key(str(entry.get("base_url") or "")) != wanted:
+            continue
+        account = entry.get("account") if isinstance(entry.get("account"), dict) else {}
+        uid = str(account.get("user_id") or "")
+        if uid:
+            out.add(uid)
+    return out
+
+
 def peer_for_group(group_id: str) -> dict[str, Any] | None:
     """The remembered peer that owns ``group_id``, or ``None`` when it is local.
 
@@ -292,6 +312,14 @@ def peer_bridge(host: str) -> tuple[Any | None, str]:
         if not b.login():
             return None, f"Could not log in on {base_url} as {email}."
         _BRIDGES[key] = b
+        # Remember this agent's account id ON that machine. The peer relays the
+        # group's messages back to us, including copies of our own — and that copy
+        # carries *this* id as `sender_id`, not the home one, so the bridge needs to
+        # know it to recognise its own message (see own_account_ids).
+        if str(getattr(b, "user_id", "") or "") and str(b.user_id) != str(account.get("user_id") or ""):
+            merged = dict(account)
+            merged["user_id"] = str(b.user_id)
+            remember_peer(host, base_url, account=merged)
         return b, ""
     except Exception as exc:  # noqa: BLE001 - report, never crash the tool
         return None, f"Could not reach {base_url}: {exc}"

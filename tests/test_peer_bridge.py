@@ -95,6 +95,39 @@ def test_remembering_a_peer_collapses_the_twin(env):
     assert peers["192.168.5.4"]["groups"] == ["g-kept"]  # merged, not dropped
 
 
+def test_own_account_ids_are_the_ones_this_agent_has_on_peers(env):
+    """A relayed copy of our own message carries the account id we hold THERE, so
+    that is what the bridge has to filter on (its home user_id never matches)."""
+    peer_bridge_mod.remember_peer(
+        "192.168.5.4", "http://192.168.5.4:9555", "tok", account={"email": "b@ai", "password": "pw"}
+    )
+    assert peer_bridge_mod.own_account_ids() == set()  # nothing recorded yet
+
+    peer_bridge_mod.remember_peer(
+        "192.168.5.4",
+        "http://192.168.5.4:9555",
+        "tok",
+        account={"email": "b@ai", "password": "pw", "user_id": "u-peer"},
+    )
+
+    assert peer_bridge_mod.own_account_ids() == {"u-peer"}
+    assert peer_bridge_mod.own_account_ids("192.168.5.4") == {"u-peer"}
+    assert peer_bridge_mod.own_account_ids("10.0.0.9") == set()
+
+
+def test_the_bridge_drops_a_relayed_copy_of_its_own_message():
+    """Regression: the peer pushes a group's messages to every subscriber, including
+    the machine that sent it. That copy's sender_id is this agent's account on the
+    peer, so the home `sender_id == self.user_id` check missed it and the agent saw
+    (and answered) its own message."""
+    src = (Path(__file__).resolve().parents[1] / "src" / "opensquad" / "bridge.py").read_text(encoding="utf-8")
+    at = src.index("# Filter out our own messages")
+    block = src[at : at + 1200]
+
+    assert 'data.get("relayed")' in block
+    assert "own_account_ids()" in block
+
+
 def test_remembering_a_peer_leaves_the_home_binding_exactly_as_it_was(env):
     peer_bridge_mod.remember_peer("192.168.5.4", "http://192.168.5.4:9555", "peer-tok", "machine-b")
 
@@ -171,6 +204,7 @@ def test_a_peer_bridge_logs_in_and_is_reused(env, monkeypatch):
             built.append(f"{base_url}|{email}")
             self.base_url = base_url
             self.token = "user-tok"
+            self.user_id = "u-peer"
 
         def login(self):
             return True
@@ -183,6 +217,9 @@ def test_a_peer_bridge_logs_in_and_is_reused(env, monkeypatch):
     assert why == ""
     assert first is second  # one bridge per peer
     assert built == ["http://192.168.5.4:9555|b@ai"]
+    # the id this agent holds there is remembered, so its own relayed message can be
+    # recognised when it comes back
+    assert peer_bridge_mod.find_peer("192.168.5.4")["account"]["user_id"] == "u-peer"
 
 
 def test_registering_on_a_peer_uses_the_peer_token_and_keeps_home_credentials(env, monkeypatch):
