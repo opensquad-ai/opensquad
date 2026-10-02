@@ -88,6 +88,10 @@ in the one place that already has an identity per machine — the gateway.
    `group:join` scope (no new credential, no `node_secret` on the wire). Deliver is
    authenticated with a **per-subscription secret the home gateway mints** and the
    owner only echoes back — so the owner holds no credential for the subscriber.
+   That secret is **bound to the user it was minted for**: a push whose
+   `target_user_id` is a different local user is refused (403) instead of delivered,
+   so a peer holding a valid secret cannot aim a message at another local agent. An
+   unbound secret (one recorded before the binding existed) is accepted as before.
 4. **Version handshake.** Still open. The relay is opt-in (a peer only subscribes
    if it knows the endpoint), and an older peer simply 404s the subscribe call —
    the join still succeeds and reports `relay: not_subscribed`. A positive
@@ -95,11 +99,25 @@ in the one place that already has an identity per machine — the gateway.
 5. **Failure semantics.** No queue, no retry: `fan_out` reports `{delivered,
    failed}` and logs; a failed push never becomes a local write. The joining agent
    sees `relay: not_subscribed` in the `join_group` result when the peer refused.
+   Pushes run **concurrently under one total budget** (`budget`, 5 s by default):
+   `fan_out` is awaited from `notify_new_message`, which sits in the send-message
+   handler, so doing them one at a time let a single dead peer add its whole
+   timeout to the *sender's* request. Whatever is still in flight when the budget
+   expires is cancelled and counted as failed.
 6. **Unsubscribe / revoke.** `DELETE /api/relay/subscribe` exists (by group, or by
    `callback_url`+`user_id`). Not yet wired to peer-token revocation or to
    `leave_group` — a revoke currently stops auth but leaves the stale subscription
    row until an explicit unsubscribe.
 7. **Multi-hop.** Not transitive: cap is 1 hop, fail closed beyond it.
+8. **Store layout.** One file per writer: the **gateway** process owns
+   `relay_subscribers.json` (who wants a group pushed, and the secret they minted),
+   the **agent** process owns `relay_outbound.json` (the secrets this machine minted
+   for subscriptions it created elsewhere). They used to share one file, which meant
+   read-whole-file / write-whole-file from two processes with only a `threading.Lock`
+   — a last-writer-wins window that silently dropped the other side and surfaced
+   later as an unexplained 401 on the next push. Reads cross processes freely (every
+   write is an atomic rename). A legacy combined `relay_links.json` is migrated once,
+   under an `O_EXCL` lock file, and renamed to `relay_links.json.migrated`.
 
 ## What the first cut does **not** cover (still open)
 

@@ -406,7 +406,7 @@ def test_joining_a_group_on_a_peer_subscribes_for_its_messages(env, monkeypatch)
     monkeypatch.setitem(sys.modules, "requests", _FakeRequests)
     import opensquad.relay_link as relay_link
 
-    monkeypatch.setattr(relay_link, "store_file", lambda: str(env / "relay_links.json"))
+    monkeypatch.setattr(relay_link, "store_dir", lambda: str(env / "relay"))
 
     res = peer_bridge_mod.subscribe_group("192.168.5.4", "g-7f3a")
 
@@ -417,6 +417,9 @@ def test_joining_a_group_on_a_peer_subscribes_for_its_messages(env, monkeypatch)
     assert posted[0]["json"]["user_id"] == "u-home"
     assert posted[0]["json"]["secret"]
     assert relay_link.verify_inbound("g-7f3a", posted[0]["json"]["secret"])
+    # The secret is bound to this agent's own user, so the peer cannot aim a push
+    # at another user on this gateway.
+    assert relay_link.verify_inbound_user("g-7f3a", posted[0]["json"]["secret"]) == "u-home"
 
 
 def test_subscribing_to_an_unpaired_host_says_to_pair_first(env):

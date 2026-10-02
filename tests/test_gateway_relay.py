@@ -31,9 +31,9 @@ from opensquad.gateway.backend.app import relay_api  # noqa: E402
 
 @pytest.fixture()
 def store(tmp_path, monkeypatch):
-    monkeypatch.setattr(rl, "store_file", lambda: str(tmp_path / "relay" / "relay_links.json"))
+    monkeypatch.setattr(rl, "store_dir", lambda: str(tmp_path / "relay"))
     rl.reset_seen()
-    return tmp_path / "relay" / "relay_links.json"
+    return tmp_path / "relay"
 
 
 def _request(headers: dict | None = None):
@@ -265,3 +265,61 @@ def test_fan_out_does_not_send_the_same_message_twice(store, monkeypatch):
 
     assert again.get("skipped") == "duplicate"
     assert len(client.posts) == 1
+
+
+class _SlowClient:
+    """A peer that never answers: this is what used to stall the sender."""
+
+    def __init__(self):
+        self.posts = 0
+
+    async def post(self, url, json=None, headers=None, timeout=None):
+        self.posts += 1
+        await asyncio.sleep(5)
+        return _Resp(200)
+
+
+def test_fan_out_is_bounded_by_its_budget(store, monkeypatch):
+    """Regression: a dead peer used to add its whole timeout to the sender's
+    request, one subscriber at a time. The fan-out now runs concurrently under one
+    budget, so the request cannot be held longer than that."""
+    for user in ("u-1", "u-2", "u-3"):
+        rl.subscribe("g-7f3a", "http://home-a:9555", f"s-{user}", user_id=user)
+    client = _SlowClient()
+    import app.http_clients as hc
+
+    monkeypatch.setattr(hc, "get_local_http_client", lambda: client)
+
+    import time
+
+    started = time.monotonic()
+    res = asyncio.run(gw_relay.fan_out("g-7f3a", {"id": "m_1"}, origin_host="machine-b", budget=0.1))
+    elapsed = time.monotonic() - started
+
+    assert res["ok"] is False
+    assert res["failed"] == 3
+    assert client.posts == 3  # all three were attempted together, not in sequence
+    assert elapsed < 3.0  # far below 3 × 5s (the old serial worst case)
+
+
+def test_a_bound_secret_only_delivers_to_its_own_user(store, monkeypatch):
+    """A peer holding a valid secret cannot aim a push at another local agent."""
+    secret = rl.new_secret()
+    rl.remember_outbound("g-7f3a", "machine-b", secret, user_id="u-1")
+    envelope = rl.build_envelope("g-7f3a", {"id": "m_1"}, "machine-b", user_id="u-2")
+
+    with pytest.raises(HTTPException) as exc:
+        _deliver(monkeypatch, secret=secret, body=envelope)
+
+    assert exc.value.status_code == 403
+
+
+def test_a_bound_secret_still_reaches_the_user_it_was_minted_for(store, monkeypatch):
+    secret = rl.new_secret()
+    rl.remember_outbound("g-7f3a", "machine-b", secret, user_id="u-1")
+    envelope = rl.build_envelope("g-7f3a", {"id": "m_1", "content": "hi"}, "machine-b", user_id="u-1")
+
+    res, mgr = _deliver(monkeypatch, secret=secret, body=envelope)
+
+    assert res["delivered"] is True
+    assert mgr.personal and mgr.personal[0][0] == "u-1"

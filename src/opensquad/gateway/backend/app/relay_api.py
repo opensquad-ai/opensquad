@@ -106,6 +106,15 @@ async def relay_deliver(request: Request, body: dict = Body(default={})):
     if not relay.verify_inbound(group_id, secret):
         raise HTTPException(status_code=401, detail="Unknown relay subscription")
 
+    # The secret was minted for one user on this machine, so it may only deliver to
+    # that user. Without this, any peer holding a valid secret could aim a push at
+    # another local agent's socket. An unbound secret (an older subscription) is
+    # accepted as before, so a rollout cannot reject legitimate pushes.
+    target_user = str(envelope.get("target_user_id") or "")
+    bound_user = relay.verify_inbound_user(group_id, secret)
+    if bound_user and bound_user != target_user:
+        raise HTTPException(status_code=403, detail="Relay secret is bound to a different user")
+
     if not relay.within_hop_limit(envelope):
         # Already relayed as far as allowed: deliver, do not forward.
         return {"ok": True, "delivered": False, "reason": "hop_limit"}
@@ -116,7 +125,6 @@ async def relay_deliver(request: Request, body: dict = Body(default={})):
     if message_id and relay.already_seen(origin_host, message_id):
         return {"ok": True, "delivered": False, "reason": "duplicate"}
 
-    target_user = str(envelope.get("target_user_id") or "")
     payload = {
         "type": "new_message",
         "data": message,

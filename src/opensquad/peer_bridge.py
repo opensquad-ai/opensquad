@@ -323,5 +323,8 @@ def subscribe_group(host: str, group_id: str, timeout: float = 10.0) -> dict[str
     if resp.status_code != 200:
         return {"ok": False, "error": f"Subscribe on {base_url} failed (HTTP {resp.status_code})."}
 
-    relay_link.remember_outbound(str(group_id), host_key(host), secret)
+    # Bound to the user it was minted for: the owner echoes this secret back on
+    # every push, and a push aimed at another local user is refused rather than
+    # delivered (see relay_link.verify_inbound_user).
+    relay_link.remember_outbound(str(group_id), host_key(host), secret, user_id=user_id)
     return {"ok": True, "group_id": str(group_id), "callback_url": callback_url}

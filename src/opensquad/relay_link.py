@@ -1,4 +1,4 @@
-"""Shared store for the gateway-to-gateway group relay (see docs/cross_machine_relay_design.md).
+"""The relay's bookkeeping: subscriptions, inbound secrets, loop protection.
 
 An agent has one socket, to its **own** gateway. When it joins a group that lives
 on a paired machine, that machine owns the group's messages but the agent's socket
@@ -6,26 +6,29 @@ is not there, so nothing arrives. The relay closes that gap: the owning gateway
 pushes the message to the agent's home gateway, which delivers it to the agent's
 user over its existing socket.
 
-This module is the part both processes need, because the two halves are written
-from opposite ends:
+**Two files, one writer each.** The two halves are written from opposite ends, and
+they sit in the same workspace but are written by *different processes*:
 
-* the **agent** (its process) subscribes — it asks the owning gateway to push, and
-  records the secret its home gateway must expect on the way back;
-* the **home gateway** (the backend process) receives — it verifies that secret.
+* the **gateway** process writes ``relay_subscribers.json`` — who wants a group
+  pushed to them, and the secret they minted (``subscribe`` / ``unsubscribe``);
+* the **agent** process writes ``relay_outbound.json`` — the secrets this machine
+  minted for the subscriptions it created elsewhere (``remember_outbound``).
 
-Both run in the same workspace, so they share this file. Keeping it out of
-``app/`` lets the agent import it without dragging in the gateway backend.
+They used to share one file, which meant read-whole-file / write-whole-file from
+two processes guarded only by a ``threading.Lock``: a last-writer-wins window that
+silently dropped the other side's entry (and surfaced later as an unexplained 401
+on the next push, long after the join reported success). One file per writer
+removes the window by construction; reads (``subscribers``, ``verify_inbound``,
+``status``) still cross processes freely, because every write is an atomic rename.
 
-Store shape (``<workspace>/data/relay/relay_links.json``)::
+File shapes::
 
-    {"links": {
-        "subscribers": {group_id: {"<callback>#<user>": {secret, host, user_id, added_at}}},
-        "outbound":    {group_id: {host, secrets: [..], added_at}}
-    }}
+    relay_subscribers.json  {"links": {"subscribers": {group_id: {"<callback>#<user>": {...}}}}}
+    relay_outbound.json     {"links": {"outbound": {group_id: {"host": ..., "secrets": [...]}}}}
 
-A group is keyed by ``callback_url`` **and** the home ``user_id``, because one
-home gateway can host several agents that all subscribe to the same remote group
-and each must be delivered to its own user.
+A group is keyed by ``callback_url`` **and** the home ``user_id``, because one home
+gateway can host several agents that all subscribe to the same remote group and
+each must be delivered to its own user.
 """
 
 from __future__ import annotations
@@ -44,28 +47,55 @@ RELAY_MAX_HOPS = 1
 # seen within this window — belt to the hop cap's braces.
 DEDUP_TTL_S = 300.0
 
-_FILE = "relay_links.json"
+_SUBSCRIBERS_FILE = "relay_subscribers.json"
+_OUTBOUND_FILE = "relay_outbound.json"
+# What both branches shared before the split, and the lock that keeps the one-time
+# migration from running twice at once.
+_LEGACY_FILE = "relay_links.json"
+_MIGRATION_LOCK = "relay_migrate.lock"
+# A migration lock left behind by a killed process must not block the split
+# forever; past this age it is treated as stale and cleared.
+_MIGRATION_LOCK_STALE_S = 60.0
 
 _LOCK = threading.Lock()
 
 
-def store_file() -> str:
+def store_dir() -> str:
+    """The directory both files live in (workspace ``data/relay/``)."""
     from opensquad.system_config import syscfg
 
-    return os.path.join(syscfg.workspace_data_dir("relay"), _FILE)
+    return syscfg.workspace_data_dir("relay")
 
 
-def _read() -> dict:
+def subscribers_file() -> str:
+    """Gateway-owned: who to push a group's messages to."""
+    return os.path.join(store_dir(), _SUBSCRIBERS_FILE)
+
+
+def outbound_file() -> str:
+    """Agent-owned: the secrets this machine minted for its own subscriptions."""
+    return os.path.join(store_dir(), _OUTBOUND_FILE)
+
+
+def store_file() -> str:
+    """Compatibility alias for the subscribers half (what the old file held)."""
+    return subscribers_file()
+
+
+def _legacy_file() -> str:
+    return os.path.join(store_dir(), _LEGACY_FILE)
+
+
+def _read_path(path: str) -> dict:
     try:
-        with open(store_file(), encoding="utf-8") as fh:
+        with open(path, encoding="utf-8") as fh:
             data = json.load(fh)
         return data if isinstance(data, dict) else {}
     except Exception:
         return {}
 
 
-def _write(data: dict) -> None:
-    path = store_file()
+def _write_path(path: str, data: dict) -> None:
     os.makedirs(os.path.dirname(path), exist_ok=True)
     tmp = f"{path}.tmp"
     with open(tmp, "w", encoding="utf-8") as fh:
@@ -73,9 +103,58 @@ def _write(data: dict) -> None:
     os.replace(tmp, path)
 
 
-def _links(data: dict) -> dict:
-    links = data.get("links")
-    return links if isinstance(links, dict) else {}
+def _branch(path: str, name: str) -> dict:
+    links = _read_path(path).get("links")
+    branch = links.get(name) if isinstance(links, dict) else None
+    return branch if isinstance(branch, dict) else {}
+
+
+def _migrate_once() -> None:
+    """Move a legacy combined file's branches into the per-writer files.
+
+    Guarded by an ``O_EXCL`` lock file — the only cross-process lock here, and only
+    for this one-time move: if another process is migrating, skip, because reads
+    fall back to the legacy file until the move is done, so nothing is lost. The
+    legacy file is renamed rather than deleted, so a bad migration stays diagnosable.
+    """
+    legacy = _legacy_file()
+    if not os.path.isfile(legacy):
+        return
+    lock = os.path.join(store_dir(), _MIGRATION_LOCK)
+    try:
+        os.makedirs(os.path.dirname(lock), exist_ok=True)
+        fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    except FileExistsError:
+        # Held by someone. If its holder died, the split would never happen (reads
+        # keep falling back to the legacy file, so nothing is lost, but the
+        # lost-update window would stay open) — clear a stale lock and retry once.
+        try:
+            if time.time() - os.path.getmtime(lock) <= _MIGRATION_LOCK_STALE_S:
+                return  # another process is migrating; the legacy fallback covers us
+            os.unlink(lock)
+            fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except Exception:
+            return
+    except Exception:
+        return
+    try:
+        os.close(fd)
+        links = _read_path(legacy).get("links")
+        links = links if isinstance(links, dict) else {}
+        subs = links.get("subscribers") if isinstance(links.get("subscribers"), dict) else None
+        out = links.get("outbound") if isinstance(links.get("outbound"), dict) else None
+        if subs and not os.path.isfile(subscribers_file()):
+            _write_path(subscribers_file(), {"links": {"subscribers": subs}})
+        if out and not os.path.isfile(outbound_file()):
+            _write_path(outbound_file(), {"links": {"outbound": out}})
+        os.replace(legacy, f"{legacy}.migrated")
+    except Exception:
+        pass
+    finally:
+        try:
+            os.unlink(lock)
+        except OSError:
+            pass
 
 
 def _sub_key(callback_url: str, user_id: str) -> str:
@@ -95,8 +174,10 @@ def subscribe(group_id: str, callback_url: str, secret: str, user_id: str = "", 
     if not group_id or not callback_url:
         return {"ok": False, "error": "group_id and callback_url are required"}
     with _LOCK:
-        data = _read()
-        links = _links(data)
+        _migrate_once()
+        path = subscribers_file()
+        data = _read_path(path)
+        links = data.get("links") if isinstance(data.get("links"), dict) else {}
         groups = links.get("subscribers")
         if not isinstance(groups, dict):
             groups = {}
@@ -113,15 +194,17 @@ def subscribe(group_id: str, callback_url: str, secret: str, user_id: str = "", 
         groups[group_id] = subs
         links["subscribers"] = groups
         data["links"] = links
-        _write(data)
+        _write_path(path, data)
     return {"ok": True, "group_id": group_id, "callback_url": callback_url, "user_id": str(user_id or "")}
 
 
 def unsubscribe(group_id: str, callback_url: str = "", user_id: str = "") -> int:
     """Drop one subscriber (or every subscriber of a group). Returns how many went."""
     with _LOCK:
-        data = _read()
-        links = _links(data)
+        _migrate_once()
+        path = subscribers_file()
+        data = _read_path(path)
+        links = data.get("links") if isinstance(data.get("links"), dict) else {}
         groups = links.get("subscribers")
         if not isinstance(groups, dict) or group_id not in groups:
             return 0
@@ -139,15 +222,14 @@ def unsubscribe(group_id: str, callback_url: str = "", user_id: str = "") -> int
             groups.pop(group_id, None)
         links["subscribers"] = groups
         data["links"] = links
-        _write(data)
+        _write_path(path, data)
         return removed
 
 
 def subscribers(group_id: str) -> list[dict]:
     """Everyone who asked for ``group_id``: ``{callback_url, secret, user_id, host}``."""
-    groups = _links(_read()).get("subscribers")
-    if not isinstance(groups, dict):
-        return []
+    _migrate_once()
+    groups = _branch(subscribers_file(), "subscribers") or _branch(_legacy_file(), "subscribers")
     subs = groups.get(group_id)
     if not isinstance(subs, dict):
         return []
@@ -169,55 +251,78 @@ def subscribers(group_id: str) -> list[dict]:
 # ── home side: the secrets this gateway expects on inbound pushes ────────────
 
 
-def remember_outbound(group_id: str, host: str, secret: str) -> dict:
+def _entry_secrets(entry: Any) -> list[dict]:
+    """Normalize ``secrets``: new entries are objects, legacy ones are strings."""
+    if not isinstance(entry, dict):
+        return []
+    raw = entry.get("secrets")
+    if not isinstance(raw, list):
+        return []
+    out = []
+    for item in raw:
+        if isinstance(item, str):
+            out.append({"secret": item, "user_id": ""})
+        elif isinstance(item, dict) and item.get("secret"):
+            out.append({"secret": str(item["secret"]), "user_id": str(item.get("user_id") or "")})
+    return out
+
+
+def _outbound_entry(group_id: str) -> dict:
+    _migrate_once()
+    out = _branch(outbound_file(), "outbound") or _branch(_legacy_file(), "outbound")
+    entry = out.get(group_id)
+    return entry if isinstance(entry, dict) else {}
+
+
+def remember_outbound(group_id: str, host: str, secret: str, user_id: str = "") -> dict:
     """Remember the secret minted for the subscription of ``group_id`` on ``host``.
 
     Several agents on this gateway can subscribe to the same remote group, so a
-    group keeps a list of the secrets it should accept.
+    group keeps a list of the secrets it accepted — each **bound to the user it was
+    minted for**, so a push cannot be redirected at another local user.
     """
     with _LOCK:
-        data = _read()
-        links = _links(data)
+        _migrate_once()
+        path = outbound_file()
+        data = _read_path(path)
+        links = data.get("links") if isinstance(data.get("links"), dict) else {}
         out = links.get("outbound")
         if not isinstance(out, dict):
             out = {}
         entry = out.get(group_id)
         if not isinstance(entry, dict):
             entry = {"host": str(host or ""), "secrets": [], "added_at": time.time()}
-        secrets_list = entry.get("secrets")
-        if not isinstance(secrets_list, list):
-            secrets_list = []
-        if secret and secret not in secrets_list:
-            secrets_list.append(str(secret))
+        secrets_list = _entry_secrets(entry)
+        if secret and not any(item["secret"] == str(secret) for item in secrets_list):
+            secrets_list.append({"secret": str(secret), "user_id": str(user_id or "")})
         entry["secrets"] = secrets_list
         entry["host"] = str(host or entry.get("host") or "")
         out[group_id] = entry
         links["outbound"] = out
         data["links"] = links
-        _write(data)
+        _write_path(path, data)
     return {"ok": True, "group_id": group_id, "host": host}
 
 
 def forget_outbound(group_id: str, secret: str = "") -> bool:
     with _LOCK:
-        data = _read()
-        links = _links(data)
+        _migrate_once()
+        path = outbound_file()
+        data = _read_path(path)
+        links = data.get("links") if isinstance(data.get("links"), dict) else {}
         out = links.get("outbound")
         if not isinstance(out, dict) or group_id not in out:
             return False
         entry = out.get(group_id)
-        if secret and isinstance(entry, dict):
-            secrets_list = [s for s in (entry.get("secrets") or []) if s != secret]
-            if secrets_list:
-                entry["secrets"] = secrets_list
-                out[group_id] = entry
-            else:
-                out.pop(group_id, None)
+        secrets_list = [item for item in _entry_secrets(entry) if not (secret and item["secret"] == str(secret))]
+        if secrets_list:
+            entry["secrets"] = secrets_list
+            out[group_id] = entry
         else:
             out.pop(group_id, None)
         links["outbound"] = out
         data["links"] = links
-        _write(data)
+        _write_path(path, data)
         return True
 
 
@@ -228,18 +333,27 @@ def new_secret() -> str:
 
 def verify_inbound(group_id: str, secret: str) -> bool:
     """True when ``secret`` is one this gateway minted for ``group_id``."""
-    out = _links(_read()).get("outbound")
-    if not isinstance(out, dict):
-        return False
-    entry = out.get(group_id)
-    if not isinstance(entry, dict):
-        return False
     if not secret:
         return False
-    for expected in entry.get("secrets") or []:
-        if expected and secrets.compare_digest(str(expected), str(secret)):
+    for expected in _entry_secrets(_outbound_entry(group_id)):
+        if expected["secret"] and secrets.compare_digest(expected["secret"], str(secret)):
             return True
     return False
+
+
+def verify_inbound_user(group_id: str, secret: str) -> str:
+    """The user a minted secret is bound to — ``""`` when unknown or unbound.
+
+    Empty means either the secret is not ours (callers check :func:`verify_inbound`
+    first) or an older subscription was recorded before the binding existed; both
+    are accepted as before, so a rollout cannot reject legitimate pushes.
+    """
+    if not secret:
+        return ""
+    for expected in _entry_secrets(_outbound_entry(group_id)):
+        if expected["secret"] and secrets.compare_digest(expected["secret"], str(secret)):
+            return expected["user_id"]
+    return ""
 
 
 # ── loop protection ────────────────────────────────────────────────────────
@@ -307,15 +421,14 @@ def within_hop_limit(envelope: dict) -> bool:
 
 def status() -> dict[str, Any]:
     """A read-only view for diagnostics: who we push to, what we expect inbound."""
-    links = _links(_read())
-    groups = links.get("subscribers") if isinstance(links.get("subscribers"), dict) else {}
-    out = links.get("outbound") if isinstance(links.get("outbound"), dict) else {}
+    groups = _branch(subscribers_file(), "subscribers") or _branch(_legacy_file(), "subscribers")
+    outbound = _branch(outbound_file(), "outbound") or _branch(_legacy_file(), "outbound")
     return {
         "subscribers": {
-            gid: [{"callback_url": s.get("callback_url"), "user_id": s.get("user_id")} for s in subs.values()]
-            for gid, subs in groups.items()
-            if isinstance(subs, dict)
+            gid: [{"callback_url": s.get("callback_url"), "user_id": s.get("user_id")} for s in entries.values()]
+            for gid, entries in groups.items()
+            if isinstance(entries, dict)
         },
-        "outbound": sorted(out.keys()),
+        "outbound": sorted(outbound.keys()),
         "max_hops": RELAY_MAX_HOPS,
     }
