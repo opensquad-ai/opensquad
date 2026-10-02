@@ -10,7 +10,13 @@ from __future__ import annotations
 
 import os
 import sqlite3
+from contextlib import suppress
 from typing import Any
+
+try:  # loaded by path (launcher) or as a package (tests)
+    from plugins import setup_check as sc
+except ImportError:  # pragma: no cover - path-loaded fallback
+    import setup_check as sc  # type: ignore[no-redef]
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -98,6 +104,117 @@ def query_data(project_root: str, params: dict) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# test_connection — the wizard's probe: log in for real, send nothing
+# ---------------------------------------------------------------------------
+
+AUTH_HINT = (
+    "认证被拒：多数邮箱不能用登录密码，要用「应用专用密码 / 授权码」"
+    "（Gmail 先开两步验证再生成 App Password；QQ/163 在邮箱设置里生成授权码）。"
+)
+NETWORK_HINT = "连不上邮件服务器：确认主机名、端口、SSL 开关与网络（企业网络常拦 993/465）。"
+
+
+def _port(value: Any, default: int) -> int:
+    try:
+        return int(str(value).strip() or default)
+    except (TypeError, ValueError):
+        return default
+
+
+def _check_imap(cfg: dict[str, Any]) -> dict:
+    import imaplib
+
+    host = str(cfg.get("imap_host") or "").strip()
+    port = _port(cfg.get("imap_port"), 993)
+    use_ssl = bool(cfg.get("imap_ssl", True))
+    mailbox = str(cfg.get("imap_mailbox") or "INBOX").strip() or "INBOX"
+    user = str(cfg.get("username") or "")
+    password = str(cfg.get("password") or "")
+    conn = None
+    try:
+        conn = imaplib.IMAP4_SSL(host, port) if use_ssl else imaplib.IMAP4(host, port)
+        conn.login(user, password)
+        typ, _data = conn.select(mailbox, readonly=True)
+        if typ != "OK":
+            return sc.check(
+                "IMAP 登录",
+                False,
+                f"登录成功，但打不开文件夹 {mailbox}",
+                "把「邮箱文件夹」改成 INBOX（或你在邮箱里实际的文件夹名）。",
+            )
+        return sc.check("IMAP 登录", True, f"已连接：{user} @ {host}:{port}")
+    except imaplib.IMAP4.error as exc:
+        detail = str(exc)
+        hint = AUTH_HINT if any(k in detail.upper() for k in ("AUTH", "LOGIN", "CREDENTIAL")) else NETWORK_HINT
+        return sc.check("IMAP 登录", False, detail, hint)
+    except Exception as exc:  # noqa: BLE001 - reported, never raised at the user
+        return sc.failed("IMAP 登录", exc, NETWORK_HINT)
+    finally:
+        if conn is not None:
+            with suppress(Exception):
+                conn.logout()
+
+
+def _check_smtp(cfg: dict[str, Any]) -> dict:
+    import smtplib
+
+    host = str(cfg.get("smtp_host") or "").strip()
+    port = _port(cfg.get("smtp_port"), 465)
+    user = str(cfg.get("username") or "")
+    password = str(cfg.get("password") or "")
+    conn = None
+    try:
+        # 465 is implicit TLS; anything else (587/25) speaks plaintext first and upgrades.
+        if port == 465:
+            conn = smtplib.SMTP_SSL(host, port, timeout=sc.CHECK_TIMEOUT_S)
+        else:
+            conn = smtplib.SMTP(host, port, timeout=sc.CHECK_TIMEOUT_S)
+            with suppress(Exception):
+                conn.starttls()
+        conn.login(user, password)
+        return sc.check("SMTP 登录", True, f"已连接：{user} @ {host}:{port}")
+    except smtplib.SMTPAuthenticationError as exc:
+        return sc.check("SMTP 登录", False, str(exc), AUTH_HINT)
+    except smtplib.SMTPException as exc:
+        return sc.check("SMTP 登录", False, str(exc), NETWORK_HINT)
+    except Exception as exc:  # noqa: BLE001 - reported, never raised at the user
+        return sc.failed("SMTP 登录", exc, NETWORK_HINT)
+    finally:
+        if conn is not None:
+            with suppress(Exception):
+                conn.quit()
+
+
+def test_connection(project_root: str, data: dict) -> dict:
+    """Log in to IMAP (and SMTP when configured). Nothing is sent or stored."""
+    cfg = sc.read_config(project_root, "email_assistant", overrides=(data or {}).get("config"))
+    imap_host = str(cfg.get("imap_host") or "").strip()
+    smtp_host = str(cfg.get("smtp_host") or "").strip()
+    user = str(cfg.get("username") or "").strip()
+    password = str(cfg.get("password") or "")
+
+    if not (imap_host or smtp_host) or not user or not password:
+        lacking = [
+            label
+            for label, ok in (
+                ("imap_host（或 smtp_host）", bool(imap_host or smtp_host)),
+                ("username（完整邮箱地址）", bool(user)),
+                ("password（应用专用密码/授权码）", bool(password)),
+            )
+            if not ok
+        ]
+        return sc.missing(
+            names=lacking,
+            hint="收件要知道 IMAP 主机，发件要知道 SMTP 主机；密码通常是「授权码」而不是登录密码。",
+        )
+
+    checks = [_check_imap(cfg)] if imap_host else []
+    if smtp_host:
+        checks.append(_check_smtp(cfg))
+    return sc.result(checks=checks)
+
+
+# ---------------------------------------------------------------------------
 # handle_action — POST /api/plugins/email_assistant/action
 # ---------------------------------------------------------------------------
 
@@ -105,10 +222,14 @@ def query_data(project_root: str, params: dict) -> dict:
 def handle_action(project_root: str, action: str, data: dict) -> dict:
     """
     Supported actions:
+        test_connection — data: {config?} — log in to IMAP/SMTP without sending anything
         send_email  — data: {to, subject, body}
         read_email  — data: {id}
         search      — data: {query, limit?}
     """
+    if action == "test_connection":
+        return test_connection(project_root, data or {})
+
     if action == "read_email":
         conn = _open_db(project_root)
         if conn is None:

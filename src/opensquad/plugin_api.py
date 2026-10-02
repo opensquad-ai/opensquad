@@ -139,6 +139,7 @@ def register(
     display_name: str = "",
     config_schema: dict[str, Any] | None = None,
     config_section: str = "",
+    config_setup: dict[str, Any] | None = None,
     dependencies: dict[str, list[str]] | None = None,
     contributes: dict[str, Any] | None = None,
     tags: list[str] | None = None,
@@ -180,6 +181,31 @@ def register(
                          description (str)  Help text shown in the UI
                          secret      (bool) If True, rendered as a masked password input
                          enum        (list) Restricts value to one of these choices
+                       Wizard metadata, also read from the same descriptor (optional):
+                         label       (str)  Short display name for the field
+                         hint        (str)  Where this value comes from ("开放平台 →
+                                            凭证与基础信息"), shown under the input
+                         help_url    (str)  Link to the page that issues it
+                         placeholder (str)  Example value ("cli_a1b2c3d4")
+                         required    (bool) The wizard refuses to continue without it
+                         pattern     (str)  Regex the value must match, checked before
+                                            the connection is tested for real
+        config_setup:  OPTIONAL guided-setup recipe: the step-by-step wizard that collects
+                       this plugin's external-connection values (feishu app id/secret,
+                       telegram bot token, IMAP/SMTP credentials, API keys…). Declared in
+                       code, like config_schema, so it cannot drift from the fields the
+                       plugin actually reads. Shape:
+                         {
+                           "title": str, "intro": str,
+                           "verify": {"action": str, "label": str, "hint": str},
+                           "steps": [{"id": str, "title": str, "description": str,
+                                      "help_url": str,
+                                      "fields": [top-level schema keys],
+                                      "bot_fields": [sub-fields of the `bots` list],
+                                      "checklist": [things to click, no input]}],
+                         }
+                       Rendered by the Plugin Manager's Setup Wizard; a plugin with no
+                       recipe keeps its plain config form.
         dependencies:  {"pip": ["requests", ...]}
         contributes:   frontend contribution points, e.g.
                        {"views": [{"name": "...", "title": "...", "icon": "...", "data_endpoint": "..."}]}
@@ -200,6 +226,7 @@ def register(
             "type": plugin_type,
             "config_schema": config_schema or {},
             "config_section": config_section,
+            "config_setup": config_setup or {},
             "dependencies": dependencies or {"pip": []},
             "contributes": contributes or {},
             "tags": tags or [],
@@ -810,6 +837,9 @@ def generate_plugin_json(cls, instance=None) -> dict[str, Any]:
         "hooks": hook_names,
         "config": config_section,
         "config_schema": config_schema,
+        # The guided-setup recipe travels with the manifest, so the Launcher can hand the
+        # wizard to the UI from the plugin's own declaration (see @register config_setup).
+        "setup": meta.get("config_setup", {}),
         "contributes": meta.get("contributes", {}),
         "dependencies": meta.get("dependencies", {"pip": []}),
     }

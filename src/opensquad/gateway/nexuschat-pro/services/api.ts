@@ -1483,6 +1483,8 @@ export interface PluginInfo {
   hooks: string[];
   config: Record<string, any>;
   config_schema?: Record<string, PluginConfigField>;
+  /** The plugin ships a guided-setup recipe (external connection): show the wizard entry. */
+  has_setup?: boolean;
   contributes?: {
     views?: Array<{
       name: string;
@@ -1543,12 +1545,44 @@ export interface PluginConfigField {
   secret?: boolean;
   /** For type === 'bot_list': schema of each bot item's fields */
   item_schema?: Record<string, PluginConfigField>;
+  /** Guided-setup metadata (see setup_check / @register config_setup): the wizard shows
+   *  the field's short name, where the value comes from, a link to that page, an example,
+   *  whether it is required, and the shape it must have before a connection is tested. */
+  label?: string;
+  hint?: string;
+  help_url?: string;
+  placeholder?: string;
+  required?: boolean;
+  pattern?: string;
+}
+
+/** One step of a plugin's guided setup. `fields` are top-level schema keys,
+ *  `bot_fields` are sub-fields of the `bots` list, `checklist` is console work with no input. */
+export interface PluginSetupStep {
+  id: string;
+  title: string;
+  description?: string;
+  help_url?: string;
+  fields?: string[];
+  bot_fields?: string[];
+  checklist?: string[];
+}
+
+/** A plugin's guided-setup recipe: the steps, plus the real connection test to run last. */
+export interface PluginSetupRecipe {
+  title?: string;
+  intro?: string;
+  steps: PluginSetupStep[];
+  verify?: { action?: string; label?: string; hint?: string };
+  finish?: { label?: string; note?: string };
 }
 
 export interface PluginConfigResponse {
   name: string;
   config_schema: Record<string, PluginConfigField>;
   config: Record<string, any>;
+  /** Present when the plugin ships a guided-setup recipe. */
+  setup?: PluginSetupRecipe;
 }
 
 export const pluginAPI = {

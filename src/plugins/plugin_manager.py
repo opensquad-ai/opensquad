@@ -37,7 +37,11 @@ logger = logging.getLogger("plugins.manager")
 # fetches / memory lookups but protects the main turn loop from indefinite
 # stalls. Hook handlers doing heavy I/O should spawn their own task.
 _HOOK_HANDLER_TIMEOUT = 10.0
-_RUNTIME_MANIFEST_KEYS = ("service", "service_toggle", "enabled")
+# Keys a manifest may carry that no @register decorator produces: the merge keeps the
+# on-disk value. `setup` is the guided-setup recipe — normally emitted from
+# @register(config_setup=…), but a manifest may hand-author one, and regenerating must
+# not silently drop it.
+_RUNTIME_MANIFEST_KEYS = ("service", "service_toggle", "enabled", "setup")
 _SKIP_PLUGIN_MODS = frozenset({"plugin_manager", "plugin_api"})
 
 
@@ -629,6 +633,10 @@ class PluginManager:
                 existing_section = existing.get("config", {}).get("section", "")
                 if existing_section:
                     generated.setdefault("config", {})["section"] = existing_section
+                # Preserve setup (the guided-setup recipe) if a manifest declares one by
+                # hand: @register normally emits it, and generated metadata wins.
+                if existing.get("setup"):
+                    generated["setup"] = existing["setup"]
             except Exception:
                 pass
 
@@ -650,6 +658,8 @@ class PluginManager:
             #   service_toggle   — launcher auto-start/stop control
             #   enabled          — per-node enable/disable (node_scope=single)
             #   config.section   — bridge to system_config.json (platform plugins)
+            #   setup            — a hand-authored guided-setup recipe (normally emitted
+            #                      by @register config_setup)
             #   → These are runtime state, not declared in @register.
             #
             # If @register's `dependencies` is updated, it OVERWRITES any

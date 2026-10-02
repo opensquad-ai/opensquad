@@ -14,6 +14,7 @@ import { pluginAPI, pluginServiceAPI, PluginInfo, PluginConfigField, PluginServi
 import { hasPluginViewAdapter } from './plugin-views/registry';
 import { PluginViewContainer } from './plugin-views/PluginViewContainer';
 import { GenericPluginView } from './plugin-views/GenericPluginView';
+import { PluginSetupWizard } from './PluginSetupWizard';
 import { PluginViewErrorBoundary } from './plugin-views/PluginViewErrorBoundary';
 import { useTranslation } from 'react-i18next';
 import {
@@ -256,6 +257,8 @@ export const PluginManagerPage: React.FC<PluginManagerPageProps> = ({
   const [detailTarget, setDetailTarget] = useState<PluginInfo | null>(null);
   const [filter, setFilter]     = useState<'all' | 'builtin' | 'platform' | 'tool' | 'hook' | 'starred'>('all');
   const [configOpen, setConfigOpen] = useState<string | null>(null);
+  // The guided-setup wizard is a modal for one plugin at a time (see PluginSetupWizard).
+  const [wizardOpen, setWizardOpen] = useState<string | null>(null);
   const [activeView, setActiveView] = useState<string | null>(null);
 
   // Category filter
@@ -647,6 +650,18 @@ export const PluginManagerPage: React.FC<PluginManagerPageProps> = ({
           </div>
         </div>
 
+        {/* Guided setup for the plugin whose ✨ button was pressed: a modal overlay, so it
+            lives at the top level rather than inside the card that opened it. */}
+        {wizardOpen ? (
+          <PluginSetupWizard
+            pluginName={wizardOpen}
+            pluginLabel={plugins.find((p) => p.name === wizardOpen)?.display_name || wizardOpen}
+            hasService={!!plugins.find((p) => p.name === wizardOpen)?.service}
+            onClose={() => setWizardOpen(null)}
+            onSaved={() => void fetchPlugins()}
+          />
+        ) : null}
+
         {/* Mobile inline search */}
         <div className="relative w-[90px] shrink-0 md:hidden">
           <Search size={12} className="absolute left-2 top-1/2 -translate-y-1/2 text-textMuted pointer-events-none" />
@@ -878,6 +893,7 @@ export const PluginManagerPage: React.FC<PluginManagerPageProps> = ({
                     configOpen={configOpen === plugin.name}
                     onConfigToggle={() => setConfigOpen(configOpen === plugin.name ? null : plugin.name)}
                     onOpenView={(viewName) => setActiveView(`${plugin.name}:${viewName}`)}
+                    onOpenWizard={() => setWizardOpen(plugin.name)}
                     starred={favorites.has(plugin.name)}
                     onToggleStar={() => toggleFavorite(plugin.name)}
                     agentLoaded={agentTools ? agentTools.has(plugin.name) : null}
@@ -1000,6 +1016,8 @@ interface PluginCardProps {
   configOpen: boolean;
   onConfigToggle: () => void;
   onOpenView: (viewName: string) => void;
+  /** Opens the guided setup wizard for a plugin that ships a setup recipe. */
+  onOpenWizard?: () => void;
   starred: boolean;
   onToggleStar: () => void;
   /** null = 未选中 agent；boolean = 该 agent 是否加载此插件 */
@@ -1015,7 +1033,7 @@ interface PluginCardProps {
 
 export const PluginCard: React.FC<PluginCardProps> = ({
   plugin, layout = 'grid', toggling, onToggle, configOpen, onConfigToggle,
-  onOpenView, starred, onToggleStar, agentLoaded, onAgentToggle,
+  onOpenView, onOpenWizard, starred, onToggleStar, agentLoaded, onAgentToggle,
   agentToolLevel, onToolLevelChange, onUninstall, onOpenDetail,
 }) => {
   const { t: tr } = useTranslation();
@@ -1114,6 +1132,19 @@ export const PluginCard: React.FC<PluginCardProps> = ({
 
   const configAndViews = (
     <>
+      {plugin.has_setup && (
+        // Guided setup: the external-connection plugins (feishu / telegram / email /
+        // search keys) each need values that only exist in a provider console, so the
+        // wizard walks through them and tests the connection before saving.
+        <button
+          onClick={onOpenWizard}
+          data-testid={`plugin-guided-setup-${plugin.name}`}
+          className="p-1 rounded transition-colors text-textMuted hover:text-primary hover:bg-primary/10"
+          title={tr('pluginManager.guidedSetup')}
+        >
+          <Sparkles size={14} />
+        </button>
+      )}
       {hasSettings && (
         <button
           onClick={onConfigToggle}

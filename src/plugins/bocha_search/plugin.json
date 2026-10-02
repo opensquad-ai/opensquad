@@ -10,37 +10,40 @@
   "tags": [
     "search"
   ],
-  "tools": [
-    {
-      "name": "bocha_search",
-      "module": "proxy",
-      "level": "core",
-      "auto_register": true,
-      "requires_agent_id": false
-    }
-  ],
+  "tools": [],
   "hooks": [],
   "config": {
     "schema": {
       "api_key": {
         "type": "string",
         "default": "",
-        "description": "Bocha API key (or set BOCHA_API_KEY env)."
+        "description": "Bocha API key (or set BOCHA_API_KEY env).",
+        "label": "API Key",
+        "secret": true,
+        "required": true,
+        "hint": "博查控制台 → API KEY 管理，创建后复制（只在创建时显示一次）。",
+        "help_url": "https://open.bochaai.com/",
+        "placeholder": "sk-…"
       },
       "base_url": {
         "type": "string",
         "default": "https://api.bocha.cn",
-        "description": "Bocha API base URL"
+        "description": "Bocha API base URL",
+        "label": "接口地址",
+        "hint": "一般不用改；用私有部署时填自建地址。"
       },
       "default_count": {
         "type": "integer",
         "default": 10,
-        "description": "Default number of results (1-50)"
+        "description": "Default number of results (1-50)",
+        "label": "默认返回条数",
+        "hint": "1–50，默认 10。"
       },
       "timeout_sec": {
         "type": "integer",
         "default": 30,
-        "description": "HTTP request timeout in seconds"
+        "description": "HTTP request timeout in seconds",
+        "label": "请求超时（秒）"
       }
     }
   },
@@ -48,22 +51,33 @@
     "api_key": {
       "type": "string",
       "default": "",
-      "description": "Bocha API key (or set BOCHA_API_KEY env)."
+      "description": "Bocha API key (or set BOCHA_API_KEY env).",
+      "label": "API Key",
+      "secret": true,
+      "required": true,
+      "hint": "博查控制台 → API KEY 管理，创建后复制（只在创建时显示一次）。",
+      "help_url": "https://open.bochaai.com/",
+      "placeholder": "sk-…"
     },
     "base_url": {
       "type": "string",
       "default": "https://api.bocha.cn",
-      "description": "Bocha API base URL"
+      "description": "Bocha API base URL",
+      "label": "接口地址",
+      "hint": "一般不用改；用私有部署时填自建地址。"
     },
     "default_count": {
       "type": "integer",
       "default": 10,
-      "description": "Default number of results (1-50)"
+      "description": "Default number of results (1-50)",
+      "label": "默认返回条数",
+      "hint": "1–50，默认 10。"
     },
     "timeout_sec": {
       "type": "integer",
       "default": 30,
-      "description": "HTTP request timeout in seconds"
+      "description": "HTTP request timeout in seconds",
+      "label": "请求超时（秒）"
     }
   },
   "contributes": {},
@@ -71,5 +85,42 @@
     "pip": [
       "requests"
     ]
+  },
+  "setup": {
+    "title": "博查搜索接入",
+    "intro": "注册博查账号并创建一个 API Key，粘贴进来即可让 agent 具备联网搜索能力。",
+    "steps": [
+      {
+        "id": "create_key",
+        "title": "第 1 步：创建 API Key",
+        "description": "登录博查开放平台（支持手机号/微信注册），在控制台创建 API Key。它只在创建时完整显示一次，注意复制保存。",
+        "help_url": "https://open.bochaai.com/",
+        "checklist": [
+          "注册 / 登录博查开放平台",
+          "控制台 → API KEY 管理 → 创建",
+          "复制 key（形如 sk-…）"
+        ]
+      },
+      {
+        "id": "credentials",
+        "title": "第 2 步：粘贴 key 并确认参数",
+        "description": "接口地址保持默认即可；返回条数与超时可按需调整。",
+        "fields": [
+          "api_key",
+          "base_url",
+          "default_count",
+          "timeout_sec"
+        ]
+      }
+    ],
+    "verify": {
+      "action": "test_connection",
+      "label": "测试连接",
+      "hint": "会用这个 key 发起一次最小搜索：成功说明 key 可用且网络可达。"
+    },
+    "finish": {
+      "label": "保存",
+      "note": "保存后 agent 即可使用联网搜索工具。"
+    }
   }
 }

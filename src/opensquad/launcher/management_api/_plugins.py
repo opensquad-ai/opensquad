@@ -410,6 +410,9 @@ class PluginsMixin:
                     "hooks": meta.get("hooks", []),
                     "config": meta.get("config", {}),
                     "config_schema": meta.get("config_schema", {}),
+                    # Whether this plugin ships a guided-setup recipe: the UI shows the
+                    # wizard entry only for plugins that have one.
+                    "has_setup": bool(meta.get("setup")),
                     "contributes": meta.get("contributes", {}),
                     "dependencies": meta.get("dependencies", {}),
                     "service": meta.get("service"),
@@ -520,6 +523,9 @@ class PluginsMixin:
         schema = {}
         section = None
         plugin_type = "tool"
+        # The guided-setup recipe (step-by-step wizard for external connections), declared
+        # by the plugin via @register(config_setup=…) and carried in its manifest.
+        setup = {}
         if os.path.isfile(plugin_json_path):
             try:
                 with open(plugin_json_path, encoding="utf-8") as f:
@@ -527,6 +533,7 @@ class PluginsMixin:
                 schema = meta.get("config_schema", {})
                 section = meta.get("config", {}).get("section")
                 plugin_type = meta.get("type", "tool")
+                setup = meta.get("setup", {}) or {}
             except Exception:
                 pass
 
@@ -573,6 +580,7 @@ class PluginsMixin:
                 "name": name,
                 "config_schema": schema,
                 "config": merged,
+                "setup": setup,
             }
         )
 
