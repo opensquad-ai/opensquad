@@ -26,9 +26,12 @@ class ModelConfigSchema(BaseModel):
 
     model_config = ConfigDict(extra="allow")
     schema_version: str = Field(default="1.0", pattern=r"^\d+\.\d+$")
-    # api_protocol: API 协议类型 (openai / openai_compat / claude / anthropic / google / gemini)
+    # api_protocol: API 协议类型
+    #   openai / openai_compat (Chat Completions) / openai_responses (Responses API)
+    #   claude / anthropic / google / gemini
     api_protocol: str = Field(
-        default="openai_compat", pattern=r"^(openai|openai_compat|claude|anthropic|google|gemini)$"
+        default="openai_compat",
+        pattern=r"^(openai|openai_compat|openai_responses|responses|claude|anthropic|google|gemini)$",
     )
     # provider: 模型供应商名称（厂商），仅用于 UI 展示/分组
     provider: str = Field(default="")

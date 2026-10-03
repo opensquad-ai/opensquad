@@ -299,6 +299,12 @@ class AgentBootPhases:
             agent_logger.info("[Boot] ENGINE SWITCH: Using GoogleAPI (Google Gemini Native Protocol)")
             agent_logger.info(f"   Model: {model_config.model}, Max Tokens: {model_config.token_max}")
             chat_api = GoogleAPI(config=model_config, stream_parser=parser)
+        elif provider in ["openai_responses", "responses"]:
+            from opensquad.responses_api import ResponsesAPI
+
+            agent_logger.info("[Boot] ENGINE SWITCH: Using ResponsesAPI (OpenAI Responses Protocol)")
+            agent_logger.info(f"   Model: {model_config.model}, Max Tokens: {model_config.token_max}")
+            chat_api = ResponsesAPI(config=model_config, stream_parser=parser)
         else:
             from opensquad.chat_api import ChatAPI
 

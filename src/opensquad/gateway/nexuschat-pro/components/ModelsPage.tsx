@@ -42,7 +42,7 @@ interface ProviderPreset {
   // provider: vendor display name (replaces old vendor_name)
   provider?: string;
   base_url: string;
-  // api_protocol: API 协议类型 (openai | openai_compat | anthropic | google)
+  // api_protocol: API 协议类型 (openai | openai_responses | openai_compat | anthropic | google)
   api_protocol: string;
   icon_url?: string;
   models: ModelPreset[];
@@ -53,18 +53,41 @@ interface ModelsPageProps {
 }
 
 // API protocol labels (协议徽章上显示)
+// openai / openai_compat 是同一条线路（OpenAI Chat Completions），只是
+// "官方" 与 "第三方兼容端点" 的区别——厂商由 provider 字段表达，故合并展示。
 const API_PROTOCOL_LABELS: Record<string, string> = {
-  openai:        'OpenAI',
-  anthropic:     'Anthropic',
-  google:        'Google',
-  openai_compat: 'OpenAI Compatible',
+  openai:           'OpenAI Chat Completions',
+  openai_compat:    'OpenAI Chat Completions',
+  openai_responses: 'OpenAI Responses',
+  anthropic:        'Anthropic Messages',
+  claude:           'Anthropic Messages',
+  google:           'Google Gemini',
+  gemini:           'Google Gemini',
 };
 
+// 模型卡抽屉「API 协议」下拉的选项（顺序即展示顺序）
+const API_PROTOCOL_OPTIONS: { value: string; label: string }[] = [
+  { value: 'openai',           label: 'OpenAI Chat Completions' },
+  { value: 'openai_responses', label: 'OpenAI Responses' },
+  { value: 'anthropic',        label: 'Anthropic Messages' },
+  { value: 'google',           label: 'Google Gemini' },
+];
+
+// 历史别名 / 同一协议的归一点：claude≡anthropic，gemini≡google
+const PROTOCOL_ALIAS: Record<string, string> = { claude: 'anthropic', gemini: 'google' };
+// 下拉匹配用的规范化值（openai/openai_compat 是同一项，展示合并但落盘保留原值）
+const protocolSelectValue = (v: string): string => (v ? PROTOCOL_ALIAS[v] || v : 'openai_compat');
+// 已有专门下拉项的协议；其余走「保留原值」的兜底项
+const KNOWN_PROTOCOLS = new Set([
+  'openai', 'openai_compat', 'openai_responses', 'anthropic', 'claude', 'google', 'gemini',
+]);
+
 const API_PROTOCOL_COLORS: Record<string, string> = {
-  openai:        'bg-emerald-500/15 text-emerald-400 border-emerald-500/30',
-  anthropic:     'bg-amber-500/15 text-amber-400 border-amber-500/30',
-  google:        'bg-blue-500/15 text-blue-400 border-blue-500/30',
-  openai_compat: 'bg-purple-500/15 text-purple-400 border-purple-500/30',
+  openai:           'bg-emerald-500/15 text-emerald-400 border-emerald-500/30',
+  openai_compat:    'bg-emerald-500/15 text-emerald-400 border-emerald-500/30',
+  openai_responses: 'bg-teal-500/15 text-teal-400 border-teal-500/30',
+  anthropic:        'bg-amber-500/15 text-amber-400 border-amber-500/30',
+  google:           'bg-blue-500/15 text-blue-400 border-blue-500/30',
 };
 
 const FAV_KEY = 'nexus_favorites_model';
@@ -1777,8 +1800,25 @@ const ModelsPage: React.FC<ModelsPageProps> = ({ onBack }) => {
                       </span>
                     </div>
                     <div className="min-w-0">
-                      <span className="text-textMuted">API Protocol · </span>
-                      <span className="text-textMain">{API_PROTOCOL_LABELS[form.api_protocol] || form.api_protocol || '—'}</span>
+                      <label className="text-textMuted text-[11px] flex items-center justify-center gap-1">
+                        API Protocol
+                      </label>
+                      <select
+                        className={`${inputCls} mt-0.5 text-center`}
+                        value={protocolSelectValue(form.api_protocol)}
+                        onChange={e => setField('api_protocol', e.target.value)}
+                      >
+                        {API_PROTOCOL_OPTIONS.map(o => {
+                          // openai/openai_compat 是同一项：展示合并，落盘保留卡片原值
+                          const value = o.value === 'openai' && form.api_protocol !== 'openai'
+                            ? 'openai_compat'
+                            : o.value;
+                          return <option key={value} value={value}>{o.label}</option>;
+                        })}
+                        {form.api_protocol && !KNOWN_PROTOCOLS.has(form.api_protocol) && (
+                          <option value={form.api_protocol}>{API_PROTOCOL_LABELS[form.api_protocol] || form.api_protocol}</option>
+                        )}
+                      </select>
                     </div>
                     <div className="min-w-0 col-span-2">
                       <span className="text-textMuted">Base URL · </span>

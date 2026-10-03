@@ -429,6 +429,14 @@ class SubAgentRunner:
             from opensquad.google_api import GoogleAPI
 
             api = GoogleAPI(**common_kwargs)
+        elif provider in ("openai_responses", "responses"):
+            from opensquad.responses_api import ResponsesAPI
+
+            api = ResponsesAPI(
+                **common_kwargs,
+                is_think=cfg.get("is_think", False),
+                reasoning_effort=cfg.get("reasoning_effort", "high"),
+            )
         else:
             from opensquad.chat_api import ChatAPI
 

@@ -540,6 +540,8 @@ class ToolCallStrategySelector:
         provider_map = {
             "openai_compat": "openai",
             "openai": "openai",
+            "openai_responses": "openai",
+            "responses": "openai",
             "claude": "claude",
             "anthropic": "claude",
             "google": "google",
@@ -570,6 +572,8 @@ class ToolCallStrategySelector:
         provider_map = {
             "openai_compat": "openai",
             "openai": "openai",
+            "openai_responses": "openai",
+            "responses": "openai",
             "claude": "claude",
             "anthropic": "claude",
             "google": "google",
