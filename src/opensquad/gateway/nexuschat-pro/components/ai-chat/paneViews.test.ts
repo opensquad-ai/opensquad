@@ -259,6 +259,9 @@ describe('the panels themselves', () => {
     expect(browser).toContain('data-testid="browser-iframe"');
     expect(browser).toContain('allow-scripts allow-forms allow-popups allow-modals');
     expect(browser).toContain('isSelfOrigin');
+    // A site that refuses to be embedded (Baidu: a page script, not a header) leaves a blank
+    // area; in the browser build say why right there and offer the system browser.
+    expect(browser).toContain('browser-iframe-hint-external');
     // It must NOT touch the launcher's browser session — that one belongs to the agent and is
     // frame-based, so a click here would act on some other window instead of this page.
     expect(browser).not.toContain('browserAPI');

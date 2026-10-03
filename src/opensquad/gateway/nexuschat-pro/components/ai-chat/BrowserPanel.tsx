@@ -193,6 +193,23 @@ export const BrowserPanel: React.FC<BrowserPanelProps> = ({ suggestions }) => {
         </div>
       ) : null}
 
+      {!isElectron && url ? (
+        // In the browser build some sites cannot be embedded at all (X-Frame-Options, or a page
+        // script that refuses to be framed — Baidu does the latter, so the area just stays blank
+        // with no clue why). Say it where it happens, with the way out next to it.
+        <div className="flex-shrink-0 flex items-center gap-1.5 border-b border-border/60 bg-amber-500/[0.07] px-2 py-0.5 text-[10px] text-textMuted">
+          <span className="min-w-0 flex-1 truncate">{t('aiChat.browser.framingNote')}</span>
+          <button
+            type="button"
+            onClick={external}
+            data-testid="browser-iframe-hint-external"
+            className="shrink-0 rounded border border-border px-1.5 py-0.5 text-textMain hover:bg-primary/10"
+          >
+            {t('aiChat.browser.openExternal')}
+          </button>
+        </div>
+      ) : null}
+
       <div className="flex-1 min-h-0 relative bg-white dark:bg-neutral-900">
         {!url ? (
           <div className="h-full flex flex-col items-center justify-center gap-1 px-4 text-center">
