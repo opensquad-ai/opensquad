@@ -20,7 +20,7 @@ import { OpenSquadLoader } from '../OpenSquadLoader';
 import { HoverTooltip } from '../HoverTooltip';
 import { formatDuration, formatFullTimestamp, formatTokenCount, formatTokenExact } from '../../utils/usageFormat';
 import { getLocalAvatarFallback } from '../../utils/image';
-import { approvalQuietLine, parseCollabApproval } from '../CollabStepApprovalCard';
+import { approvalFallbackLine, approvalQuietLine, hasApprovalMarker, parseCollabApproval } from '../CollabStepApprovalCard';
 
 /** Per-round billed token usage stamped on the round's final assistant message. */
 export interface MessageUsage {
@@ -544,6 +544,15 @@ const MessageBubbleInner: React.FC<MessageBubbleProps> = ({
         >
           {decided ? approvalQuietLine(approvalCard) : `📋 待批准：${approvalCard.title || approvalCard.step || '批准请求'}（在群聊中点击「确定」或「拒绝」）`}
         </div>
+      </div>
+    );
+  }
+
+  if (hasApprovalMarker(safeContent)) {
+    // The marker is there but unreadable: its readable line, never the raw marker text.
+    return (
+      <div className="flex justify-center my-2" data-testid="approval-fallback-line">
+        <div className="text-[11px] text-center px-2 text-textMuted">{approvalFallbackLine(safeContent)}</div>
       </div>
     );
   }

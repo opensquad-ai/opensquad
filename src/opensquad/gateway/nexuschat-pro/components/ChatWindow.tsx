@@ -13,7 +13,9 @@ import { OpenSquadLoader } from './OpenSquadLoader';
 import { playGentleNotificationSound } from '../utils/sounds';
 import {
   CollabStepApprovalCard,
+  approvalFallbackLine,
   approvalQuietLine,
+  hasApprovalMarker,
   isResolvedApprovalMessage,
   parseCollabApproval,
 } from './CollabStepApprovalCard';
@@ -306,8 +308,17 @@ const MessageRowImpl: React.FC<MessageRowProps> = ({
     !msg.isDeleted && msg.type === MessageType.TEXT ? parseCollabTask(msg.content || '') : null;
   const interactiveWindowCard =
     !msg.isDeleted && msg.type === MessageType.TEXT ? parseWindowCard(msg.content || '') : null;
+  // A marker we cannot parse must still never be painted verbatim — a hand-built card with a raw
+  // newline in its JSON is exactly the reported case. Treat it as the card it meant to be, so the
+  // bubble chrome stays off and the branch below shows its readable headline instead of the blob.
+  const unparsedApproval =
+    !msg.isDeleted &&
+    msg.type === MessageType.TEXT &&
+    !interactiveApproval &&
+    hasApprovalMarker(msg.content || '');
   const isInteractiveCard = !!(
     interactiveApproval ||
+    unparsedApproval ||
     interactiveProposal ||
     interactiveCollabTask ||
     interactiveWindowCard
@@ -518,6 +529,14 @@ const MessageRowImpl: React.FC<MessageRowProps> = ({
                     );
                   }
                   const proposal = !msg.isDeleted ? parseProposeOptions(msg.content || '') : null;
+                  if (unparsedApproval) {
+                    // Nothing could read the marker: show the line it was carrying, not the marker.
+                    return (
+                      <div className="text-[11px] text-textMuted" data-testid="approval-fallback-line">
+                        {approvalFallbackLine(msg.content || '')}
+                      </div>
+                    );
+                  }
                   if (proposal) {
                     return (
                       <ProposeOptionsCard

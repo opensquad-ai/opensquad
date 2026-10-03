@@ -128,6 +128,45 @@ def test_the_patch_survives_braces_in_the_summary():
     assert parsed["id"] == "appr_y"
 
 
+def test_a_hand_built_marker_with_raw_newlines_is_repaired():
+    """The shape actually seen in the wild: the model typing the marker, newlines and all.
+
+    Found in the instance's own chat.db — the JSON's summary carried real newlines, so neither the
+    chat nor the resolve endpoint could read it. The card stayed a wall of text through the click.
+    """
+    hand = (
+        '[[COLLAB_APPROVAL]]{"v":1,"id":"appr_hand","kind":"collab_step","title":"讨论方案：秒表",'
+        '"summary":"第一行\n第二行","status":"pending","group_id":"gjxwzp"}[[/COLLAB_APPROVAL]]\n'
+        "📋 协作批准请求：讨论方案：秒表"
+    )
+
+    payload = ca.parse_approval_payload(hand)
+
+    assert payload is not None and payload["status"] == "pending"
+    assert payload["summary"] == "第一行\n第二行"
+
+    patched = ca.patch_approval_status_in_content(hand, "approved")
+
+    healed = ca.parse_approval_payload(patched)
+    assert healed["status"] == "approved", "the patch now reaches a hand-built marker"
+    assert "\n" not in patched.split(ca.COLLAB_APPROVAL_END)[0], "and rewrites it as valid JSON"
+
+
+def test_a_value_containing_the_closing_tag_still_parses():
+    """An agent quoting the marker inside its own summary used to truncate the body."""
+    content = (
+        '[[COLLAB_APPROVAL]]{"v":1,"id":"appr_in","title":"t","status":"pending",'
+        '"summary":"原始消息：[[/COLLAB_APPROVAL]] 就这样"}[[/COLLAB_APPROVAL]]\n📋 协作批准请求：t'
+    )
+
+    payload = ca.parse_approval_payload(content)
+
+    assert payload is not None and payload["id"] == "appr_in"
+    assert "[[/COLLAB_APPROVAL]]" in payload["summary"]
+    found = ca.read_approval_marker(content)
+    assert found is not None and content[found["end"] :].startswith("\n📋")
+
+
 def test_encode_keeps_agent_readable_fallback():
     content = _card_content(kind="invite", card="code_review", participants=[{"agent_id": "qa", "state": "invited"}])
     assert "Task ID: AB12CD" in content

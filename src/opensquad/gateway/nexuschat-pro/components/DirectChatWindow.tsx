@@ -17,7 +17,7 @@ import { DM_QUOTE_MAX, encodeDmQuote, parseDmQuote, type DmQuote } from '../util
 import { MessageBubble, type ChatMessage, type FileAttachment } from './ai-chat/MessageBubble';
 import { CollabTaskCard, openCollabTaskWindow, parseCollabTask } from './CollabTaskCard';
 import { WindowCard, parseWindowCard } from './WindowCard';
-import { CollabStepApprovalCard, approvalQuietLine, parseCollabApproval } from './CollabStepApprovalCard';
+import { CollabStepApprovalCard, approvalFallbackLine, approvalQuietLine, hasApprovalMarker, parseCollabApproval } from './CollabStepApprovalCard';
 import { OpenSquadLoader } from './OpenSquadLoader';
 
 export interface DirectChatWindowProps {
@@ -380,6 +380,17 @@ export const DirectChatWindow: React.FC<DirectChatWindowProps> = ({
                         }}
                       />
                     )}
+                  </div>
+                </div>
+              );
+            }
+            if (hasApprovalMarker(b.message.content)) {
+              // Nothing could read the marker — a hand-built card, a raw newline inside its JSON.
+              // Show the line it carried rather than the marker itself.
+              return (
+                <div key={b.id} className={`mb-2 flex ${b.mine ? 'justify-end' : 'justify-start'}`}>
+                  <div className="text-[11px] px-1 text-textMuted" data-testid="approval-fallback-line">
+                    {approvalFallbackLine(b.message.content)}
                   </div>
                 </div>
               );
