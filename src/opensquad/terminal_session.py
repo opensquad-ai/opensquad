@@ -130,6 +130,20 @@ def resolve_shell(shell_id: str = "") -> dict[str, Any]:
     }
 
 
+def _console_encoding(kind: str) -> str:
+    """The encoding this shell speaks on Windows; UTF-8 everywhere else."""
+    if os.name != "nt":
+        return "utf-8"
+    if kind in ("cmd", "powershell", "pwsh"):
+        import locale
+
+        try:
+            return locale.getpreferredencoding(False) or "cp936"
+        except Exception:
+            return "cp936"
+    return "utf-8"
+
+
 class TerminalSession:
     """One shell child plus the thread that streams its output."""
 
@@ -140,6 +154,11 @@ class TerminalSession:
         self.trusted = trusted
         self.shell = resolve_shell(shell)
         self.shell_type = str(self.shell.get("label") or self.shell.get("id") or "shell")
+        # How to talk to this shell. A Windows console shell reads and writes its **console code
+        # page** (cp936 on a Chinese Windows); decoding its output as UTF-8 turns every 中文 into
+        # `\ufffd`, and encoding input as UTF-8 mangles a pasted Chinese path into `������` — the
+        # field report. So both directions use the shell's own encoding.
+        self.encoding = _console_encoding(str(self.shell.get("kind") or ""))
         self.process: subprocess.Popen | None = None
         self.exited = False
         self.return_code: int | None = None
@@ -194,10 +213,7 @@ class TerminalSession:
             logger.warning("[Terminal] failed to start a shell: %s", exc)
             return {"ok": False, "error": str(exc)}
         threading.Thread(target=self._pump, name=f"terminal-{self.id}", daemon=True).start()
-        if os.name == "nt":  # pragma: no cover - platform specific
-            # cmd echoes what it reads from a pipe; the panel echoes the typed line itself,
-            # so without this every command would appear twice on Windows.
-            self.write("@echo off\r\n")
+        self._bootstrap()
         self._emit_status("running")
         return {
             "ok": True,
@@ -206,6 +222,29 @@ class TerminalSession:
             "shell": self.shell_type,
             "shell_id": self.shell.get("id"),
         }
+
+    def _bootstrap(self) -> None:
+        """Put the shell into a state that can be driven over a pipe.
+
+        Two Windows-specific things bit us here:
+
+        * ``cmd`` reads piped stdin in the **console code page** — GBK on a Chinese Windows — so
+          a pasted path containing 中文 arrived as `������` and the shell could not enter the
+          folder. Switching the code page to UTF-8 first is what the agent's own persistent shell
+          does, and it is the difference between a usable terminal and one that cannot cd into a
+          Chinese directory.
+        * ``cmd`` also echoes what it reads from a pipe while the panel echoes the typed line
+          itself, so without ``@echo off`` every command appears twice.
+        """
+        kind = str(self.shell.get("kind") or "")
+        if os.name != "nt":  # pragma: no cover - POSIX shells are UTF-8 already
+            return
+        if kind == "cmd":  # pragma: no cover - platform specific
+            # cmd echoes what it reads from a pipe, and the panel echoes the typed line itself,
+            # so without this every command appears twice. (No `chcp` here: switching the code
+            # page mid-stream left cmd waiting on a continuation — `More?` — and split the very
+            # next command. The session talks in the console's own code page instead.)
+            self.write("@echo off\r\n")
 
     def _pump(self) -> None:
         """Read the child's output and stream it, until it exits."""
@@ -218,7 +257,9 @@ class TerminalSession:
                 if not data:
                     break
                 if isinstance(data, bytes):
-                    text = data.decode("utf-8", errors="replace")
+                    # The shell's own encoding (cp936 for a Windows console shell); a byte that
+                    # does not fit is replaced rather than killing the stream.
+                    text = data.decode(self.encoding, errors="replace")
                 else:
                     text = str(data)
                 if text:
@@ -240,7 +281,7 @@ class TerminalSession:
         if self.exited or self.process is None or self.process.stdin is None:
             return {"ok": False, "error": "terminal is not running"}
         try:
-            self.process.stdin.write(text.encode("utf-8"))
+            self.process.stdin.write(text.encode(self.encoding, errors="replace"))
             self.process.stdin.flush()
         except Exception as exc:  # noqa: BLE001 - reported, never raised at the user
             return {"ok": False, "error": f"write failed: {exc}"}
