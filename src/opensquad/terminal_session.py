@@ -65,6 +65,11 @@ class TerminalSession:
         self.exited = False
         self.return_code: int | None = None
         self.error = ""
+        # Output is kept so a *polling* caller (the launcher serves the panel over HTTP, which
+        # has no push channel) can read what it has not seen yet: `offset` is the running total
+        # of characters emitted, and the buffer keeps the tail of it.
+        self.buffer = ""
+        self.offset = 0
         self._lock = threading.Lock()
 
     # ── lifecycle ───────────────────────────────────────────────────────────
@@ -207,7 +212,31 @@ class TerminalSession:
         )
 
     def _emit_stdout(self, chunk: str) -> None:
+        with self._lock:
+            self.buffer = (self.buffer + chunk)[-MAX_BUFFER:]
+            self.offset += len(chunk)
         self._emit("job_stdout", {"chunk": chunk})
+
+    def read(self, since: int = 0) -> dict[str, Any]:
+        """Everything written since ``since``, plus this terminal's state.
+
+        ``since`` is a character offset, not a timestamp: the caller polls with the ``offset``
+        it last received, and a client that fell behind gets the tail it missed rather than a
+        gap. Safe to call while the shell is running (the reader thread holds the same lock).
+        """
+        with self._lock:
+            start = max(0, int(since or 0))
+            missed = start - (self.offset - len(self.buffer))
+            chunk = self.buffer[max(0, missed) :] if start < self.offset else ""
+            return {
+                "ok": True,
+                "terminal_id": self.id,
+                "chunk": chunk,
+                "offset": self.offset,
+                "running": not self.exited,
+                "return_code": self.return_code,
+                "error": self.error,
+            }
 
     def _emit_status(self, state: str, **extra: Any) -> None:
         self._emit("job_status", {"state": state, **extra})
@@ -288,6 +317,14 @@ def close_terminal(terminal_id: str) -> dict[str, Any]:
 def list_terminals() -> list[dict[str, Any]]:
     with _LOCK:
         return [s.info() for s in _TERMINALS.values()]
+
+
+def read_terminal(terminal_id: str, since: int = 0) -> dict[str, Any]:
+    """Polling read: the launcher serves the panel over HTTP, so output is pulled, not pushed."""
+    session = _get(terminal_id)
+    if session is None:
+        return {"ok": False, "error": f"unknown terminal: {terminal_id}", "chunk": "", "offset": 0, "running": False}
+    return session.read(since)
 
 
 def close_all() -> int:

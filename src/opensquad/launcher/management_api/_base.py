@@ -416,6 +416,26 @@ class BaseHandlerMixin:
             name = path.split("/")[3]
             body = self._read_body() or {}
             return self._handle_fs_open_terminal(name, body)
+        elif path.startswith("/api/agents/") and path.endswith("/terminal/open"):
+            name = path.split("/")[3]
+            body = self._read_body() or {}
+            return self._handle_terminal_open(name, body)
+        elif path.startswith("/api/agents/") and path.endswith("/terminal/write"):
+            name = path.split("/")[3]
+            body = self._read_body() or {}
+            return self._handle_terminal_write(name, body)
+        elif path.startswith("/api/agents/") and path.endswith("/terminal/interrupt"):
+            name = path.split("/")[3]
+            body = self._read_body() or {}
+            return self._handle_terminal_interrupt(name, body)
+        elif path.startswith("/api/agents/") and path.endswith("/terminal/close"):
+            name = path.split("/")[3]
+            body = self._read_body() or {}
+            return self._handle_terminal_close(name, body)
+        elif path.startswith("/api/agents/") and path.endswith("/terminal/read"):
+            name = path.split("/")[3]
+            body = self._read_body() or {}
+            return self._handle_terminal_read(name, body)
         elif path.startswith("/api/agents/") and path.endswith("/fs/session-diffs"):
             name = path.split("/")[3]
             body = self._read_body() or {}

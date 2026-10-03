@@ -2412,6 +2412,37 @@ export interface CollabBoardSummary {
   items: Record<string, CollabBoardItem[]>;
 }
 
+/** The right panel's terminal: a shell on this machine, hosted by the launcher (not the
+ *  agent), so it works with the agent stopped. Output is polled — `read` returns everything
+ *  since the offset the caller last saw. */
+export const terminalAPI = {
+  open: (name: string, terminalId: string, root?: string, cwd?: string) =>
+    apiRequest<{ ok: boolean; terminal_id: string; cwd: string; shell: string; error?: string }>(
+      `/ai-web/admin/agents/${encodeURIComponent(name)}/terminal/open`,
+      { method: 'POST', body: JSON.stringify({ terminal_id: terminalId, root, cwd }) },
+    ),
+  write: (name: string, terminalId: string, text: string) =>
+    apiRequest<{ ok: boolean; error?: string }>(
+      `/ai-web/admin/agents/${encodeURIComponent(name)}/terminal/write`,
+      { method: 'POST', body: JSON.stringify({ terminal_id: terminalId, text }) },
+    ),
+  interrupt: (name: string, terminalId: string) =>
+    apiRequest<{ ok: boolean; error?: string }>(
+      `/ai-web/admin/agents/${encodeURIComponent(name)}/terminal/interrupt`,
+      { method: 'POST', body: JSON.stringify({ terminal_id: terminalId }) },
+    ),
+  close: (name: string, terminalId: string) =>
+    apiRequest<{ ok: boolean }>(
+      `/ai-web/admin/agents/${encodeURIComponent(name)}/terminal/close`,
+      { method: 'POST', body: JSON.stringify({ terminal_id: terminalId }) },
+    ),
+  read: (name: string, terminalId: string, since: number) =>
+    apiRequest<{ ok: boolean; chunk: string; offset: number; running: boolean; return_code?: number | null }>(
+      `/ai-web/admin/agents/${encodeURIComponent(name)}/terminal/read`,
+      { method: 'POST', body: JSON.stringify({ terminal_id: terminalId, since }) },
+    ),
+};
+
 export const nodesAPI = {
   /** This machine's own LAN addresses (the invite panel names one of them). */
   localAddresses: () =>
@@ -2591,7 +2622,7 @@ export interface PlanSnapshot {
 export interface ModelCardInfo {
   name: string;
   title: string;
-  // api_protocol: API 协议类型 (openai | openai_compat | anthropic | google)
+  // api_protocol: API 协议类型 (openai | openai_responses | openai_compat | anthropic | google)
   api_protocol: string;
   // provider: 模型供应商（厂商）名称，用于 UI 展示/分组
   provider?: string;

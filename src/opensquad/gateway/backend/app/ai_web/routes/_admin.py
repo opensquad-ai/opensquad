@@ -767,6 +767,47 @@ async def admin_fs_open_terminal(name: str, body: dict = Body(...), current_user
     return await _proxy_post(f"/api/agents/{name}/fs/open-terminal", body or {}, timeout=10.0)
 
 
+# ── The right panel's terminal ──────────────────────────────────────────────
+# Hosted by the launcher, not the agent: a terminal is a workspace tool, so it must work with
+# the agent stopped (and without an agent-side release). Output is polled — the launcher has no
+# push channel — so `read` is a POST that returns everything since the caller's offset.
+
+
+@admin_router.post("/admin/agents/{name}/terminal/open")
+async def admin_terminal_open(
+    name: str, body: dict = Body(default={}), current_user: User = Depends(get_current_user_dep)
+):
+    return await _proxy_post(f"/api/agents/{name}/terminal/open", body or {}, timeout=20.0)
+
+
+@admin_router.post("/admin/agents/{name}/terminal/write")
+async def admin_terminal_write(
+    name: str, body: dict = Body(default={}), current_user: User = Depends(get_current_user_dep)
+):
+    return await _proxy_post(f"/api/agents/{name}/terminal/write", body or {}, timeout=15.0)
+
+
+@admin_router.post("/admin/agents/{name}/terminal/interrupt")
+async def admin_terminal_interrupt(
+    name: str, body: dict = Body(default={}), current_user: User = Depends(get_current_user_dep)
+):
+    return await _proxy_post(f"/api/agents/{name}/terminal/interrupt", body or {}, timeout=15.0)
+
+
+@admin_router.post("/admin/agents/{name}/terminal/close")
+async def admin_terminal_close(
+    name: str, body: dict = Body(default={}), current_user: User = Depends(get_current_user_dep)
+):
+    return await _proxy_post(f"/api/agents/{name}/terminal/close", body or {}, timeout=15.0)
+
+
+@admin_router.post("/admin/agents/{name}/terminal/read")
+async def admin_terminal_read(
+    name: str, body: dict = Body(default={}), current_user: User = Depends(get_current_user_dep)
+):
+    return await _proxy_post(f"/api/agents/{name}/terminal/read", body or {}, timeout=15.0)
+
+
 @admin_router.put("/admin/agents/{name}/config")
 async def admin_update_config(name: str, body: dict = Body(...), current_user: User = Depends(get_current_user_dep)):
     """Update Agent's config.json and sync agent_name to the bound account's display name"""

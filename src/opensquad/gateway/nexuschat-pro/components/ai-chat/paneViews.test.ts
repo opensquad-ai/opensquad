@@ -207,12 +207,40 @@ describe('the page wires them', () => {
 });
 
 describe('the panels themselves', () => {
-  it('the terminal still streams over the existing events', () => {
+  it('the terminal is hosted by the launcher — no agent involved', () => {
     const terminal = read('TerminalPanel.tsx');
 
-    expect(terminal).toContain("svc.on('job_stdout'");
-    expect(terminal).toContain("if (String(d.job_id || '') !== tunnel) return;");
+    // HTTP to the launcher, through the gateway: a terminal must work with the agent stopped
+    expect(terminal).toContain("import { terminalAPI } from '../../services/api'");
+    expect(terminal).toContain('terminalAPI.open(agentId, terminalId');
+    expect(terminal).toContain('terminalAPI.read(agentId, terminalId');
+    expect(terminal).toContain('terminalAPI.write(agentId, terminalId');
+    expect(terminal).toContain('terminalAPI.interrupt(agentId, terminalId)');
+    expect(terminal).toContain('terminalAPI.close(agentId, terminalId)');
+    // …and NOT over the agent's websocket: that was the design that left it stuck on
+    // '正在启动 shell…' whenever the agent was not connected
+    expect(terminal).not.toContain('getAiWsService');
+    expect(terminal).not.toContain("svc.on('job_stdout'");
+    // output is polled by character offset, so a missed poll costs nothing
+    expect(terminal).toContain('offsetRef');
+    expect(terminal).toContain('const POLL_MS = 400');
     expect(terminal).toContain("t('aiChat.terminal.noTtyNote')");
+    expect(terminal).toContain('data-testid="terminal-input"');
+  });
+
+  it('the terminal surface is proxied launcher-ward, in both directions', () => {
+    const api = read('../../services/api.ts');
+    // …/src/opensquad/gateway/backend/… and …/src/opensquad/launcher/…
+    const gateway = read('../../../backend/app/ai_web/routes/_admin.py');
+    const launcher = read('../../../../launcher/management_api/_filesystem.py');
+
+    for (const op of ['open', 'write', 'interrupt', 'close', 'read']) {
+      expect(api, op).toContain(`/terminal/${op}`);
+    }
+    expect(gateway).toContain('@admin_router.post("/admin/agents/{name}/terminal/open")');
+    // the launcher is what actually holds the shell
+    expect(launcher).toContain('terminal_session.open_terminal(');
+    expect(launcher).toContain('terminal_session.read_terminal(');
   });
 
   it('the browser still has both renderers, and the desktop shell is hardened', () => {

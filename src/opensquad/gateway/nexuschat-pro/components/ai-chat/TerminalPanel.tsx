@@ -1,156 +1,123 @@
 /**
- * TerminalPanel — the interactive shell tab of the right-hand panel.
+ * TerminalPanel — an interactive shell in the workspace, hosted by the launcher.
  *
- * It drives a real shell on the agent's machine: the id is minted here, sent with every
- * command, and the output comes back on the websocket events the app already uses for job
- * output (`job_stdout` / `job_status`, keyed by `terminal:<id>`). Nothing new was needed on
- * the protocol or the gateway for that — which is why this panel is small.
+ * Deliberately **not** the agent: a terminal is a workspace tool, so it must work with the
+ * agent stopped, and it must not depend on an agent-side release. The shell runs in the
+ * launcher process (`opensquad/terminal_session.py`, served by
+ * `launcher/management_api/_filesystem.py` and proxied through the gateway).
  *
- * What it is not: a TTY. There is no pty in this repository, so full-screen programs
- * (vim/top), colour escapes and interactive password prompts do not work. The panel says so
- * rather than letting the user conclude it is broken.
+ * The launcher has no push channel to the browser, so output is *polled*: every few hundred
+ * milliseconds the panel asks for everything after the character offset it last saw. Characters
+ * (not timestamps) means a missed poll costs nothing — the next read returns the gap.
+ *
+ * What it is not: a TTY. There is no pty in this repository, so full-screen programs (vim/top),
+ * colour escapes and interactive password prompts do not work. The panel says so rather than
+ * letting the user conclude it is broken.
  */
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Ban, Eraser, RotateCw, Terminal as TerminalIcon } from 'lucide-react';
+import { Ban, Eraser, Loader2, RotateCw, Terminal as TerminalIcon } from 'lucide-react';
 
-import { getAiWsService } from '../../services/aiWebSocket';
+import { terminalAPI } from '../../services/api';
 
-const ID_PREFIX = 'terminal:';
 /** Trim the local scrollback so a long-running shell cannot grow without bound. */
 const MAX_CHARS = 200_000;
+const POLL_MS = 400;
 const PROMPT = '$ ';
 
 export interface TerminalPanelProps {
+  /** The agent whose workspace this is — the shell starts in that directory. */
   agentId: string;
   /** The workspace directory the shell starts in (the panel's project). */
   rootPath?: string;
   sessionId?: string;
 }
 
-interface StreamPayload {
-  job_id?: string;
-  chunk?: string;
-  state?: string;
-  reason?: string;
-  return_code?: number | null;
-}
-
-export const TerminalPanel: React.FC<TerminalPanelProps> = ({ agentId, rootPath = '', sessionId = '' }) => {
+export const TerminalPanel: React.FC<TerminalPanelProps> = ({ agentId, rootPath = '' }) => {
   const { t } = useTranslation();
-  // Minted once per mount: the agent keys its output on this, so a second panel is a second
+  // Minted once per mount: the launcher keys the shell on it, so a second panel is a second
   // shell rather than a shared one.
   const terminalId = useMemo(
     () => `t${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`,
     [],
   );
-  const tunnel = `${ID_PREFIX}${terminalId}`;
   const [output, setOutput] = useState('');
   const [input, setInput] = useState('');
   const [history, setHistory] = useState<string[]>([]);
   const [historyIndex, setHistoryIndex] = useState(-1);
-  const [state, setState] = useState<'connecting' | 'running' | 'done'>('connecting');
-  const [connected, setConnected] = useState<boolean>(() => {
-    try {
-      return getAiWsService(agentId).isConnected;
-    } catch {
-      return false;
-    }
-  });
+  const [state, setState] = useState<'starting' | 'running' | 'exited' | 'failed'>('starting');
+  const [shell, setShell] = useState('');
+  const [cwd, setCwd] = useState('');
+  const [error, setError] = useState('');
+  const offsetRef = useRef(0);
+  const aliveRef = useRef(true);
   const scrollerRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
-  /** Stream this terminal's output (only this terminal's — one panel per shell). */
-  useEffect(() => {
-    if (!agentId) return;
-    const svc = getAiWsService(agentId);
-    setConnected(svc.isConnected);
-    const read = (msg: unknown): StreamPayload => {
-      const raw = msg as { content?: unknown; data?: unknown } | null;
-      const body = (raw?.content ?? raw?.data ?? {}) as Record<string, unknown>;
-      return body as StreamPayload;
-    };
-    const offOut = svc.on('job_stdout', (msg) => {
-      const d = read(msg);
-      if (String(d.job_id || '') !== tunnel) return;
-      const chunk = typeof d.chunk === 'string' ? d.chunk : '';
-      if (!chunk) return;
-      setState((s) => (s === 'connecting' ? 'running' : s));
-      setOutput((prev) => (prev + chunk).slice(-MAX_CHARS));
-    });
-    const offStatus = svc.on('job_status', (msg) => {
-      const d = read(msg);
-      if (String(d.job_id || '') !== tunnel) return;
-      const next = String(d.state || '');
-      if (next === 'running') setState('running');
-      else if (next === 'done' || next === 'aborted' || next === 'error') setState('done');
-    });
-    return () => {
-      offOut();
-      offStatus();
-    };
-  }, [agentId, tunnel]);
-
-  const open = useCallback(() => {
+  /** Start (or restart) a shell in this workspace. */
+  const open = useCallback(async () => {
     if (!agentId) return;
     setOutput('');
-    setState('connecting');
-    const svc = getAiWsService(agentId);
-    setConnected(svc.isConnected);
-    if (!svc.isConnected) {
-      // Nothing else dials this agent's socket for us: without this the command below goes
-      // nowhere and the panel waits forever.
-      try {
-        svc.connect(agentId);
-      } catch {
-        /* already connecting */
-      }
-    }
-    svc.openTerminal(terminalId, rootPath || undefined, sessionId || undefined);
-    window.setTimeout(() => inputRef.current?.focus(), 0);
-  }, [agentId, rootPath, sessionId, terminalId]);
-
-  /**
-   * The socket may not be up yet when the tab opens (lazily dialled, or the agent is still
-   * starting) — and a command sent on a closed socket is dropped, which left the panel saying
-   * "正在启动 shell…" forever. So: dial it, keep the indicator honest, and re-ask for the shell
-   * once the socket is there.
-   */
-  useEffect(() => {
-    if (!agentId || state !== 'connecting') return;
-    let tries = 0;
-    const timer = window.setInterval(() => {
-      const svc = getAiWsService(agentId);
-      const live = svc.isConnected;
-      setConnected(live);
-      if (!live) {
-        try {
-          svc.connect(agentId);
-        } catch {
-          /* already connecting */
-        }
+    setError('');
+    setState('starting');
+    offsetRef.current = 0;
+    try {
+      const res = await terminalAPI.open(agentId, terminalId, rootPath || undefined);
+      if (!aliveRef.current) return;
+      if (!res?.ok) {
+        setState('failed');
+        setError(String(res?.error || t('aiChat.terminal.openFailed')));
         return;
       }
-      // connected: ask again (idempotent — the agent reuses a live terminal with the same id)
-      tries += 1;
-      svc.openTerminal(terminalId, rootPath || undefined, sessionId || undefined);
-      if (tries >= 3) window.clearInterval(timer);
-    }, 1000);
-    return () => window.clearInterval(timer);
-  }, [agentId, state, terminalId, rootPath, sessionId]);
+      setShell(String(res.shell || ''));
+      setCwd(String(res.cwd || rootPath || ''));
+      setState('running');
+      window.setTimeout(() => inputRef.current?.focus(), 0);
+    } catch (e: any) {
+      if (!aliveRef.current) return;
+      setState('failed');
+      setError(String(e?.message || e));
+    }
+  }, [agentId, rootPath, terminalId, t]);
 
-  /** Open on mount; stop the shell when the panel goes away. */
   useEffect(() => {
-    if (!agentId) return;
-    open();
+    aliveRef.current = true;
+    void open();
     return () => {
-      try {
-        getAiWsService(agentId).closeTerminal(terminalId);
-      } catch {
-        /* the socket may already be gone; the agent drops the shell when it exits */
-      }
+      aliveRef.current = false;
+      // Stop the shell when the panel goes away (fire and forget: the tab may be closing).
+      void terminalAPI.close(agentId, terminalId).catch(() => undefined);
     };
   }, [agentId, terminalId, open]);
+
+  /** Poll for output — the launcher cannot push it to us. */
+  useEffect(() => {
+    if (!agentId || (state !== 'running' && state !== 'starting')) return;
+    let stopped = false;
+    const tick = async () => {
+      try {
+        const res = await terminalAPI.read(agentId, terminalId, offsetRef.current);
+        if (stopped || !aliveRef.current) return;
+        if (res?.chunk) {
+          offsetRef.current = Number(res.offset) || offsetRef.current;
+          setOutput((prev) => (prev + res.chunk).slice(-MAX_CHARS));
+          setState((s) => (s === 'starting' ? 'running' : s));
+        }
+        if (res && res.running === false && res.offset !== undefined) {
+          offsetRef.current = Number(res.offset) || offsetRef.current;
+          setState('exited');
+        }
+      } catch {
+        /* a failed poll is not fatal: the next one retries */
+      }
+    };
+    const timer = window.setInterval(() => void tick(), POLL_MS);
+    void tick();
+    return () => {
+      stopped = true;
+      window.clearInterval(timer);
+    };
+  }, [agentId, terminalId, state]);
 
   /** Keep the newest output in view, the way a terminal does. */
   useEffect(() => {
@@ -161,10 +128,10 @@ export const TerminalPanel: React.FC<TerminalPanelProps> = ({ agentId, rootPath 
   const submit = () => {
     const line = input;
     if (!agentId) return;
-    // A piped shell does not echo for us (cmd is switched to `@echo off`), so the typed
-    // line is echoed here — exactly once, on both platforms.
+    // The shell does not echo for us (cmd is switched to `@echo off`), so the typed line is
+    // echoed here — exactly once, on both platforms.
     setOutput((prev) => `${prev}${PROMPT}${line}\n`.slice(-MAX_CHARS));
-    getAiWsService(agentId).writeTerminal(terminalId, `${line}\n`);
+    void terminalAPI.write(agentId, terminalId, `${line}\n`).catch((e) => setError(String(e?.message || e)));
     if (line.trim()) setHistory((h) => [line, ...h].slice(0, 100));
     setHistoryIndex(-1);
     setInput('');
@@ -192,32 +159,35 @@ export const TerminalPanel: React.FC<TerminalPanelProps> = ({ agentId, rootPath 
     }
     if (e.key === 'c' && e.ctrlKey) {
       e.preventDefault();
-      getAiWsService(agentId).interruptTerminal(terminalId);
+      void terminalAPI.interrupt(agentId, terminalId).catch(() => undefined);
     }
   };
 
   const restart = () => {
-    getAiWsService(agentId).closeTerminal(terminalId);
-    open();
+    void terminalAPI.close(agentId, terminalId).catch(() => undefined).then(() => open());
   };
+
+  const status =
+    state === 'exited'
+      ? t('aiChat.terminal.exited')
+      : state === 'failed'
+        ? t('aiChat.terminal.failed')
+        : state === 'starting'
+          ? t('aiChat.terminal.connecting')
+          : t('aiChat.terminal.running');
 
   return (
     <div className="flex-1 min-h-0 flex flex-col" data-testid="terminal-panel">
       <div className="px-2 py-1 border-b border-border flex-shrink-0 flex items-center gap-2 text-[10px] text-textMuted">
         <TerminalIcon size={11} className="shrink-0" />
-        <span className="truncate font-mono" title={rootPath || undefined}>
-          {rootPath || t('aiChat.terminal.workspaceRoot')}
+        <span className="truncate font-mono" title={cwd || rootPath || undefined}>
+          {shell ? `${shell} · ` : ''}
+          {cwd || rootPath || t('aiChat.terminal.workspaceRoot')}
         </span>
-        <span className="ml-auto shrink-0">
-          {state === 'done'
-            ? t('aiChat.terminal.exited')
-            : connected
-              ? t('aiChat.terminal.running')
-              : t('aiChat.terminal.disconnected')}
-        </span>
+        <span className="ml-auto shrink-0">{status}</span>
         <button
           type="button"
-          onClick={() => getAiWsService(agentId).interruptTerminal(terminalId)}
+          onClick={() => void terminalAPI.interrupt(agentId, terminalId).catch(() => undefined)}
           className="shrink-0 rounded p-1 hover:bg-primary/10"
           title={t('aiChat.terminal.interrupt')}
           data-testid="terminal-interrupt"
@@ -252,7 +222,11 @@ export const TerminalPanel: React.FC<TerminalPanelProps> = ({ agentId, rootPath 
       >
         {output || (
           <span className="text-neutral-500">
-            {state === 'connecting' ? t('aiChat.terminal.connecting') : t('aiChat.terminal.ready')}
+            {state === 'failed'
+              ? error || t('aiChat.terminal.openFailed')
+              : state === 'starting'
+                ? t('aiChat.terminal.connecting')
+                : t('aiChat.terminal.ready')}
           </span>
         )}
       </div>
@@ -267,13 +241,15 @@ export const TerminalPanel: React.FC<TerminalPanelProps> = ({ agentId, rootPath 
           spellCheck={false}
           autoComplete="off"
           data-testid="terminal-input"
+          disabled={state === 'failed'}
           placeholder={t('aiChat.terminal.placeholder')}
-          className="min-w-0 flex-1 bg-transparent font-mono text-[11.5px] text-textMain outline-none"
+          className="min-w-0 flex-1 bg-transparent font-mono text-[11.5px] text-textMain outline-none disabled:opacity-50"
         />
+        {state === 'starting' ? <Loader2 size={11} className="shrink-0 animate-spin text-textMuted" /> : null}
       </div>
 
       <div className="flex-shrink-0 px-2 pb-1 text-[10px] leading-snug text-textMuted/70">
-        {connected ? t('aiChat.terminal.noTtyNote') : t('aiChat.terminal.needAgent')}
+        {t('aiChat.terminal.noTtyNote')}
       </div>
     </div>
   );

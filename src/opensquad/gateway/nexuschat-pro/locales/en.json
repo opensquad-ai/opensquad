@@ -964,7 +964,9 @@
       "clear": "Clear",
       "restart": "Restart shell",
       "placeholder": "Type a command and press Enter…",
-      "needAgent": "The terminal is hosted by the agent process: with no connection there is no shell (it now redials, and starts one as soon as the socket is up).",
+      "needAgent": "The terminal is hosted by the launcher (no agent needed): it works with the agent stopped.",
+      "failed": "Failed to start",
+      "openFailed": "Could not start a shell: check that the launcher is running.",
       "noTtyNote": "Note: this is not a full terminal (no TTY). Line-oriented tools work — git, npm, python, builds, tests; full-screen programs (vim, top) and interactive password prompts do not."
     },
     "changedFiles": "Changed Files",

@@ -272,6 +272,53 @@ class FilesystemMixin:
         result["agent"] = name
         return self._send_json(result)
 
+    # ── Terminal (hosted HERE, not in the agent) ─────────────────────────────
+    # A terminal is a workspace tool, not an agent capability: hosting it in the launcher means
+    # it works with the agent stopped and needs no agent-side release. The launcher has no push
+    # channel to the browser, so output is *polled* (`terminal/read` returns what the caller has
+    # not seen yet) — the panel does that every few hundred milliseconds.
+
+    def _handle_terminal_open(self, name: str, body: dict):
+        root, err = self._agent_fs_root(name, str(body.get("root") or ""))
+        if err is not None:
+            return err
+        from opensquad import terminal_session
+
+        result = terminal_session.open_terminal(
+            terminal_id=str(body.get("terminal_id") or ""),
+            cwd=root,
+            sid="",
+            working_directory=str(body.get("cwd") or ""),
+        )
+        if not result.get("ok"):
+            return self._send_json(result, 400)
+        result["agent"] = name
+        return self._send_json(result)
+
+    def _handle_terminal_write(self, name: str, body: dict):
+        from opensquad import terminal_session
+
+        result = terminal_session.write_terminal(str(body.get("terminal_id") or ""), str(body.get("text") or ""))
+        return self._send_json(result, 200 if result.get("ok") else 400)
+
+    def _handle_terminal_interrupt(self, name: str, body: dict):
+        from opensquad import terminal_session
+
+        result = terminal_session.interrupt_terminal(str(body.get("terminal_id") or ""))
+        return self._send_json(result, 200 if result.get("ok") else 400)
+
+    def _handle_terminal_close(self, name: str, body: dict):
+        from opensquad import terminal_session
+
+        return self._send_json(terminal_session.close_terminal(str(body.get("terminal_id") or "")))
+
+    def _handle_terminal_read(self, name: str, body: dict):
+        from opensquad import terminal_session
+
+        return self._send_json(
+            terminal_session.read_terminal(str(body.get("terminal_id") or ""), int(body.get("since") or 0))
+        )
+
     def _handle_pick_directory(self, body: dict | None = None):
         """POST /api/system/pick-directory — native OS folder dialog on this host.
 
