@@ -8,6 +8,7 @@ local file so nothing here needs the network.
 from __future__ import annotations
 
 import base64
+import os
 import sys
 from pathlib import Path
 
@@ -20,6 +21,10 @@ if str(_SRC) not in sys.path:
 pytest.importorskip("playwright.sync_api", reason="the built-in browser needs Playwright")
 
 import opensquad.browser_session as bs  # noqa: E402
+
+# Every session in this suite is headless: a window per test would put eight browser windows on
+# screen mid-run. The window path has a test of its own (test_a_window_is_opened_when_asked).
+os.environ.setdefault("OPENSQUAD_BROWSER_HEADLESS", "1")
 
 
 @pytest.fixture(autouse=True)
@@ -142,3 +147,67 @@ def test_close_all_stops_every_browser():
 
     assert bs.close_all() == 2
     assert bs.list_sessions() == []
+
+
+def test_a_window_is_opened_when_asked(tmp_path):
+    """Option A: the user gets a browser they can really use, not only a picture of one.
+
+    `headless=False` overrides the suite-wide env var, so this is a real window on a machine
+    that has a desktop; where none exists the session says so instead of failing.
+    """
+    opened = bs.open_session(session_id="win1", headless=False)
+    try:
+        if not opened.get("headed"):
+            pytest.skip(f"no desktop here: {opened.get('window_note') or 'no window'}")
+        assert opened["ok"] is True and opened["headed"] is True
+        assert opened["headless"] is False
+        assert bs.navigate("win1", _page(tmp_path).as_uri())["ok"] is True
+    finally:
+        bs.close_session("win1")
+
+
+def test_a_machine_without_a_desktop_falls_back_to_headless(monkeypatch):
+    """A server or a CI box must still give the agent a browser — and a reason to report."""
+    # The suite-wide env var would force headless before the window is even attempted; this test
+    # is about the *attempt* failing.
+    monkeypatch.delenv("OPENSQUAD_BROWSER_HEADLESS", raising=False)
+
+    class _FakePage:
+        def set_default_timeout(self, *_args, **_kwargs):
+            return None
+
+    def _no_window(self, *, headless):
+        if not headless:
+            raise RuntimeError("no display available")
+        self._page = _FakePage()
+        self._context = None
+        self.headless = headless
+
+    monkeypatch.setattr(bs.BrowserSession, "_start_context", _no_window)
+
+    opened = bs.open_session(session_id="nodisp", headless=False)
+
+    assert opened["ok"] is True, opened
+    assert opened["headed"] is False
+    assert "cannot show a window" in opened["window_note"]
+
+
+def test_the_profile_is_persistent(tmp_path):
+    """Logins survive a restart: that is why the session does not use a throwaway profile."""
+    opened = bs.open_session(session_id="prof")
+
+    assert opened["ok"] is True
+    profile = Path(opened["profile_dir"])
+    bs.close_session("prof")
+
+    assert profile.is_dir()
+    assert any(profile.iterdir()), "the profile was never written"
+
+
+def test_the_env_var_keeps_a_suite_headless(monkeypatch):
+    monkeypatch.setenv("OPENSQUAD_BROWSER_HEADLESS", "1")
+
+    opened = bs.open_session(session_id="envless")
+
+    assert opened["ok"] is True
+    assert opened["headed"] is False

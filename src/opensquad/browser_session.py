@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import base64
 import logging
+import os
 import queue
 import threading
 import uuid
@@ -32,6 +33,8 @@ logger = logging.getLogger(__name__)
 # every poll.
 MAX_SNAPSHOT_CHARS = 20_000
 DEFAULT_TIMEOUT_MS = 20_000
+# How long a caller waits to learn whether the session got a window (see BrowserSession.ready).
+START_TIMEOUT_S = 30.0
 VIEWPORT = {"width": 1280, "height": 800}
 
 
@@ -48,19 +51,30 @@ class _Job:
 class BrowserSession:
     """A Chromium page plus the thread that owns it."""
 
-    def __init__(self, session_id: str, *, headless: bool = True):
+    def __init__(self, session_id: str, *, headless: bool | None = None):
         self.id = session_id
-        self.headless = headless
+        # None means "prefer a real window" — see _launch: a browser you can use beats a picture
+        # of one, and a machine with no desktop falls back to headless by itself.
+        self.want_headless = headless
+        self.headless = bool(headless)
+        self.headed = False
+        self.window_note = ""
+        self.profile_dir = _profile_dir(session_id)
         self.url = ""
         self.title = ""
         self.error = ""
         self.frame: str = ""  # last screenshot, base64 (what the panel shows)
         self.frame_at: float = 0.0
         self.closed = False
+        # Set once the launch has resolved (a window, or the headless fallback, or an error):
+        # a headed launch can take seconds to fail, and until it has, "which shape did we get"
+        # is not yet knowable — reporting too early showed "preview only" for sessions that were
+        # in fact about to get a real window.
+        self.ready = threading.Event()
         self._jobs: queue.Queue[_Job | None] = queue.Queue()
         self._thread: threading.Thread | None = None
         self._pw = None
-        self._browser = None
+        self._context = None
         self._page = None
 
     # ── the worker thread ───────────────────────────────────────────────────
@@ -69,14 +83,15 @@ class BrowserSession:
             from playwright.sync_api import sync_playwright
 
             self._pw = sync_playwright().start()
-            self._browser = self._pw.chromium.launch(headless=self.headless)
-            self._page = self._browser.new_page(viewport=VIEWPORT)
+            self._launch()
             self._page.set_default_timeout(DEFAULT_TIMEOUT_MS)
         except Exception as exc:  # noqa: BLE001 - reported through the first call
             self.error = f"could not start a browser: {exc}"
             logger.warning("[Browser] %s failed to start: %s", self.id, exc)
             self._close_resources()
             return
+        finally:
+            self.ready.set()
         while True:
             job = self._jobs.get()
             if job is None:  # stop signal
@@ -89,17 +104,46 @@ class BrowserSession:
                 job.done.set()
         self._close_resources()
 
+    def _launch(self) -> None:
+        """A real window when one can be shown, headless when it cannot.
+
+        A window is the better half of the deal: the user gets a browser they can actually use —
+        hover, caret, selection, right-click — while the agent drives that same window through
+        the same Playwright session, so "the browser the agent uses" is still one page. Headless
+        remains for machines with no desktop, and for callers that ask for it.
+        """
+        if not self.want_headless:
+            try:
+                self._start_context(headless=False)
+                self.headed = True
+                return
+            except Exception as exc:  # noqa: BLE001 - falling back is the point
+                self.window_note = f"this machine cannot show a window ({type(exc).__name__}: {exc})"
+                logger.info("[Browser] %s: no window (%s); using headless", self.id, exc)
+        self._start_context(headless=True)
+
+    def _start_context(self, *, headless: bool) -> None:
+        """One persistent profile per session — that is what keeps you logged in across runs."""
+        self._context = self._pw.chromium.launch_persistent_context(
+            user_data_dir=self.profile_dir,
+            headless=headless,
+            viewport=VIEWPORT,
+            args=["--no-first-run", "--no-default-browser-check"],
+        )
+        self._page = self._context.pages[0] if self._context.pages else self._context.new_page()
+        self.headless = headless
+
     def _close_resources(self) -> None:
         for closer in (
             lambda: self._page and self._page.close(),
-            lambda: self._browser and self._browser.close(),
+            lambda: self._context and self._context.close(),
             lambda: self._pw and self._pw.stop(),
         ):
             try:
                 closer()
             except Exception:
                 pass
-        self._page = self._browser = self._pw = None
+        self._page = self._context = self._pw = None
 
     def _call(self, fn: Callable[[], Any]) -> Any:
         if self.closed:
@@ -276,6 +320,10 @@ class BrowserSession:
             "title": self.title,
             "png": self.frame,
             "captured_at": self.frame_at,
+            # carried on the poll so the panel keeps showing the right mode even when the agent
+            # is the one that opened the browser
+            "headed": self.headed,
+            "window_note": self.window_note,
         }
 
     def info(self) -> dict[str, Any]:
@@ -286,6 +334,11 @@ class BrowserSession:
             "running": not self.closed and not self.error,
             "error": self.error,
             "has_frame": bool(self.frame),
+            # which half of the deal this session got: a real window, or only a preview
+            "headed": self.headed,
+            "headless": self.headless,
+            "profile_dir": self.profile_dir,
+            "window_note": self.window_note,
         }
 
 
@@ -295,9 +348,41 @@ _SESSIONS: dict[str, BrowserSession] = {}
 _LOCK = threading.Lock()
 
 
-def open_session(*, session_id: str = "", headless: bool = True) -> dict[str, Any]:
-    """Start (or reuse) the browser. One session per id, shared by agent and panel."""
+def _profile_dir(session_id: str) -> str:
+    """Where this session's cookies live. Persistent, so a login survives a restart."""
+    base = str(os.environ.get("OPENSQUAD_WORKSPACE") or os.environ.get("OPENSQUAD_USER_DATA") or "")
+    if not base:
+        try:
+            from opensquad.system_config import syscfg
+
+            base = str(syscfg.workspace_dir() or "")
+        except Exception:
+            base = ""
+    if not base:
+        base = os.path.join(os.path.expanduser("~"), ".opensquad")
+    safe = "".join(ch if ch.isalnum() or ch in "-_." else "_" for ch in str(session_id or "default"))[:64]
+    return os.path.join(base, "browser_profiles", safe or "default")
+
+
+def _env_prefers_headless() -> bool:
+    """``OPENSQUAD_BROWSER_HEADLESS=1`` keeps every session headless.
+
+    For test suites and servers: a window per session is fine for a person at a desk and wrong
+    for a suite that opens eight of them (and for a machine with nobody watching).
+    """
+    return str(os.environ.get("OPENSQUAD_BROWSER_HEADLESS") or "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def open_session(*, session_id: str = "", headless: bool | None = None) -> dict[str, Any]:
+    """Start (or reuse) the browser. One session per id, shared by agent and panel.
+
+    ``headless=None`` (the default callers get) prefers a real window and falls back to headless
+    if this machine cannot show one; ``headless=True`` is for remote/CI callers that only want
+    frames.
+    """
     sid = str(session_id or "").strip() or uuid.uuid4().hex[:12]
+    if headless is None and _env_prefers_headless():
+        headless = True
     with _LOCK:
         existing = _SESSIONS.get(sid)
         if existing is not None and not existing.closed:
@@ -305,9 +390,10 @@ def open_session(*, session_id: str = "", headless: bool = True) -> dict[str, An
         session = BrowserSession(sid, headless=headless)
         _SESSIONS[sid] = session
     session.start()
-    # The first call also surfaces a start failure (a missing browser, for instance).
-    if session._thread is not None:
-        session._thread.join(timeout=0.05)
+    # Wait for the launch to resolve: the caller (panel or tool) is told which shape this session
+    # got, and "preview only" while Chromium is still starting would be a lie. Headless comes up
+    # in about a second; a headed launch that cannot show a window takes a few seconds to fail.
+    session.ready.wait(timeout=START_TIMEOUT_S)
     if session.error:
         with _LOCK:
             _SESSIONS.pop(sid, None)

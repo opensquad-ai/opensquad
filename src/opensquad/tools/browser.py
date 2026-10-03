@@ -99,8 +99,11 @@ def _call(op: str, *, session_id: str = "", **extra: Any) -> dict[str, Any]:
 def browser_open(session_id: str = "") -> dict[str, Any]:
     """Start (or reuse) the built-in browser for this agent.
 
-    The page shows up in the panel's 浏览器 tab, so the user can watch. Call this before the
-    other browser_* tools if you are unsure whether a browser is running.
+    On this machine that opens a **real browser window** (persistent profile, so logins survive)
+    which the user can work in directly while you drive the same window — so when you are about
+    to browse on the user's behalf, say where to look. `headed` in the reply says whether a
+    window exists; when it is false the session is headless and only the panel's preview shows
+    the page (`window_note` explains why).
     """
     return _call("open", session_id=session_id)
 

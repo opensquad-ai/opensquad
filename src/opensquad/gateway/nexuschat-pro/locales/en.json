@@ -955,6 +955,9 @@
       "actionFailed": "Action failed",
       "typePlaceholder": "Click a field on the page, then type here and press Enter",
       "sendText": "Send the text and press Enter",
+      "windowOpen": "A browser window is open on this machine",
+      "previewOnly": "This is a preview (no desktop on that machine, or headless was requested)",
+      "showWindow": "Open a window on this machine",
       "selfOrigin": "That address is OpenSquad itself, so it is opened externally instead of framed."
     },
     "terminal": {

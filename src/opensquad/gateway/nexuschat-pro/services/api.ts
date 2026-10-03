@@ -2460,12 +2460,22 @@ export const terminalAPI = {
 /** The built-in browser: one Playwright session in the launcher, shared with the agent's
  *  browser_* tools — the panel shows its frames, so both look at the same page. */
 export const browserAPI = {
-  /** Start (or reuse) the session. Ids are chosen by the caller; `agent-<id>` is the agent's. */
-  open: (name: string, sessionId: string) =>
-    apiRequest<{ ok: boolean; session_id: string; reused?: boolean; error?: string }>(
-      `/ai-web/admin/agents/${encodeURIComponent(name)}/browser/open`,
-      { method: 'POST', body: JSON.stringify({ session_id: sessionId }) },
-    ),
+  /** Start (or reuse) the session. Ids are chosen by the caller; `agent-<id>` is the agent's.
+   *  `headless` unset means "prefer a real window on the launcher's machine" (and report
+   *  `headed` + `window_note` either way). */
+  open: (name: string, sessionId: string, headless?: boolean) =>
+    apiRequest<{
+      ok: boolean;
+      session_id: string;
+      reused?: boolean;
+      headed?: boolean;
+      headless?: boolean;
+      window_note?: string;
+      error?: string;
+    }>(`/ai-web/admin/agents/${encodeURIComponent(name)}/browser/open`, {
+      method: 'POST',
+      body: JSON.stringify(headless === undefined ? { session_id: sessionId } : { session_id: sessionId, headless }),
+    }),
   navigate: (name: string, sessionId: string, url: string) =>
     apiRequest<{ ok: boolean; url: string; title: string; error?: string }>(
       `/ai-web/admin/agents/${encodeURIComponent(name)}/browser/navigate`,
@@ -2493,10 +2503,19 @@ export const browserAPI = {
     ),
   /** The poll: the last captured frame, without re-rendering the page. */
   frame: (name: string, sessionId: string) =>
-    apiRequest<{ ok: boolean; png?: string; url?: string; title?: string; captured_at?: number; error?: string }>(
-      `/ai-web/admin/agents/${encodeURIComponent(name)}/browser/frame`,
-      { method: 'POST', body: JSON.stringify({ session_id: sessionId }) },
-    ),
+    apiRequest<{
+      ok: boolean;
+      png?: string;
+      url?: string;
+      title?: string;
+      captured_at?: number;
+      headed?: boolean;
+      window_note?: string;
+      error?: string;
+    }>(`/ai-web/admin/agents/${encodeURIComponent(name)}/browser/frame`, {
+      method: 'POST',
+      body: JSON.stringify({ session_id: sessionId }),
+    }),
   screenshot: (name: string, sessionId: string, fullPage = false) =>
     apiRequest<{ ok: boolean; png?: string; url?: string; title?: string; error?: string }>(
       `/ai-web/admin/agents/${encodeURIComponent(name)}/browser/screenshot`,

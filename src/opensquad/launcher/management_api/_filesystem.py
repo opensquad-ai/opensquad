@@ -344,10 +344,14 @@ class FilesystemMixin:
     def _handle_browser_open(self, name: str, body: dict):
         from opensquad import browser_session
 
+        # No `headless` in the body means "prefer a real window on this machine, fall back to
+        # headless" — the browser_use tools and the panel both leave it unset, because a browser
+        # the user can actually use is the point. A remote caller can ask for headless frames.
+        requested = body.get("headless")
         return self._browser_reply(
             browser_session.open_session(
                 session_id=str(body.get("session_id") or ""),
-                headless=bool(body.get("headless", True)),
+                headless=None if requested is None else bool(requested),
             )
         )
 

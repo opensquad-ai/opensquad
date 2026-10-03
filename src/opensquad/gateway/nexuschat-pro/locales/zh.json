@@ -955,6 +955,9 @@
       "actionFailed": "操作失败",
       "typePlaceholder": "点页面上的输入框后，在这里打字并回车",
       "sendText": "发送文本并回车",
+      "windowOpen": "已在这台机器上打开浏览器窗口 ✓",
+      "previewOnly": "这里是预览（本机没有桌面环境或已被要求无头运行）",
+      "showWindow": "在本机打开窗口",
       "selfOrigin": "这个地址指向 OpenSquad 自身，为避免面板越权访问已改为外部打开。"
     },
     "terminal": {
