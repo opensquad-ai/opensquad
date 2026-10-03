@@ -100,7 +100,7 @@ describe('the pane renders them', () => {
     expect(SHELL).toContain('data-testid="pane-terminal"');
     expect(SHELL).toContain('data-testid="pane-browser"');
     expect(SHELL).toContain('<TerminalPanel agentId={agentId} rootPath={rootPath} />');
-    expect(SHELL).toContain('<BrowserPanel />');
+    expect(SHELL).toContain('<BrowserPanel agentId={agentId} />');
     // a render throw costs the pane that view, not the workspace
     expect(SHELL).toContain('<ErrorBoundary label="terminal"');
     expect(SHELL).toContain('<ErrorBoundary label="browser"');
@@ -251,8 +251,15 @@ describe('the panels themselves', () => {
     const browser = read('BrowserPanel.tsx');
     const main = fs.readFileSync(path.resolve(__dirname, '..', '..', 'electron', 'main.ts'), 'utf8');
 
-    expect(browser).toContain("React.createElement('webview'");
-    expect(browser).toContain('data-testid="browser-iframe"');
+    // the page is the Playwright session's frame — nothing is framed, so sites that refuse
+    // framing (Baidu, GitHub) display here too, and the agent drives this very page
+    expect(browser).toContain('browserAPI.frame(agentId, session)');
+    expect(browser).toContain('data-testid="browser-frame"');
+    expect(browser).toContain('browserAPI.click(agentId, session, x, y)');
+    expect(browser).toContain('browserAPI.type(agentId, session, value, true)');
+    expect(browser).toContain('browserSessionId');
+    expect(browser).not.toContain('<iframe');
+    expect(browser).not.toContain("'webview'");
     expect(main).toContain('webviewTag:       true');
     expect(main).toContain("on('will-attach-webview'");
     expect(main).toContain('setWindowOpenHandler');

@@ -816,6 +816,82 @@ async def admin_terminal_shells(
     return await _proxy_post(f"/api/agents/{name}/terminal/shells", body or {}, timeout=15.0)
 
 
+# ── The built-in browser ────────────────────────────────────────────────────
+# One Playwright session in the launcher, driven by the agent's browser_* tools AND by the
+# panel (which shows its frames), so both look at the same page. `frame` is the panel's poll —
+# it returns the last captured frame instead of re-rendering on every tick.
+
+
+@admin_router.post("/admin/agents/{name}/browser/open")
+async def admin_browser_open(
+    name: str, body: dict = Body(default={}), current_user: User = Depends(get_current_user_dep)
+):
+    return await _proxy_post(f"/api/agents/{name}/browser/open", body or {}, timeout=60.0)
+
+
+@admin_router.post("/admin/agents/{name}/browser/navigate")
+async def admin_browser_navigate(
+    name: str, body: dict = Body(default={}), current_user: User = Depends(get_current_user_dep)
+):
+    return await _proxy_post(f"/api/agents/{name}/browser/navigate", body or {}, timeout=60.0)
+
+
+@admin_router.post("/admin/agents/{name}/browser/back")
+async def admin_browser_back(
+    name: str, body: dict = Body(default={}), current_user: User = Depends(get_current_user_dep)
+):
+    return await _proxy_post(f"/api/agents/{name}/browser/back", body or {}, timeout=60.0)
+
+
+@admin_router.post("/admin/agents/{name}/browser/click")
+async def admin_browser_click(
+    name: str, body: dict = Body(default={}), current_user: User = Depends(get_current_user_dep)
+):
+    return await _proxy_post(f"/api/agents/{name}/browser/click", body or {}, timeout=60.0)
+
+
+@admin_router.post("/admin/agents/{name}/browser/type")
+async def admin_browser_type(
+    name: str, body: dict = Body(default={}), current_user: User = Depends(get_current_user_dep)
+):
+    return await _proxy_post(f"/api/agents/{name}/browser/type", body or {}, timeout=60.0)
+
+
+@admin_router.post("/admin/agents/{name}/browser/press")
+async def admin_browser_press(
+    name: str, body: dict = Body(default={}), current_user: User = Depends(get_current_user_dep)
+):
+    return await _proxy_post(f"/api/agents/{name}/browser/press", body or {}, timeout=60.0)
+
+
+@admin_router.post("/admin/agents/{name}/browser/snapshot")
+async def admin_browser_snapshot(
+    name: str, body: dict = Body(default={}), current_user: User = Depends(get_current_user_dep)
+):
+    return await _proxy_post(f"/api/agents/{name}/browser/snapshot", body or {}, timeout=60.0)
+
+
+@admin_router.post("/admin/agents/{name}/browser/screenshot")
+async def admin_browser_screenshot(
+    name: str, body: dict = Body(default={}), current_user: User = Depends(get_current_user_dep)
+):
+    return await _proxy_post(f"/api/agents/{name}/browser/screenshot", body or {}, timeout=60.0)
+
+
+@admin_router.post("/admin/agents/{name}/browser/frame")
+async def admin_browser_frame(
+    name: str, body: dict = Body(default={}), current_user: User = Depends(get_current_user_dep)
+):
+    return await _proxy_post(f"/api/agents/{name}/browser/frame", body or {}, timeout=60.0)
+
+
+@admin_router.post("/admin/agents/{name}/browser/close")
+async def admin_browser_close(
+    name: str, body: dict = Body(default={}), current_user: User = Depends(get_current_user_dep)
+):
+    return await _proxy_post(f"/api/agents/{name}/browser/close", body or {}, timeout=30.0)
+
+
 @admin_router.put("/admin/agents/{name}/config")
 async def admin_update_config(name: str, body: dict = Body(...), current_user: User = Depends(get_current_user_dep)):
     """Update Agent's config.json and sync agent_name to the bound account's display name"""

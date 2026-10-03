@@ -2457,6 +2457,58 @@ export const terminalAPI = {
     ),
 };
 
+/** The built-in browser: one Playwright session in the launcher, shared with the agent's
+ *  browser_* tools — the panel shows its frames, so both look at the same page. */
+export const browserAPI = {
+  /** Start (or reuse) the session. Ids are chosen by the caller; `agent-<id>` is the agent's. */
+  open: (name: string, sessionId: string) =>
+    apiRequest<{ ok: boolean; session_id: string; reused?: boolean; error?: string }>(
+      `/ai-web/admin/agents/${encodeURIComponent(name)}/browser/open`,
+      { method: 'POST', body: JSON.stringify({ session_id: sessionId }) },
+    ),
+  navigate: (name: string, sessionId: string, url: string) =>
+    apiRequest<{ ok: boolean; url: string; title: string; error?: string }>(
+      `/ai-web/admin/agents/${encodeURIComponent(name)}/browser/navigate`,
+      { method: 'POST', body: JSON.stringify({ session_id: sessionId, url }) },
+    ),
+  back: (name: string, sessionId: string) =>
+    apiRequest<{ ok: boolean; url: string; title: string; error?: string }>(
+      `/ai-web/admin/agents/${encodeURIComponent(name)}/browser/back`,
+      { method: 'POST', body: JSON.stringify({ session_id: sessionId }) },
+    ),
+  click: (name: string, sessionId: string, x: number, y: number) =>
+    apiRequest<{ ok: boolean; error?: string }>(
+      `/ai-web/admin/agents/${encodeURIComponent(name)}/browser/click`,
+      { method: 'POST', body: JSON.stringify({ session_id: sessionId, x, y }) },
+    ),
+  type: (name: string, sessionId: string, text: string, submit = false) =>
+    apiRequest<{ ok: boolean; error?: string }>(
+      `/ai-web/admin/agents/${encodeURIComponent(name)}/browser/type`,
+      { method: 'POST', body: JSON.stringify({ session_id: sessionId, text, submit }) },
+    ),
+  press: (name: string, sessionId: string, key: string) =>
+    apiRequest<{ ok: boolean; error?: string }>(
+      `/ai-web/admin/agents/${encodeURIComponent(name)}/browser/press`,
+      { method: 'POST', body: JSON.stringify({ session_id: sessionId, key }) },
+    ),
+  /** The poll: the last captured frame, without re-rendering the page. */
+  frame: (name: string, sessionId: string) =>
+    apiRequest<{ ok: boolean; png?: string; url?: string; title?: string; captured_at?: number; error?: string }>(
+      `/ai-web/admin/agents/${encodeURIComponent(name)}/browser/frame`,
+      { method: 'POST', body: JSON.stringify({ session_id: sessionId }) },
+    ),
+  screenshot: (name: string, sessionId: string, fullPage = false) =>
+    apiRequest<{ ok: boolean; png?: string; url?: string; title?: string; error?: string }>(
+      `/ai-web/admin/agents/${encodeURIComponent(name)}/browser/screenshot`,
+      { method: 'POST', body: JSON.stringify({ session_id: sessionId, full_page: fullPage }) },
+    ),
+  close: (name: string, sessionId: string) =>
+    apiRequest<{ ok: boolean }>(
+      `/ai-web/admin/agents/${encodeURIComponent(name)}/browser/close`,
+      { method: 'POST', body: JSON.stringify({ session_id: sessionId }) },
+    ),
+};
+
 export const nodesAPI = {
   /** This machine's own LAN addresses (the invite panel names one of them). */
   localAddresses: () =>

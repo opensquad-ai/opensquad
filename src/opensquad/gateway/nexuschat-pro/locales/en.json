@@ -950,6 +950,11 @@
       "empty": "Type a URL and press Enter, or use a local-service shortcut above.",
       "framingNote": "Some sites refuse to be embedded (X-Frame-Options) and show blank — use \"Open in system browser\". The desktop build has no such limit.",
       "electronNote": "Desktop build: a real browser view, so logins and interaction work.",
+      "sharedNote": "This is the same browser the agent uses (hosted by this machine's launcher): when the agent clicks or types, this view follows; what you click here is sent to it as well.",
+      "startFailed": "The browser did not start: check that Playwright's browsers are installed on this machine.",
+      "actionFailed": "Action failed",
+      "typePlaceholder": "Click a field on the page, then type here and press Enter",
+      "sendText": "Send the text and press Enter",
       "selfOrigin": "That address is OpenSquad itself, so it is opened externally instead of framed."
     },
     "terminal": {

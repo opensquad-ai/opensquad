@@ -950,6 +950,11 @@
       "empty": "输入网址后回车，或用上面的本地服务快捷入口。",
       "framingNote": "部分网站禁止被嵌入（X-Frame-Options），会显示空白——用「在系统浏览器中打开」。桌面版没有这个限制。",
       "electronNote": "桌面版：这是真正的浏览器视图，可以正常登录和交互。",
+      "sharedNote": "这是 agent 与你共用的同一个浏览器（由本机 launcher 托管）：agent 在上面点击/输入时，这个视图会跟着更新；在这里点击也会传给 agent 那边。",
+      "startFailed": "浏览器启动失败：请确认本机已安装 Playwright 浏览器。",
+      "actionFailed": "操作失败",
+      "typePlaceholder": "点页面上的输入框后，在这里打字并回车",
+      "sendText": "发送文本并回车",
       "selfOrigin": "这个地址指向 OpenSquad 自身，为避免面板越权访问已改为外部打开。"
     },
     "terminal": {

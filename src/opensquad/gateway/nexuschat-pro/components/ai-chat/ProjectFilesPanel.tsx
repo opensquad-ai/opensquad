@@ -57,8 +57,8 @@ export type ProjectFileOpenRequest = {
 /** Which of the rail's top-level tabs is showing (remembered per browser). */
 const RAIL_TAB_KEY = 'opensquad.filesRail.tab';
 
-/** The rail's tabs, in the order they are shown: browser, terminal, files. */
-const RAIL_TABS: PaneViewId[] = ['browser', 'terminal', 'files'];
+/** The rail's tabs, in the order they are shown: files, terminal, browser. */
+const RAIL_TABS: PaneViewId[] = ['files', 'terminal', 'browser'];
 
 type TreeEntry = {
   path: string;
@@ -2933,7 +2933,7 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
       {/* 浏览器 / 终端 are the other two tabs; the file list (below) is the third and is
           unchanged, including the chat drawer's treeOnly usage. */}
       {viewTabs && railTab === 'browser' ? (
-        <BrowserPanel />
+        <BrowserPanel agentId={agentId} />
       ) : viewTabs && railTab === 'terminal' ? (
         <TerminalPanel agentId={agentId} rootPath={rootPath} />
       ) : (
