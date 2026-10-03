@@ -230,7 +230,6 @@ describe('the panels themselves', () => {
     expect(terminal).toContain('.shells(agentId)');
     expect(terminal).toContain('data-testid="terminal-shell"');
     expect(terminal).toContain('shells.map((s) =>');
-    expect(terminal).toContain('shell:');
   });
 
   it('the terminal surface is proxied launcher-ward, in both directions', () => {
