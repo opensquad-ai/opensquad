@@ -424,38 +424,106 @@ def create_group(name: str, description: str = "", is_private: bool = False) -> 
         return {"status": "error", "message": str(e)}
 
 
-def list_groups(host: str = "") -> dict[str, Any]:
+def _group_rows(groups: Any) -> list[dict[str, Any]]:
+    """The three fields this tool has always reported, for any gateway-shaped payload."""
+    return [
+        {
+            "id": g.get("id", "") if isinstance(g, dict) else str(g),
+            "name": g.get("name", "") if isinstance(g, dict) else "",
+            "description": g.get("description", "") if isinstance(g, dict) else "",
+        }
+        for g in (groups or [])
+    ]
+
+
+def _peer_group_rows(host: str, wanted: set[str]) -> list[dict[str, Any]]:
+    """The groups joined on one peer: ids from this agent's own config, names from the peer.
+
+    The ids are local knowledge — ``join_group(host=...)`` recorded them here — so they are
+    listed whether or not that machine answers. Names and descriptions are not: the machine
+    that owns a group owns the data about it, so they are fetched from there and simply left
+    empty when it cannot be reached.
     """
-    Get a list of all groups the agent has currently joined.
-    Returns each group's ID, name, and description.
+    from ..peer_bridge import peer_bridge
+
+    rows = [
+        {"id": gid, "name": "", "description": "", "source": "remote", "host": host, "reachable": False}
+        for gid in sorted(wanted)
+    ]
+    bridge_inst, why = peer_bridge(host)
+    if bridge_inst is None:
+        return [{**row, "note": why} for row in rows]
+    try:
+        known = {r["id"]: r for r in _group_rows(bridge_inst.list_groups_api())}
+    except Exception as exc:  # noqa: BLE001 - reported per row, never raised at the agent
+        return [{**row, "note": f"could not read {host}'s group list: {exc}"} for row in rows]
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        match = known.get(row["id"])
+        if match is None:
+            # Recorded as joined, but that machine does not list it any more. Still reported:
+            # a stale record is exactly what the agent would otherwise act on blindly.
+            out.append({**row, "note": f"{host} does not list this group any more"})
+        else:
+            out.append({**row, "name": match["name"], "description": match["description"], "reachable": True})
+    return out
+
+
+def _remote_group_rows() -> list[dict[str, Any]]:
+    """Every group this agent joined on a paired machine, per its own ``config.json``."""
+    from ..peer_bridge import load_peers
+
+    rows: list[dict[str, Any]] = []
+    for key, entry in load_peers().items():
+        groups = entry.get("groups") if isinstance(entry.get("groups"), list) else []
+        wanted = {str(g).strip() for g in groups if str(g).strip()}
+        if not wanted:
+            continue
+        rows.extend(_peer_group_rows(str(entry.get("host") or key), wanted))
+    return rows
+
+
+def list_groups(host: str = "", include_remote: bool = True) -> dict[str, Any]:
+    """
+    Get the list of groups the agent has currently joined — on this machine **and** on the
+    machines it paired with.
+
+    Without ``host`` the result merges two sources: this agent's own gateway, and the groups
+    it joined on a peer. The peer ones carry ``source: "remote"`` and the peer's ``host``;
+    when that machine cannot be reached their ``name`` is empty and ``reachable`` is false,
+    because membership is recorded locally at join time while a group's metadata lives on the
+    machine that owns it. A remote group whose owner no longer lists it is still reported,
+    with a ``note`` — the agent should not believe it is receiving a group's messages when
+    the owner has stopped listing it.
 
     Args:
-        host: Optional peer host (a machine this agent paired with). When set, list
-              the groups on THAT machine instead of this agent's own gateway.
+        host: Optional peer host (a machine this agent paired with). When set, list the
+              groups on THAT machine instead of merging (as before).
+        include_remote: Set false to list only this machine's own groups.
     """
     try:
-        bridge_inst = _bridge()
         if (host or "").strip():
             from ..peer_bridge import peer_bridge
 
             bridge_inst, why = peer_bridge(host.strip())
             if bridge_inst is None:
                 return {"status": "error", "code": "peer_not_ready", "message": why}
-        groups = bridge_inst.list_groups_api()
-        if not groups:
-            return {"status": "success", "count": 0, "groups": []}
-        return {
-            "status": "success",
-            "count": len(groups),
-            "groups": [
-                {
-                    "id": g.get("id", "") if isinstance(g, dict) else str(g),
-                    "name": g.get("name", "") if isinstance(g, dict) else "",
-                    "description": g.get("description", "") if isinstance(g, dict) else "",
-                }
-                for g in groups
-            ],
-        }
+            rows = _group_rows(bridge_inst.list_groups_api())
+            return {"status": "success", "count": len(rows), "groups": rows}
+
+        rows: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for row in _group_rows(_bridge().list_groups_api()):
+            rows.append({**row, "source": "local"})
+            seen.add(row["id"])
+        if include_remote:
+            for remote in _remote_group_rows():
+                # A group id that is also local is the local group: never report it twice.
+                if remote["id"] in seen:
+                    continue
+                seen.add(remote["id"])
+                rows.append(remote)
+        return {"status": "success", "count": len(rows), "groups": rows}
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
