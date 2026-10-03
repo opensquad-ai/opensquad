@@ -50,6 +50,10 @@ export const BrowserPanel: React.FC<BrowserPanelProps> = ({ agentId }) => {
   const [error, setError] = useState('');
   const [text, setText] = useState('');
   const imgRef = useRef<HTMLImageElement>(null);
+<<<<<<< Updated upstream
+  const typeRef = useRef<HTMLInputElement>(null);
+=======
+>>>>>>> Stashed changes
   const busyRef = useRef(false);
   busyRef.current = busy;
 
@@ -134,9 +138,25 @@ export const BrowserPanel: React.FC<BrowserPanelProps> = ({ agentId }) => {
     if (!rect.width || !rect.height) return;
     const x = Math.round(((event.clientX - rect.left) / rect.width) * VIEWPORT.width);
     const y = Math.round(((event.clientY - rect.top) / rect.height) * VIEWPORT.height);
+<<<<<<< Updated upstream
+    // Move the caret to the field below: the page has focus now (on the field that was clicked),
+    // so whatever is typed next goes there. The image cannot show a caret, and without this the
+    // natural next move — start typing — would go nowhere.
+    typeRef.current?.focus();
     void run(() => browserAPI.click(agentId, session, x, y));
   };
 
+  /** Wheel scrolls the page, not the image: the view cannot move a page it does not render. */
+  const onWheel = (event: React.WheelEvent) => {
+    if (busyRef.current) return;
+    void run(() => browserAPI.press(agentId, session, event.deltaY > 0 ? 'PageDown' : 'PageUp'));
+  };
+
+=======
+    void run(() => browserAPI.click(agentId, session, x, y));
+  };
+
+>>>>>>> Stashed changes
   const sendText = () => {
     const value = text;
     if (!value) return;
@@ -204,7 +224,11 @@ export const BrowserPanel: React.FC<BrowserPanelProps> = ({ agentId }) => {
         </button>
       </div>
 
+<<<<<<< Updated upstream
+      <div className="flex-1 min-h-0 overflow-auto bg-white dark:bg-neutral-900" data-testid="browser-stage" onWheel={onWheel}>
+=======
       <div className="flex-1 min-h-0 overflow-auto bg-white dark:bg-neutral-900">
+>>>>>>> Stashed changes
         {frame ? (
           <img
             ref={imgRef}
@@ -212,7 +236,13 @@ export const BrowserPanel: React.FC<BrowserPanelProps> = ({ agentId }) => {
             alt={title || url}
             onClick={onPageClick}
             data-testid="browser-frame"
+<<<<<<< Updated upstream
+            // Natural size, not squeezed into the rail: a 1280px page scaled to ~300px is
+            // unreadable. The stage scrolls instead.
+            className="block max-w-none cursor-pointer select-none"
+=======
             className="block w-full cursor-pointer select-none"
+>>>>>>> Stashed changes
             draggable={false}
           />
         ) : (
@@ -227,6 +257,10 @@ export const BrowserPanel: React.FC<BrowserPanelProps> = ({ agentId }) => {
 
       <div className="flex-shrink-0 flex items-center gap-1.5 border-t border-border px-2 py-1">
         <input
+<<<<<<< Updated upstream
+          ref={typeRef}
+=======
+>>>>>>> Stashed changes
           value={text}
           onChange={(e) => setText(e.target.value)}
           onKeyDown={(e) => {
