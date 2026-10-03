@@ -1509,6 +1509,23 @@ def remember_board_owner(collab_id: str, host: str) -> bool:
         return False
 
 
+def board_owners() -> dict[str, str]:
+    """Every collaboration this machine knows lives elsewhere: ``{collab_id: host}``.
+
+    The local record of boards reached through a paired machine — written when this agent joined
+    the group there, and again by ``join_collaboration``. It is what lets a caller with no hint of
+    its own (listing which collaborations it is part of, say) still find the remote ones: each id
+    it names can be read back with ``get_task``, and those calls carry the hint that routes them.
+    """
+    try:
+        data = read_json(_board_owners_file(), {})
+    except Exception:
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    return {str(k).strip(): str(v).strip() for k, v in data.items() if str(k).strip() and str(v).strip()}
+
+
 def board_owner(collab_id: str = "", group_id: str = "") -> str:
     """The host owning this board, or ``""`` when it is local.
 

@@ -49,7 +49,9 @@ group chat opens it). Everything about the task happens there, not in the group:
   a choice, an approval to give, a blocker, a delivery to accept. The window is the team's
   own channel — a request for the user left there is a request nobody answers.
 - **Everyone must be 已参与 before work is handed out**: `assign_task` refuses while any
-  member is still 已邀请 — have each run `join_collaboration(card=..., collab_id=...)`
+  member is still 已邀请 — have each run `join_collaboration(card=..., collab_id=...)`, passing
+  `group_id=<the group>` when the collaboration's group lives on a paired machine (the board lives
+  there too; without it the join reports `join_tracking_failed` instead of recording anything)
   (remind them in the group if needed), then assign.
 - **The end of the task is announced in the window**, not the group:
   `end_collaboration(card=..., collab_id=...)` posts the closure into the task thread and

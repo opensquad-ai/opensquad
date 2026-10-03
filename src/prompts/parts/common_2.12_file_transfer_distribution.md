@@ -34,7 +34,10 @@ message happened to arrive:
   a message nobody answers — the user reads the group, and a task-window message is not a
   notification to them.
 - **Everyone must be 已参与 before any work is handed out.** `assign_task` refuses while any
-  member is still 已邀请 — have each one run `join_collaboration(card=..., collab_id=...)`
+  member is still 已邀请 — have each one run `join_collaboration(card=..., collab_id=...)`, with
+  `group_id=<the group>` when that group lives on a paired machine: the collaboration's board lives
+  on the machine that owns the group, and without the handle the join cannot reach it (it returns
+  `join_tracking_failed` rather than pretending to have joined)
   (the invite is delivered to them; @ them in the group if they are slow). A member who
   never accepted is not somebody to assign work to, and waiting for the whole team is the
   point of inviting it.
