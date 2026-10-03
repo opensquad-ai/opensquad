@@ -56,10 +56,11 @@ def _shell_label() -> str:
 class TerminalSession:
     """One shell child plus the thread that streams its output."""
 
-    def __init__(self, terminal_id: str, *, cwd: str = "", sid: str = ""):
+    def __init__(self, terminal_id: str, *, cwd: str = "", sid: str = "", trusted: bool = False):
         self.id = terminal_id
         self.cwd = cwd
         self.sid = sid
+        self.trusted = trusted
         self.shell_type = _shell_label()
         self.process: subprocess.Popen | None = None
         self.exited = False
@@ -77,7 +78,12 @@ class TerminalSession:
         from opensquad.tools.system import _noninteractive_shell_env
         from opensquad.utils.path_utils import is_path_safe
 
-        if not is_path_safe(self.cwd):
+        # Two trust boundaries, and they are not the same one. A shell an *agent* asks for is
+        # confined to its workspace. A terminal the **user** opens from the panel is not: the
+        # launcher already resolved that directory as the agent's own workspace (which can
+        # legitimately live outside `get_workspace_root()` — e.g. on the Desktop), and applying
+        # the agent's fence here refuses the very directory the panel is showing.
+        if not self.trusted and not is_path_safe(self.cwd):
             return {"ok": False, "error": f"working directory is outside the workspace: {self.cwd}"}
         popen_kw: dict[str, Any] = {
             "stdin": subprocess.PIPE,
@@ -267,9 +273,18 @@ def _new_id() -> str:
 
 
 def open_terminal(
-    *, terminal_id: str = "", cwd: str = "", sid: str = "", working_directory: str = ""
+    *,
+    terminal_id: str = "",
+    cwd: str = "",
+    sid: str = "",
+    working_directory: str = "",
+    trusted: bool = False,
 ) -> dict[str, Any]:
-    """Start a terminal. ``cwd``/``working_directory`` resolve inside the workspace."""
+    """Start a terminal. ``cwd``/``working_directory`` resolve inside the workspace.
+
+    ``trusted=True`` skips the agent-side workspace fence for a shell the *user* asked for
+    (the launcher-hosted terminal); the caller is then responsible for the directory.
+    """
     from opensquad.tools.system import _resolve_working_directory
 
     tid = str(terminal_id or "").strip() or _new_id()
@@ -278,7 +293,7 @@ def open_terminal(
         existing = _TERMINALS.get(tid)
         if existing is not None and not existing.exited:
             return {"ok": True, "terminal_id": tid, "reused": True, **existing.info()}
-        session = TerminalSession(tid, cwd=resolved, sid=str(sid or ""))
+        session = TerminalSession(tid, cwd=resolved, sid=str(sid or ""), trusted=trusted)
         _TERMINALS[tid] = session
     result = session.start()
     if not result.get("ok"):

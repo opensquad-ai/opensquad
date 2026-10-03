@@ -289,6 +289,10 @@ class FilesystemMixin:
             cwd=root,
             sid="",
             working_directory=str(body.get("cwd") or ""),
+            # The user opened this terminal, not an agent: `_agent_fs_root` already vetted the
+            # directory, and the agent's own workspace fence refuses a perfectly good workspace
+            # that lives outside get_workspace_root() — the reported case, on the Desktop.
+            trusted=True,
         )
         if not result.get("ok"):
             return self._send_json(result, 400)

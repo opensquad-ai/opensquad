@@ -11,6 +11,7 @@ is answered rather than ignored.
 from __future__ import annotations
 
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -99,6 +100,19 @@ def test_a_terminal_outside_the_workspace_is_refused(events):
     assert "workspace" in result["error"].lower()
     assert ts.list_terminals() == []  # nothing was registered
     assert [e for e, _ in events if e == "job_stdout"] == []
+
+
+def test_a_trusted_terminal_may_start_outside_it(events):
+    """The user's own terminal is not an agent action. `is_path_safe` confines an *agent's*
+    shells to its workspace — but an agent's workspace can legitimately live outside
+    get_workspace_root() (the reported case: on the Desktop), and the launcher has already
+    vetted that directory, so the fence must not refuse the folder the panel is showing."""
+    outside = tempfile.mkdtemp(prefix="opensquad-terminal-")
+
+    result = ts.open_terminal(terminal_id="t3b", cwd=outside, trusted=True)
+
+    assert result["ok"] is True, result
+    assert result["cwd"].lower().rstrip("\\/") == outside.lower().rstrip("\\/")
 
 
 def test_opening_the_same_id_twice_reuses_the_live_shell(events):
