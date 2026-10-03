@@ -71,37 +71,67 @@ def _balanced_json_end(text: str, open_at: int) -> int:
     return -1
 
 
+def repair_json_text(text: str) -> str:
+    """Escape raw control characters that sit inside JSON string literals.
+
+    A card built by hand — the model typing the marker instead of calling the tool — can carry a
+    real newline inside a value. That is not valid JSON at all: ``json.loads`` refuses it, the card
+    parsed as *no card*, the chat painted the marker verbatim, and the resolve path could not
+    rewrite the status either (it reads with the same reader). Repairing the reader's input keeps
+    the display sane **and** lets the patch rewrite the marker properly, which heals the message.
+    """
+    out: list[str] = []
+    in_str = False
+    esc = False
+    for ch in text:
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+            elif ord(ch) < 0x20:
+                out.append({"\n": "\\n", "\r": "\\r", "\t": "\\t"}.get(ch, f"\\u{ord(ch):04x}"))
+                continue
+        elif ch == '"':
+            in_str = True
+        out.append(ch)
+    return "".join(out)
+
+
 def read_approval_marker(content: str) -> dict[str, Any] | None:
     """``{payload, start, end}`` for the marker in *content*, closing tag or not.
 
     ``start``/``end`` span the whole marker (opening tag through the closing one, or through the
     end of its JSON when the closing one is missing) so a caller can rewrite it in place.
+
+    The JSON is located **first** and the closing tag looked for *after* it: a value may itself
+    contain the tag's text (an agent quoting the marker inside its own summary), and searching for
+    the tag first truncated the body mid-JSON and lost the card.
     """
     if not content:
         return None
     start_match = _APPROVAL_START_RE.search(content)
     if not start_match:
         return None
-    body_start = start_match.end()
-    end_match = _APPROVAL_END_RE.search(content, body_start)
-    body_end = end_match.start() if end_match else len(content)
-    body = content[body_start:body_end]
-    open_at = body.find("{")
+    open_at = content.find("{", start_match.end())
     if open_at < 0:
         return None
-    close_at = _balanced_json_end(body, open_at)
+    close_at = _balanced_json_end(content, open_at)
     if close_at < 0:
         return None
     try:
-        data = json.loads(body[open_at:close_at])
+        data = json.loads(repair_json_text(content[open_at:close_at]))
     except Exception:
         return None
     if not isinstance(data, dict) or not data.get("id"):
         return None
+    end_match = _APPROVAL_END_RE.search(content, close_at)
     return {
         "payload": data,
         "start": start_match.start(),
-        "end": end_match.end() if end_match else body_start + close_at,
+        "end": end_match.end() if end_match else close_at,
     }
 
 

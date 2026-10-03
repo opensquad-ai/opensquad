@@ -51,13 +51,37 @@ function balancedJsonEnd(text: string, openAt: number): number {
   return -1;
 }
 
+/** Escape raw control characters inside JSON string literals (see the Python twin). */
+function repairJsonText(text: string): string {
+  let out = '';
+  let inStr = false;
+  let esc = false;
+  for (const ch of text) {
+    if (inStr) {
+      if (esc) esc = false;
+      else if (ch === '\\') esc = true;
+      else if (ch === '"') inStr = false;
+      else if (ch.charCodeAt(0) < 0x20) {
+        out += ch === '\n' ? '\\n' : ch === '\r' ? '\\r' : ch === '\t' ? '\\t' : `\\u${ch.charCodeAt(0).toString(16).padStart(4, '0')}`;
+        continue;
+      }
+    } else if (ch === '"') {
+      inStr = true;
+    }
+    out += ch;
+  }
+  return out;
+}
+
 /**
- * The marker's payload plus the span it occupies, tolerating a missing closing tag.
+ * The marker's payload plus the span it occupies.
  *
- * The closing tag used to be required, so a card whose end marker was lost (a truncated send, a
- * hand-built message, an older client) parsed as *no card at all* — and the chat then painted the
- * raw marker JSON inside an ordinary bubble. That is the "big bubble of text appeared after I
- * clicked 确定" report. The span is returned so callers can drop or rewrite the whole marker.
+ * Tolerant on purpose, because a hand-built card (the model typing the marker rather than calling
+ * the tool) is what actually arrives in the wild — it can be missing its closing tag, contain the
+ * tag's text inside a value, or carry a real newline inside a JSON string. Any of those used to
+ * mean "no card", and the chat then painted the marker verbatim: the reported big bubble. The
+ * object is located first and the closing tag looked for after it; the JSON is repaired before
+ * parsing; the span is returned so callers can drop or rewrite the whole marker.
  */
 export function readApprovalMarker(
   content: string,
@@ -65,26 +89,42 @@ export function readApprovalMarker(
   if (!content) return null;
   const startMatch = MARKER_START_RE.exec(content);
   if (!startMatch) return null;
-  const bodyStart = startMatch.index + startMatch[0].length;
-  const rest = content.slice(bodyStart);
-  const endMatch = MARKER_END_RE.exec(rest);
-  const bodyEnd = endMatch ? bodyStart + endMatch.index : content.length;
-  const body = content.slice(bodyStart, bodyEnd);
-  const openAt = body.indexOf('{');
+  const openAt = content.indexOf('{', startMatch.index + startMatch[0].length);
   if (openAt < 0) return null;
-  const closeAt = balancedJsonEnd(body, openAt);
+  const closeAt = balancedJsonEnd(content, openAt);
   if (closeAt < 0) return null;
   try {
-    const data = JSON.parse(body.slice(openAt, closeAt));
+    const data = JSON.parse(repairJsonText(content.slice(openAt, closeAt)));
     if (!data || typeof data !== 'object' || !data.id) return null;
+    const after = content.slice(closeAt);
+    const endMatch = MARKER_END_RE.exec(after);
     return {
       payload: data as GroupApprovalPayload,
       start: startMatch.index,
-      end: endMatch ? bodyStart + endMatch.index + endMatch[0].length : bodyStart + closeAt,
+      end: endMatch ? closeAt + endMatch.index + endMatch[0].length : closeAt,
     };
   } catch {
     return null;
   }
+}
+
+/** True when the content carries an approval marker, parseable or not. */
+export function hasApprovalMarker(content?: string | null): boolean {
+  return !!content && MARKER_START_RE.test(content);
+}
+
+/**
+ * What to show when a marker is there but its JSON still cannot be read.
+ *
+ * The last resort must never be the marker itself: the readable headline the encoder appends
+ * (`📋 协作批准请求：…`, or a verdict line) is enough to say what happened.
+ */
+export function approvalFallbackLine(content: string): string {
+  const line = String(content || '')
+    .split('\n')
+    .map((s) => s.trim())
+    .find((s) => /^(📋|✅|❌|🔄|✋)/.test(s));
+  return line || '📋 批准请求（内容无法解析）';
 }
 
 export function parseCollabApproval(content: string): GroupApprovalPayload | null {

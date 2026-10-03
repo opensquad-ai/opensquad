@@ -19,7 +19,9 @@ import path from 'path';
 import { describe, expect, it } from 'vitest';
 
 import {
+  approvalFallbackLine,
   approvalQuietLine,
+  hasApprovalMarker,
   isResolvedApprovalMessage,
   parseCollabApproval,
   readApprovalMarker,
@@ -68,6 +70,49 @@ describe('tolerating a lost closing tag', () => {
   it('still refuses content that is not a card', () => {
     expect(parseCollabApproval('just a message')).toBeNull();
     expect(parseCollabApproval('[[COLLAB_APPROVAL]] not json [[/COLLAB_APPROVAL]]')).toBeNull();
+  });
+});
+
+describe('the shapes that actually arrive in the wild', () => {
+  // Taken from the instance's own chat.db after the second report: the summary held real newlines,
+  // so neither side could read the marker and the card stayed a wall of text through the click.
+  const handBuilt =
+    '[[COLLAB_APPROVAL]]{"v":1,"id":"appr_hand","kind":"collab_step","title":"讨论方案：秒表",' +
+    '"summary":"第一行\n第二行","status":"pending","group_id":"gjxwzp"}[[/COLLAB_APPROVAL]]\n' +
+    '📋 协作批准请求：讨论方案：秒表';
+
+  it('repairs a raw newline inside a string value', () => {
+    const payload = parseCollabApproval(handBuilt);
+
+    expect(payload?.id).toBe('appr_hand');
+    expect(payload?.summary).toBe('第一行\n第二行');
+    expect(isResolvedApprovalMessage(handBuilt)).toBe(false);
+  });
+
+  it('does not truncate when a value contains the closing tag', () => {
+    const content =
+      '[[COLLAB_APPROVAL]]{"v":1,"id":"appr_in","title":"t","status":"pending",' +
+      '"summary":"原始：[[/COLLAB_APPROVAL]] 就这样"}[[/COLLAB_APPROVAL]]\n📋 协作批准请求：t';
+
+    const found = readApprovalMarker(content);
+
+    expect(found?.payload.id).toBe('appr_in');
+    expect(content.slice(found!.end)).toContain('📋 协作批准请求');
+  });
+
+  it('never paints a marker it cannot read', () => {
+    expect(hasApprovalMarker('[[COLLAB_APPROVAL]] garbage')).toBe(true);
+    expect(parseCollabApproval('[[COLLAB_APPROVAL]] garbage')).toBeNull();
+    expect(approvalFallbackLine('[[COLLAB_APPROVAL]] garbage\n📋 协作批准请求：讨论方案')).toBe(
+      '📋 协作批准请求：讨论方案',
+    );
+    expect(approvalFallbackLine('[[COLLAB_APPROVAL]] garbage')).toBe('📋 批准请求（内容无法解析）');
+  });
+
+  it('every renderer falls back to that line', () => {
+    for (const rel of ['../ChatWindow.tsx', '../DirectChatWindow.tsx', 'MessageBubble.tsx']) {
+      expect(read(rel), rel).toContain('approval-fallback-line');
+    }
   });
 });
 
