@@ -13,6 +13,7 @@ import { OpenSquadLoader } from './OpenSquadLoader';
 import { playGentleNotificationSound } from '../utils/sounds';
 import {
   CollabStepApprovalCard,
+  approvalQuietLine,
   isResolvedApprovalMessage,
   parseCollabApproval,
 } from './CollabStepApprovalCard';
@@ -3103,6 +3104,7 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
                                     // rendered raw. Same card the chat draws, so the pinned
                                     // row and the message agree.
                                     const pinnedTask = parseCollabTask(pm.content);
+                                    const pinnedApproval = parseCollabApproval(pm.content);
                                     return (
                                         <div
                                             key={pm.id}
@@ -3124,7 +3126,36 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
                                                 <span className="text-xs font-semibold text-textMain">{pSender?.name}</span>
                                                 <span className="text-[10px] text-textMuted ml-auto">{new Date(pm.timestamp).toLocaleDateString('zh-CN')}</span>
                                             </div>
-                                            {pinnedTask ? (
+                                            {pinnedApproval ? (
+                                                // A pinned approval is a card too: this row used to
+                                                // print the raw marker JSON, and a *decided* one
+                                                // should read as the same quiet grey line the chat
+                                                // now leaves behind.
+                                                <div onClick={(e) => e.stopPropagation()} data-testid="pinned-collab-approval">
+                                                    {String(pinnedApproval.status || 'pending') === 'pending' ? (
+                                                        <CollabStepApprovalCard
+                                                            payload={pinnedApproval}
+                                                            groupId={pinnedApproval.group_id || ''}
+                                                            messageId={pm.id}
+                                                            onResolve={async (action) => {
+                                                                const approvalGroup = pinnedApproval.group_id || '';
+                                                                if (!approvalGroup) return;
+                                                                await messageAPI.resolveCollabApproval(approvalGroup, pinnedApproval.id, action, {
+                                                                    messageId: pm.id,
+                                                                });
+                                                            }}
+                                                        />
+                                                    ) : (
+                                                        <p
+                                                            className={`text-[11px] ${
+                                                                pinnedApproval.status === 'rejected' ? 'text-rose-500/80' : 'text-textMuted'
+                                                            }`}
+                                                        >
+                                                            {approvalQuietLine(pinnedApproval)}
+                                                        </p>
+                                                    )}
+                                                </div>
+                                            ) : pinnedTask ? (
                                                 // The card's own clicks open the task window; they
                                                 // must not also jump the chat behind it.
                                                 <div onClick={(e) => e.stopPropagation()} data-testid="pinned-collab-task">

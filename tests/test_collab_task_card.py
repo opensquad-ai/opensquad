@@ -90,6 +90,44 @@ def test_markers_do_not_collide():
     )
 
 
+def test_a_marker_without_its_closing_tag_is_still_a_card():
+    """The reported bug: a lost end tag meant "no card", so the raw JSON was painted in a bubble.
+
+    With no card the resolve endpoint could not rewrite the status either — it reads with the same
+    parser — so the card never read as answered and stayed in the chat as text.
+    """
+    content = ca.encode_approval_message(
+        ca.build_approval_payload(approval_id="appr_x", title="任务验收", kind="collab_step", collab_id="AB12CD")
+    )
+    truncated = content.replace(ca.COLLAB_APPROVAL_END, "")
+
+    assert ca.parse_approval_payload(truncated)["id"] == "appr_x"
+
+    patched = ca.patch_approval_status_in_content(truncated, "approved")
+
+    assert ca.COLLAB_APPROVAL_END in patched, "the patch restores a well-formed marker"
+    assert ca.parse_approval_payload(patched)["status"] == "approved"
+
+
+def test_the_patch_survives_braces_in_the_summary():
+    """A non-greedy regex stopped at the first ``}``; brace scanning does not."""
+    summary = '用例 {"a": 1} 通过，另有 {"b": {"c": 2}}'
+    content = ca.encode_approval_message(
+        ca.build_approval_payload(
+            approval_id="appr_y", title="任务验收", kind="collab_step", collab_id="AB12CD", summary=summary
+        )
+    )
+
+    patched = ca.patch_approval_status_in_content(content, "rejected", note="再改一版")
+
+    parsed = ca.parse_approval_payload(patched)
+
+    assert parsed["status"] == "rejected"
+    assert parsed["resolve_note"] == "再改一版"
+    assert parsed["summary"] == summary
+    assert parsed["id"] == "appr_y"
+
+
 def test_encode_keeps_agent_readable_fallback():
     content = _card_content(kind="invite", card="code_review", participants=[{"agent_id": "qa", "state": "invited"}])
     assert "Task ID: AB12CD" in content

@@ -25,34 +25,97 @@ export interface GroupApprovalPayload {
   resolve_note?: string;
 }
 
-const MARKER_RE =
-  /\[\[(?:GROUP_APPROVAL|COLLAB_APPROVAL)\]\]\s*(\{[\s\S]*?\})\s*\[\[\/(?:GROUP_APPROVAL|COLLAB_APPROVAL)\]\]/;
+const MARKER_START_RE = /\[\[(?:GROUP_APPROVAL|COLLAB_APPROVAL)\]\]/;
+const MARKER_END_RE = /\[\[\/(?:GROUP_APPROVAL|COLLAB_APPROVAL)\]\]/;
 
-export function parseCollabApproval(content: string): GroupApprovalPayload | null {
-  if (
-    !content ||
-    (!content.includes('[[COLLAB_APPROVAL]]') && !content.includes('[[GROUP_APPROVAL]]'))
-  ) {
-    return null;
+/** Index just past the `}` closing the object at `openAt` (nested objects / braces in strings). */
+function balancedJsonEnd(text: string, openAt: number): number {
+  let depth = 0;
+  let inStr = false;
+  let esc = false;
+  for (let i = openAt; i < text.length; i += 1) {
+    const ch = text[i];
+    if (inStr) {
+      if (esc) esc = false;
+      else if (ch === '\\') esc = true;
+      else if (ch === '"') inStr = false;
+      continue;
+    }
+    if (ch === '"') inStr = true;
+    else if (ch === '{') depth += 1;
+    else if (ch === '}') {
+      depth -= 1;
+      if (depth === 0) return i + 1;
+    }
   }
-  const m = content.match(MARKER_RE);
-  if (!m) return null;
+  return -1;
+}
+
+/**
+ * The marker's payload plus the span it occupies, tolerating a missing closing tag.
+ *
+ * The closing tag used to be required, so a card whose end marker was lost (a truncated send, a
+ * hand-built message, an older client) parsed as *no card at all* — and the chat then painted the
+ * raw marker JSON inside an ordinary bubble. That is the "big bubble of text appeared after I
+ * clicked 确定" report. The span is returned so callers can drop or rewrite the whole marker.
+ */
+export function readApprovalMarker(
+  content: string,
+): { payload: GroupApprovalPayload; start: number; end: number } | null {
+  if (!content) return null;
+  const startMatch = MARKER_START_RE.exec(content);
+  if (!startMatch) return null;
+  const bodyStart = startMatch.index + startMatch[0].length;
+  const rest = content.slice(bodyStart);
+  const endMatch = MARKER_END_RE.exec(rest);
+  const bodyEnd = endMatch ? bodyStart + endMatch.index : content.length;
+  const body = content.slice(bodyStart, bodyEnd);
+  const openAt = body.indexOf('{');
+  if (openAt < 0) return null;
+  const closeAt = balancedJsonEnd(body, openAt);
+  if (closeAt < 0) return null;
   try {
-    const data = JSON.parse(m[1]);
+    const data = JSON.parse(body.slice(openAt, closeAt));
     if (!data || typeof data !== 'object' || !data.id) return null;
-    return data as GroupApprovalPayload;
+    return {
+      payload: data as GroupApprovalPayload,
+      start: startMatch.index,
+      end: endMatch ? bodyStart + endMatch.index + endMatch[0].length : bodyStart + closeAt,
+    };
   } catch {
     return null;
   }
 }
+
+export function parseCollabApproval(content: string): GroupApprovalPayload | null {
+  return readApprovalMarker(content)?.payload ?? null;
+}
+
+/**
+ * The single quiet line an approval leaves behind once it is answered.
+ *
+ * A decided card is not history worth keeping — the answer is on the board — so the chat shows
+ * this instead of the card, in small grey text and without a bubble, which is exactly what the
+ * group chat gets from the backend's SYSTEM message.
+ */
+export function approvalQuietLine(payload: GroupApprovalPayload): string {
+  const what = payload.title || payload.step || '批准请求';
+  if (payload.status === 'approved') return `✅ 协作环节已批准：${what}`;
+  if (payload.status === 'rejected') return `❌ 协作环节已拒绝：${what}`;
+  return `📋 批准请求：${what}`;
+}
+
+/** The marker's opposite: the same thing with no marker at all. */
+export const KIND_APPROVAL_MARKERS = [MARKER_START_RE, MARKER_END_RE];
 
 /** @deprecated use parseCollabApproval (parses both markers) */
 export const parseGroupApproval = parseCollabApproval;
 
 export function stripCollabApprovalMarker(content: string): string {
   if (!content) return content;
-  return content
-    .replace(MARKER_RE, '')
+  const found = readApprovalMarker(content);
+  const withoutMarker = found ? content.slice(0, found.start) + content.slice(found.end) : content;
+  return withoutMarker
     .replace(/^📋\s*协作批准请求：.*$/gm, '')
     .replace(/^🔄\s*模式切换申请：.*$/gm, '')
     .replace(/^✋\s*批准请求：.*$/gm, '')
