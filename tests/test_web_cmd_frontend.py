@@ -166,20 +166,20 @@ def test_node_beside_npm_counts_as_available(tmp_path, found):
     """The shim prefers `<npm dir>\\node.exe`, so no PATH entry is needed."""
     npm_dir = tmp_path / "npm"
     npm_dir.mkdir()
-    (npm_dir / "node.exe").write_text("", encoding="utf-8")
+    (npm_dir / _node_name()).write_text("", encoding="utf-8")
     found({"node": None})
 
-    assert web_cmd._npm_can_run(str(npm_dir / "npm.cmd")) is True
+    assert web_cmd._npm_can_run(str(npm_dir / _npm_name())) is True
 
 
 def test_node_on_path_counts_as_available(tmp_path, found):
-    found({"node": tmp_path / "node.exe"})
-    assert web_cmd._npm_can_run(str(tmp_path / "elsewhere" / "npm.cmd")) is True
+    found({"node": tmp_path / _node_name()})
+    assert web_cmd._npm_can_run(str(tmp_path / "elsewhere" / _npm_name())) is True
 
 
 def test_neither_node_nor_side_by_side(tmp_path, found):
     found({"node": None})
-    assert web_cmd._npm_can_run(str(tmp_path / "elsewhere" / "npm.cmd")) is False
+    assert web_cmd._npm_can_run(str(tmp_path / "elsewhere" / _npm_name())) is False
 
 
 def test_resolve_npm_never_returns_a_bare_name(tmp_path, found):
