@@ -18,7 +18,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next';
 import { Ban, Eraser, Loader2, RotateCw, Terminal as TerminalIcon } from 'lucide-react';
 
-import { terminalAPI } from '../../services/api';
+import { terminalAPI, type TerminalShellProfile } from '../../services/api';
 
 /** Trim the local scrollback so a long-running shell cannot grow without bound. */
 const MAX_CHARS = 200_000;
@@ -49,20 +49,48 @@ export const TerminalPanel: React.FC<TerminalPanelProps> = ({ agentId, rootPath 
   const [shell, setShell] = useState('');
   const [cwd, setCwd] = useState('');
   const [error, setError] = useState('');
+  /** Which shells this machine has, and which one this terminal runs. */
+  const [shells, setShells] = useState<TerminalShellProfile[]>([]);
+  const [shellId, setShellId] = useState('');
   const offsetRef = useRef(0);
   const aliveRef = useRef(true);
   const scrollerRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
+  /** Ask what this machine has, so the picker offers real shells (cmd / pwsh / bash / wsl…). */
+  useEffect(() => {
+    if (!agentId) return;
+    let alive = true;
+    void terminalAPI
+      .shells(agentId)
+      .then((res) => {
+        if (!alive) return;
+        const list = Array.isArray(res?.shells) ? res.shells : [];
+        setShells(list);
+        setShellId((current) => current || String(res?.default || list[0]?.id || ''));
+      })
+      .catch(() => undefined);
+    return () => {
+      alive = false;
+    };
+  }, [agentId]);
+
   /** Start (or restart) a shell in this workspace. */
-  const open = useCallback(async () => {
+  const open = useCallback(async (overrideShell?: string) => {
     if (!agentId) return;
     setOutput('');
     setError('');
     setState('starting');
     offsetRef.current = 0;
     try {
-      const res = await terminalAPI.open(agentId, terminalId, rootPath || undefined);
+      const wanted = overrideShell ?? shellId;
+      const res = await terminalAPI.open(
+        agentId,
+        terminalId,
+        rootPath || undefined,
+        undefined,
+        wanted || undefined,
+      );
       if (!aliveRef.current) return;
       if (!res?.ok) {
         setState('failed');
@@ -78,7 +106,7 @@ export const TerminalPanel: React.FC<TerminalPanelProps> = ({ agentId, rootPath 
       setState('failed');
       setError(String(e?.message || e));
     }
-  }, [agentId, rootPath, terminalId, t]);
+  }, [agentId, rootPath, shellId, terminalId, t]);
 
   useEffect(() => {
     aliveRef.current = true;
@@ -185,6 +213,30 @@ export const TerminalPanel: React.FC<TerminalPanelProps> = ({ agentId, rootPath 
           {cwd || rootPath || t('aiChat.terminal.workspaceRoot')}
         </span>
         <span className="ml-auto shrink-0">{status}</span>
+        {/* Which shell runs here: the machines's own list (cmd / PowerShell / pwsh / Git Bash /
+            WSL / zsh / fish), never a hard-coded single default. Switching restarts the shell. */}
+        {shells.length ? (
+          <select
+            value={shellId}
+            onChange={(e) => {
+              const next = e.target.value;
+              setShellId(next);
+              void terminalAPI
+                .close(agentId, terminalId)
+                .catch(() => undefined)
+                .then(() => open(next));
+            }}
+            data-testid="terminal-shell"
+            title={t('aiChat.terminal.shell')}
+            className="shrink-0 max-w-[8.5rem] rounded border border-border bg-bgLight px-1 py-0.5 font-mono text-[10px] text-textMuted outline-none"
+          >
+            {shells.map((s) => (
+              <option key={s.id} value={s.id}>
+                {s.label}
+              </option>
+            ))}
+          </select>
+        ) : null}
         <button
           type="button"
           onClick={() => void terminalAPI.interrupt(agentId, terminalId).catch(() => undefined)}
@@ -218,34 +270,36 @@ export const TerminalPanel: React.FC<TerminalPanelProps> = ({ agentId, rootPath 
         ref={scrollerRef}
         data-testid="terminal-output"
         onClick={() => inputRef.current?.focus()}
-        className="flex-1 min-h-0 overflow-auto bg-neutral-950/95 px-2 py-1.5 font-mono text-[11.5px] leading-[1.45] text-neutral-200 whitespace-pre-wrap break-words"
+        className="flex-1 min-h-0 overflow-auto bg-neutral-950/95 px-2 py-1.5 font-mono text-[11.5px] leading-[1.45] text-neutral-200"
       >
-        {output || (
-          <span className="text-neutral-500">
+        <div className="whitespace-pre-wrap break-words">{output}</div>
+        {!output && state !== 'running' ? (
+          <div className="text-neutral-500">
             {state === 'failed'
               ? error || t('aiChat.terminal.openFailed')
               : state === 'starting'
                 ? t('aiChat.terminal.connecting')
                 : t('aiChat.terminal.ready')}
-          </span>
-        )}
-      </div>
-
-      <div className="flex-shrink-0 flex items-center gap-1.5 border-t border-border px-2 py-1">
-        <span className="font-mono text-[11px] text-textMuted">{PROMPT}</span>
-        <input
-          ref={inputRef}
-          value={input}
-          onChange={(e) => setInput(e.target.value)}
-          onKeyDown={onKeyDown}
-          spellCheck={false}
-          autoComplete="off"
-          data-testid="terminal-input"
-          disabled={state === 'failed'}
-          placeholder={t('aiChat.terminal.placeholder')}
-          className="min-w-0 flex-1 bg-transparent font-mono text-[11.5px] text-textMain outline-none disabled:opacity-50"
-        />
-        {state === 'starting' ? <Loader2 size={11} className="shrink-0 animate-spin text-textMuted" /> : null}
+          </div>
+        ) : null}
+        {/* The prompt line is IN the terminal — click anywhere in the surface and type here,
+            the way a real terminal works, instead of a separate box along the bottom. */}
+        <div className="flex items-center gap-1.5">
+          <span className="shrink-0 text-neutral-400">{PROMPT}</span>
+          <input
+            ref={inputRef}
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+            onKeyDown={onKeyDown}
+            spellCheck={false}
+            autoComplete="off"
+            data-testid="terminal-input"
+            disabled={state === 'failed'}
+            placeholder={state === 'running' ? '' : t('aiChat.terminal.placeholder')}
+            className="min-w-0 flex-1 bg-transparent font-mono text-[11.5px] text-neutral-100 caret-neutral-100 outline-none placeholder:text-neutral-600 disabled:opacity-50"
+          />
+          {state === 'starting' ? <Loader2 size={11} className="shrink-0 animate-spin text-neutral-500" /> : null}
+        </div>
       </div>
 
       <div className="flex-shrink-0 px-2 pb-1 text-[10px] leading-snug text-textMuted/70">

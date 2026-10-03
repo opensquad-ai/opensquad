@@ -65,7 +65,8 @@ def test_a_terminal_runs_a_command_and_streams_its_output(events):
 
     assert opened["ok"] is True, opened
     assert opened["terminal_id"] == "t1"
-    assert opened["shell"] in ("cmd", "bash")
+    # the profile label for display, and its id for the picker
+    assert opened["shell"] and opened["shell_id"]
 
     assert ts.write_terminal("t1", "echo opensquad-terminal-ok\n")["ok"] is True
 

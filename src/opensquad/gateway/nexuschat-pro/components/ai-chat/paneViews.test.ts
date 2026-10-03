@@ -211,8 +211,8 @@ describe('the panels themselves', () => {
     const terminal = read('TerminalPanel.tsx');
 
     // HTTP to the launcher, through the gateway: a terminal must work with the agent stopped
-    expect(terminal).toContain("import { terminalAPI } from '../../services/api'");
-    expect(terminal).toContain('terminalAPI.open(agentId, terminalId');
+    expect(terminal).toContain("from '../../services/api'");
+    expect(terminal).toContain('terminalAPI.open(');
     expect(terminal).toContain('terminalAPI.read(agentId, terminalId');
     expect(terminal).toContain('terminalAPI.write(agentId, terminalId');
     expect(terminal).toContain('terminalAPI.interrupt(agentId, terminalId)');
@@ -226,6 +226,11 @@ describe('the panels themselves', () => {
     expect(terminal).toContain('const POLL_MS = 400');
     expect(terminal).toContain("t('aiChat.terminal.noTtyNote')");
     expect(terminal).toContain('data-testid="terminal-input"');
+    // the shell is chosen from what the machine has, not hard-coded
+    expect(terminal).toContain('.shells(agentId)');
+    expect(terminal).toContain('data-testid="terminal-shell"');
+    expect(terminal).toContain('shells.map((s) =>');
+    expect(terminal).toContain('shell:');
   });
 
   it('the terminal surface is proxied launcher-ward, in both directions', () => {

@@ -436,6 +436,10 @@ class BaseHandlerMixin:
             name = path.split("/")[3]
             body = self._read_body() or {}
             return self._handle_terminal_read(name, body)
+        elif path.startswith("/api/agents/") and path.endswith("/terminal/shells"):
+            name = path.split("/")[3]
+            body = self._read_body() or {}
+            return self._handle_terminal_shells(name, body)
         elif path.startswith("/api/agents/") and path.endswith("/fs/session-diffs"):
             name = path.split("/")[3]
             body = self._read_body() or {}

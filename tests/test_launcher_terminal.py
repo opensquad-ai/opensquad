@@ -37,10 +37,8 @@ class _Stub(FilesystemMixin):
 
 
 @pytest.fixture(autouse=True)
-def clean_registry(monkeypatch, tmp_path):
+def clean_registry():
     """A real shell is started here: no terminal may outlive the test."""
-    # The workspace gate is about the *agent's* shells; here the root is a temp dir.
-    monkeypatch.setattr("opensquad.utils.path_utils.is_path_safe", lambda path: True)
     yield
     ts.close_all()
 
@@ -82,6 +80,39 @@ def test_interrupt_and_unknown_ids_are_reported(tmp_path):
     assert stub._handle_terminal_interrupt("agent305", {"terminal_id": "term2"})["ok"] is True
     gone = stub._handle_terminal_write("agent305", {"terminal_id": "nope", "text": "x\n"})
     assert gone["ok"] is False and stub.sent[1] == 400
+
+
+def test_the_shell_list_is_what_this_machine_has(tmp_path):
+    """The picker offers real shells (cmd / PowerShell / pwsh / Git Bash / WSL / zsh / fish) —
+    whatever this machine has, with a default that is in the list."""
+    stub = _Stub(str(tmp_path))
+
+    listed = stub._handle_terminal_shells("agent305", {})
+
+    assert listed["ok"] is True
+    shells = listed["shells"]
+    assert shells, "a terminal with nothing to run is useless"
+    assert all(s.get("id") and s.get("label") and s.get("path") for s in shells)
+    ids = [s["id"] for s in shells]
+    assert listed["default"] in ids
+
+    # …and the chosen one is the one that starts
+    opened = stub._handle_terminal_open("agent305", {"terminal_id": "sh1", "shell": ids[0]})
+
+    assert opened["ok"] is True, opened
+    assert opened["shell_id"] == ids[0]
+
+
+def test_an_unavailable_shell_is_refused_rather_than_substituted(tmp_path):
+    """Asking for a shell this machine does not have must say so, not quietly start another
+    one — otherwise the panel's picker would lie about what is running."""
+    stub = _Stub(str(tmp_path))
+
+    res = stub._handle_terminal_open("agent305", {"terminal_id": "sh2", "shell": "no-such-shell"})
+
+    assert res["ok"] is False
+    assert "no-such-shell" in res["error"]
+    assert stub.sent[1] == 400
 
 
 def test_a_start_failure_is_a_400_not_a_crash(tmp_path, monkeypatch):

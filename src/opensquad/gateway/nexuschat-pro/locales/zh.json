@@ -964,6 +964,7 @@
       "clear": "清屏",
       "restart": "重启 shell",
       "placeholder": "输入命令后回车…",
+      "shell": "选择 shell",
       "needAgent": "终端由 launcher 托管（不依赖 agent）：agent 未启动也能用。",
       "failed": "启动失败",
       "openFailed": "启动 shell 失败：请确认 launcher 正在运行。",

@@ -964,6 +964,7 @@
       "clear": "Clear",
       "restart": "Restart shell",
       "placeholder": "Type a command and press Enter…",
+      "shell": "Choose a shell",
       "needAgent": "The terminal is hosted by the launcher (no agent needed): it works with the agent stopped.",
       "failed": "Failed to start",
       "openFailed": "Could not start a shell: check that the launcher is running.",

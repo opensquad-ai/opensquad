@@ -42,26 +42,104 @@ READ_CHUNK = 4096
 MAX_BUFFER = 400_000
 
 
-def _shell_command() -> list[str]:
-    """The shell to run: honest defaults per platform, overridable by the environment."""
-    if os.name == "nt":
-        return [os.environ.get("COMSPEC") or "cmd.exe"]
-    return [os.environ.get("SHELL") or "/bin/bash"]
+# ── shell profiles ──────────────────────────────────────────────────────────
+# What the panel offers is whatever this machine actually has, not one hard-coded shell: cmd /
+# pwsh / powershell on Windows, plus bash (Git Bash, or WSL's bash.exe) when they are present;
+# bash / sh / zsh / fish on POSIX. "Found" means the interpreter exists — for WSL we also check
+# that a distribution is installed, because wsl.exe itself always exists and would otherwise be
+# offered on every Windows box.
+SHELL_PROFILES: tuple[dict[str, Any], ...] = (
+    {"id": "cmd", "label": "Command Prompt", "kind": "cmd", "candidates": (r"C:\Windows\System32\cmd.exe", "cmd.exe")},
+    {"id": "powershell", "label": "Windows PowerShell", "kind": "powershell", "candidates": ("powershell.exe",)},
+    {"id": "pwsh", "label": "PowerShell", "kind": "pwsh", "candidates": ("pwsh.exe", "pwsh")},
+    {
+        "id": "bash",
+        "label": "Git Bash",
+        "kind": "bash",
+        "candidates": (r"C:\Program Files\Git\bin\bash.exe", r"C:\Program Files (x86)\Git\bin\bash.exe", "bash.exe"),
+    },
+    {"id": "wsl", "label": "WSL", "kind": "wsl", "candidates": ("wsl.exe",)},
+    {"id": "zsh", "label": "zsh", "kind": "zsh", "candidates": ("zsh",)},
+    {"id": "fish", "label": "fish", "kind": "fish", "candidates": ("fish",)},
+    {"id": "sh", "label": "sh", "kind": "sh", "candidates": ("/bin/sh", "sh")},
+)
 
 
-def _shell_label() -> str:
-    return "cmd" if os.name == "nt" else "bash"
+def _which(candidates: tuple[str, ...]) -> str:
+    """First candidate that exists on PATH (or as an absolute path)."""
+    import shutil
+
+    for candidate in candidates:
+        found = (
+            shutil.which(candidate)
+            if not os.path.isabs(candidate)
+            else (candidate if os.path.isfile(candidate) else None)
+        )
+        if found:
+            return found
+    return ""
+
+
+def _wsl_has_distro() -> bool:
+    """``wsl.exe`` exists on every Windows box; a distribution may not."""
+    try:
+        out = subprocess.run(["wsl.exe", "-l", "-q"], capture_output=True, timeout=8, check=False)
+        return bool((out.stdout or b"").decode("utf-16-le", errors="ignore").strip() or (out.stdout or b"").strip())
+    except Exception:
+        return False
+
+
+def available_shells() -> list[dict[str, Any]]:
+    """The shells this machine can actually run, best default first."""
+    found: list[dict[str, Any]] = []
+    for profile in SHELL_PROFILES:
+        path = _which(profile["candidates"])
+        if not path:
+            continue
+        if profile["kind"] == "wsl" and not _wsl_has_distro():
+            continue
+        found.append({"id": profile["id"], "label": profile["label"], "path": path, "kind": profile["kind"]})
+    if not found:  # never leave the panel with nothing to offer
+        fallback = os.environ.get("COMSPEC") or "/bin/sh"
+        found.append({"id": os.path.basename(fallback).split(".")[0], "label": fallback, "path": fallback, "kind": ""})
+    return found
+
+
+def default_shell_id() -> str:
+    shells = available_shells()
+    return shells[0]["id"] if shells else ""
+
+
+def resolve_shell(shell_id: str = "") -> dict[str, Any]:
+    """The command line for ``shell_id`` (or this platform's default)."""
+    wanted = str(shell_id or "").strip() or default_shell_id()
+    for profile in available_shells():
+        if profile["id"] == wanted:
+            command = [profile["path"]]
+            # A login-ish, non-interactive-friendly start for the ones that need it.
+            if profile["kind"] == "bash":
+                command += ["--noprofile", "--norc", "-i"]
+            return {**profile, "command": command}
+    return {
+        "id": wanted,
+        "label": wanted,
+        "path": "",
+        "kind": "",
+        "command": [],
+        "error": f"shell not available: {wanted}",
+    }
 
 
 class TerminalSession:
     """One shell child plus the thread that streams its output."""
 
-    def __init__(self, terminal_id: str, *, cwd: str = "", sid: str = "", trusted: bool = False):
+    def __init__(self, terminal_id: str, *, cwd: str = "", sid: str = "", trusted: bool = False, shell: str = ""):
         self.id = terminal_id
         self.cwd = cwd
         self.sid = sid
         self.trusted = trusted
-        self.shell_type = _shell_label()
+        self.shell = resolve_shell(shell)
+        self.shell_type = str(self.shell.get("label") or self.shell.get("id") or "shell")
         self.process: subprocess.Popen | None = None
         self.exited = False
         self.return_code: int | None = None
@@ -102,9 +180,11 @@ class TerminalSession:
             startupinfo.wShowWindow = subprocess.SW_HIDE
         else:
             popen_kw["start_new_session"] = True  # own process group: SIGINT reaches the shell
+        if self.shell.get("error"):
+            return {"ok": False, "error": str(self.shell["error"]), "shells": available_shells()}
         try:
             self.process = subprocess.Popen(
-                _shell_command(),
+                self.shell.get("command") or [os.environ.get("COMSPEC") or "/bin/sh"],
                 creationflags=creationflags,
                 startupinfo=startupinfo,
                 **popen_kw,
@@ -119,7 +199,13 @@ class TerminalSession:
             # so without this every command would appear twice on Windows.
             self.write("@echo off\r\n")
         self._emit_status("running")
-        return {"ok": True, "terminal_id": self.id, "cwd": self.cwd, "shell": self.shell_type}
+        return {
+            "ok": True,
+            "terminal_id": self.id,
+            "cwd": self.cwd,
+            "shell": self.shell_type,
+            "shell_id": self.shell.get("id"),
+        }
 
     def _pump(self) -> None:
         """Read the child's output and stream it, until it exits."""
@@ -260,6 +346,7 @@ class TerminalSession:
             "terminal_id": self.id,
             "cwd": self.cwd,
             "shell": self.shell_type,
+            "shell_id": self.shell.get("id"),
             "running": not self.exited,
             "return_code": self.return_code,
         }
@@ -279,11 +366,14 @@ def open_terminal(
     sid: str = "",
     working_directory: str = "",
     trusted: bool = False,
+    shell: str = "",
 ) -> dict[str, Any]:
     """Start a terminal. ``cwd``/``working_directory`` resolve inside the workspace.
 
     ``trusted=True`` skips the agent-side workspace fence for a shell the *user* asked for
     (the launcher-hosted terminal); the caller is then responsible for the directory.
+    ``shell`` picks one of :func:`available_shells` — the panel offers what this machine has,
+    and an unavailable one is refused (with the list) rather than silently substituted.
     """
     from opensquad.tools.system import _resolve_working_directory
 
@@ -293,7 +383,7 @@ def open_terminal(
         existing = _TERMINALS.get(tid)
         if existing is not None and not existing.exited:
             return {"ok": True, "terminal_id": tid, "reused": True, **existing.info()}
-        session = TerminalSession(tid, cwd=resolved, sid=str(sid or ""), trusted=trusted)
+        session = TerminalSession(tid, cwd=resolved, sid=str(sid or ""), trusted=trusted, shell=shell)
         _TERMINALS[tid] = session
     result = session.start()
     if not result.get("ok"):

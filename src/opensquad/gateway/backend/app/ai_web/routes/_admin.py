@@ -808,6 +808,14 @@ async def admin_terminal_read(
     return await _proxy_post(f"/api/agents/{name}/terminal/read", body or {}, timeout=15.0)
 
 
+@admin_router.post("/admin/agents/{name}/terminal/shells")
+async def admin_terminal_shells(
+    name: str, body: dict = Body(default={}), current_user: User = Depends(get_current_user_dep)
+):
+    """The shells this machine has (cmd / PowerShell / pwsh / Git Bash / WSL / zsh / fish…)."""
+    return await _proxy_post(f"/api/agents/{name}/terminal/shells", body or {}, timeout=15.0)
+
+
 @admin_router.put("/admin/agents/{name}/config")
 async def admin_update_config(name: str, body: dict = Body(...), current_user: User = Depends(get_current_user_dep)):
     """Update Agent's config.json and sync agent_name to the bound account's display name"""

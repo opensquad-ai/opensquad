@@ -2412,14 +2412,28 @@ export interface CollabBoardSummary {
   items: Record<string, CollabBoardItem[]>;
 }
 
+/** One shell the machine has, as the terminal picker shows it. */
+export interface TerminalShellProfile {
+  id: string;
+  label: string;
+  path: string;
+  kind?: string;
+}
+
 /** The right panel's terminal: a shell on this machine, hosted by the launcher (not the
  *  agent), so it works with the agent stopped. Output is polled — `read` returns everything
  *  since the offset the caller last saw. */
 export const terminalAPI = {
-  open: (name: string, terminalId: string, root?: string, cwd?: string) =>
-    apiRequest<{ ok: boolean; terminal_id: string; cwd: string; shell: string; error?: string }>(
+  /** Which shells this machine can run — the panel's picker offers exactly these. */
+  shells: (name: string) =>
+    apiRequest<{ ok: boolean; shells: TerminalShellProfile[]; default: string }>(
+      `/ai-web/admin/agents/${encodeURIComponent(name)}/terminal/shells`,
+      { method: 'POST', body: JSON.stringify({}) },
+    ),
+  open: (name: string, terminalId: string, root?: string, cwd?: string, shell?: string) =>
+    apiRequest<{ ok: boolean; terminal_id: string; cwd: string; shell: string; shell_id?: string; error?: string }>(
       `/ai-web/admin/agents/${encodeURIComponent(name)}/terminal/open`,
-      { method: 'POST', body: JSON.stringify({ terminal_id: terminalId, root, cwd }) },
+      { method: 'POST', body: JSON.stringify({ terminal_id: terminalId, root, cwd, shell }) },
     ),
   write: (name: string, terminalId: string, text: string) =>
     apiRequest<{ ok: boolean; error?: string }>(

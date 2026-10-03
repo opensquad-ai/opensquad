@@ -293,6 +293,8 @@ class FilesystemMixin:
             # directory, and the agent's own workspace fence refuses a perfectly good workspace
             # that lives outside get_workspace_root() — the reported case, on the Desktop.
             trusted=True,
+            # …and the shell is the one the user picked from the profiles this machine has.
+            shell=str(body.get("shell") or ""),
         )
         if not result.get("ok"):
             return self._send_json(result, 400)
@@ -321,6 +323,14 @@ class FilesystemMixin:
 
         return self._send_json(
             terminal_session.read_terminal(str(body.get("terminal_id") or ""), int(body.get("since") or 0))
+        )
+
+    def _handle_terminal_shells(self, name: str, body: dict):
+        """The shells this machine can actually run — what the panel's picker offers."""
+        from opensquad import terminal_session
+
+        return self._send_json(
+            {"ok": True, "shells": terminal_session.available_shells(), "default": terminal_session.default_shell_id()}
         )
 
     def _handle_pick_directory(self, body: dict | None = None):
