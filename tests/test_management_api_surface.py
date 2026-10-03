@@ -88,7 +88,7 @@ EXPECTED_METHODS_PER_MODULE = {
     # 17 = 16 + ``_handle_put_agent_profile`` (PUT /api/agents/{name}/profile),
     # which backs the custom-agent-avatar upload.
     "_agents": 17,
-    "_filesystem": 25,
+    "_filesystem": 36,
     # 18 = the repo status/branch/changes/sync handlers + ``_handle_git_worktree``
     # (the mode-switch prepare).  ``_git_send`` is the one non-``_handle_*``
     # helper: every git reply goes out as HTTP 200 with an ``{ok, code}`` body,
@@ -115,7 +115,7 @@ EXPECTED_METHODS_PER_MODULE = {
     "_cards": 18,
     "_workspace": 6,
 }
-EXPECTED_TOTAL_MIXIN_METHODS = 150
+EXPECTED_TOTAL_MIXIN_METHODS = 161
 
 # ``_do_*_impl`` if/elif chain lengths -- the URL surface of each verb.
 EXPECTED_DISPATCH_BRANCHES = {
@@ -124,7 +124,7 @@ EXPECTED_DISPATCH_BRANCHES = {
     # 44 = 31 + the thirteen ``/git/*`` POSTs (init, checkout, delete, stage,
     # unstage, discard, commit, undo-commit, merge/abort, fetch, pull, push,
     # worktree).
-    "_do_post_impl": 50,
+    "_do_post_impl": 60,
     # 18 = 17 + the ``/api/agents/{name}/profile`` PUT branch.
     "_do_put_impl": 18,
     "_do_delete_impl": 7,

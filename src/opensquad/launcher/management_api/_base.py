@@ -440,6 +440,46 @@ class BaseHandlerMixin:
             name = path.split("/")[3]
             body = self._read_body() or {}
             return self._handle_terminal_shells(name, body)
+        elif path.startswith("/api/agents/") and path.endswith("/browser/open"):
+            name = path.split("/")[3]
+            body = self._read_body() or {}
+            return self._handle_browser_open(name, body)
+        elif path.startswith("/api/agents/") and path.endswith("/browser/navigate"):
+            name = path.split("/")[3]
+            body = self._read_body() or {}
+            return self._handle_browser_navigate(name, body)
+        elif path.startswith("/api/agents/") and path.endswith("/browser/back"):
+            name = path.split("/")[3]
+            body = self._read_body() or {}
+            return self._handle_browser_back(name, body)
+        elif path.startswith("/api/agents/") and path.endswith("/browser/click"):
+            name = path.split("/")[3]
+            body = self._read_body() or {}
+            return self._handle_browser_click(name, body)
+        elif path.startswith("/api/agents/") and path.endswith("/browser/type"):
+            name = path.split("/")[3]
+            body = self._read_body() or {}
+            return self._handle_browser_type(name, body)
+        elif path.startswith("/api/agents/") and path.endswith("/browser/press"):
+            name = path.split("/")[3]
+            body = self._read_body() or {}
+            return self._handle_browser_press(name, body)
+        elif path.startswith("/api/agents/") and path.endswith("/browser/snapshot"):
+            name = path.split("/")[3]
+            body = self._read_body() or {}
+            return self._handle_browser_snapshot(name, body)
+        elif path.startswith("/api/agents/") and path.endswith("/browser/screenshot"):
+            name = path.split("/")[3]
+            body = self._read_body() or {}
+            return self._handle_browser_screenshot(name, body)
+        elif path.startswith("/api/agents/") and path.endswith("/browser/frame"):
+            name = path.split("/")[3]
+            body = self._read_body() or {}
+            return self._handle_browser_frame(name, body)
+        elif path.startswith("/api/agents/") and path.endswith("/browser/close"):
+            name = path.split("/")[3]
+            body = self._read_body() or {}
+            return self._handle_browser_close(name, body)
         elif path.startswith("/api/agents/") and path.endswith("/fs/session-diffs"):
             name = path.split("/")[3]
             body = self._read_body() or {}

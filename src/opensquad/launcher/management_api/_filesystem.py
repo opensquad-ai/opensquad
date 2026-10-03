@@ -333,6 +333,92 @@ class FilesystemMixin:
             {"ok": True, "shells": terminal_session.available_shells(), "default": terminal_session.default_shell_id()}
         )
 
+    # ── Built-in browser (hosted HERE) ───────────────────────────────────────
+    # Playwright renders on this machine, so the agent's browser_* tools and the panel's 浏览器
+    # tab drive ONE page: what the agent clicks is what the user sees. Both sides reach it over
+    # these endpoints; nothing keeps a browser of its own.
+
+    def _browser_reply(self, result: dict):
+        return self._send_json(result, 200 if result.get("ok") else 400)
+
+    def _handle_browser_open(self, name: str, body: dict):
+        from opensquad import browser_session
+
+        return self._browser_reply(
+            browser_session.open_session(
+                session_id=str(body.get("session_id") or ""),
+                headless=bool(body.get("headless", True)),
+            )
+        )
+
+    def _handle_browser_navigate(self, name: str, body: dict):
+        from opensquad import browser_session
+
+        return self._browser_reply(
+            browser_session.navigate(str(body.get("session_id") or ""), str(body.get("url") or ""))
+        )
+
+    def _handle_browser_back(self, name: str, body: dict):
+        from opensquad import browser_session
+
+        return self._browser_reply(browser_session.back(str(body.get("session_id") or "")))
+
+    def _handle_browser_click(self, name: str, body: dict):
+        from opensquad import browser_session
+
+        x = body.get("x")
+        y = body.get("y")
+        return self._browser_reply(
+            browser_session.click(
+                str(body.get("session_id") or ""),
+                selector=str(body.get("selector") or ""),
+                x=None if x is None else float(x),
+                y=None if y is None else float(y),
+            )
+        )
+
+    def _handle_browser_type(self, name: str, body: dict):
+        from opensquad import browser_session
+
+        return self._browser_reply(
+            browser_session.type_text(
+                str(body.get("session_id") or ""),
+                str(body.get("selector") or ""),
+                str(body.get("text") or ""),
+                submit=bool(body.get("submit", False)),
+            )
+        )
+
+    def _handle_browser_press(self, name: str, body: dict):
+        from opensquad import browser_session
+
+        return self._browser_reply(
+            browser_session.press(str(body.get("session_id") or ""), str(body.get("key") or "Enter"))
+        )
+
+    def _handle_browser_snapshot(self, name: str, body: dict):
+        from opensquad import browser_session
+
+        return self._browser_reply(browser_session.snapshot(str(body.get("session_id") or "")))
+
+    def _handle_browser_screenshot(self, name: str, body: dict):
+        from opensquad import browser_session
+
+        return self._browser_reply(
+            browser_session.screenshot(str(body.get("session_id") or ""), full_page=bool(body.get("full_page", False)))
+        )
+
+    def _handle_browser_frame(self, name: str, body: dict):
+        """The panel's poll: the latest frame, without re-rendering the page."""
+        from opensquad import browser_session
+
+        return self._browser_reply(browser_session.frame(str(body.get("session_id") or "")))
+
+    def _handle_browser_close(self, name: str, body: dict):
+        from opensquad import browser_session
+
+        return self._browser_reply(browser_session.close_session(str(body.get("session_id") or "")))
+
     def _handle_pick_directory(self, body: dict | None = None):
         """POST /api/system/pick-directory — native OS folder dialog on this host.
 

@@ -175,7 +175,13 @@ def create_chat_api_from_config(model_cfg: dict, system_prompt: str, stream_pars
     else:
         from opensquad.chat_api import ChatAPI
 
-        return ChatAPI(
+        chat_cls = ChatAPI
+        if provider in ("openai_responses", "responses"):
+            from opensquad.responses_api import ResponsesAPI
+
+            chat_cls = ResponsesAPI
+
+        return chat_cls(
             api_key=model_cfg.get("api_key", ""),
             base_url=model_cfg.get("base_url", ""),
             model=model_cfg.get("model_name", ""),
@@ -274,6 +280,7 @@ TOOL_MODULES = {
     "collaboration": "opensquad.tools.collaboration",
     "window_card": "opensquad.tools.window_card",
     "invite": "opensquad.tools.invite",
+    "browser": "opensquad.tools.browser",
     "delegate_task": "opensquad.tools.delegate",
     "workspace": "opensquad.tools.workspace",
     "task_watch": "opensquad.tools.task_watch",
@@ -320,6 +327,10 @@ MANDATORY_TOOLS = {
     # join_by_invite — the skill loaded, the tools it told the agent to call did
     # not (see tests/test_invite.py).
     "invite",
+    # The built-in browser, for the same reason: the tools drive a page the user can watch in
+    # the panel, and an agent that cannot see them would fall back to its own headless browser
+    # (or to nothing).
+    "browser",
     "delegate_task",
     "workspace",
     "task_watch",
