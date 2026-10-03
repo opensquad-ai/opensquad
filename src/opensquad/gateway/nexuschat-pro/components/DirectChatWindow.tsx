@@ -11,12 +11,13 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { FolderUp, Image as ImageIcon, Paperclip, Reply, Send, X } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
-import { directMessageAPI, uploadAPI, type DirectMessageItem } from '../services/api';
+import { directMessageAPI, messageAPI, uploadAPI, type DirectMessageItem } from '../services/api';
 import { getLocalAvatarFallback } from '../utils/image';
 import { DM_QUOTE_MAX, encodeDmQuote, parseDmQuote, type DmQuote } from '../utils/dmQuote';
 import { MessageBubble, type ChatMessage, type FileAttachment } from './ai-chat/MessageBubble';
 import { CollabTaskCard, openCollabTaskWindow, parseCollabTask } from './CollabTaskCard';
 import { WindowCard, parseWindowCard } from './WindowCard';
+import { CollabStepApprovalCard, approvalQuietLine, parseCollabApproval } from './CollabStepApprovalCard';
 import { OpenSquadLoader } from './OpenSquadLoader';
 
 export interface DirectChatWindowProps {
@@ -344,6 +345,41 @@ export const DirectChatWindow: React.FC<DirectChatWindowProps> = ({
                 <div key={b.id} className={`mb-2 flex ${b.mine ? 'justify-end' : 'justify-start'}`}>
                   <div className="max-w-[85%]">
                     <CollabTaskCard payload={collabTask} onOpen={openCollabTaskWindow} />
+                  </div>
+                </div>
+              );
+            }
+            // An approval gate reaches a DM too. Without a branch here the marker's raw JSON was
+            // painted inside an ordinary bubble — the same report as the group-chat one.
+            const approval = parseCollabApproval(b.message.content);
+            if (approval) {
+              const decided = String(approval.status || 'pending') !== 'pending';
+              const approvalGroup = approval.group_id || '';
+              return (
+                <div key={b.id} className={`mb-2 flex ${b.mine ? 'justify-end' : 'justify-start'}`}>
+                  <div className="max-w-[85%]">
+                    {decided ? (
+                      // Answered: one quiet line, no bubble, exactly like the group chat's verdict.
+                      <div
+                        className={`text-[11px] px-1 ${
+                          approval.status === 'rejected' ? 'text-rose-500/80' : 'text-textMuted'
+                        }`}
+                      >
+                        {approvalQuietLine(approval)}
+                      </div>
+                    ) : (
+                      <CollabStepApprovalCard
+                        payload={approval}
+                        groupId={approvalGroup}
+                        messageId={b.id}
+                        onResolve={async (action) => {
+                          if (!approvalGroup) return;
+                          await messageAPI.resolveCollabApproval(approvalGroup, approval.id, action, {
+                            messageId: b.id,
+                          });
+                        }}
+                      />
+                    )}
                   </div>
                 </div>
               );

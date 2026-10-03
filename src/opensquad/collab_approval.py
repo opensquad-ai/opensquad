@@ -37,6 +37,74 @@ _MARKER_RE = re.compile(
     re.DOTALL,
 )
 
+# Tolerant marker reader. The regex above requires the closing tag, so a card whose end marker
+# was lost — a truncated send, a hand-built message, an older client — parsed as *no card at
+# all*: the chat painted the raw marker JSON in a normal bubble, and the resolve endpoint could
+# not patch the status back into it (patch_approval_status_in_content found no match either).
+_APPROVAL_START_RE = re.compile(r"\[\[(?:GROUP_APPROVAL|COLLAB_APPROVAL)\]\]")
+_APPROVAL_END_RE = re.compile(r"\[\[/(?:GROUP_APPROVAL|COLLAB_APPROVAL)\]\]")
+
+
+def _balanced_json_end(text: str, open_at: int) -> int:
+    """Index just past the ``}`` closing the object at ``open_at`` (nested/in-string aware)."""
+    depth = 0
+    in_str = False
+    esc = False
+    for i in range(open_at, len(text)):
+        ch = text[i]
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+            continue
+        if ch == '"':
+            in_str = True
+        elif ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return i + 1
+    return -1
+
+
+def read_approval_marker(content: str) -> dict[str, Any] | None:
+    """``{payload, start, end}`` for the marker in *content*, closing tag or not.
+
+    ``start``/``end`` span the whole marker (opening tag through the closing one, or through the
+    end of its JSON when the closing one is missing) so a caller can rewrite it in place.
+    """
+    if not content:
+        return None
+    start_match = _APPROVAL_START_RE.search(content)
+    if not start_match:
+        return None
+    body_start = start_match.end()
+    end_match = _APPROVAL_END_RE.search(content, body_start)
+    body_end = end_match.start() if end_match else len(content)
+    body = content[body_start:body_end]
+    open_at = body.find("{")
+    if open_at < 0:
+        return None
+    close_at = _balanced_json_end(body, open_at)
+    if close_at < 0:
+        return None
+    try:
+        data = json.loads(body[open_at:close_at])
+    except Exception:
+        return None
+    if not isinstance(data, dict) or not data.get("id"):
+        return None
+    return {
+        "payload": data,
+        "start": start_match.start(),
+        "end": end_match.end() if end_match else body_start + close_at,
+    }
+
+
 _PROPOSE_OPTIONS_RE = re.compile(
     r"\[\[PROPOSE_OPTIONS\]\]\s*(\{.*?\})\s*\[\[/PROPOSE_OPTIONS\]\]",
     re.DOTALL,
@@ -172,19 +240,10 @@ def encode_approval_message(payload: dict[str, Any]) -> str:
 
 
 def parse_approval_payload(content: str) -> dict[str, Any] | None:
-    if not content:
+    found = read_approval_marker(content or "")
+    if not found:
         return None
-    if "[[GROUP_APPROVAL]]" not in content and "[[COLLAB_APPROVAL]]" not in content:
-        return None
-    m = _MARKER_RE.search(content)
-    if not m:
-        return None
-    try:
-        data = json.loads(m.group(1))
-    except Exception:
-        return None
-    if not isinstance(data, dict) or not data.get("id"):
-        return None
+    data: dict[str, Any] = found["payload"]
     # Normalize kind for legacy collab cards that omit it
     if not data.get("kind"):
         if data.get("collab_id") or data.get("step"):
@@ -290,9 +349,10 @@ def post_group_propose_options_card(payload: dict[str, Any], group_id: str) -> d
 
 def patch_approval_status_in_content(content: str, status: str, note: str = "") -> str:
     """Rewrite marker JSON status inside an existing message body."""
-    payload = parse_approval_payload(content)
-    if not payload:
+    found = read_approval_marker(content or "")
+    if not found:
         return content
+    payload: dict[str, Any] = found["payload"]
     payload["status"] = status
     if note:
         payload["resolve_note"] = note
@@ -302,7 +362,9 @@ def patch_approval_status_in_content(content: str, status: str, note: str = "") 
     else:
         start, end = GROUP_APPROVAL_START, GROUP_APPROVAL_END
     new_marker = f"{start}{json.dumps(payload, ensure_ascii=False, separators=(',', ':'))}{end}"
-    return _MARKER_RE.sub(new_marker, content, count=1)
+    # Span the whole marker, so a body that lost its closing tag comes back well-formed — that is
+    # what lets the clients see the decision at all (they filter a decided card out of the chat).
+    return content[: found["start"]] + new_marker + content[found["end"] :]
 
 
 def resolve_current_group_id(explicit: str = "") -> str:
