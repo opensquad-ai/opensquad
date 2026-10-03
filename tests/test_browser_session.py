@@ -18,13 +18,36 @@ _SRC = Path(__file__).resolve().parents[1] / "src"
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
-pytest.importorskip("playwright.sync_api", reason="the built-in browser needs Playwright")
-
 import opensquad.browser_session as bs  # noqa: E402
 
 # Every session in this suite is headless: a window per test would put eight browser windows on
 # screen mid-run. The window path has a test of its own (test_a_window_is_opened_when_asked).
 os.environ.setdefault("OPENSQUAD_BROWSER_HEADLESS", "1")
+
+
+def _browser_available() -> bool:
+    """True when Playwright can actually start a Chromium here.
+
+    Installing the *package* is not the same as having the *browser*: CI jobs that only run
+    `uv sync` fail every test in this file with "Executable doesn't exist at ...". The tests are
+    worth keeping (they are the only real coverage of the session), so probe once and skip the
+    module with a reason instead of reporting eight failures.
+    """
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        return False
+    try:
+        with sync_playwright() as pw:
+            browser = pw.chromium.launch(headless=True)
+            browser.close()
+        return True
+    except Exception:
+        return False
+
+
+if not _browser_available():
+    pytest.skip("Playwright is installed but no Chromium binary is available here", allow_module_level=True)
 
 
 @pytest.fixture(autouse=True)

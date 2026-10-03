@@ -103,6 +103,15 @@ jobs:
         # on a real defect.
         run: uv sync --python 3.11 --extra dev --extra websearch --extra telegram --extra google
 
+      - name: Install Playwright Chromium
+        # The built-in browser's session tests drive a real Chromium, and the *package* is not the
+        # *browser*: without this they failed here with "Executable doesn't exist at
+        # /home/runner/...". The tests now skip where no browser is installed, and this step keeps
+        # CI from being such a machine. continue-on-error: a download hiccup must not block the
+        # gate, because the fallback (skip) is already correct.
+        continue-on-error: true
+        run: uv run --python 3.11 --with playwright playwright install chromium
+
       - name: Run tests
         env:
           PYTHONPATH: src

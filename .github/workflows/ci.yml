@@ -132,6 +132,12 @@ jobs:
         - name: Sync dependencies with uv
           run: uv sync --extra dev --extra websearch --extra telegram --extra google --python ${{ matrix.python-version }}
 
+        - name: Install Playwright Chromium
+          # See ci-fast.yml: the package alone is not the browser, and the browser session tests
+          # drive a real Chromium (they skip where there is none).
+          continue-on-error: true
+          run: uv run --python ${{ matrix.python-version }} --with playwright playwright install chromium
+
         - name: Run tests
           env:
             PYTHONPATH: src
