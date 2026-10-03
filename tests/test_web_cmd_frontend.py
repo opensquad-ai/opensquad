@@ -252,9 +252,23 @@ def test_failure_still_reports_when_no_log_is_writable(
 # ---------------------------------------------------------------- R4
 
 
+def _node_name() -> str:
+    """What `node` is called here — the code under test branches on this, so the fixtures must.
+
+    Hard-coding `node.exe` is why these three cases passed on Windows and failed on Linux: the
+    session looked for `node`, found nothing beside npm, and reported "node is not on PATH".
+    """
+    return web_cmd._node_exe_names()[0]
+
+
+def _npm_name() -> str:
+    """What npm's launcher is called here (`npm.cmd` on Windows)."""
+    return "npm.cmd" if os.name == "nt" else "npm"
+
+
 def _npm_shim(tmp_path):
     """npm as an earlier install left it: a shim with no node beside it."""
-    npm = tmp_path / "Roaming" / "npm" / "npm.cmd"
+    npm = tmp_path / "Roaming" / "npm" / _npm_name()
     npm.parent.mkdir(parents=True, exist_ok=True)
     npm.write_text("@echo off\r\n", encoding="utf-8")
     return npm
@@ -268,7 +282,7 @@ def test_node_off_this_path_is_still_found_and_used(
     found({"npm": npm, "node": None})
     node_dir = tmp_path / "ai" / "nodejs24"
     node_dir.mkdir(parents=True)
-    (node_dir / "node.exe").write_text("", encoding="utf-8")
+    (node_dir / _node_name()).write_text("", encoding="utf-8")
     monkeypatch.setattr(web_cmd, "_node_hint_dirs", lambda: [str(node_dir)])
 
     web_cmd._ensure_frontend(5173)
@@ -286,8 +300,8 @@ def test_a_node_install_uses_its_own_npm_before_patching_path(
     found({"npm": npm, "node": None})
     node_dir = tmp_path / "nodejs"
     node_dir.mkdir()
-    (node_dir / "node.exe").write_text("", encoding="utf-8")
-    sibling = node_dir / "npm.cmd"
+    (node_dir / _node_name()).write_text("", encoding="utf-8")
+    sibling = node_dir / _npm_name()
     sibling.write_text("@echo off\r\n", encoding="utf-8")
     monkeypatch.setattr(web_cmd, "_node_hint_dirs", lambda: [str(node_dir)])
 
@@ -311,11 +325,11 @@ def test_finding_no_node_anywhere_still_spawns_nothing(frontend_tree, ports_clos
 def test_locate_node_prefers_the_shim_folder_over_path(tmp_path, found):
     node_dir = tmp_path / "npm"
     node_dir.mkdir()
-    beside = node_dir / "node.exe"
+    beside = node_dir / _node_name()
     beside.write_text("", encoding="utf-8")
-    found({"node": tmp_path / "elsewhere" / "node.exe"})
+    found({"node": tmp_path / "elsewhere" / _node_name()})
 
-    assert web_cmd._locate_node(str(node_dir / "npm.cmd")) == str(beside)
+    assert web_cmd._locate_node(str(node_dir / _npm_name())) == str(beside)
 
 
 def test_locate_node_returns_empty_when_there_is_none(tmp_path, found):

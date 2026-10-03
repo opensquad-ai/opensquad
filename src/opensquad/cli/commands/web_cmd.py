@@ -58,7 +58,7 @@ def _npm_can_run(npm_exe: str) -> bool:
     """
     import shutil
 
-    side_by_side = os.path.join(os.path.dirname(os.path.abspath(npm_exe)), "node.exe")
+    side_by_side = os.path.join(os.path.dirname(os.path.abspath(npm_exe)), _node_exe_names()[0])
     if os.path.isfile(side_by_side):
         return True
     return bool(shutil.which("node"))

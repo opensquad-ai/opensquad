@@ -16,6 +16,7 @@ The contract these tests pin down:
 from __future__ import annotations
 
 import socket
+import sys
 import threading
 import urllib.error
 import urllib.request
@@ -92,6 +93,11 @@ def test_local_request_bypasses_ambient_proxy(local_server, hijacked_proxy):
 
 def test_plain_urlopen_would_have_been_hijacked(local_server, hijacked_proxy):
     """Guard against the premise becoming vacuous on a future platform."""
+    if sys.platform != "win32":
+        # The hijack this guards is the Windows one: there `proxy_bypass("127.0.0.1")` returns
+        # False, so plain urlopen rides the proxy. POSIX bypasses loopback by itself, so there is
+        # no hijack to demonstrate — plain urlopen succeeding is correct, not a lost premise.
+        pytest.skip("loopback is proxy-bypassed natively on POSIX; nothing to hijack")
     if "http" not in urllib.request.getproxies():
         pytest.skip("proxy environment is not visible to urllib on this platform")
     with pytest.raises((urllib.error.URLError, TimeoutError, OSError)):
