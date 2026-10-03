@@ -100,7 +100,7 @@ describe('the pane renders them', () => {
     expect(SHELL).toContain('data-testid="pane-terminal"');
     expect(SHELL).toContain('data-testid="pane-browser"');
     expect(SHELL).toContain('<TerminalPanel agentId={agentId} rootPath={rootPath} />');
-    expect(SHELL).toContain('<BrowserPanel agentId={agentId} />');
+    expect(SHELL).toContain('<BrowserPanel />');
     // a render throw costs the pane that view, not the workspace
     expect(SHELL).toContain('<ErrorBoundary label="terminal"');
     expect(SHELL).toContain('<ErrorBoundary label="browser"');
@@ -247,19 +247,25 @@ describe('the panels themselves', () => {
     expect(launcher).toContain('terminal_session.read_terminal(');
   });
 
-  it('the browser still has both renderers, and the desktop shell is hardened', () => {
+  it('the browser is the user own view: real DOM, never the agent session', () => {
     const browser = read('BrowserPanel.tsx');
     const main = fs.readFileSync(path.resolve(__dirname, '..', '..', 'electron', 'main.ts'), 'utf8');
 
-    // the page is the Playwright session's frame — nothing is framed, so sites that refuse
-    // framing (Baidu, GitHub) display here too, and the agent drives this very page
-    expect(browser).toContain('browserAPI.frame(agentId, session)');
-    expect(browser).toContain('data-testid="browser-frame"');
-    expect(browser).toContain('browserAPI.click(agentId, session, x, y)');
-    expect(browser).toContain('browserAPI.type(agentId, session, value, true)');
-    expect(browser).toContain('browserSessionId');
-    expect(browser).not.toContain('<iframe');
-    expect(browser).not.toContain("'webview'");
+    // Desktop: a real <webview>, i.e. an actual browser, so the person using it gets a DOM.
+    expect(browser).toContain("React.createElement('webview'");
+    expect(browser).toContain("'browser-webview'");
+    expect(browser).toContain('persist:opensquad-browser');
+    // Web/LAN: a sandboxed iframe, and a same-origin URL is never framed with allow-same-origin.
+    expect(browser).toContain('data-testid="browser-iframe"');
+    expect(browser).toContain('allow-scripts allow-forms allow-popups allow-modals');
+    expect(browser).toContain('isSelfOrigin');
+    // It must NOT touch the launcher's browser session — that one belongs to the agent and is
+    // frame-based, so a click here would act on some other window instead of this page.
+    expect(browser).not.toContain('browserAPI');
+    expect(browser).not.toContain('browserSessionId');
+    expect(browser).not.toContain('browser-frame');
+    expect(browser).not.toContain('agentId');
+    // …and the desktop shell stays hardened around webviews.
     expect(main).toContain('webviewTag:       true');
     expect(main).toContain("on('will-attach-webview'");
     expect(main).toContain('setWindowOpenHandler');

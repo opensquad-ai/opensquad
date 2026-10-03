@@ -97,15 +97,14 @@ def _call(op: str, *, session_id: str = "", **extra: Any) -> dict[str, Any]:
 
 
 def browser_open(session_id: str = "") -> dict[str, Any]:
-    """Start (or reuse) the built-in browser for this agent.
+    """Start (or reuse) a browser for this agent — headless, invisible to the user.
 
-    On this machine that opens a **real browser window** (persistent profile, so logins survive)
-    which the user can work in directly while you drive the same window — so when you are about
-    to browse on the user's behalf, say where to look. `headed` in the reply says whether a
-    window exists; when it is false the session is headless and only the panel's preview shows
-    the page (`window_note` explains why).
+    The panel's 浏览器 tab is the user's own browser (a real webview/iframe) and is *not* this
+    one, so nothing you do here moves their page: this session renders off-screen and you read
+    it through browser_snapshot / browser_screenshot. Ask for `headless=False` only when the
+    user explicitly wants to watch you browse somewhere.
     """
-    return _call("open", session_id=session_id)
+    return _call("open", session_id=session_id, headless=True)
 
 
 def browser_navigate(url: str, session_id: str = "") -> dict[str, Any]:

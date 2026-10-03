@@ -2933,7 +2933,7 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
       {/* 浏览器 / 终端 are the other two tabs; the file list (below) is the third and is
           unchanged, including the chat drawer's treeOnly usage. */}
       {viewTabs && railTab === 'browser' ? (
-        <BrowserPanel agentId={agentId} />
+        <BrowserPanel />
       ) : viewTabs && railTab === 'terminal' ? (
         <TerminalPanel agentId={agentId} rootPath={rootPath} />
       ) : (

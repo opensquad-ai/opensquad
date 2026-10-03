@@ -333,7 +333,7 @@ export const WorkspacePaneShell: React.FC<WorkspacePaneShellProps> = ({
             data-testid="pane-browser"
           >
             <ErrorBoundary label="browser" resetKey={`${agentId}:browser`}>
-              <BrowserPanel agentId={agentId} />
+              <BrowserPanel />
             </ErrorBoundary>
           </div>
         ) : null}
