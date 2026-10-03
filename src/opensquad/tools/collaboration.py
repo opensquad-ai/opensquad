@@ -258,9 +258,17 @@ def start_collaboration(
             f"Task ID: {_task_id}\n"
             f"Collab Card: {card}\n"
             f"{project_description or ''}\n"
-            f'确认参与（必须）：调用 join_collaboration(card="{card}", collab_id="{_task_id}") —— '
-            f"确认之后你才是「已参与」；在你确认之前，不会被派活，也读不到任务窗口里的消息。\n"
-            f'All board updates/reads must include collab_id="{_task_id}"'
+            f'确认参与（必须）：调用 join_collaboration(card="{card}", collab_id="{_task_id}"'
+            + (f', group_id="{group_id}"' if group_id else "")
+            + ") —— 确认之后你才是「已参与」；在你确认之前，不会被派活，也读不到任务窗口里的消息。\n"
+            + (
+                "（group_id 就是协作所在的这个群。若该群在配对机器上，协作的看板也在那台机器上，"
+                "带上它、或先用 im.join_group(host=...) 加入该群，加入才会落到看板所在的机器；"
+                "否则 join_collaboration 会返回 join_tracking_failed 并告诉你缺什么。）\n"
+                if group_id
+                else ""
+            )
+            + f'All board updates/reads must include collab_id="{_task_id}"'
         )
 
         try:
@@ -489,7 +497,7 @@ def set_project_dir(collab_id: str, project_dir: str) -> dict[str, Any]:
     }
 
 
-def join_collaboration(card: str, collab_id: str = "") -> dict[str, Any]:
+def join_collaboration(card: str, collab_id: str = "", group_id: str = "") -> dict[str, Any]:
     """
     [Worker] Join an active collaboration session.
 
@@ -500,6 +508,11 @@ def join_collaboration(card: str, collab_id: str = "") -> dict[str, Any]:
 
     Args:
         card: Collab card name (as specified by PM in the invitation)
+        collab_id: The collaboration to join (from the invitation card)
+        group_id: The group the invitation arrived in. Required when that group lives on a paired
+                  machine — the collaboration's board lives there too, and this is the handle that
+                  resolves it. Without it the join cannot reach the board and is reported as an
+                  error rather than silently doing nothing.
     """
     # 1. Validate collab card
     card_file = os.path.join(_collab_cards_dir(), f"{card}.md")
@@ -547,6 +560,22 @@ def join_collaboration(card: str, collab_id: str = "") -> dict[str, Any]:
         pass
 
     join_tracking = ""
+    join_error = ""
+    if collab_id and (group_id or "").strip():
+        # The board for this collaboration lives on the machine that owns its group. Only the
+        # machine that *started* the collaboration records that (board_owners.json), so a worker
+        # joining from elsewhere has no entry — and with no entry every board call for this collab
+        # runs against this machine's own empty board, which is the silent failure this tool used
+        # to report as success. The group is the handle that resolves it, so resolve it and keep it.
+        try:
+            from ..collab_board import board_owner, remember_board_owner
+
+            _owner = board_owner(group_id=str(group_id).strip())
+            if _owner:
+                remember_board_owner(collab_id, _owner)
+        except Exception:
+            pass
+
     if collab_id:
         try:
             from ..collab_board import update_task
@@ -560,11 +589,30 @@ def join_collaboration(card: str, collab_id: str = "") -> dict[str, Any]:
 
                 set_card_and_skills(collab_id=collab_id, card=card, skills=[f"collab_{card}"])
                 mark_participant(collab_id=collab_id, agent_id=_agent_id, state="accepted")
-            except Exception:
-                pass
-            join_tracking = f"joined task {collab_id}"
+            except Exception as exc:  # noqa: BLE001 - reported below, not swallowed
+                join_error = str(exc) or type(exc).__name__
+            if not join_error:
+                join_tracking = f"joined task {collab_id}"
         except Exception as e:
-            join_tracking = f"join tracking failed: {e}"
+            join_error = str(e) or type(e).__name__
+            join_tracking = f"join tracking failed: {join_error}"
+
+    if join_error:
+        # The card is loaded, but nobody's board shows this agent as accepted — and `assign_task`
+        # refuses on exactly that. Saying "success" here is what made a remote worker report a join
+        # the PM could not act on.
+        return {
+            "status": "error",
+            "code": "join_tracking_failed",
+            "message": (
+                f"Joined the card, but collaboration '{collab_id}' did not record it: {join_error}. "
+                "The board lives on the machine that owns the collaboration's group. If that group "
+                "is on a paired machine, pass group_id='<the group you were invited in>' (or join "
+                "that group first with im.join_group(host='<peer>')) and retry. Until then do NOT "
+                "report that you have joined: assign_task will still refuse."
+            ),
+            "join_tracking": join_tracking or f"join tracking failed: {join_error}",
+        }
 
     return {
         "status": "success",
@@ -787,9 +835,33 @@ def list_active_collaborations() -> dict[str, Any]:
     """
     try:
         my_ids = _resolve_my_agent_ids()
-        from ..collab_board import list_tasks
+        from ..collab_board import board_owners, list_tasks
 
         tasks = list_tasks(include_stale=False)
+
+        # A collaboration whose board lives on a paired machine is not in this machine's file.
+        # board_owners.json is the local record of those, and reading each one by id carries the
+        # hint that routes the call to its owner — so a worker on another machine can see the
+        # collaboration it joined instead of a confident zero. An owner we cannot reach simply
+        # contributes nothing, and is named in `unreachable` so the reason is visible.
+        unreachable: list[str] = []
+        seen = {str(t.get("task_id") or "") for t in tasks}
+        try:
+            from ..collab_board import get_task
+
+            for cid in board_owners():
+                if cid in seen:
+                    continue
+                try:
+                    remote = get_task(task_id=cid)
+                except Exception:  # noqa: BLE001 - named below, never fatal
+                    unreachable.append(cid)
+                    continue
+                if isinstance(remote, dict) and str(remote.get("task_id") or ""):
+                    tasks.append(remote)
+                    seen.add(cid)
+        except Exception:
+            pass
 
         active_tasks = []
         for t in tasks:
@@ -817,6 +889,7 @@ def list_active_collaborations() -> dict[str, Any]:
             "status": "success",
             "count": len(active_tasks),
             "collaborations": active_tasks,
+            **({"unreachable": unreachable} if unreachable else {}),
         }
     except Exception as e:
         return {"status": "error", "message": str(e)}
@@ -916,8 +989,10 @@ def _not_accepted_message(collab_id: str, pending: list[dict[str, Any]], worker_
     lines += [
         "",
         "解决步骤（按顺序）：",
-        f'1) 让每个成员执行 join_collaboration(card="<卡片名>", collab_id="{collab_id}") —— 邀请已定向发给'
-        "他们，在群里 @ 一下催促即可；",
+        f'1) 让每个成员执行 join_collaboration(card="<卡片名>", collab_id="{collab_id}", '
+        'group_id="<协作所在的群>") —— 邀请已定向发给'
+        "他们，在群里 @ 一下催促即可（跨机协作者必须带上 group_id，否则加入落不到看板所在的那台机器，"
+        "对方会看到 join_tracking_failed）；",
         "2) 等他们的状态变成「已参与」（任务窗口的参与人员里能看到）；",
         "3) 全员已参与后，再调用 assign_task。",
         "已经拒绝（declined）的成员：换人，或把它从任务里去掉后再分配——不要给没参与的人派活。",
