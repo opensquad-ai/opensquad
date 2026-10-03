@@ -245,12 +245,55 @@ def verify(token: str) -> dict | None:
         if not isinstance(peer, dict) or peer.get("revoked_at"):
             continue
         if secrets.compare_digest(str(peer.get("token_hash") or ""), digest):
-            return {
+            info = {
                 "id": peer.get("id"),
                 "name": peer.get("name"),
                 "scopes": tuple(peer.get("scopes") or ()),
             }
+            # Stamp the one fact whose absence made this failure class undiagnosable: whether this
+            # peer EVER authenticated. Every peer in the store showed last_seen_at = null, so
+            # "never used" and "used, then revoked" looked identical to both sides, and a 401 had
+            # to be traced by hashing tokens by hand on the owner.
+            try:
+                with _LOCK:
+                    fresh = _read()
+                    fresh_peers = fresh.get("peers") if isinstance(fresh.get("peers"), dict) else {}
+                    entry = fresh_peers.get(str(peer.get("id") or ""))
+                    if isinstance(entry, dict):
+                        entry["last_seen_at"] = _now()
+                        fresh["peers"] = fresh_peers
+                        _write(fresh)
+            except Exception:
+                logger.debug("[NodePeers] could not stamp last_seen_at for %s", peer.get("id"), exc_info=True)
+            return info
     return None
+
+
+def explain(token: str) -> str:
+    """Why ``verify(token)`` fails, in words: ``""`` when it would succeed.
+
+    The board gate answers one 401 for every auth failure — no token, unknown token, revoked token,
+    token without the needed scope — so a paired machine reporting "401 Invalid or missing node
+    secret" says nothing about which of those it is. This names it for the side that already holds
+    the token, which is what turns a hand-run sha256 comparison into a one-line answer.
+    """
+    if not token:
+        return "no peer token was sent"
+    digest = _hash(token)
+    data = _read()
+    peers = data.get("peers") if isinstance(data.get("peers"), dict) else {}
+    for peer in peers.values():
+        if not isinstance(peer, dict):
+            continue
+        if secrets.compare_digest(str(peer.get("token_hash") or ""), digest):
+            if peer.get("revoked_at"):
+                where = peer.get("name") or peer.get("id")
+                return f"this machine's token was revoked on {where} (pair again to get a new one)"
+            scopes = tuple(peer.get("scopes") or ())
+            if "board:read" not in scopes and "board:write" not in scopes:
+                return f"this machine's token has no board scope ({', '.join(scopes) or 'none'})"
+            return ""
+    return "this machine is not paired here any more (pair again)"
 
 
 def has_scope(peer: dict | None, scope: str) -> bool:

@@ -1668,7 +1668,16 @@ def _remote_call(op: str, args: tuple, kwargs: dict) -> Any:
         body = ""
         with suppress(Exception):
             body = exc.read().decode("utf-8")[:300]
-        raise BoardRemoteError(f"board {op} rejected by {base}: HTTP {exc.code} {body}") from exc
+        hint = ""
+        if exc.code == 401:
+            # The owner just told us it did not accept this machine's token; it now also says why
+            # (revoked / unknown / no scope). The recovery is always the same, so say it here too.
+            hint = (
+                f" — {base} did not accept this machine's pairing token. Check the peer there "
+                "(Node pairing: it must be listed and not revoked); if it was revoked, pair again "
+                "with a fresh code to get a working token."
+            )
+        raise BoardRemoteError(f"board {op} rejected by {base}: HTTP {exc.code} {body}{hint}") from exc
     except Exception as exc:
         raise BoardRemoteError(f"board {op} could not reach {base}: {exc}") from exc
     if not isinstance(data, dict) or not data.get("ok"):

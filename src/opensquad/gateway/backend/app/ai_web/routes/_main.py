@@ -1514,7 +1514,20 @@ async def agent_board_op(body: BoardOpRequest, request: Request):
             peer = node_peers.verify(peer_token)
             authorized = node_peers.has_scope(peer, "board:read") or node_peers.has_scope(peer, "board:write")
     if not authorized:
-        raise HTTPException(status_code=401, detail="Invalid or missing node secret")
+        # One 401 for every failure is useless to the machine on the other end: it reported
+        # "Invalid or missing node secret" while holding a token this side had revoked, and the only
+        # way anyone found out was hashing tokens by hand here. Name the reason instead.
+        why = ""
+        try:
+            from opensquad import node_peers as _node_peers
+
+            why = _node_peers.explain(request.headers.get("X-Node-Token", ""))
+        except Exception:
+            why = ""
+        raise HTTPException(
+            status_code=401,
+            detail=f"Invalid or missing node secret ({why or 'the token was not accepted'})",
+        )
     try:
         result = collab_board.local_call(body.op, *(body.args or []), **(body.kwargs or {}))
     except KeyError as exc:
