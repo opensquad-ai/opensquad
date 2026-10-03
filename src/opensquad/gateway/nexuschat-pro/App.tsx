@@ -27,6 +27,8 @@ import {
   type DesktopUpdateOverlayState,
 } from './services/desktopUpdateOverlay';
 import { useDesktopUpdate } from './hooks/useDesktopUpdate';
+import { getActiveAgentWorkCount } from './utils/agentActivity';
+import { getUpdatePrefs, loadUpdatePrefs } from './services/updatePrefs';
 import { AvatarImg } from './components/AvatarImg';
 import { OpenSquadLoader } from './components/OpenSquadLoader';
 import { setLanguage } from './i18n';
@@ -444,6 +446,39 @@ const App: React.FC = () => {
       });
     });
   }, []);
+
+  // Update preferences (auto background download / apply on quit / idle install).
+  // The main process owns the values; load them once for the idle watcher.
+  useEffect(() => {
+    void loadUpdatePrefs();
+  }, []);
+
+  // Idle auto-install: when a downloaded installer is ready and the user opted
+  // in, restart & install once no agent work has run for a while. The count is
+  // polled (not a one-shot check) so a turn that starts mid-window resets it.
+  const installNowRef = useRef(installNow);
+  installNowRef.current = installNow;
+  useEffect(() => {
+    if (updateOverlay?.phase !== 'downloaded') return;
+    const IDLE_REQUIRED_MS = 2 * 60 * 1000;
+    const POLL_MS = 15 * 1000;
+    let idleSince = getActiveAgentWorkCount() === 0 ? Date.now() : 0;
+    const timer = window.setInterval(() => {
+      if (!getUpdatePrefs().autoInstallWhenIdle || getActiveAgentWorkCount() > 0) {
+        idleSince = 0;
+        return;
+      }
+      if (idleSince === 0) {
+        idleSince = Date.now();
+        return;
+      }
+      if (Date.now() - idleSince >= IDLE_REQUIRED_MS) {
+        window.clearInterval(timer);
+        void installNowRef.current();
+      }
+    }, POLL_MS);
+    return () => window.clearInterval(timer);
+  }, [updateOverlay?.phase]);
 
   const [editName, setEditName] = useState('');
   const [editAvatar, setEditAvatar] = useState('');

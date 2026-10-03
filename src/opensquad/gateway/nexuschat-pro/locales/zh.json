@@ -1621,6 +1621,13 @@
       "updateNotifyInstallNow": "立即重启并安装",
       "updateNotifyFailed": "下载失败：{{error}}",
       "updateNotifyRetry": "重试",
+      "updatePrefsTitle": "自动更新",
+      "updatePrefsAutoDownload": "发现新版本后自动后台下载",
+      "updatePrefsAutoDownloadHint": "下载在后台进行，不影响继续使用",
+      "updatePrefsInstallOnQuit": "退出应用时自动安装",
+      "updatePrefsInstallOnQuitHint": "下次正常关闭 OpenSquad 时顺带完成升级，无需立即重启",
+      "updatePrefsAutoInstallIdle": "空闲时自动重启安装",
+      "updatePrefsAutoInstallIdleHint": "连续一段时间没有 Agent 任务时自动重启安装（会短暂关闭应用）",
       "channel": {
         "stable": "稳定版",
         "dev": "开发版",

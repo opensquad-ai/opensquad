@@ -6,8 +6,14 @@ import http from 'http'
 import fs from 'fs'
 import { buildElectronPopupMenus, isElectronMenuId } from './electron-menus'
 import { resolveDesktopWorkspace, writeDesktopWorkspace } from './desktop-workspace'
-import { runDesktopUpdate, downloadUpdate, installUpdate, type UpdateStatus } from './desktop-updater'
-import { checkForUpdates, type UpdateChannel } from './update-checker'
+import {
+  runDesktopUpdate,
+  downloadUpdate,
+  installUpdate,
+  launchInstaller,
+  type UpdateStatus,
+} from './desktop-updater'
+import { checkForUpdates, type UpdateChannel, type UpdateInfo } from './update-checker'
 import { agentPythonForBackendEnv, isAgentRuntimeReady } from './agent-runtime'
 import { runSetupWizard } from './setup-window'
 
@@ -196,6 +202,56 @@ function clearPendingUpdate(): void {
   }
 }
 
+// ── Update preferences (background download / apply on quit) ─────────────────
+// These drive the "update without interrupting work" flow: a background download
+// can start as soon as a release is found, and the installer can be applied on a
+// normal app quit instead of forcing an immediate restart. Persisted to userData
+// so the main-process auto checker and the quit handler see the user's choice
+// even before the renderer mounts.
+const UPDATE_PREFS_FILE = 'update-prefs.json'
+
+interface UpdatePrefs {
+  /** Download a found release in the background without asking. */
+  autoDownload: boolean
+  /** Apply a downloaded installer when the app is quit normally. */
+  installOnQuit: boolean
+  /** Restart & install automatically once no agent work is running. */
+  autoInstallWhenIdle: boolean
+}
+
+const DEFAULT_UPDATE_PREFS: UpdatePrefs = {
+  autoDownload: true,
+  installOnQuit: true,
+  autoInstallWhenIdle: false,
+}
+
+let updatePrefs: UpdatePrefs = { ...DEFAULT_UPDATE_PREFS }
+
+function loadUpdatePrefs(): void {
+  try {
+    const raw = fs.readFileSync(path.join(app.getPath('userData'), UPDATE_PREFS_FILE), 'utf-8')
+    const data = JSON.parse(raw) as Partial<UpdatePrefs>
+    updatePrefs = { ...DEFAULT_UPDATE_PREFS, ...data }
+  } catch {
+    /* first run — defaults */
+  }
+}
+
+function saveUpdatePrefs(next: Partial<UpdatePrefs>): UpdatePrefs {
+  updatePrefs = { ...updatePrefs, ...next }
+  try {
+    fs.writeFileSync(
+      path.join(app.getPath('userData'), UPDATE_PREFS_FILE),
+      JSON.stringify(updatePrefs),
+    )
+  } catch (err) {
+    console.warn('[electron] failed to persist update preferences:', err)
+  }
+  return updatePrefs
+}
+
+loadUpdatePrefs()
+
 // Application icon — Windows expects an .ico, other platforms accept PNG.
 const APP_ICON_PATH = process.platform === 'win32'
   ? resolvePackagedAsset('icon.ico')
@@ -209,6 +265,13 @@ let gatewayProcess:  ChildProcess | null = null
 let launcherProcess: ChildProcess | null = null
 let mainWindow:      BrowserWindow | null = null
 let tray:            Tray | null = null
+
+// Update-flow guards: an explicit install launches the installer itself, so the
+// quit handler must not launch it a second time; and the periodic checker must
+// not start two downloads for the same release.
+let installingUpdate = false
+let quitApplyStarted = false
+let autoDownloadTask: Promise<void> | null = null
 const USE_CUSTOM_TITLEBAR = process.platform === 'win32'
 let popupMenus = buildElectronPopupMenus()
 
@@ -262,9 +325,11 @@ function registerElectronIpc(): void {
         win?.webContents.send('electron:update-status', status)
       }
       try {
+        installingUpdate = true
         await runDesktopUpdate(payload.url, payload.fileName, sendStatus)
         return { ok: true as const }
       } catch (err) {
+        installingUpdate = false
         const message = err instanceof Error ? err.message : String(err)
         return { ok: false as const, error: message }
       }
@@ -281,6 +346,12 @@ function registerElectronIpc(): void {
         win?.webContents.send('electron:update-status', status)
       }
       try {
+        // Idempotent: a background auto-download may already be in flight or
+        // finished for this release — wait for / reuse it instead of starting a
+        // second download when the user also clicks "download in background".
+        if (autoDownloadTask) await autoDownloadTask
+        if (readPendingUpdate()) return { ok: true as const }
+
         const installerPath = await downloadUpdate(payload.url, payload.fileName, sendStatus)
         writePendingUpdate({
           path: installerPath,
@@ -306,11 +377,14 @@ function registerElectronIpc(): void {
     if (!pending) {
       return { ok: false as const, error: 'No downloaded update is ready to install' }
     }
+    // Mark before quitting so the quit handler does not also launch the installer.
+    installingUpdate = true
     try {
       await installUpdate(pending.path, sendStatus)
       clearPendingUpdate()
       return { ok: true as const }
     } catch (err) {
+      installingUpdate = false
       const message = err instanceof Error ? err.message : String(err)
       return { ok: false as const, error: message }
     }
@@ -343,6 +417,15 @@ function registerElectronIpc(): void {
       }
     },
   )
+
+  // Update preferences (auto background download / apply on quit / idle install).
+  ipcMain.handle('electron:get-update-prefs', async () => updatePrefs)
+
+  ipcMain.handle(
+    'electron:set-update-prefs',
+    async (_event, next: Partial<UpdatePrefs> | null) =>
+      saveUpdatePrefs(next && typeof next === 'object' ? next : {}),
+  )
 }
 
 // ── Auto update checker ──────────────────────────────────────────────────────
@@ -357,6 +440,42 @@ function registerElectronIpc(): void {
 const AUTO_UPDATE_INITIAL_DELAY_MS = 30_000 // 30s after app ready
 const AUTO_UPDATE_INTERVAL_MS = 60 * 60 * 1000 // 1h
 
+function broadcastUpdateStatus(status: UpdateStatus): void {
+  for (const win of BrowserWindow.getAllWindows()) {
+    if (!win.isDestroyed()) win.webContents.send('electron:update-status', status)
+  }
+}
+
+/**
+ * Start a background download for *info* when the user opted in.
+ *
+ * Runs in the main process so it still works while the renderer is busy, and is
+ * deduped via ``autoDownloadTask`` so the hourly checker cannot start a second
+ * download for the same release. The download never quits or touches the
+ * window — the user keeps working and installs later.
+ */
+function maybeAutoDownloadUpdate(info: UpdateInfo): void {
+  if (!updatePrefs.autoDownload) return
+  if (!info.downloadUrl || !info.fileName) return
+  if (autoDownloadTask) return
+  const pending = readPendingUpdate()
+  if (pending && pending.version === info.latestVersion) return
+
+  const url = info.downloadUrl
+  const fileName = info.fileName
+  autoDownloadTask = (async () => {
+    try {
+      const installerPath = await downloadUpdate(url, fileName, broadcastUpdateStatus)
+      writePendingUpdate({ path: installerPath, fileName, version: info.latestVersion })
+      console.log('[electron] background update downloaded:', info.latestVersion)
+    } catch (err) {
+      console.warn('[electron] background update download failed:', err)
+    } finally {
+      autoDownloadTask = null
+    }
+  })()
+}
+
 function startAutoUpdateChecker(channel: UpdateChannel = 'stable'): void {
   const tick = async () => {
     try {
@@ -369,6 +488,9 @@ function startAutoUpdateChecker(channel: UpdateChannel = 'stable'): void {
             win.webContents.send('electron:update-available', info)
           }
         }
+        // Optionally fetch it in the background right away, so it is ready to
+        // apply on the next quit with no further user action.
+        maybeAutoDownloadUpdate(info)
       }
     } catch {
       // Silent — auto-check failures should never bother the user.
@@ -857,6 +979,25 @@ app.on('window-all-closed', () => {
 app.on('before-quit', () => {
   // Signal the exit handler and health monitor to skip auto-restart.
   _shuttingDown = true
+
+  // Apply a downloaded update on a normal quit when the user opted in: the
+  // install then happens while the app is closing, instead of forcing an
+  // immediate restart mid-work. Skipped when an explicit install is already in
+  // progress (that path launches the installer itself).
+  if (!installingUpdate && !quitApplyStarted && updatePrefs.installOnQuit) {
+    quitApplyStarted = true
+    const pending = readPendingUpdate()
+    if (pending) {
+      console.log('[electron] applying pending update on quit:', pending.version ?? pending.fileName)
+      clearPendingUpdate()
+      // Fire-and-forget: spawn is immediate; the installer replaces files once
+      // this process (and its run.exe children) exit.
+      launchInstaller(pending.path).catch((err) => {
+        console.warn('[electron] failed to launch installer on quit:', err)
+      })
+    }
+  }
+
   // Tear down both backend processes. On Windows use taskkill /T so the whole
   // child tree (e.g. launcher-spawned agents) is cleaned up.
   const procs: Array<[string, ChildProcess | null]> = [

@@ -15,6 +15,12 @@ declare module 'react' {
 
 
 declare global {
+  interface UpdatePrefs {
+    autoDownload: boolean
+    installOnQuit: boolean
+    autoInstallWhenIdle: boolean
+  }
+
   interface Window {
     electronEnv?: {
       isElectron: boolean
@@ -51,6 +57,9 @@ declare global {
       installUpdate?: () => Promise<{ ok: true } | { ok: false; error: string }>
       /** Whether a downloaded installer is waiting to be installed. */
       hasPendingUpdate?: () => Promise<{ pending: boolean; version?: string | null }>
+      /** Update preferences (auto background download / apply on quit / idle install). */
+      getUpdatePrefs?: () => Promise<UpdatePrefs>
+      setUpdatePrefs?: (prefs: Partial<UpdatePrefs>) => Promise<UpdatePrefs>
       onUpdateStatus?: (callback: (status: {
         phase: 'downloading' | 'downloaded' | 'preparing' | 'launching' | 'shutting-down'
         percent?: number

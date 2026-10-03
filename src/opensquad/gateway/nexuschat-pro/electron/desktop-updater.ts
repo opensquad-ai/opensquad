@@ -135,7 +135,7 @@ async function downloadInstaller(
   return dest
 }
 
-async function launchInstaller(installerPath: string): Promise<void> {
+export async function launchInstaller(installerPath: string): Promise<void> {
   if (!fs.existsSync(installerPath)) {
     throw new Error('Installer file not found')
   }

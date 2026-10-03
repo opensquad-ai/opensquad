@@ -44,6 +44,23 @@ contextBridge.exposeInMainWorld('electronEnv', {
       pending: boolean
       version?: string | null
     }>,
+  /** Update preferences (auto background download / apply on quit / idle install). */
+  getUpdatePrefs: () =>
+    ipcRenderer.invoke('electron:get-update-prefs') as Promise<{
+      autoDownload: boolean
+      installOnQuit: boolean
+      autoInstallWhenIdle: boolean
+    }>,
+  setUpdatePrefs: (prefs: {
+    autoDownload?: boolean
+    installOnQuit?: boolean
+    autoInstallWhenIdle?: boolean
+  }) =>
+    ipcRenderer.invoke('electron:set-update-prefs', prefs) as Promise<{
+      autoDownload: boolean
+      installOnQuit: boolean
+      autoInstallWhenIdle: boolean
+    }>,
   onUpdateStatus: (callback: (status: PreloadUpdateStatus) => void) => {
     const listener = (_event: Electron.IpcRendererEvent, status: PreloadUpdateStatus) => callback(status)
     ipcRenderer.on('electron:update-status', listener)

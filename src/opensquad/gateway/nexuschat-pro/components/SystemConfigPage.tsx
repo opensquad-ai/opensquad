@@ -11,6 +11,12 @@ import { APP_VERSION } from '../utils/appVersion';
 import {
   offerDesktopUpdate,
 } from '../services/desktopUpdateOverlay';
+import {
+  loadUpdatePrefs,
+  saveUpdatePrefs,
+  subscribeUpdatePrefs,
+  type UpdatePrefs,
+} from '../services/updatePrefs';
 import WorkspaceManager from './WorkspaceManager';
 import { OpenSquadLoader } from './OpenSquadLoader';
 import { ThemeSettingsPanel } from './ThemeSettingsModal';
@@ -437,6 +443,11 @@ interface VersionInfoState {
 const AboutTab: React.FC = () => {
   const { t } = useTranslation();
   const isDesktopApp = Boolean(window.electronEnv?.isElectron) && !import.meta.env.DEV;
+  const [updatePrefs, setUpdatePrefs] = useState<UpdatePrefs | null>(null);
+  useEffect(() => {
+    void loadUpdatePrefs();
+    return subscribeUpdatePrefs(setUpdatePrefs);
+  }, []);
   const [versionInfo, setVersionInfo] = useState<VersionInfoState>(() => {
     try {
       const cached = sessionStorage.getItem(VERSION_CHECK_CACHE_KEY);
@@ -616,6 +627,47 @@ const AboutTab: React.FC = () => {
           {checking ? <OpenSquadLoader size={16} /> : <RefreshCw size={16} />}
           {checking ? t('systemConfig.about.checking') : t('systemConfig.about.checkUpdate')}
         </button>
+
+        {/* Auto-update preferences — desktop only. These make updates land
+            without interrupting work: download in the background, then apply
+            on the next quit (or, optionally, once the app is idle). */}
+        {isDesktopApp && updatePrefs && (
+          <div className="mt-4 pt-4 border-t border-border space-y-3">
+            <p className="text-xs font-bold text-textMuted uppercase">
+              {t('systemConfig.about.updatePrefsTitle')}
+            </p>
+            <div className="flex items-center justify-between gap-3">
+              <div className="min-w-0">
+                <p className="text-sm text-textMain">{t('systemConfig.about.updatePrefsAutoDownload')}</p>
+                <p className="text-xs text-textMuted">{t('systemConfig.about.updatePrefsAutoDownloadHint')}</p>
+              </div>
+              <Toggle
+                value={updatePrefs.autoDownload}
+                onChange={(v) => { void saveUpdatePrefs({ autoDownload: v }); }}
+              />
+            </div>
+            <div className="flex items-center justify-between gap-3">
+              <div className="min-w-0">
+                <p className="text-sm text-textMain">{t('systemConfig.about.updatePrefsInstallOnQuit')}</p>
+                <p className="text-xs text-textMuted">{t('systemConfig.about.updatePrefsInstallOnQuitHint')}</p>
+              </div>
+              <Toggle
+                value={updatePrefs.installOnQuit}
+                onChange={(v) => { void saveUpdatePrefs({ installOnQuit: v }); }}
+              />
+            </div>
+            <div className="flex items-center justify-between gap-3">
+              <div className="min-w-0">
+                <p className="text-sm text-textMain">{t('systemConfig.about.updatePrefsAutoInstallIdle')}</p>
+                <p className="text-xs text-textMuted">{t('systemConfig.about.updatePrefsAutoInstallIdleHint')}</p>
+              </div>
+              <Toggle
+                value={updatePrefs.autoInstallWhenIdle}
+                onChange={(v) => { void saveUpdatePrefs({ autoInstallWhenIdle: v }); }}
+              />
+            </div>
+          </div>
+        )}
 
         {error && (
           <div className="mt-3 px-4 py-2 bg-red-50 border border-red-200 rounded-lg text-sm text-red-600 flex items-center gap-2">

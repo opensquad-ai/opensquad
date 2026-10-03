@@ -48,6 +48,37 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### Added
 
+- **Desktop: background updates that don't interrupt work.** The app already
+  downloaded installers in the background, but only when the user clicked
+  "download in background", and installing always forced an immediate restart.
+  A new **Automatic updates** section in Settings → About adds three switches:
+  *download new versions in the background* (on by default — the main-process
+  checker starts the download as soon as a release is found, deduped against the
+  manual button), *install on quit* (on by default — a downloaded installer is
+  applied when the app is closed normally, instead of a forced mid-work
+  restart), and *restart & install when idle* (off by default — restarts only
+  after no agent work has run for a couple of minutes). Preferences persist to
+  `update-prefs.json` in userData so the main process can auto-download and apply
+  on quit even before the renderer mounts. The install itself is unchanged — the
+  silent NSIS installer still replaces the files while the app is closing — so
+  this changes *when* the restart happens, not whether the app restarts.
+- **Model cards: the OpenAI `/v1/responses` protocol (`api_protocol: openai_responses`).**
+  OpenAI now ships two wire formats, so the model-card editor's **API Protocol**
+  control is a dropdown offering both: `OpenAI Chat Completions` and
+  `OpenAI Responses` (the new `openai_responses` value), alongside
+  `Anthropic Messages` and the other providers. `openai` and `openai_compat`
+  are one wire format (both drive `ChatAPI` over `/v1/chat/completions`), so
+  they share a single `OpenAI Chat Completions` entry; a card keeps whichever
+  of the two values it already had. `ResponsesAPI`
+  (`opensquad/responses_api.py`) reuses `ChatAPI`'s whole turn engine — context
+  compression, retries, stop handling, Native Function Calling, usage accounting
+  and session persistence — and swaps only the transport: a small client bridge
+  converts the request into `instructions` + `input` items (tools flattened to
+  the Responses shape) and translates the typed event stream
+  (`response.output_text.delta`, `response.function_call_arguments.delta`,
+  `response.completed`, …) back into the Chat-Completions chunk shape the shared
+  loop reads. Existing OpenAI models keep working unchanged; only cards set to
+  `openai_responses` use the new endpoint.
 - **Agent Web: a scheduled task's detail pane now lists its run history.**
   The pane showed `Run count 90` with nowhere to see any of those 90 runs — the
   history only existed in the 执行 tab, mixed across every task. The detail now

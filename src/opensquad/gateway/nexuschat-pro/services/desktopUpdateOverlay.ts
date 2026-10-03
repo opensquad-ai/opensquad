@@ -90,6 +90,24 @@ export function subscribeDesktopUpdateOverlay(
 
 /** A new version was found: offer it and pop the changelog. */
 export function offerDesktopUpdate(offer: DesktopUpdateOffer): void {
+  // A background (auto) download may already be running — or finished — for this
+  // exact version by the time the offer arrives. Never reset that back to
+  // 'available', or the in-flight progress / ready installer state is lost.
+  const sameVersionInProgress =
+    state.version === offer.version &&
+    (state.phase === 'downloading' || state.phase === 'downloaded');
+
+  if (sameVersionInProgress) {
+    emit({
+      releaseNotes: offer.releaseNotes ?? state.releaseNotes,
+      releaseUrl: offer.releaseUrl ?? state.releaseUrl,
+      isBeta: Boolean(offer.isBeta),
+      downloadUrl: offer.downloadUrl,
+      fileName: offer.fileName,
+    });
+    return;
+  }
+
   emit({
     phase: 'available',
     version: offer.version,

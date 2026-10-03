@@ -1623,6 +1623,13 @@
       "updateNotifyInstallNow": "Restart & install now",
       "updateNotifyFailed": "Download failed: {{error}}",
       "updateNotifyRetry": "Retry",
+      "updatePrefsTitle": "Automatic updates",
+      "updatePrefsAutoDownload": "Download new versions in the background",
+      "updatePrefsAutoDownloadHint": "Downloads while you keep working",
+      "updatePrefsInstallOnQuit": "Install on quit",
+      "updatePrefsInstallOnQuitHint": "Finish the upgrade the next time you close OpenSquad — no immediate restart",
+      "updatePrefsAutoInstallIdle": "Restart & install when idle",
+      "updatePrefsAutoInstallIdleHint": "Restart automatically once no agent work has run for a while (briefly closes the app)",
       "channel": {
         "stable": "stable",
         "dev": "dev",
