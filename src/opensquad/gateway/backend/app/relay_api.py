@@ -196,7 +196,12 @@ async def relay_deliver(request: Request, body: dict = Body(default={})):
         # place the owning gateway's local dispatch puts it — so the remote agent
         # behaves exactly as it does when the user talks in a local task window.
         event_id = str(message.get("event_id") or "")
-        if event_id and relay.already_seen(origin_host, event_id):
+        # Peek, do not record: the owner retries anything it was told was not delivered, and
+        # recording here burned the dedup key *before* the agent could be reached — so a push
+        # that missed once (the agent's control socket was briefly absent, e.g. just after a
+        # restart) came back "duplicate" on every retry, the event never arrived, and the outbox
+        # retried it forever. A live cross-machine run showed exactly that.
+        if event_id and relay.already_seen(origin_host, event_id, record=False):
             return {"ok": True, "delivered": False, "reason": "duplicate"}
         target_agent = str(envelope.get("target_agent_id") or "")
         if not target_agent:
@@ -210,7 +215,15 @@ async def relay_deliver(request: Request, body: dict = Body(default={})):
         except Exception as exc:  # noqa: BLE001 - a failed notification must not break the push
             logger.warning("[Relay] task delivery to agent %s failed: %s", target_agent, exc)
             delivered = False
-        return {"ok": True, "delivered": bool(delivered)}
+        if delivered:
+            relay.note_seen(origin_host, event_id)
+        else:
+            # The agent is not on its control channel right now. Say so (delivered: False) and
+            # leave the key unrecorded: the owner's retry is the only thing that can heal this,
+            # and it needs the frame to still look new. `reason` names the real cause, which
+            # "duplicate" used to hide.
+            logger.info("[Relay] task event %s for agent %s was not delivered yet", event_id, target_agent)
+        return {"ok": True, "delivered": bool(delivered), "reason": "" if delivered else "agent_offline"}
 
     message_id = str(message.get("id") or "")
     if message_id and relay.already_seen(origin_host, message_id):

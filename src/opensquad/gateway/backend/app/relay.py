@@ -23,6 +23,7 @@ from opensquad.relay_link import (  # noqa: F401  (re-exported for gateway calle
     enqueue_outbox,
     forget_outbound,
     new_secret,
+    note_seen,
     outbox_entries,
     outbox_size,
     prune_outbox,
