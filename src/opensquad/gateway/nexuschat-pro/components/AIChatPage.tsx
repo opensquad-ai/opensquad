@@ -2868,14 +2868,20 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
         role: 'user',
         content: formatUserSkillDisplayContent(text),
         timestamp: new Date().toISOString().replace(/\.\d{3}Z$/, 'Z'),
-        message_id: uid,
+        message_id: messageId || uid,
       };
       const prevBucket = sid
         ? (liveTimelinesBySessionRef.current[sid] ?? [])
         : (timelineRef.current ?? []);
       // 插话嵌进正在跑的工具流里，不 seal、不插独立气泡 —— 否则工具流会被切成
       // 两段。只有在没有可挂载的流时（回合已收尾）才退回「封口 + 气泡」。
-      const steered = appendUserSteerToTimeline(prevBucket, { text, source, sender_name: senderName });
+      // 带 message_id 传入：同一帧可能被重投（广播 + 重连补发），去重后只落一行。
+      const steered = appendUserSteerToTimeline(prevBucket, {
+        text,
+        source,
+        sender_name: senderName,
+        message_id: messageId,
+      });
       const nextEntries: TimelineEntry[] = steered ?? [
         ...sealIncompleteWorkflows(prevBucket, { fallbackStartedMs: turnStartedMsRef.current }),
         { kind: 'message', data: userMsg, _uid: uid },
