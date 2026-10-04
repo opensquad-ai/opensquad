@@ -1535,53 +1535,6 @@ async def agent_board_op(body: BoardOpRequest, request: Request):
     return {"ok": True, "result": result}
 
 
-@router.post("/collab-board/tasks/{task_id}/notify")
-async def collab_task_notify(task_id: str, request: Request, body: dict = Body(default={})):
-    """Fan out a task-window message that an *agent* wrote to the board.
-
-    The user's task-window message has its own endpoint, which does the board write and the
-    fan-out together. An agent's message is written straight to the board — locally on the owner,
-    or through the board bridge — and nothing carried it on, so a worker on a paired machine could
-    read it (pull) but never received it (push). This is that missing hop: authenticated like the
-    board bridge, and travelling the same path the user's messages do.
-    """
-    from app import relay
-    from app.ai_web.websocket import _check_node_secret
-    from opensquad import collab_board, node_peers
-    from opensquad.system_config import syscfg
-
-    authorized = _check_node_secret(request.headers.get("X-Node-Secret", ""))
-    if not authorized:
-        peer_token = request.headers.get("X-Node-Token", "")
-        if peer_token:
-            peer = node_peers.verify(peer_token)
-            authorized = node_peers.has_scope(peer, "board:write")
-    if not authorized:
-        raise HTTPException(status_code=401, detail="Invalid or missing node secret (task notify)")
-
-    task = collab_board.local_call("get_task", task_id=str(task_id or "")) or {}
-    group_id = str((task.get("extra") or {}).get("group_id") or "") if isinstance(task, dict) else ""
-    if not group_id:
-        return {"ok": False, "error": "this collaboration has no group, so there is nobody to push to"}
-    content = str((body or {}).get("content") or "")
-    if not content:
-        return {"ok": False, "error": "content is required"}
-    result = await relay.fan_out_task(
-        group_id,
-        {
-            "type": "chat",
-            "content": content,
-            "channel": "task",
-            "collab_id": str(task_id or ""),
-            "mentions": [str(m) for m in ((body or {}).get("mentions") or [])],
-            "wake": True,
-            "event_id": uuid.uuid4().hex,
-        },
-        origin_host=str(syscfg.node_id() or ""),
-    )
-    return {"ok": True, "group_id": group_id, "relay": result if isinstance(result, dict) else {}}
-
-
 @router.get("/node/local-addresses")
 async def node_local_addresses(current_user: User = Depends(get_current_user_dep)):
     """This machine's own LAN addresses, so the invite panel can name a reachable host.
