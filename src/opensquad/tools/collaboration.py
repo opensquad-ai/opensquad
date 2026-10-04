@@ -1049,7 +1049,7 @@ def _gate_requirement_message(collab_id: str, needed: tuple[str, ...]) -> str:
     try:
         from ..collab_board import gate_states
 
-        states = gate_states(collab_id)
+        states = gate_states(collab_id=collab_id)
     except Exception:
         return ""
     blockers = [step for step in needed if states.get(step) != "approved"]
