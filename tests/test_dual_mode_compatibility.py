@@ -59,16 +59,16 @@ def test_auto_mode_selects_native_for_glm5():
     print("✅ auto 模式为 GLM-5 自动选择 Native FC")
 
 
-def test_auto_mode_selects_xml_for_unknown():
-    """验证 auto 模式为未知模型选择 XML"""
+def test_auto_mode_selects_native_for_unknown():
+    """验证 auto 模式为未知模型选择 Native FC"""
     config = {"model": {"provider": "unknown", "model_name": "unknown-model", "tool_call_mode": "auto"}}
 
     mock_registry = Mock()
 
     strategy = ToolCallStrategySelector.select(config, mock_registry)
 
-    assert isinstance(strategy, XMLToolCallStrategy)
-    print("✅ auto 模式为未知模型自动降级到 XML")
+    assert isinstance(strategy, NativeToolCallStrategy)
+    print("✅ auto 模式为未知模型选择 Native FC")
 
 
 def test_default_mode_is_native():
@@ -120,7 +120,7 @@ if __name__ == "__main__":
     test_xml_mode_still_works()
     test_native_mode_works()
     test_auto_mode_selects_native_for_glm5()
-    test_auto_mode_selects_xml_for_unknown()
+    test_auto_mode_selects_native_for_unknown()
     test_default_mode_is_native()
     test_both_strategies_produce_valid_output()
 
