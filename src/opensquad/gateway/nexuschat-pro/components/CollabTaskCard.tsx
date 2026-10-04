@@ -10,7 +10,7 @@
 import React from 'react';
 import { useTranslation } from 'react-i18next';
 import { ArrowUpRight, CheckCircle2, CircleDot, XCircle } from 'lucide-react';
-import type { CollabTaskCardPayload, CollabTaskParticipant } from '../services/api';
+import { collabBoardAPI, type CollabTaskCardPayload, type CollabTaskParticipant } from '../services/api';
 
 export const COLLAB_TASK_START = '[[COLLAB_TASK]]';
 export const COLLAB_TASK_END = '[[/COLLAB_TASK]]';
@@ -90,7 +90,33 @@ export interface CollabTaskCardProps {
 export const CollabTaskCard: React.FC<CollabTaskCardProps> = ({ payload, onOpen, onRespond, disabled }) => {
   const { t } = useTranslation();
   const kind = payload.kind || 'discussion';
-  const participants = payload.participants || [];
+
+  /**
+   * The card travels as message text, so whatever it carries is as old as the message: a member who
+   * accepted minutes after it was written still reads as invited in the payload, which is exactly
+   * the difference the field kept seeing between the card and the task window. The board is the
+   * live record, so the card reads it — and keeps its own snapshot on screen when the board cannot
+   * be reached, because a stale name beats an empty card.
+   */
+  const [liveParticipants, setLiveParticipants] = React.useState<CollabTaskParticipant[] | null>(null);
+  const collabId = payload.collab_id;
+  React.useEffect(() => {
+    if (!collabId) return;
+    let alive = true;
+    void (async () => {
+      try {
+        const summary = await collabBoardAPI.taskSummary(collabId);
+        if (alive && Array.isArray(summary?.participants)) setLiveParticipants(summary.participants);
+      } catch {
+        /* the snapshot stays on screen */
+      }
+    })();
+    return () => {
+      alive = false;
+    };
+  }, [collabId]);
+
+  const participants = liveParticipants ?? payload.participants ?? [];
   const kindLabel = t(`collabTask.kind.${kind}`, { defaultValue: kind });
 
   return (
@@ -112,7 +138,7 @@ export const CollabTaskCard: React.FC<CollabTaskCardProps> = ({ payload, onOpen,
       ) : null}
 
       {participants.length ? (
-        <div className="mt-2" data-testid="collab-task-participants">
+        <div className="mt-2" data-testid="collab-task-participants" data-live={liveParticipants ? '1' : '0'}>
           <div className="text-[11px] text-textMuted">{t('collabTask.participants')}</div>
           <div className="mt-1 flex flex-wrap gap-1.5">
             {participants.map((p) => (
