@@ -27,12 +27,19 @@ describe('the folded view', () => {
     expect(expanded).toContain("t('chat.collapseText'");
   });
 
-  it('fades the text itself, with the panel\'s own graduated mask', () => {
-    // The bug this guards: a mask or blur on an empty overlay blurs nothing and shows nothing.
-    const fade = FOLD.slice(FOLD.indexOf('data-testid="long-text-fade"'), FOLD.indexOf('</div>', FOLD.indexOf('data-testid="long-text-fade"')));
-    expect(fade).toContain('os-thought-tail');
-    expect(fade).toMatch(/blur-\[[\d.]+px\]/);
-    expect(fade).toContain('foldedText(text, limit)');
+  it('keeps the text crisp and blurs only a masked copy at the edge', () => {
+    // The bug these guard: a mask or blur on an empty overlay shows nothing, and a blur on the text
+    // itself softens the whole message. So the crisp layer carries the fade mask, and the blur
+    // lives on a second copy of the same text, masked to the bottom.
+    expect(FOLD).toMatch(/className="os-thought-tail whitespace-pre-wrap break-words"/);
+    expect(FOLD).not.toMatch(/className="[^"]*\bos-thought-tail\b[^"]*blur-/);
+
+    const blur = FOLD.slice(FOLD.indexOf('data-testid="long-text-blur"'));
+    expect(blur).toContain('foldedText(text, limit)');
+    expect(blur).toMatch(/blur-\[[\d.]+px\]/);
+    expect(blur).toContain('[mask-image:linear-gradient(to_bottom,transparent_58%,black_100%)]');
+    expect(blur).toContain('pointer-events-none');
+    expect(blur).toContain('select-none');
   });
 
   it('uses the same primitive the reasoning panel fades out with', () => {

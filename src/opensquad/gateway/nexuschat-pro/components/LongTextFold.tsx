@@ -39,14 +39,19 @@ export const LongTextFold: React.FC<LongTextFoldProps> = ({ text, limit = LONG_T
 
   return (
     <div data-testid="long-text" data-expanded="0">
-      {/* The fade has to sit on the text itself: a mask or blur on an empty overlay blurs nothing.
-          `os-thought-tail` is the same graduated mask the reasoning panel fades out with, so the
-          tail dims into the bubble's own surface in either appearance rather than into a colour. */}
-      <div
-        data-testid="long-text-fade"
-        className="os-thought-tail blur-[0.6px] whitespace-pre-wrap break-words"
-      >
-        {foldedText(text, limit)}
+      {/* Two layers, so the blur is only at the edge and the rest stays crisp: the text itself,
+          with its tail faded out by the same mask the reasoning panel uses, and the very same text
+          again, blurred, masked so it shows only where the first one faded. Blurring one element
+          outright would soften the whole message, which is not the effect. */}
+      <div className="relative" data-testid="long-text-fade">
+        <div className="os-thought-tail whitespace-pre-wrap break-words">{foldedText(text, limit)}</div>
+        <div
+          aria-hidden="true"
+          data-testid="long-text-blur"
+          className="pointer-events-none select-none absolute inset-0 blur-[2.5px] whitespace-pre-wrap break-words [mask-image:linear-gradient(to_bottom,transparent_58%,black_100%)]"
+        >
+          {foldedText(text, limit)}
+        </div>
       </div>
       <button
         type="button"
