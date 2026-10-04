@@ -919,6 +919,11 @@
       "skillsEmpty": "No skills installed",
       "goalMode": "Goal mode",
       "goalModeHint": "Same as typing /goal — set a long-running verifiable goal",
+      "wakeMode": "Wake mode",
+      "wakeModeStrict": "Only when @mentioned",
+      "wakeModeStrictHint": "Only messages that mention it wake it; the rest wait until it wakes",
+      "wakeModeNormal": "Every message",
+      "wakeModeNormalHint": "Any group message wakes it — quicker, and uses more tokens",
       "trigger": "Attach",
       "triggerAutoSpeechOn": "Attach (auto speech on)"
     },

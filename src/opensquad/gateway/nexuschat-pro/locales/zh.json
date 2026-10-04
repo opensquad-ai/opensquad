@@ -919,6 +919,11 @@
       "skillsEmpty": "未安装技能",
       "goalMode": "目标模式",
       "goalModeHint": "等同于输入 /goal，设定一个可验证的长期目标",
+      "wakeMode": "唤醒模式",
+      "wakeModeStrict": "仅 @ 时唤醒",
+      "wakeModeStrictHint": "只有被 @ 的消息会叫醒它，其余消息等它醒来后再看",
+      "wakeModeNormal": "每条消息都唤醒",
+      "wakeModeNormalHint": "群里任何消息都会叫醒它（更及时，也更耗 token）",
       "trigger": "添加附件",
       "triggerAutoSpeechOn": "添加附件（已开启自动朗读）"
     },

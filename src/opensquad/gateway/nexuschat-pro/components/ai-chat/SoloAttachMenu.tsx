@@ -5,7 +5,7 @@
 import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { useTranslation } from 'react-i18next';
-import { BookOpen, Check, ChevronRight, Image as ImageIcon, Mic, Paperclip, Plus, Target, Upload, Volume2 } from 'lucide-react';
+import { Bell, BookOpen, Check, ChevronRight, Image as ImageIcon, Mic, Paperclip, Plus, Target, Upload, Volume2 } from 'lucide-react';
 import type { SkillInfo } from '../../services/api';
 import { POPOVER_SURFACE_CLASS, usePopMenuMounted } from './popoverSurface';
 
@@ -35,6 +35,12 @@ export interface SoloAttachMenuProps {
   /** When true, agent final replies are spoken via TTS automatically. */
   autoSpeechEnabled?: boolean;
   onToggleAutoSpeech?: (enabled: boolean) => void;
+  /**
+   * strict = only a message that @mentions the agent wakes it; normal = every message does.
+   * The same value the agent reads at boot (`default_wake_mode`).
+   */
+  wakeMode?: 'strict' | 'normal';
+  onWakeMode?: (mode: 'strict' | 'normal') => void;
 }
 
 export const SoloAttachMenu: React.FC<SoloAttachMenuProps> = ({
@@ -52,8 +58,14 @@ export const SoloAttachMenu: React.FC<SoloAttachMenuProps> = ({
   voiceActive = false,
   autoSpeechEnabled = false,
   onToggleAutoSpeech,
+  wakeMode = 'normal',
+  onWakeMode,
 }) => {
   const { t } = useTranslation();
+  const wakeOptions = [
+    { mode: 'strict' as const, labelKey: 'aiChat.attach.wakeModeStrict', hintKey: 'aiChat.attach.wakeModeStrictHint' },
+    { mode: 'normal' as const, labelKey: 'aiChat.attach.wakeModeNormal', hintKey: 'aiChat.attach.wakeModeNormalHint' },
+  ];
   const [open, setOpen] = useState(false);
   const [skillsOpen, setSkillsOpen] = useState(false);
   const [menuPos, setMenuPos] = useState<{ bottom: number; left: number } | null>(null);
@@ -246,6 +258,37 @@ export const SoloAttachMenu: React.FC<SoloAttachMenuProps> = ({
             </span>
             <span className="flex-1 min-w-0 truncate font-medium">{t('aiChat.attach.goalMode')}</span>
           </button>
+        ) : null}
+        {onWakeMode ? (
+          <>
+            <div className="my-0.5 h-px bg-border/60" />
+            <div className="px-3 pt-1 pb-0.5 text-[10px] font-semibold tracking-wide text-textMuted/70">
+              {t('aiChat.attach.wakeMode')}
+            </div>
+            {wakeOptions.map((option) => (
+              <button
+                key={option.mode}
+                type="button"
+                data-wake-mode={option.mode}
+                onMouseEnter={() => setSkillsOpen(false)}
+                onClick={() => run(() => onWakeMode(option.mode))}
+                title={t(option.hintKey)}
+                className={`w-full flex items-center gap-2 px-3 py-1.5 text-left text-[12px] transition-colors border-0 cursor-pointer ${
+                  wakeMode === option.mode
+                    ? 'bg-black/[0.05] dark:bg-white/[0.08] text-textMain'
+                    : 'bg-transparent text-textMain hover:bg-black/[0.06] dark:hover:bg-white/[0.10]'
+                }`}
+              >
+                <span className="w-4 shrink-0 flex items-center justify-center">
+                  <Bell size={14} className="text-textMuted" />
+                </span>
+                <span className="flex-1 min-w-0 truncate font-medium">{t(option.labelKey)}</span>
+                {wakeMode === option.mode ? (
+                  <Check size={13} className="text-blue-600 dark:text-blue-400" />
+                ) : null}
+              </button>
+            ))}
+          </>
         ) : null}
         <button
           type="button"
