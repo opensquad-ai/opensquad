@@ -453,6 +453,9 @@ def _resolve_tool_format(config: dict) -> str:
     elif mode == "xml":
         return "xml"
     else:  # auto -- query model capabilities database
+        declared_fc = model_cfg.get("supports_function_calling")
+        if declared_fc is not None:
+            return "fc" if bool(declared_fc) else "xml"
         from opensquad.model_capabilities import get_model_capability
 
         provider = model_cfg.get("api_protocol", "openai_compat")

@@ -477,7 +477,12 @@ class ToolCallStrategySelector:
         model_name = model_config.get("model_name", "")
 
         # Check if model supports Function Calling
-        supports_fc = ToolCallStrategySelector._supports_function_calling(provider, model_name)
+        declared_fc = model_config.get("supports_function_calling")
+        if declared_fc is None:
+            supports_fc = ToolCallStrategySelector._supports_function_calling(provider, model_name)
+        else:
+            supports_fc = bool(declared_fc)
+            logger.info(f"Model {model_name}: Function Calling declared in the model card ({supports_fc})")
 
         # Strategy selection logic
         if mode == "native":

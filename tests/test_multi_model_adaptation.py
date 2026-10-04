@@ -217,6 +217,78 @@ class TestToolCallStrategySelector:
         assert result is True
 
 
+class TestDeclaredFunctionCalling:
+    """模型卡声明 Function Calling 能力时，优先于内置能力表。"""
+
+    def _select(self, model: dict):
+        from unittest.mock import MagicMock
+
+        from opensquad.tool_call_strategy import ToolCallStrategySelector
+
+        return ToolCallStrategySelector.select({"model": model}, MagicMock())
+
+    def test_a_card_can_declare_support_the_registry_does_not_know(self):
+        from opensquad.tool_call_strategy import NativeToolCallStrategy
+
+        strategy = self._select(
+            {
+                "model_name": "vendor-model-preview",
+                "api_protocol": "openai_compat",
+                "tool_call_mode": "native",
+                "supports_function_calling": True,
+            }
+        )
+
+        assert isinstance(strategy, NativeToolCallStrategy)
+
+    def test_without_a_declaration_an_unknown_model_falls_back(self):
+        from opensquad.tool_call_strategy import XMLToolCallStrategy
+
+        strategy = self._select(
+            {
+                "model_name": "vendor-model-preview",
+                "api_protocol": "openai_compat",
+                "tool_call_mode": "native",
+            }
+        )
+
+        assert isinstance(strategy, XMLToolCallStrategy)
+
+    def test_a_declaration_can_also_turn_it_off(self):
+        from opensquad.tool_call_strategy import XMLToolCallStrategy
+
+        strategy = self._select(
+            {
+                "model_name": "gpt-4",
+                "api_protocol": "openai",
+                "tool_call_mode": "native",
+                "supports_function_calling": False,
+            }
+        )
+
+        assert isinstance(strategy, XMLToolCallStrategy)
+
+    def test_auto_mode_honours_the_declaration(self):
+        from opensquad.tool_call_strategy import NativeToolCallStrategy
+
+        strategy = self._select(
+            {
+                "model_name": "vendor-model-preview",
+                "api_protocol": "openai_compat",
+                "tool_call_mode": "auto",
+                "supports_function_calling": True,
+            }
+        )
+
+        assert isinstance(strategy, NativeToolCallStrategy)
+
+    def test_the_schema_accepts_the_field_and_leaves_it_unset_by_default(self):
+        from opensquad.config_schema import ModelConfigSchema
+
+        assert ModelConfigSchema(model_name="m").supports_function_calling is None
+        assert ModelConfigSchema(model_name="m", supports_function_calling=True).supports_function_calling is True
+
+
 class TestModelCapabilityEdgeCases:
     """测试边缘情况和特殊场景"""
 
