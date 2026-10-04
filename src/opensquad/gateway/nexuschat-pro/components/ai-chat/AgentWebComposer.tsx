@@ -93,6 +93,8 @@ function formatFileSize(bytes: number): string {
   return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)} GB`;
 }
 
+import { adminAPI } from '../../services/api';
+
 export interface AgentWebComposerProps {
   agentId: string;
   columnClass?: string;
@@ -434,6 +436,44 @@ export const AgentWebComposer = forwardRef<AgentWebComposerHandle, AgentWebCompo
   );
 
   /** "+" menu → 目标模式: same entry point as typing `/goal ` by hand. */
+  /**
+   * Wake mode: `strict` wakes the agent only for a message that @mentions it, `normal` for every
+   * message. It is the agent's own `default_wake_mode` — the value its boot reads and the message
+   * router consults — so the setting here is the one the agent actually runs with, not a local
+   * preference that nothing on the agent side would see.
+   */
+  const [wakeMode, setWakeMode] = useState<'strict' | 'normal'>('normal');
+  useEffect(() => {
+    let alive = true;
+    void (async () => {
+      try {
+        const res = await adminAPI.getConfig(agentId);
+        const stored = String((res?.config || {})['default_wake_mode'] || '');
+        if (alive && (stored === 'strict' || stored === 'normal')) setWakeMode(stored);
+      } catch {
+        /* the menu keeps its default; nothing else depends on this */
+      }
+    })();
+    return () => {
+      alive = false;
+    };
+  }, [agentId]);
+
+  const changeWakeMode = useCallback(
+    async (mode: 'strict' | 'normal') => {
+      setWakeMode(mode);
+      try {
+        const res = await adminAPI.getConfig(agentId);
+        const config = { ...((res?.config || {}) as Record<string, unknown>) };
+        config['default_wake_mode'] = mode;
+        await adminAPI.updateConfig(agentId, config);
+      } catch {
+        /* the agent keeps running what it has; reopening the menu re-reads the file */
+      }
+    },
+    [agentId],
+  );
+
   const enterGoalMode = useCallback(() => {
     const goal = SLASH_COMMANDS.find((cmd) => cmd.id === 'goal');
     if (goal) selectSlashCommand(goal);
@@ -1016,6 +1056,8 @@ export const AgentWebComposer = forwardRef<AgentWebComposerHandle, AgentWebCompo
                   skillsLoading={skillsLoading}
                   onOpenSkills={onOpenSkills}
                   onGoalMode={enterGoalMode}
+                  wakeMode={wakeMode}
+                  onWakeMode={changeWakeMode}
                   autoSpeechEnabled={autoSpeechEnabled}
                   onToggleAutoSpeech={onToggleAutoSpeech}
                   voiceEnabled={voiceEnabled}
