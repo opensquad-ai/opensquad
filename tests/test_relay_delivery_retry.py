@@ -62,3 +62,23 @@ def test_the_task_branch_peeks_and_records_only_on_success():
         "relay.note_seen(origin_host, event_id)"
     )
     assert '"reason": "duplicate"' in src, "a genuine duplicate must still short-circuit"
+
+
+def test_the_group_message_branch_follows_the_same_rule():
+    """The identical bug class: a group message that missed one socket was lost the same way."""
+    src = (_SRC / "opensquad" / "gateway" / "backend" / "app" / "relay_api.py").read_text(encoding="utf-8")
+
+    assert "already_seen(origin_host, message_id, record=False)" in src
+    assert "relay.note_seen(origin_host, message_id)" in src
+    assert src.index("already_seen(origin_host, message_id, record=False)") < src.index(
+        "relay.note_seen(origin_host, message_id)"
+    ), "the key must be recorded after the delivery, not before it"
+
+
+def test_a_loopback_subscription_is_accepted_but_flagged():
+    """The junk entry that filled a live outbox with 401s, and how it will be caught next time."""
+    src = (_SRC / "opensquad" / "gateway" / "backend" / "app" / "relay_api.py").read_text(encoding="utf-8")
+
+    assert "callback_url is a loopback address" in src
+    assert 'logger.warning("[Relay] subscribe for group %s used a loopback callback' in src
+    assert '({"note": loopback_note} if loopback_note else {})' in src
