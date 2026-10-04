@@ -122,21 +122,32 @@ export const TerminalPanel: React.FC<TerminalPanelProps> = ({ agentId, rootPath 
   useEffect(() => {
     if (!agentId || (state !== 'running' && state !== 'starting')) return;
     let stopped = false;
+    let inFlight = false;
     const tick = async () => {
+      // Polls must not overlap. Two responses can come back out of order, and the older one
+      // carries a smaller offset; taking it made the next poll ask for text the panel had already
+      // shown, so the same output was appended again and again.
+      if (inFlight) return;
+      inFlight = true;
       try {
         const res = await terminalAPI.read(agentId, terminalId, offsetRef.current);
         if (stopped || !aliveRef.current) return;
-        if (res?.chunk) {
-          offsetRef.current = Number(res.offset) || offsetRef.current;
+        const nextOffset = Number(res?.offset);
+        if (res?.chunk && !(Number.isFinite(nextOffset) && nextOffset <= offsetRef.current)) {
+          if (Number.isFinite(nextOffset)) offsetRef.current = nextOffset;
           setOutput((prev) => (prev + res.chunk).slice(-MAX_CHARS));
           setState((s) => (s === 'starting' ? 'running' : s));
         }
         if (res && res.running === false && res.offset !== undefined) {
-          offsetRef.current = Number(res.offset) || offsetRef.current;
+          if (Number.isFinite(nextOffset)) {
+            offsetRef.current = Math.max(offsetRef.current, nextOffset);
+          }
           setState('exited');
         }
       } catch {
         /* a failed poll is not fatal: the next one retries */
+      } finally {
+        inFlight = false;
       }
     };
     const timer = window.setInterval(() => void tick(), POLL_MS);
