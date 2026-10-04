@@ -39,8 +39,9 @@ describe('the menu offers both wake modes behind a second-level row', () => {
     expect(MENU).toContain('<Check size={13}');
   });
 
-  it('reports the choice and closes the menu', () => {
-    expect(MENU).toContain('onClick={() => run(() => onWakeMode(option.mode))}');
+  it('reports the choice, narrowing the optional prop in the handler that calls it', () => {
+    expect(MENU).toContain('run(() => onWakeMode(option.mode))');
+    expect(MENU).toContain('if (!onWakeMode) return;');
   });
 
   it('is only shown when the composer wires it up', () => {

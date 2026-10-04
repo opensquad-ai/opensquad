@@ -326,7 +326,12 @@ export const SoloAttachMenu: React.FC<SoloAttachMenuProps> = ({
               key={option.mode}
               type="button"
               data-wake-mode={option.mode}
-              onClick={() => run(() => onWakeMode(option.mode))}
+              onClick={() => {
+                // Narrowed here on purpose: the guard above lives in another closure, where the
+                // optional prop is not narrowed, and TypeScript refuses to call it.
+                if (!onWakeMode) return;
+                run(() => onWakeMode(option.mode));
+              }}
               title={t(option.hintKey)}
               className={`w-full flex items-center gap-2 px-3 py-1.5 text-left text-[12px] transition-colors border-0 cursor-pointer ${
                 wakeMode === option.mode
