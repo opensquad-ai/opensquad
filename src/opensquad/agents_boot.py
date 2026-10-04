@@ -792,6 +792,15 @@ async def main(agent_dir: str, override_port: int | None = None):
     3. Load context.py and call init (Part 1)
     4. Pass the before_input hook to AgentRunner
     """
+    # An agent is the process most likely to be running code older than the working tree — it is
+    # started once and then kept alive for days — so it stamps itself too.
+    try:
+        from opensquad import build_info
+
+        build_info.log_build(logger, what=f"agent {os.path.basename(os.path.normpath(agent_dir))}")
+    except Exception:  # noqa: BLE001 - a stamp must never stop an agent from booting
+        pass
+
     # If the path is relative and contains no path separator, it may be an agent name
     # e.g.: --agent-dir ultimate  or  --agent-dir agents/ultimate
     if not os.path.isabs(agent_dir):

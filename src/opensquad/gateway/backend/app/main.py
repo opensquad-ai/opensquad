@@ -318,6 +318,17 @@ async def lifespan(app: FastAPI):
     """Application lifecycle management"""
     global _app_ready_lite, _app_ready, _db_ready, _db_task
     _startup_log.info("Backend starting up...")
+    # Say which code this process is running, and say it loudly if the files beside it have moved
+    # on: a fix that landed after this process started is not running, and that has been mistaken
+    # for "the fix did not work" more than once.
+    try:
+        from opensquad import build_info
+
+        build_info.log_build(_startup_log, what="gateway")
+        _BUILD_SNAPSHOT.clear()
+        _BUILD_SNAPSHOT.update(build_info.snapshot())
+    except Exception:  # noqa: BLE001 - a stamp must never stop the backend
+        _startup_log.debug("[Build] could not report the build", exc_info=True)
     # P2-9: warm the default ThreadPoolExecutor now so the first WS connection
     # does not pay thread-creation latency (~80ms on Windows) on its
     # asyncio.to_thread session-cache calls. Subsequent connects drop from
@@ -523,6 +534,9 @@ async def lifespan(app: FastAPI):
 # Create FastAPI application
 app = FastAPI(title="OpenSquad API", description="OpenSquad gateway backend API", version="1.0.0", lifespan=lifespan)
 
+# Filled in at startup so /health can answer without walking the source tree on every probe.
+_BUILD_SNAPSHOT: dict[str, object] = {}
+
 # Configure CORS - read allowed origins from system_config.json's gateway.cors_origins
 # (falls back to security.cors_allow_origins for backward compatibility).
 # Defaults to ["http://localhost:5173"] for local development.
@@ -640,11 +654,24 @@ async def ai_user_chat(websocket: WebSocket, agent_id: str):
 @app.get("/health")
 async def health_check():
     """Health check endpoint (returns before full init; check ``ready`` for UI load)."""
+    build = dict(_BUILD_SNAPSHOT)
+    if not build:
+        try:
+            from opensquad import build_info
+
+            build = {
+                "version": build_info.version(),
+                "commit": build_info.commit(),
+                "source_root": str(build_info.SOURCE_ROOT),
+            }
+        except Exception:  # noqa: BLE001 - health must answer even without a stamp
+            build = {}
     return {
         "status": "ok",
         "service": "OpenSquad API",
         "ready_lite": _app_ready_lite,
         "ready": _app_ready,
+        "build": build,
     }
 
 
