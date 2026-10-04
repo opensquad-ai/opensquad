@@ -33,7 +33,7 @@ OpenSquad is a multi-agent framework. Each agent runs as an independent process 
 | Feature Module | Key Content | Documentation Path |
 |---|---|---|
 | System Architecture & Core Modules | Agent Runtime, Session/Memory, Prompt placeholder architecture, built-in tool list, plugin loading mechanism, bootstrap flow | `doc_en/ARCHITECTURE.md` |
-| Multi-Agent Collaboration | Blueprint workflows, Task Board, shared workspace `workspace/collab/`, PM monitoring protocol | `doc_en/COLLABORATION.md` |
+| Multi-Agent Collaboration | Collab cards, the collaboration board (`collab_id`, zones, gates), task window vs group chat, cross-machine relay | `doc_en/COLLABORATION.md` |
 | Agent Management | Directory structure, config fields, profile/memory layout, lifecycle, plugin/agent creation flow, collab cards | `doc_en/agent_management.md` |
 | MCP Dynamic Integration | Add/remove/restart MCP servers at runtime without restarting the agent | `doc_cn/MCP_DYNAMIC_SETUP.md` (Chinese only) |
 | External Resource Download Conventions | Landing path conventions when downloading Skills/MCPs/files from the internet; writing to root or framework directories is prohibited | `doc_cn/DOWNLOAD_CONVENTIONS.md` (Chinese only) |

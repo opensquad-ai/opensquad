@@ -5,9 +5,13 @@
 OpenSquad uses a **Collab Card-driven** collaboration model. Agents coordinate through:
 1. **Group chat** — primary communication channel (natural language)
 2. **Collab Card** — structured workflow protocol defining roles, phases, and rules
-3. **Shared File Workspace** — `workspace/collab/` directory for cross-agent visibility
+3. **Collaboration Board** — one board per collaboration, held by the machine that owns the group
+   (`collab_board.py`), keyed by a 6-character `collab_id` and reached through the board tools
 
-There is no centralized blackboard or shared database. State is distributed across agent notes in the shared file workspace.
+The board is centralized per machine, not a pile of agent notes: requirements, plan, tasks, status
+and discussion are items on it, every agent reads and writes it through the same tools, and a
+collaboration owned by a paired machine is reached over the relay. See `COLLAB_BOARD_DESIGN.md`
+for the storage, ownership and forwarding rules.
 
 ---
 
@@ -17,7 +21,7 @@ Collab cards are stored as flat files in `collab_cards/*.md`. Each card defines:
 - **Suggested Roles** (advisory only — PM decides who to actually invite)
 - **Workflow phases** (Planning, Execution, Review, User Acceptance)
 - **Communication rules** (@mention, sleep/wake patterns)
-- **Shared file workspace rules** (PM responsibilities)
+- **Board rules** (who writes which zone, and when)
 
 Currently available cards (in `src/collab_cards/`):
 - `software_dev_team` — full software development lifecycle (PM / Developer / QA)
@@ -78,19 +82,33 @@ The PM agent drives collaboration autonomously:
 
 ---
 
-## Shared File Workspace (`workspace/collab/`)
+## Collaboration Board
 
-### PM Manual File
-PM should create and maintain `workspace/collab/pm_tasks.md` manually (via `filesystem.write_file`), containing:
-- Requirements summary and acceptance criteria
-- Member assignments (who is responsible for what)
-- Current phase (Planning / Execution / Review / Acceptance)
-- Key decisions and change log
+Each collaboration owns a board (a `collab_id`), and the board is the collaboration's memory: the
+requirements, the plan, the task assignments, the progress and the discussion all live on it, as
+items in zones (`requirement` / `plan` / `task` / `status` / `discussion`).
 
-### PM Monitoring Protocol
-1. PM periodically reads worker files via `filesystem.read_file("workspace/collab/{agent_id}_tasks.md")`
-2. PM reads ALL collab files before phase transitions
-3. PM reads ALL collab files before writing the final report to the user
+- **Ownership**: the board belongs to the machine that owns the group, and the board tools resolve
+  that owner for the `collab_id` — so an agent on a paired machine reads and writes the same board,
+  over the relay, rather than a copy of its own.
+- **Reading**: `board_view(collab_id)` for the whole board, `board_list(...)` to filter,
+  `board_list_tasks(collab_id)` for the assignments, `board_list_my_tasks(collab_id)` for the
+  current agent's own work.
+- **Writing**: `board_update(...)` for an entry, `assign_task(...)` to create a task item with its
+  checklist, `update_task_progress(...)` for a subtask, `board_post_public_discussion(...)` for a
+  decision the whole team should see.
+- **Approvals**: the four gates (需要 / 方案 / 分配 / 验收) are items of type `approval` on the
+  board. The user approves them in the task window, and `assign_task` refuses until the first two
+  are approved.
+
+Read the board rather than a private note before a phase transition, and post decisions to it
+instead of only saying them in chat — a message scrolls away, a board item does not.
+
+### Structured task items
+
+`assign_task` writes a task item whose `extra` carries the structured subtasks (id, title, status,
+progress, note), and `update_task_progress` moves one subtask at a time. The item's rendered content
+is generated from those subtasks, so the checklist markers are the same facts, not a second copy.
 
 ---
 
@@ -130,19 +148,19 @@ Defined in `collab_cards/software_dev_team.md`.
 4. PM assigns tasks via @mention in group chat
 
 ### Phase 2: Execution
-1. Workers read PM's assignments in group chat
-2. Workers maintain their own task notes in `workspace/collab/` (via `filesystem.write_file`)
-3. Workers implement, update notes as progress is made
+1. Workers read PM's assignments in group chat, and the task items on the board
+2. Workers move their own subtasks with `update_task_progress(collab_id, item_key, subtask_id, ...)`
+3. Workers implement, reporting progress on the board as it happens
 4. Workers report completion/blockers in group chat
-5. PM monitors progress by reading `workspace/collab/` files
+5. PM follows progress by reading the board (`board_list_tasks`), not by polling files
 
 ### Phase 3: Review & Iteration
-1. PM reviews completed work (reads code, checks output, reads collab files)
-2. Approved: PM confirms in group chat
+1. PM reviews completed work (reads code, checks output, reads the board)
+2. Approved: PM confirms in group chat and moves the subtask to done
 3. Rejected: PM provides feedback, worker fixes and resubmits
 
 ### Phase 4: User Acceptance
-1. PM reviews all completed work and all collab files
+1. PM reviews all completed work and the board
 2. PM reports to user via `<to_user>` with summary
 3. User approved: PM calls `end_collaboration(card="software_dev_team")` to close
 4. User requests changes: back to Phase 2
@@ -177,7 +195,7 @@ For PM agents, the recommended pattern is:
 | Protocol storage | `blueprints/{name}/BLUEPRINT.md` (subdirectory) | `collab_cards/{name}.md` (flat file) |
 | Role assignment | `roles` field (implied mandatory) | `suggested_roles` (advisory, PM decides) |
 | members in start | Required list | Optional — PM decides via group chat |
-| State sharing | Blackboard (ProjectBoard) in `workspace/` | Shared file workspace (`workspace/collab/`) |
+| State sharing | Blackboard (ProjectBoard) in `workspace/` | Collaboration Board, per machine (`collab_board.py`) |
 | Team registry | `workspace/TEAM.md` manual file | `get_team_status()` real-time API |
-| PM visibility | Had to parse blackboard | Reads files in `workspace/collab/` |
-| Task persistence | In-memory only | Files in `workspace/collab/` (manually maintained) |
+| PM visibility | Had to parse blackboard | `board_view` / `board_list_tasks` |
+| Task persistence | In-memory only | Board items, persisted on the owning machine |

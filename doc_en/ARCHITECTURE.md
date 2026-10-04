@@ -59,7 +59,7 @@ OpenSquad is a multi-agent framework where each agent runs as an independent pro
 
 | Module | Responsibility |
 |--------|---------------|
-| `skill_loader.py` | Loads SKILL.md files (YAML frontmatter + Markdown). Manages Task Board (`_task_board` dict), auto-syncs to `workspace/collab/`. |
+| `skill_loader.py` | Loads SKILL.md files (YAML frontmatter + Markdown). Collaboration state lives on the collaboration board (`collab_board.py`), not here. |
 | `plugin_api.py` | Plugin decorator API: `@register`, `@on_event`, `@tool`, etc. Defines `ToolPlugin`, `HookPlugin`, `AdapterPlugin` base concepts. |
 | `sdk.py` | Public SDK surface for plugins to interact with the agent runtime. |
 

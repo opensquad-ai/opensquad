@@ -59,7 +59,7 @@ OpenSquad 是一个多智能体框架，每个 Agent 作为独立进程运行，
 
 | 模块 | 职责 |
 |------|------|
-| `skill_loader.py` | 加载 SKILL.md 文件（YAML frontmatter + Markdown）。管理任务板（`_task_board` 字典），自动同步到 `workspace/collab/`。 |
+| `skill_loader.py` | 加载 SKILL.md 文件（YAML frontmatter + Markdown）。协作状态存放在协作看板（`collab_board.py`）上，不在这里。 |
 | `plugin_api.py` | 插件装饰器 API：`@register`、`@on_event`、`@tool` 等。定义 `ToolPlugin`、`HookPlugin`、`AdapterPlugin` 基础概念。 |
 | `sdk.py` | 插件与 Agent 运行时交互的公开 SDK 接口。 |
 
