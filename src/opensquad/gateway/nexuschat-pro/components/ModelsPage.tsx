@@ -1495,25 +1495,31 @@ const ModelsPage: React.FC<ModelsPageProps> = ({ onBack }) => {
         </div>
       </div>
 
-      {/* Vendor tag filter */}
+      {/* Provider filter: one select instead of a tag per vendor — the tag row wrapped onto
+          several lines as soon as there were more than a handful of providers. */}
       {allVendors.length > 0 && (
-        <div className="px-6 py-2 border-b border-border bg-panel/30 flex items-center justify-center gap-2 shrink-0 flex-wrap">
+        <div className="px-6 py-2 border-b border-border bg-panel/30 flex items-center gap-2 shrink-0">
           <span className="text-xs text-textMuted shrink-0">供应商 (Provider):</span>
-          {allVendors.map(v => (
-            <button
-              key={v}
-              onClick={() => selectVendor(v)}
-              className={`px-2 py-0.5 rounded-md text-xs border transition-colors ${
-                activeVendor === v
-                  ? 'bg-primary/15 text-primary border-primary/30'
-                  : 'text-textMuted border-border hover:border-primary/30 hover:text-textMain'
-              }`}
-            >
-              {v}
-            </button>
-          ))}
+          <select
+            data-testid="provider-filter"
+            value={activeVendor ?? ''}
+            onChange={(e) => (e.target.value ? selectVendor(e.target.value) : setActiveVendor(null))}
+            className="px-2 py-1 rounded-lg text-xs md:text-sm bg-bgLight border border-border text-textMain focus:outline-none focus:border-primary/50 max-w-[16rem]"
+          >
+            <option value="">
+              {t('modelsPage.allProviders')} ({cards.length})
+            </option>
+            {allVendors.map((v) => (
+              <option key={v} value={v}>
+                {v} ({cards.filter((c) => (c.provider || '') === v).length})
+              </option>
+            ))}
+          </select>
           {activeVendor && (
-            <button onClick={() => setActiveVendor(null)} className="text-xs text-textMuted hover:text-red-400 ml-1 transition-colors">
+            <button
+              onClick={() => setActiveVendor(null)}
+              className="text-xs text-textMuted hover:text-red-400 transition-colors"
+            >
               Clear
             </button>
           )}
