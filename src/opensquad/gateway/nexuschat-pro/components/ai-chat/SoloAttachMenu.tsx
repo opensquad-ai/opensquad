@@ -68,6 +68,7 @@ export const SoloAttachMenu: React.FC<SoloAttachMenuProps> = ({
   ];
   const [open, setOpen] = useState(false);
   const [skillsOpen, setSkillsOpen] = useState(false);
+  const [wakeOpen, setWakeOpen] = useState(false);
   const [menuPos, setMenuPos] = useState<{ bottom: number; left: number } | null>(null);
   const rootRef = useRef<HTMLDivElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
@@ -158,6 +159,7 @@ export const SoloAttachMenu: React.FC<SoloAttachMenuProps> = ({
   // Stay mounted briefly after close so the pop-out animation can play.
   const menuMounted = usePopMenuMounted(open);
   const skillsMounted = usePopMenuMounted(skillsOpen);
+  const wakeMounted = usePopMenuMounted(wakeOpen);
 
   const attachItems = [
     { key: 'files', label: t('aiChat.attach.uploadFiles'), icon: Paperclip, onClick: onUploadFiles },
@@ -188,7 +190,7 @@ export const SoloAttachMenu: React.FC<SoloAttachMenuProps> = ({
             <button
               key={item.key}
               type="button"
-              onMouseEnter={() => setSkillsOpen(false)}
+              onMouseEnter={() => { setSkillsOpen(false); setWakeOpen(false); }}
               onClick={() => run(item.onClick)}
               className="w-full flex items-center gap-2 px-3 py-1.5 text-left text-[12px] text-textMain hover:bg-black/[0.06] dark:hover:bg-white/[0.10] transition-colors border-0 bg-transparent cursor-pointer"
             >
@@ -205,7 +207,7 @@ export const SoloAttachMenu: React.FC<SoloAttachMenuProps> = ({
             {voiceEnabled && onOpenVoice ? (
               <button
                 type="button"
-                onMouseEnter={() => setSkillsOpen(false)}
+                onMouseEnter={() => { setSkillsOpen(false); setWakeOpen(false); }}
                 onClick={() => run(onOpenVoice)}
                 className={`w-full flex items-center gap-2 px-3 py-1.5 text-left text-[12px] transition-colors border-0 cursor-pointer ${
                   voiceActive
@@ -226,7 +228,7 @@ export const SoloAttachMenu: React.FC<SoloAttachMenuProps> = ({
             {onToggleAutoSpeech && (
               <button
                 type="button"
-                onMouseEnter={() => setSkillsOpen(false)}
+                onMouseEnter={() => { setSkillsOpen(false); setWakeOpen(false); }}
                 onClick={() => onToggleAutoSpeech(!autoSpeechEnabled)}
                 className={`w-full flex items-center gap-2 px-3 py-1.5 text-left text-[12px] transition-colors border-0 cursor-pointer ${
                   autoSpeechEnabled
@@ -248,7 +250,7 @@ export const SoloAttachMenu: React.FC<SoloAttachMenuProps> = ({
         {onGoalMode ? (
           <button
             type="button"
-            onMouseEnter={() => setSkillsOpen(false)}
+            onMouseEnter={() => { setSkillsOpen(false); setWakeOpen(false); }}
             onClick={() => run(onGoalMode)}
             className="w-full flex items-center gap-2 px-3 py-1.5 text-left text-[12px] text-textMain hover:bg-black/[0.06] dark:hover:bg-white/[0.10] transition-colors border-0 bg-transparent cursor-pointer"
             title={t('aiChat.attach.goalModeHint')}
@@ -260,42 +262,40 @@ export const SoloAttachMenu: React.FC<SoloAttachMenuProps> = ({
           </button>
         ) : null}
         {onWakeMode ? (
-          <>
-            <div className="my-0.5 h-px bg-border/60" />
-            <div className="px-3 pt-1 pb-0.5 text-[10px] font-semibold tracking-wide text-textMuted/70">
-              {t('aiChat.attach.wakeMode')}
-            </div>
-            {wakeOptions.map((option) => (
-              <button
-                key={option.mode}
-                type="button"
-                data-wake-mode={option.mode}
-                onMouseEnter={() => setSkillsOpen(false)}
-                onClick={() => run(() => onWakeMode(option.mode))}
-                title={t(option.hintKey)}
-                className={`w-full flex items-center gap-2 px-3 py-1.5 text-left text-[12px] transition-colors border-0 cursor-pointer ${
-                  wakeMode === option.mode
-                    ? 'bg-black/[0.05] dark:bg-white/[0.08] text-textMain'
-                    : 'bg-transparent text-textMain hover:bg-black/[0.06] dark:hover:bg-white/[0.10]'
-                }`}
-              >
-                <span className="w-4 shrink-0 flex items-center justify-center">
-                  <Bell size={14} className="text-textMuted" />
-                </span>
-                <span className="flex-1 min-w-0 truncate font-medium">{t(option.labelKey)}</span>
-                {wakeMode === option.mode ? (
-                  <Check size={13} className="text-blue-600 dark:text-blue-400" />
-                ) : null}
-              </button>
-            ))}
-          </>
+          <button
+            type="button"
+            data-testid="wake-mode-row"
+            onMouseEnter={() => {
+              if (suppressHoverRef.current) return;
+              setWakeOpen(true);
+              setSkillsOpen(false);
+            }}
+            onClick={() => {
+              setWakeOpen((v) => !v);
+              setSkillsOpen(false);
+            }}
+            className={`w-full flex items-center gap-2 px-3 py-1.5 text-left text-[12px] transition-colors border-0 cursor-pointer ${
+              wakeOpen
+                ? 'bg-black/[0.06] dark:bg-white/[0.08] text-textMain'
+                : 'bg-transparent text-textMain hover:bg-black/[0.06] dark:hover:bg-white/[0.10]'
+            }`}
+          >
+            <span className="w-4 shrink-0 flex items-center justify-center">
+              <Bell size={14} className="text-textMuted" />
+            </span>
+            <span className="flex-1 min-w-0 truncate font-medium">{t('aiChat.attach.wakeMode')}</span>
+            <span className="shrink-0 text-[11px] text-textMuted/80">
+              {t(wakeMode === 'strict' ? 'aiChat.attach.wakeModeStrict' : 'aiChat.attach.wakeModeNormal')}
+            </span>
+            <ChevronRight size={13} className="text-textMuted/50" />
+          </button>
         ) : null}
         <button
           type="button"
           onMouseEnter={() => {
             if (suppressHoverRef.current) return;
             setSkillsOpen(true);
-            onOpenSkills?.();
+            setWakeOpen(false);
           }}
           onClick={() => {
             setSkillsOpen((v) => !v);
@@ -314,6 +314,37 @@ export const SoloAttachMenu: React.FC<SoloAttachMenuProps> = ({
           <ChevronRight size={13} className="text-textMuted/50" />
         </button>
       </div>
+
+      {wakeMounted && (
+        <div
+          className={`min-w-[176px] origin-left rounded-xl border border-border ${POPOVER_SURFACE_CLASS} ${
+            wakeOpen ? 'os-pop-menu' : 'os-pop-menu-out'
+          }`}
+        >
+          {wakeOptions.map((option) => (
+            <button
+              key={option.mode}
+              type="button"
+              data-wake-mode={option.mode}
+              onClick={() => run(() => onWakeMode(option.mode))}
+              title={t(option.hintKey)}
+              className={`w-full flex items-center gap-2 px-3 py-1.5 text-left text-[12px] transition-colors border-0 cursor-pointer ${
+                wakeMode === option.mode
+                  ? 'bg-black/[0.05] dark:bg-white/[0.08] text-textMain'
+                  : 'bg-transparent text-textMain hover:bg-black/[0.06] dark:hover:bg-white/[0.10]'
+              }`}
+            >
+              <span className="w-4 shrink-0 flex items-center justify-center">
+                <Bell size={14} className="text-textMuted" />
+              </span>
+              <span className="flex-1 min-w-0 truncate font-medium">{t(option.labelKey)}</span>
+              {wakeMode === option.mode ? (
+                <Check size={13} className="text-blue-600 dark:text-blue-400" />
+              ) : null}
+            </button>
+          ))}
+        </div>
+      )}
 
       {skillsMounted && (
         <div
