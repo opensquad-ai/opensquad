@@ -254,8 +254,38 @@ async def _build_email_agent_id_map() -> dict[str, str]:
     return mapping
 
 
-def _member_info(user: User, status: str | None = None, agent_id: str | None = None) -> GroupMemberInfo:
-    remote_label = _remote_label_for(user)
+def _relay_member_origins(group_id: str) -> dict[str, str]:
+    """Which group members are on a paired machine, and where — from the relay subscriptions.
+
+    A member that lives elsewhere has no socket on this gateway, so its local status is always
+    offline, and the row reads "Offline" while the agent is in fact working: its messages arrive
+    over the relay. The subscription is this machine's own runtime record of that, and it is exact
+    — subscribe() is called with the member's user id on this gateway. The origin record written at
+    registration only catches one registration path, which is how a remote agent could still be
+    shown as offline.
+
+    Returns ``user_id -> host`` (host may be empty; the caller falls back to a generic label).
+    """
+    origins: dict[str, str] = {}
+    try:
+        from opensquad import relay_link
+
+        for entry in relay_link.subscribers(group_id):
+            user_id = str(entry.get("user_id") or "")
+            if user_id:
+                origins[user_id] = str(entry.get("host") or "")
+    except Exception:
+        return {}
+    return origins
+
+
+def _member_info(
+    user: User,
+    status: str | None = None,
+    agent_id: str | None = None,
+    remote_label: str | None = None,
+) -> GroupMemberInfo:
+    label = _remote_label_for(user) or remote_label
     return GroupMemberInfo(
         id=user.id,
         name=user.name,
@@ -263,8 +293,8 @@ def _member_info(user: User, status: str | None = None, agent_id: str | None = N
         status=status if status is not None else user.status.value,
         is_agent=_is_agent_email(getattr(user, "email", None)),
         agent_id=agent_id,
-        is_remote=remote_label is not None,
-        remote_label=remote_label,
+        is_remote=label is not None,
+        remote_label=label,
     )
 
 
@@ -1052,6 +1082,7 @@ async def get_group(
     settings = settings_result.scalar_one_or_none()
 
     email_agent_id_map = await _build_email_agent_id_map()
+    relay_origins = _relay_member_origins(group_id)
     member_statuses = {}
     members_info = []
     avatar_dirty = False
@@ -1062,7 +1093,12 @@ async def get_group(
         member_agent_id = None
         if _is_agent_email(getattr(member, "email", None)):
             member_agent_id = email_agent_id_map.get(member.email or "")
-        info = _member_info(member, member_statuses[member.id], agent_id=member_agent_id)
+        info = _member_info(
+            member,
+            member_statuses[member.id],
+            agent_id=member_agent_id,
+            remote_label=relay_origins.get(member.id) or None,
+        )
         if (member.avatar or "") != before:
             avatar_dirty = True
         members_info.append(info)
