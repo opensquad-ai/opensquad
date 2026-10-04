@@ -173,17 +173,16 @@ class TestToolCallStrategySelector:
         assert isinstance(strategy, NativeToolCallStrategy)
 
     def test_select_auto_mode_unknown_model(self):
-        """Test auto mode falls back to XML for unknown models"""
+        """Test auto mode assumes Function Calling for unknown models"""
         config = {"model": {"provider": "unknown", "model_name": "unknown-model", "tool_call_mode": "auto"}}
         mock_registry = Mock()
 
         strategy = ToolCallStrategySelector.select(config, mock_registry)
 
-        # Unknown model should fall back to XML
-        assert isinstance(strategy, XMLToolCallStrategy)
+        assert isinstance(strategy, NativeToolCallStrategy)
 
-    def test_select_native_unknown_openai_compat_falls_back_xml(self):
-        """dots / OpenRouter free cards are unknown; native still falls back to XML."""
+    def test_select_native_unknown_openai_compat_uses_native(self):
+        """dots / OpenRouter free cards are unknown; native stays native."""
         config = {
             "model": {
                 "api_protocol": "openai_compat",
@@ -195,8 +194,8 @@ class TestToolCallStrategySelector:
 
         strategy = ToolCallStrategySelector.select(config, mock_registry)
 
-        assert isinstance(strategy, XMLToolCallStrategy)
-        assert strategy.get_strategy_name() == "XML"
+        assert isinstance(strategy, NativeToolCallStrategy)
+        assert strategy.get_strategy_name() == "Native-FC"
 
     def test_select_default_auto_mode(self):
         """Test default mode is auto when not specified"""
@@ -228,9 +227,10 @@ class TestToolCallStrategySelector:
         """Test FC detection for Gemini"""
         assert ToolCallStrategySelector._supports_function_calling("google", "gemini-1.5-pro")
 
-    def test_does_not_support_function_calling_unknown(self):
-        """Test FC detection returns False for unknown models"""
-        assert not ToolCallStrategySelector._supports_function_calling("unknown", "unknown-model")
+    def test_unknown_model_is_assumed_to_support_function_calling(self):
+        """An unlisted name is assumed capable; a listed-unsupported one is not."""
+        assert ToolCallStrategySelector._supports_function_calling("unknown", "unknown-model")
+        assert not ToolCallStrategySelector._supports_function_calling("openai_compat", "moonshot-v1-128k")
 
 
 class TestNativeFCToolCallParsing:

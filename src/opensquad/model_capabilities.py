@@ -345,12 +345,11 @@ class ModelCapabilityRegistry:
                 notes="Unknown Gemini model, assuming Function Calling support",
             )
         else:
-            # OpenAI-compatible APIs default to no Function Calling support
             return ModelCapability(
-                supports_function_calling=False,
+                supports_function_calling=True,
                 supports_streaming=True,
                 function_calling_format="openai",
-                notes="Unknown model, assuming no Function Calling support (use XML fallback)",
+                notes="Unknown model, assuming Function Calling support",
             )
 
     @classmethod

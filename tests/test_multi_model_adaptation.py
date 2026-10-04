@@ -83,14 +83,17 @@ class TestModelCapabilityRegistry:
 
     def test_unknown_model_default(self):
         """测试未知模型的默认行为"""
-        # OpenAI-compatible 未知模型，默认不支持
-        assert supports_function_calling("unknown-model-v1", "openai") is False
+        # OpenAI-compatible 未知模型，默认按支持处理
+        assert supports_function_calling("unknown-model-v1", "openai") is True
 
         # Claude 未知模型，假设支持（保守策略）
         assert supports_function_calling("claude-4-unknown", "claude") is True
 
         # Google 未知模型，假设支持（保守策略）
         assert supports_function_calling("gemini-2.0-unknown", "google") is True
+
+        # 能力表里明确标注不支持的模型，仍然不支持
+        assert supports_function_calling("moonshot-v1-128k", "openai_compat") is False
 
     def test_get_model_capability(self):
         """测试获取模型能力配置"""
@@ -241,12 +244,25 @@ class TestDeclaredFunctionCalling:
 
         assert isinstance(strategy, NativeToolCallStrategy)
 
-    def test_without_a_declaration_an_unknown_model_falls_back(self):
-        from opensquad.tool_call_strategy import XMLToolCallStrategy
+    def test_an_unknown_model_defaults_to_native(self):
+        from opensquad.tool_call_strategy import NativeToolCallStrategy
 
         strategy = self._select(
             {
                 "model_name": "vendor-model-preview",
+                "api_protocol": "openai_compat",
+                "tool_call_mode": "native",
+            }
+        )
+
+        assert isinstance(strategy, NativeToolCallStrategy)
+
+    def test_a_model_the_table_lists_as_unsupported_still_falls_back(self):
+        from opensquad.tool_call_strategy import XMLToolCallStrategy
+
+        strategy = self._select(
+            {
+                "model_name": "moonshot-v1-128k",
                 "api_protocol": "openai_compat",
                 "tool_call_mode": "native",
             }

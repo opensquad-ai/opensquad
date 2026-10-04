@@ -234,7 +234,7 @@ async def test_session_switch_promotes_default_for_other_panes(monkeypatch):
     assert session_model.current_api_card(api_b) == "stepaudio-2.5-chat"
 
 
-def test_reselect_tool_call_strategy_unknown_dots_is_xml():
+def test_reselect_tool_call_strategy_unknown_dots_is_native():
     from opensquad.model_switch import reselect_tool_call_strategy
 
     registry = MagicMock()
@@ -252,7 +252,7 @@ def test_reselect_tool_call_strategy_unknown_dots_is_xml():
 
     reselect_tool_call_strategy(runner, new_model)
 
-    assert runner.tool_call_strategy.get_strategy_name() == "XML"
+    assert runner.tool_call_strategy.get_strategy_name() == "Native-FC"
     assert context_builder.tool_call_strategy is runner.tool_call_strategy
 
 
