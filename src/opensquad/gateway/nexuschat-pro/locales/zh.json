@@ -832,6 +832,9 @@
     "approve": "批准",
     "reject": "拒绝",
     "pairedTitle": "已配对的机器",
+    "lastSeen": "已连接过",
+    "neverUsed": "从未连接",
+    "neverUsedHint": "这台机器的令牌从未成功通过校验。解除配对不可恢复：如果正在用的其实是它，撤销后只能重新配对。",
     "revoke": "解除配对"
   },
   "groupAccess": {

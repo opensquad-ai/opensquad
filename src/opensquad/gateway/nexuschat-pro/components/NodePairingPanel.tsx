@@ -22,6 +22,8 @@ interface Peer {
   id: string;
   name: string;
   scopes: string[];
+  /** When this peer's token last authenticated; null means it never has. */
+  last_seen_at?: number | null;
   revoked: boolean;
 }
 
@@ -168,6 +170,21 @@ export const NodePairingPanel: React.FC<Props> = ({ host = '', groupId = '' }) =
             {paired.map((p) => (
               <div key={p.id} className="flex items-center gap-1.5 rounded-lg border border-border bg-bgLight px-2 py-1.5">
                 <span className="min-w-0 flex-1 truncate text-[12px] text-textMain">{p.name}</span>
+                {/* Whether this token ever authenticated is what tells a live pairing from a dead
+                    one — and the reason it is shown here. Three peers with the same name and no
+                    way to tell them apart is how a working one got unpaired by mistake, and an
+                    unpaired token cannot be restored: the machine has to pair again. */}
+                <span
+                  data-testid="peer-last-seen"
+                  className={`shrink-0 text-[10px] ${p.last_seen_at ? 'text-textMuted' : 'text-amber-500'}`}
+                  title={
+                    p.last_seen_at
+                      ? new Date(p.last_seen_at * 1000).toLocaleString()
+                      : t('nodePairing.neverUsedHint')
+                  }
+                >
+                  {p.last_seen_at ? t('nodePairing.lastSeen') : t('nodePairing.neverUsed')}
+                </span>
                 <button
                   type="button"
                   title={t('nodePairing.revoke')}
