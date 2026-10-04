@@ -39,13 +39,14 @@ export const LongTextFold: React.FC<LongTextFoldProps> = ({ text, limit = LONG_T
 
   return (
     <div data-testid="long-text" data-expanded="0">
-      <div className="relative">
-        <div className="whitespace-pre-wrap break-words">{foldedText(text, limit)}</div>
-        <div
-          aria-hidden="true"
-          data-testid="long-text-fade"
-          className="pointer-events-none absolute inset-x-0 bottom-0 h-8 blur-[1.5px] [mask-image:linear-gradient(to_bottom,black,transparent)]"
-        />
+      {/* The fade has to sit on the text itself: a mask or blur on an empty overlay blurs nothing.
+          `os-thought-tail` is the same graduated mask the reasoning panel fades out with, so the
+          tail dims into the bubble's own surface in either appearance rather than into a colour. */}
+      <div
+        data-testid="long-text-fade"
+        className="os-thought-tail blur-[0.6px] whitespace-pre-wrap break-words"
+      >
+        {foldedText(text, limit)}
       </div>
       <button
         type="button"
