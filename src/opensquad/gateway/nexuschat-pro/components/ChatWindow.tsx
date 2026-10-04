@@ -30,6 +30,8 @@ import { wrapMarkdownTables } from '../utils/markdownTables';
 import { useMobileChatSwipe } from '../hooks/useMobileChatSwipe';
 import { formatLocalClock, parseTimestampMs } from '../utils/time';
 
+import { claimRestore, recallScroll, releaseRestore, rememberScroll } from '../utils/chatScrollMemory';
+
 // 全局消息位置记忆缓存：groupId -> { messageId, scrollTop }
 // 使用模块级变量，确保组件重新挂载后缓存仍然有效
 const globalScrollPositionCache: Record<string, { messageId: string; scrollTop: number }> = {};
@@ -1746,6 +1748,45 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
       saveScrollPosition();
     };
   }, [group.id]); // 当切换群组时触发
+
+  // Restore the offset once this conversation has rendered. The effect above restores only when
+  // the recorded message is already in the DOM, which it is not on the frame you switch back, so
+  // nothing ran and the container stayed at scrollTop 0 — the top of the history.
+  useLayoutEffect(() => {
+    if (messages.length === 0) return;
+    const container = scrollContainerRef.current;
+    if (!container) return;
+    if (!claimRestore(group.id)) return;
+    const remembered = recallScroll(group.id);
+    if (remembered === null) return;
+    container.scrollTop = remembered;
+  }, [group.id, messages.length]);
+
+  // Record the offset as the user reads. Only after the view has settled: the scroll events a
+  // switch produces report 0, and writing those would overwrite what we just restored.
+  useEffect(() => {
+    const container = scrollContainerRef.current;
+    if (!container) return;
+    let frame = 0;
+    const save = () => {
+      if (isRestoringPositionRef.current || !hasRestoredPositionRef.current) return;
+      rememberScroll(group.id, container.scrollTop);
+    };
+    const onScroll = () => {
+      if (frame) return;
+      frame = window.requestAnimationFrame(() => {
+        frame = 0;
+        save();
+      });
+    };
+    container.addEventListener('scroll', onScroll, { passive: true });
+    return () => {
+      if (frame) window.cancelAnimationFrame(frame);
+      container.removeEventListener('scroll', onScroll);
+      save();
+      releaseRestore(group.id);
+    };
+  }, [group.id]);
 
   // 异步 fallback：缓存命中 + 缓存的消息不在当前 DOM 中
   // （即消息在更早的历史里，需要先把历史加载进来）。
