@@ -30,7 +30,11 @@ def test_gate_states_is_a_board_operation():
 def test_the_tool_asks_with_the_keyword_so_the_hint_resolves():
     tool = (_SRC / "opensquad" / "tools" / "collaboration.py").read_text(encoding="utf-8")
 
-    assert "gate_states(collab_id=collab_id)" in tool
+    # The dispatcher reads collab_id out of the keyword arguments to work out which machine owns the
+    # board, so the gate check must pass it by name — a positional call quietly reads the local
+    # board instead, which is how every cross-machine gate once read as missing.
+    assert "gate_report(collab_id=collab_id)" in tool
+    assert "gate_report(collab_id)" not in tool
     assert "gate_states(collab_id)" not in tool
 
 
