@@ -29,12 +29,15 @@ function readLocalized(lang: string): { greetings: GreetingSets; tips: string[] 
     if (Array.isArray(v) && (v as unknown[]).length) return v as T;
     return fallback;
   };
-  const greetings = read<GreetingSets>('newChatLanding', {
-    morning: [],
-    afternoon: [],
-    evening: [],
-    lateNight: [],
-  });
+  // Each period is its own array. Asking for the parent object and expecting something array-like
+  // made every list fall back to empty, so the landing hero rendered its title as an empty <h1>
+  // while the tip — read as a plain array — kept showing.
+  const greetings: GreetingSets = {
+    morning: read<string[]>('newChatLanding.morning', []),
+    afternoon: read<string[]>('newChatLanding.afternoon', []),
+    evening: read<string[]>('newChatLanding.evening', []),
+    lateNight: read<string[]>('newChatLanding.lateNight', []),
+  };
   const tips = read<string[]>('newChatLanding.tips', []);
   return { greetings, tips };
 }
