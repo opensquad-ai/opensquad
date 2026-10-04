@@ -16,16 +16,16 @@ v4.1 changes:
 
 import logging
 import os
-import threading
 from typing import Any
 
 logger = logging.getLogger(__name__)
 
 # Serialize read-modify-write sequences on collab_board items.
-# collab_board._LOCK only protects single file I/O, not cross-function
-# sequences like: list_items() -> modify extra -> upsert_item().
-# Without this, concurrent agents updating subtasks can overwrite each other.
-_collab_rw_lock = threading.Lock()
+# collab_board's lock is only held for single file I/O, not for cross-function sequences like
+# list_items() -> modify extra -> upsert_item(). Those sequences now take collab_board's own file
+# lock for their whole duration (board_write_lock), so they are atomic for every process on this
+# machine; a thread lock here only ever serialised the threads of one process, which is how two
+# agents updating different subtasks of the same item could lose one of the updates.
 
 # ---------------------------------------------------------------------------
 # Paths
@@ -1146,7 +1146,7 @@ def assign_task(
       )
     """
     try:
-        from ..collab_board import active_tasks_for, get_task, pending_members, upsert_item
+        from ..collab_board import active_tasks_for, board_write_lock, get_task, pending_members, upsert_item
 
         # The gates are the user's approvals: assigning work is phase 3, so the first
         # two must be approved first. Refuse, and say how to get there.
@@ -1252,10 +1252,10 @@ def assign_task(
 
         content = "\n".join(content_lines).strip()
 
-        # Hold the read-modify-write lock so that a concurrent add_subtask /
-        # update_task_progress in the same process cannot interleave with this
-        # whole-item overwrite (which would silently wipe worker progress).
-        with _collab_rw_lock:
+        # Hold the board's write lock so that a concurrent add_subtask /
+        # update_task_progress — in this or any other agent process — cannot interleave
+        # with this whole-item overwrite (which would silently wipe worker progress).
+        with board_write_lock():
             item = upsert_item(
                 collab_id=collab_id,
                 agent_id=worker_id,
@@ -1339,11 +1339,11 @@ def add_subtask(
       )
     """
     try:
-        from ..collab_board import list_items, upsert_item
+        from ..collab_board import board_write_lock, list_items, upsert_item
 
-        # Acquire the read-modify-write lock to prevent concurrent subtask updates
-        # from overwriting each other (collab_board._LOCK only protects single I/O).
-        with _collab_rw_lock:
+        # The whole read-modify-write runs under the board's own file lock, so two agent
+        # processes cannot each read subtasks, then write, and lose one of the updates.
+        with board_write_lock():
             items = list_items(collab_id=collab_id)
             target = next((i for i in items if str(i.get("item_key", "")) == item_key), None)
             if not target:
@@ -1453,11 +1453,11 @@ def update_task_progress(
     }
 
     try:
-        from ..collab_board import list_items, upsert_item
+        from ..collab_board import board_write_lock, list_items, upsert_item
 
-        # Acquire the read-modify-write lock to prevent concurrent subtask updates
-        # from overwriting each other.
-        with _collab_rw_lock:
+        # The whole read-modify-write runs under the board's own file lock, so two agent
+        # processes cannot each read subtasks, then write, and lose one of the updates.
+        with board_write_lock():
             items = list_items(collab_id=collab_id)
             target = next((i for i in items if str(i.get("item_key", "")) == item_key), None)
             if not target:
