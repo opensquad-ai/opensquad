@@ -25,6 +25,8 @@ import {
 } from './ProposeOptionsCard';
 import { CollabTaskCard, parseCollabTask, openCollabTaskWindow } from './CollabTaskCard';
 import { TaskStrip } from './TaskStrip';
+import { LongTextFold } from './LongTextFold';
+import { shouldFold } from '../utils/longText';
 import { useStripTasks } from '../hooks/useStripTasks';
 import type { CollabBoardTask } from '../services/api';
 import { WindowCard, parseWindowCard } from './WindowCard';
@@ -556,7 +558,19 @@ const MessageRowImpl: React.FC<MessageRowProps> = ({
                       />
                     );
                   }
-                  return (
+                  return shouldFold(msg.content) ? (
+                    <LongTextFold
+                      text={msg.content}
+                      renderFull={() => (
+                        <div
+                          className="ai-markdown prose prose-sm max-w-full prose-p:my-0 prose-ul:my-1 break-all"
+                          style={{ wordBreak: 'break-all', overflowWrap: 'break-word' }}
+                          dangerouslySetInnerHTML={{ __html: parseContent(msg.content, msg.id) }}
+                          onClick={(e) => actions.contentClick(e, msg.id)}
+                        />
+                      )}
+                    />
+                  ) : (
                     <div
                       className="ai-markdown prose prose-sm max-w-full prose-p:my-0 prose-ul:my-1 break-all"
                       style={{ wordBreak: 'break-all', overflowWrap: 'break-word' }}
