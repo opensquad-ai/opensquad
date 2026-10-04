@@ -1613,6 +1613,87 @@ def _board_args_hint(op: str, args: tuple, kwargs: dict) -> dict[str, str]:
     return hint
 
 
+def _board_auth_headers(base: str) -> dict[str, str]:
+    """The headers a board call needs: this machine's secret, plus the peer token when paired.
+
+    A paired machine does not hold the owner's ``node_secret``; it authenticates with the scoped
+    token it was given. Pairing records that token in two places (the workspace peer store, and the
+    agent's own config) and the store is not always where it ends up — a re-pairing, a migrated
+    install — so both are read, or the board answers 401 "Invalid or missing node secret" and the
+    write silently lands on this machine's board instead of the owner's. Shared by the board RPC and
+    the task-message notify so the two cannot drift into that again.
+    """
+    try:
+        from opensquad.system_config import syscfg
+
+        secret = syscfg.node_secret()
+    except Exception:
+        secret = ""
+    headers = {"Content-Type": "application/json", "X-Node-Secret": secret or ""}
+    try:
+        from opensquad import node_peers
+
+        peer = node_peers.load_local_peer(base)
+        if peer and peer.get("token"):
+            headers["X-Node-Token"] = str(peer["token"])
+    except Exception:
+        pass
+    if not headers.get("X-Node-Token"):
+        try:
+            from opensquad import peer_bridge
+
+            token = peer_bridge.peer_token(base)
+            if token:
+                headers["X-Node-Token"] = str(token)
+        except Exception:
+            pass
+    return headers
+
+
+def notify_task_message(collab_id: str, content: str, *, mentions: list[str] | None = None, author: str = "") -> bool:
+    """Ask the machine that owns this board to push a task-window message to its subscribers.
+
+    The user's own task-window message is fanned out by the endpoint that receives it. An *agent's*
+    message is a plain board write and nothing followed it, so a worker on a paired machine could
+    read it over the board API but never had it pushed — "pull works, push does not", for every
+    task-window message an agent posted. This is the missing half: the writer announces it to the
+    owner, the owner fans it out (``relay.fan_out_task``), and the paired agent's control channel
+    hears about it exactly as it does for the user's messages.
+
+    Best effort by design: the message is already on the board, so a failure here must not fail the
+    tool — it only means the push did not happen, and the pull still works.
+    """
+    import urllib.request
+
+    cid = str(collab_id or "").strip()
+    if not cid:
+        return False
+    base = board_base_url(collab_id=cid)
+    if not base:
+        # The board is this machine's own, so its owner is its own gateway, on loopback.
+        try:
+            from opensquad.system_config import syscfg
+
+            base = f"http://127.0.0.1:{int(syscfg.port('gateway') or 9555)}"
+        except Exception:
+            return False
+    body = json.dumps(
+        {"content": str(content or ""), "mentions": [str(m) for m in (mentions or [])], "author": str(author or "")}
+    ).encode("utf-8")
+    req = urllib.request.Request(
+        f"{base}/api/ai-web/collab-board/tasks/{cid}/notify",
+        data=body,
+        headers=_board_auth_headers(base),
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=8.0) as resp:
+            return bool(json.loads(resp.read().decode("utf-8") or "{}").get("ok"))
+    except Exception:
+        logger.debug("[Board] task-message notify failed for %s", cid, exc_info=True)
+        return False
+
+
 def _remote_call(op: str, args: tuple, kwargs: dict) -> Any:
     import urllib.error
     import urllib.request
@@ -1624,36 +1705,9 @@ def _remote_call(op: str, args: tuple, kwargs: dict) -> Any:
     )
     if not base:
         raise BoardRemoteError("no remote board configured")
-    try:
-        from opensquad.system_config import syscfg
-
-        secret = syscfg.node_secret()
-    except Exception:
-        secret = ""
-    headers = {"Content-Type": "application/json", "X-Node-Secret": secret or ""}
-    # A paired machine does not hold this gateway's node_secret: it authenticates
-    # with the scoped token it was given for that host.
-    try:
-        from opensquad import node_peers
-
-        peer = node_peers.load_local_peer(base)
-        if peer and peer.get("token"):
-            headers["X-Node-Token"] = str(peer["token"])
-    except Exception:
-        pass
-    if not headers.get("X-Node-Token"):
-        # Pairing records the token in the agent's own config as well, and the workspace
-        # store is not always where it ends up (a re-pairing, a migrated install). Read
-        # it from either, or the board answers 401 "Invalid or missing node secret" and
-        # the write silently lands on this machine's board instead of the owner's.
-        try:
-            from opensquad import peer_bridge
-
-            token = peer_bridge.peer_token(base)
-            if token:
-                headers["X-Node-Token"] = str(token)
-        except Exception:
-            pass
+    # How a board call authenticates is decided in one place now, shared with the task-message
+    # notify — two copies of this lookup is how a stale token once went unnoticed.
+    headers = _board_auth_headers(base)
     payload = json.dumps({"op": op, "args": list(args), "kwargs": kwargs}).encode("utf-8")
     req = urllib.request.Request(
         f"{base}{_BOARD_AGENT_PATH}",
