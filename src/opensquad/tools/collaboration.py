@@ -1186,7 +1186,25 @@ def assign_task(
         # …and the whole team has to be in before any work is handed out: a member still at
         # 已邀请 has not agreed to take anything, and assigning only to those who happened
         # to accept builds a team that never assembled.
+        import re as _re
+
+        def _usable_member(agent_id: str) -> bool:
+            return bool(_re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{1,63}", str(agent_id or "")))
+
         pending = pending_members(collab_id)
+        # A member id that cannot be an agent name is not a member. A malformed members list used
+        # to record ids like '[', '"', 'p', 'm' and ']' — permanently invited, since no such agent
+        # exists to accept — and, because dispatch validates the same table, they blocked every
+        # assignment. Real members, here or on a paired machine, have ordinary names, so only
+        # these are stepped over, and they are named rather than silently dropped.
+        unusable = [m for m in pending if not _usable_member(m)]
+        pending = [m for m in pending if _usable_member(m)]
+        if unusable:
+            logger.warning(
+                "[Collab] Ignoring member ids that cannot be agent names: %s (collab %s)",
+                ", ".join(repr(m) for m in unusable),
+                collab_id,
+            )
         if pending:
             return {
                 "status": "error",
