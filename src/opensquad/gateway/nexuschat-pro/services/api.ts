@@ -2549,7 +2549,16 @@ export const nodesAPI = {
   /** Machines already paired with this deployment. */
   listPeers: () =>
     apiRequest<{
-      peers: { id: string; name: string; scopes: string[]; created_at: number; revoked: boolean }[];
+      peers: {
+        id: string;
+        name: string;
+        scopes: string[];
+        created_at: number;
+        /** Null until this peer's token authenticates once — the fact that tells a live pairing
+         *  from a dead one, and the one whose absence made an accidental unpair unfindable. */
+        last_seen_at: number | null;
+        revoked: boolean;
+      }[];
     }>('/node/peers'),
 
   /** Cut a machine off; its token stops working immediately. */

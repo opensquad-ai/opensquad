@@ -832,6 +832,9 @@
     "approve": "Approve",
     "reject": "Reject",
     "pairedTitle": "Paired machines",
+    "lastSeen": "Connected before",
+    "neverUsed": "Never connected",
+    "neverUsedHint": "This machine's token has never authenticated. Unpairing cannot be undone: if it is the one in use, it will have to pair again.",
     "revoke": "Unpair"
   },
   "groupAccess": {
