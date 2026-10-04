@@ -62,6 +62,19 @@ async def relay_subscribe(request: Request, body: dict = Body(default={})):
     if not group_id or not callback_url:
         raise HTTPException(status_code=400, detail="group_id and callback_url are required")
 
+    # A callback on the subscriber's own loopback address can never work: the owner pushes to it
+    # and reaches itself. One of these sat in a live install from a hand-made subscribe call and
+    # filled the outbox with 401 retries (one per group message) until its TTL. Accept it — a local
+    # test harness legitimately uses loopback — but say so, in the log and in the reply.
+    loopback = callback_url
+    loopback_note = ""
+    if "127.0.0.1" in loopback or "localhost" in loopback or "[::1]" in loopback:
+        loopback_note = (
+            "callback_url is a loopback address, so pushes to it can only ever fail. "
+            "Send the address this machine is reachable at from the owner instead."
+        )
+        logger.warning("[Relay] subscribe for group %s used a loopback callback (%s)", group_id, callback_url)
+
     result = relay.subscribe(
         group_id,
         callback_url,
@@ -88,6 +101,7 @@ async def relay_subscribe(request: Request, body: dict = Body(default={})):
         "origin_host": _origin_host(),
         "backfilled": int(backfilled.get("delivered") or 0),
         "backfill_failed": int(backfilled.get("failed") or 0),
+        **({"note": loopback_note} if loopback_note else {}),
     }
 
 
@@ -226,7 +240,11 @@ async def relay_deliver(request: Request, body: dict = Body(default={})):
         return {"ok": True, "delivered": bool(delivered), "reason": "" if delivered else "agent_offline"}
 
     message_id = str(message.get("id") or "")
-    if message_id and relay.already_seen(origin_host, message_id):
+    # The same rule as the task event above: peek, and record only once the message is on its way.
+    # Recording here meant a group message that missed the user's socket once — a reconnect, a
+    # gateway restart — came back "duplicate" on every retry the owner made: lost, while the outbox
+    # kept retrying it until its TTL.
+    if message_id and relay.already_seen(origin_host, message_id, record=False):
         return {"ok": True, "delivered": False, "reason": "duplicate"}
 
     # The files stay on the machine that owns the group: make the references absolute
@@ -249,7 +267,11 @@ async def relay_deliver(request: Request, body: dict = Body(default={})):
         # which reaches anyone already subscribed to that group id locally.
         await manager.broadcast_to_group(group_id, payload)
         delivered = True
-    return {"ok": True, "delivered": delivered}
+    if delivered and message_id:
+        relay.note_seen(origin_host, message_id)
+    else:
+        logger.info("[Relay] group message %s was not delivered yet (%s offline)", message_id, target_user or "group")
+    return {"ok": True, "delivered": delivered, "reason": "" if delivered else "user_offline"}
 
 
 @router.get("/relay/status")
