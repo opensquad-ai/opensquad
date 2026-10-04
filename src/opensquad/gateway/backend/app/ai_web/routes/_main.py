@@ -1298,7 +1298,14 @@ class CollabTaskUpdateRequest(BaseModel):
 async def get_collab_board_tasks(
     current_user: User = Depends(get_current_user_dep),
 ):
-    tasks = collab_board_list_tasks()
+    """Every task, including collaborations whose board lives on a paired machine.
+
+    Reading only the local board file hid a collaboration created on a peer, so the strip above the
+    composer showed nothing for work that was in fact running elsewhere.
+    """
+    from opensquad import collab_board
+
+    tasks, _unreachable = collab_board.merged_tasks()
     return {"tasks": tasks, "count": len(tasks)}
 
 

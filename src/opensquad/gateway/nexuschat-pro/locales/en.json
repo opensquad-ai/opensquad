@@ -848,6 +848,12 @@
     "reject": "Reject",
     "ownerOnly": "Only the group owner can approve"
   },
+  "taskStrip": {
+    "title": "Tasks in progress",
+    "within": "including those finished in the last day",
+    "running": "running",
+    "finished": "finished"
+  },
   "collabTask": {
     "messagePlaceholder": "Say something in this task… (Enter to send, Shift+Enter for a new line)",
     "send": "Send",

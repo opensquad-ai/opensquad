@@ -873,33 +873,14 @@ def list_active_collaborations() -> dict[str, Any]:
     """
     try:
         my_ids = _resolve_my_agent_ids()
-        from ..collab_board import board_owners, list_tasks
-
-        tasks = list_tasks(include_stale=False)
+        from ..collab_board import merged_tasks
 
         # A collaboration whose board lives on a paired machine is not in this machine's file.
-        # board_owners.json is the local record of those, and reading each one by id carries the
-        # hint that routes the call to its owner — so a worker on another machine can see the
-        # collaboration it joined instead of a confident zero. An owner we cannot reach simply
-        # contributes nothing, and is named in `unreachable` so the reason is visible.
-        unreachable: list[str] = []
-        seen = {str(t.get("task_id") or "") for t in tasks}
-        try:
-            from ..collab_board import get_task
-
-            for cid in board_owners():
-                if cid in seen:
-                    continue
-                try:
-                    remote = get_task(task_id=cid)
-                except Exception:  # noqa: BLE001 - named below, never fatal
-                    unreachable.append(cid)
-                    continue
-                if isinstance(remote, dict) and str(remote.get("task_id") or ""):
-                    tasks.append(remote)
-                    seen.add(cid)
-        except Exception:
-            pass
+        # merged_tasks reads the local board, then reads each collaboration recorded in
+        # board_owners.json by id (which carries the hint that routes to its owner), so a worker
+        # on another machine sees the collaboration it joined instead of a confident zero. An
+        # owner we cannot reach contributes nothing and comes back named.
+        tasks, unreachable = merged_tasks(include_stale=False)
 
         active_tasks = []
         for t in tasks:

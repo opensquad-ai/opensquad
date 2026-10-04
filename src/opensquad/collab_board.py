@@ -1686,6 +1686,36 @@ def _post_to_owner(collab_id: str, path: str, payload: dict[str, Any]) -> bool:
         return False
 
 
+def merged_tasks(include_stale: bool = False) -> tuple[list, list[str]]:
+    """Every task this deployment knows about, including boards owned by paired machines.
+
+    The local board file holds only this machine's own tasks, so a caller that reads nothing else
+    reports a confident zero for a collaboration that lives on a peer — the failure mode that looks
+    like "nothing is running" while the other machine is mid-task. board_owners.json is the local
+    record of those, and reading each one by id carries the hint that routes the call to its owner.
+    An owner we cannot reach contributes nothing and is named, so the reason is visible.
+    """
+    tasks = list_tasks(include_stale=include_stale)
+    unreachable: list[str] = []
+    seen = {str(t.get("task_id") or "") for t in tasks}
+    try:
+        owners = list(board_owners())
+    except Exception:
+        owners = []
+    for cid in owners:
+        if cid in seen:
+            continue
+        try:
+            remote = get_task(task_id=cid)
+        except Exception:  # noqa: BLE001 - named instead, never fatal
+            unreachable.append(cid)
+            continue
+        if isinstance(remote, dict) and str(remote.get("task_id") or ""):
+            tasks.append(remote)
+            seen.add(cid)
+    return tasks, unreachable
+
+
 def announce_participant(collab_id: str, agent_id: str, state: str) -> bool:
     """Ask the machine that owns this board to rewrite a collaboration card's participant state.
 
