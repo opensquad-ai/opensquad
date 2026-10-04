@@ -451,8 +451,6 @@ export const MessageInput: React.FC<MessageInputProps> = ({
 
           <div className="h-4 w-px bg-gray-300 mx-1"></div>
 
-          <TaskStrip tasks={tasks} />
-
           {/* AI 按钮 */}
           <button
             onClick={(e) => {
@@ -466,6 +464,8 @@ export const MessageInput: React.FC<MessageInputProps> = ({
           >
             <span>@</span>
           </button>
+
+          <TaskStrip tasks={tasks} />
         </div>
 
         <div className="flex items-center gap-0.5 md:gap-1">
