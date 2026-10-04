@@ -1354,24 +1354,32 @@ function sealWorkflowAfterUserStop(
  * stream in two (`sealIncompleteWorkflows` + message).
  */
 export function makeUserSteerEvent(payload: SteerPayload): WorkflowEvent {
-  const { text, source, sender_name } = steerParts(payload);
+  const { text, source, sender_name, message_id } = steerParts(payload);
   return {
     _uid: genTimelineUID(),
     type: 'user_steer',
-    content: { text, source, sender_name },
+    content: { text, source, sender_name, message_id },
     timestamp: Date.now(),
   };
 }
 
 /** A steer's text, plus where it came from when it was someone else's message. */
-export type SteerPayload = string | { text: string; source?: string; sender_name?: string };
+export type SteerPayload =
+  | string
+  | { text: string; source?: string; sender_name?: string; message_id?: string };
 
-function steerParts(payload: SteerPayload): { text: string; source: string; sender_name: string } {
-  if (typeof payload === 'string') return { text: payload, source: '', sender_name: '' };
+function steerParts(payload: SteerPayload): {
+  text: string;
+  source: string;
+  sender_name: string;
+  message_id: string;
+} {
+  if (typeof payload === 'string') return { text: payload, source: '', sender_name: '', message_id: '' };
   return {
     text: String(payload?.text ?? ''),
     source: String(payload?.source ?? ''),
     sender_name: String(payload?.sender_name ?? ''),
+    message_id: String(payload?.message_id ?? ''),
   };
 }
 
@@ -1387,6 +1395,13 @@ export function appendUserSteerToTimeline(
   payload: SteerPayload,
 ): TimelineEntry[] | null {
   if (!formatUserSkillDisplayContent(steerParts(payload).text).trim()) return null;
+  // A consumed steer is broadcast to every client watching the agent, and a reconnect replays
+  // what it missed — so the same one arrives more than once, and each delivery used to add a row
+  // with a fresh uid. A refresh rebuilds the row from disk and shows it once, which is why the
+  // duplicates vanished on reload. Keying on the message id keeps the live view equal to the
+  // rebuilt one instead of growing a copy per delivery.
+  const steerId = steerParts(payload).message_id;
+  if (steerId && timelineHasSteer(timeline, steerId)) return timeline;
   for (let i = timeline.length - 1; i >= 0; i--) {
     const entry = timeline[i];
     if (entry.kind !== 'workflow') continue;
@@ -1399,6 +1414,24 @@ export function appendUserSteerToTimeline(
     );
   }
   return null;
+}
+
+/** True when a steer carrying this message id is already in the timeline, sealed fold or not. */
+export function timelineHasSteer(timeline: TimelineEntry[], messageId: string): boolean {
+  const wanted = String(messageId || '').trim();
+  if (!wanted) return false;
+  for (const entry of timeline) {
+    if (entry?.kind === 'workflow') {
+      for (const evt of entry.data?.events ?? []) {
+        if (evt?.type === 'user_steer' && String(evt?.content?.message_id ?? '') === wanted) {
+          return true;
+        }
+      }
+    } else if (entry?.kind === 'message') {
+      if (String((entry.data as any)?.message_id ?? '') === wanted) return true;
+    }
+  }
+  return false;
 }
 
 /**
