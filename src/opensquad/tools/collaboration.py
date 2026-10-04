@@ -129,6 +129,38 @@ def start_collaboration(
                 team's files live, so a worker — including one on a paired machine — knows
                 where the project is. ``assign_task`` refuses until it is set.
     """
+    # A members argument that arrives as text must never be read as text: `for m in '["pm"]'`
+    # takes each character as a member, so the card, the invitation and assign_task's member
+    # check all end up believing in '[', '"', 'p', 'm' and ']' — five members nobody can ever
+    # accept, and the task then refuses to dispatch, several steps after the mistake.
+    if isinstance(members, str):
+        _text = members.strip()
+        _parsed = None
+        if _text.startswith("[") and _text.endswith("]"):
+            try:
+                import json as _json
+
+                _parsed = _json.loads(_text)
+            except Exception:
+                _parsed = None
+        if not isinstance(_parsed, list):
+            return {
+                "status": "error",
+                "code": "members_invalid",
+                "message": (
+                    f"members must be a list of agent names, not the string {members!r} — "
+                    "read one character at a time it would invite '[' and '\"' as members"
+                ),
+            }
+        members = _parsed
+    elif members is not None and not isinstance(members, (list, tuple, set)):
+        return {
+            "status": "error",
+            "code": "members_invalid",
+            "message": f"members must be a list of agent names, not {type(members).__name__}",
+        }
+    members = [str(m).strip() for m in (members or []) if str(m).strip()]
+
     # 1. Validate collab card exists
     card_file = os.path.join(_collab_cards_dir(), f"{card}.md")
     if not os.path.exists(card_file):
