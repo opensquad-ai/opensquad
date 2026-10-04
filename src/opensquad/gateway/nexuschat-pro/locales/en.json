@@ -173,6 +173,8 @@
     "voiceMessageLabel": "Voice message",
     "edited": "(edited)",
     "replyingTo": "Replying to {{name}}",
+    "expandText": "Show full message",
+    "collapseText": "Collapse",
     "download": "Download",
     "downloadFile": "Download File",
     "zoomHint": "Ctrl + Wheel to Zoom · Drag to Pan",

@@ -173,6 +173,8 @@
     "voiceMessageLabel": "语音消息",
     "edited": "(已编辑)",
     "replyingTo": "回复 {{name}}",
+    "expandText": "展开全文",
+    "collapseText": "收起",
     "download": "下载",
     "downloadFile": "下载文件",
     "zoomHint": "Ctrl + 滚轮缩放 · 拖拽平移",
