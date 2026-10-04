@@ -7,6 +7,8 @@ import { parse } from 'marked';
 import { sanitizeHtml } from '../utils/safeHtml';
 import { AvatarImg } from './AvatarImg';
 import { getUserMediaSafe } from '../utils/mediaDevices';
+import { TaskStrip } from './TaskStrip';
+import type { CollabBoardTask } from '../services/api';
 
 interface MessageInputProps {
   value: string;
@@ -25,6 +27,8 @@ interface MessageInputProps {
   onUploadFolder?: (files: FileList) => void;
   onPasteFiles?: (files: File[]) => void; // 粘贴文件/图片回调
   hasAttachments?: boolean; // 是否有待发送的附件
+  /** 跨群任务条：给了才显示（群聊给，私聊不给）。 */
+  tasks?: CollabBoardTask[];
 }
 
 // 文件大小限制配置
@@ -140,6 +144,7 @@ export const MessageInput: React.FC<MessageInputProps> = ({
   groupMembers = [],
   onPasteFiles,
   hasAttachments = false,
+  tasks = [],
 }) => {
   const { t } = useTranslation();
   const [isFocused, setIsFocused] = useState(false);
@@ -445,6 +450,8 @@ export const MessageInput: React.FC<MessageInputProps> = ({
           )}
 
           <div className="h-4 w-px bg-gray-300 mx-1"></div>
+
+          <TaskStrip tasks={tasks} />
 
           {/* AI 按钮 */}
           <button

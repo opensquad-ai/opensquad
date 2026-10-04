@@ -26,6 +26,7 @@ import {
 import { CollabTaskCard, parseCollabTask, openCollabTaskWindow } from './CollabTaskCard';
 import { TaskStrip } from './TaskStrip';
 import { useStripTasks } from '../hooks/useStripTasks';
+import type { CollabBoardTask } from '../services/api';
 import { WindowCard, parseWindowCard } from './WindowCard';
 import { markMentions, renderMentionSpans } from '../utils/mentions';
 import { wrapMarkdownTables } from '../utils/markdownTables';
@@ -914,6 +915,7 @@ interface ChatComposerHostProps {
   onPasteFiles: (files: File[]) => void;
   hasAttachments: boolean;
   groupMembers: User[];
+  tasks?: CollabBoardTask[];
 }
 
 /**
@@ -935,6 +937,7 @@ const ChatComposerHost = React.memo(React.forwardRef<ChatComposerApi, ChatCompos
   onPasteFiles,
   hasAttachments,
   groupMembers,
+  tasks,
 }, ref) => {
   const [inputText, setInputText] = useState('');
   const inputTextRef = useRef(inputText);
@@ -982,6 +985,7 @@ const ChatComposerHost = React.memo(React.forwardRef<ChatComposerApi, ChatCompos
       hasAttachments={hasAttachments}
       placeholder=""
       groupMembers={groupMembers}
+      tasks={tasks}
     />
   );
 }));
@@ -3554,10 +3558,8 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
             </div>
         )}
 
-        {/* 任务条：消息一多，任务窗会被顶上去看不见；它固定在输入框上方，
+        {/* 任务条：消息一多，任务窗会被顶上去看不见；它挂在输入框工具栏那一行，
             并且是跨群聚合（含对端机器上的任务）。 */}
-        <TaskStrip tasks={useStripTasks()} />
-
         {/* Message Input — draft state lives inside the host so typing does
             not re-render this window / reconcile the message list. */}
         <ChatComposerHost
@@ -3572,6 +3574,7 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
             onPasteFiles={handleStageFiles}
             hasAttachments={stagedItems.length > 0}
             groupMembers={groupMembers}
+            tasks={useStripTasks()}
         />
 
         {/* Hidden file inputs */}
