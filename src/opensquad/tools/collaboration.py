@@ -2446,6 +2446,17 @@ def post_task_message(
             content=text,
         )
 
+        # The user's task-window message is pushed to the group's subscribers by the endpoint that
+        # receives it; an agent's write had no equivalent, so a worker on a paired machine only ever
+        # saw it by polling the board. Announce it to the machine that owns the board, which fans it
+        # out the same way. Best effort: the message is already on the board either way.
+        try:
+            from ..collab_board import notify_task_message
+
+            notify_task_message(collab_id, text, author=agent_id)
+        except Exception:
+            pass
+
         # Files/images attached to this message belong to the task itself, so they
         # are recorded on the board (the URL is served by the gateway, which is
         # what makes them visible from every machine).
