@@ -1412,6 +1412,7 @@ REMOTE_OPS = (
     "list_snapshots",
     "save_plan_snapshot",
     "list_plan_snapshots",
+    "gate_states",
     "cleanup_stale_tasks",
 )
 
