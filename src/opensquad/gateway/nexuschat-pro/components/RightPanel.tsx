@@ -549,7 +549,10 @@ export const RightPanel: React.FC<RightPanelProps> = ({ isOpen, onClose, group, 
                         alt=""
                         loading="lazy"
                         onDoubleClick={user.is_agent ? () => {
-                          if (user.status === 'online') {
+                          if (user.is_remote) {
+                            // Its agent runs on the paired machine: there is no local chat to open.
+                            showAgentToast(t('rightPanel.remoteChatHint'));
+                          } else if (user.status === 'online') {
                             window.dispatchEvent(new CustomEvent('openAgentChat', { detail: { agentId: user.agent_id || user.id } }));
                           } else {
                             showAgentToast(t('chat.agentOffline'));
@@ -562,7 +565,17 @@ export const RightPanel: React.FC<RightPanelProps> = ({ isOpen, onClose, group, 
                           img.src = getLocalAvatarFallback(user.id, user.name);
                         }}
                       />
-                      <div className={`absolute bottom-0 right-0 w-2.5 h-2.5 border-2 border-white rounded-full ${user.status === 'online' ? 'bg-green-500' : user.status === 'busy' ? 'bg-red-500' : 'bg-gray-400'}`}></div>
+                      <div
+                        className={`absolute bottom-0 right-0 w-2.5 h-2.5 border-2 border-white rounded-full ${
+                          user.is_remote
+                            ? 'bg-sky-400'
+                            : user.status === 'online'
+                              ? 'bg-green-500'
+                              : user.status === 'busy'
+                                ? 'bg-red-500'
+                                : 'bg-gray-400'
+                        }`}
+                      ></div>
                     </div>
                     <div className="flex-1 min-w-0">
                       <div className="flex items-center gap-1.5">
@@ -576,7 +589,14 @@ export const RightPanel: React.FC<RightPanelProps> = ({ isOpen, onClose, group, 
                           </span>
                         )}
                       </div>
-                      <p className="text-xs text-gray-400 capitalize">{user.status}</p>
+                      {/* An agent on a paired machine has no socket on THIS gateway, so its local
+                          status is always "offline" — true here, misleading to read: it is working,
+                          and its messages arrive over the relay. Say where it is instead. */}
+                      <p className={`text-xs capitalize ${user.is_remote ? 'text-sky-600/80' : 'text-gray-400'}`}>
+                        {user.is_remote
+                          ? t('rightPanel.remoteStatus', { host: user.remote_label || t('rightPanel.remoteMember') })
+                          : user.status}
+                      </p>
                     </div>
                   </div>
                 );
