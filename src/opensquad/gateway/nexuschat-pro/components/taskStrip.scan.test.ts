@@ -9,15 +9,15 @@ import { describe, expect, it } from 'vitest';
 const read = (rel: string) => fs.readFileSync(path.resolve(__dirname, rel), 'utf8');
 
 describe('where it sits', () => {
-  it('is on the toolbar line, after the rich-text controls and before the @ button', () => {
+  it('is on the toolbar line, right after the @ button', () => {
     const src = read('../components/MessageInput.tsx');
 
     const divider = src.indexOf('h-4 w-px bg-gray-300');
-    const strip = src.indexOf('<TaskStrip');
     const ai = src.indexOf('{/* AI 按钮 */}');
+    const strip = src.indexOf('<TaskStrip');
 
-    expect(strip).toBeGreaterThan(divider);
-    expect(ai).toBeGreaterThan(strip);
+    expect(ai).toBeGreaterThan(divider);
+    expect(strip).toBeGreaterThan(ai);
   });
 
   it('is fed the cross-group list, fetched once by the chat window', () => {
