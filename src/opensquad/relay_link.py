@@ -670,8 +670,15 @@ def _prune(now: float) -> None:
             _seen.pop(key, None)
 
 
-def already_seen(origin_host: str, message_id: str) -> bool:
-    """True when this relayed message was handled before (and records it now)."""
+def already_seen(origin_host: str, message_id: str, *, record: bool = True) -> bool:
+    """True when this relayed message was handled before.
+
+    ``record=True`` (the default) also remembers it — that is the dedup window. Pass
+    ``record=False`` to *peek* instead, and call :func:`note_seen` once the message was actually
+    delivered: recording before delivery turned a transient miss into a permanent loss, because
+    the owner retries a push the receiver had already marked as seen, and every retry came back
+    "duplicate" while the event never reached the agent.
+    """
     if not message_id:
         return False
     key = (str(origin_host or ""), str(message_id))
@@ -680,8 +687,18 @@ def already_seen(origin_host: str, message_id: str) -> bool:
         _prune(now)
         if key in _seen:
             return True
-        _seen[key] = now
+        if record:
+            _seen[key] = now
     return False
+
+
+def note_seen(origin_host: str, message_id: str) -> None:
+    """Remember a relayed message as handled (call it only after a successful delivery)."""
+    if not message_id:
+        return
+    key = (str(origin_host or ""), str(message_id))
+    with _LOCK:
+        _seen[key] = time.time()
 
 
 def reset_seen() -> None:

@@ -45,13 +45,21 @@ revoke it.
 - **Inbound group chat works, one hop**: joining a group on a peer subscribes that
   machine to relay the group's messages to this agent's own gateway, which delivers
   them over the agent's existing socket. So messages sent to that group **do** arrive
-  here and can be answered. What still does **not** cross machines: task-window
-  messages and board-change notifications, and DMs. For those, use a dedicated agent
+  here and can be answered.
+- **Task-window messages**: a message the **user** posts in a task window crosses
+  machines (the endpoint fans it out to the group's subscribers, and it lands on the
+  paired agent's control channel) — collaboration invitations do too. A message an
+  **agent** writes into a task window is the exception today: it is a board write,
+  and no fan-out follows it, so a worker on another machine finds it by reading the
+  board (`board_view`, `board_list_my_tasks`) rather than seeing it arrive.
+- **What still does not cross**: board-change notifications (a task window polls the
+  board every 5 s instead of being pushed) and DMs. For those, use a dedicated agent
   on that machine.
 
-So: for receiving and answering **group chat**, this one agent now suffices. For a
-full task window or DMs, the supported arrangement is still **one agent per machine**
-— a dedicated agent living there, not this one swinging its bridge across.
+So: for receiving and answering **group chat**, the **user's task-window messages**
+and invites, this one agent now suffices. For pushed board changes or DMs, the
+supported arrangement is still **one agent per machine** — a dedicated agent living
+there, not this one swinging its bridge across.
 
 ## When not to use this
 

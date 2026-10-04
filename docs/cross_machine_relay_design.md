@@ -147,7 +147,13 @@ in the one place that already has an identity per machine — the gateway.
 ## What this cut does **not** cover (still open)
 
 - **board_rev change pings.** A task window still polls the board (5 s) instead of
-  being pushed; only task *messages* cross machines.
+  being pushed. Task *messages* themselves do cross: the **user's** by the task-window
+  endpoint (`fan_out_task`) and the collab invite by the invite endpoint. The one
+  direction still missing is an **agent's own** task-window message: it is written to
+  the board (`upsert_item` / `append_public_discussion`) and nothing fans it out, so a
+  paired worker only sees it by reading the board. A paired worker's live run found
+  exactly this, and the stale line that used to say "only task messages cross" made it
+  look like a design boundary rather than a gap.
 - **DMs.** Out of scope (identity semantics differ from groups).
 - **The positive version handshake** (see 4). A peer that is too old to know
   `/api/relay/subscribe` is still detected by its 404.

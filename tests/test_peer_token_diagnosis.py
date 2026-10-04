@@ -93,3 +93,20 @@ def test_the_gateway_and_the_client_both_name_the_reason():
     assert 'explain(request.headers.get("X-Node-Token"' in gw.replace("_node_peers.", "node_peers.")
     assert "Invalid or missing node secret (" in gw, "the 401 must carry the reason"
     assert "pair again" in client, "the client's 401 must say how to recover"
+
+
+def test_the_skill_no_longer_claims_task_windows_do_not_cross():
+    """The sentence that made a live gap look like a design boundary.
+
+    A paired worker tested task-window push three times, found pull works and push does not, and
+    both agents concluded "by design" — quoting this file. The user's task-window messages DO cross
+    (fan_out_task, with tests); only an agent's own task-window write does not, and that is a gap,
+    not a boundary.
+    """
+    skill = (_SRC / "skills" / "cross_machine_join" / "SKILL.md").read_text(encoding="utf-8")
+    doc = (_SRC.parent / "docs" / "cross_machine_relay_design.md").read_text(encoding="utf-8")
+
+    assert "What still does **not** cross machines: task-window" not in skill
+    assert "Task-window messages**:" in skill, "the skill must state which task-window direction crosses"
+    assert "only task *messages* cross machines" not in doc
+    assert "agent's own" in doc and "nothing fans it out" in doc
