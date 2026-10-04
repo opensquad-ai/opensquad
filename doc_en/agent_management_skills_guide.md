@@ -150,12 +150,14 @@ Takes effect after restarting the Agent.
 
 #### Built-in collaboration cards
 
+A card must exist in `src/collab_cards/` — it is what `start_collaboration` loads.
+
 | Card | Use case | Suggested roles |
 |------|----------|-----------------|
 | **software_dev_team** | Full software-development project | pm, developer, qa |
+| **general_software_dev_collab** | General software development | pm, dev, qa, devops, reviewer |
 | **code_review** | Code review | reviewer, author |
-| **research_task** | Research-oriented task | lead, researcher |
-| **autonomous_vcs_dev** | Autonomous development flow | developer |
+| **distributed_deep_research** | Deep research task | pm, researcher, analyst |
 
 #### Collaboration card structure
 

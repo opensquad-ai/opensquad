@@ -149,12 +149,14 @@
 
 #### 内置协作卡
 
+协作卡必须存在于 `src/collab_cards/` —— 它是 `start_collaboration` 加载的东西。
+
 | 协作卡 | 适用场景 | 建议角色 |
 |-------|---------|---------|
 | **software_dev_team** | 完整软件开发项目 | pm, developer, qa |
+| **general_software_dev_collab** | 通用软件开发协作 | pm, dev, qa, devops, reviewer |
 | **code_review** | 代码审查 | reviewer, author |
-| **research_task** | 研究型任务 | lead, researcher |
-| **autonomous_vcs_dev** | 自主开发流程 | developer |
+| **distributed_deep_research** | 分布式深度调研 | pm, researcher, analyst |
 
 #### 协作卡结构
 

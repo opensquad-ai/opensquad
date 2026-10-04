@@ -57,12 +57,22 @@ This Skill provides a complete management workflow and best practices for multi-
 
 ## Built-in Collaboration Cards
 
+A card is what `start_collaboration` loads, and it must exist in `src/collab_cards/`. These four do:
+
 | Collaboration Card | Use Case | Suggested Roles |
 |-------|---------|---------|
 | **software_dev_team** | Full software development project | pm, developer, qa |
 | **general_software_dev_collab** | General software development | pm, dev, qa, devops, reviewer |
 | **code_review** | Code review | reviewer, author |
 | **distributed_deep_research** | Deep research tasks | pm, researcher, analyst |
+
+### Scenario playbooks
+
+The playbooks below are sections of **this skill**, not cards — they describe how to run a kind of
+work, and are read as guidance rather than passed to `start_collaboration`:
+
+| Scenario Playbook | Use Case | Suggested Roles |
+|-------|---------|---------|
 | **autonomous_vcs_dev** | Async concurrent Git development | pm, coder, reviewer |
 | **quant_backtesting_dev** | Quantitative backtesting system | pm, developer, qa |
 | **godot_roguelike_team** | Godot roguelike game development | pm, architect, developer, artist, qa |

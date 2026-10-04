@@ -5,9 +5,12 @@
 OpenSquad 使用**协作卡片驱动**的协作模型。Agent 之间通过以下方式进行协调：
 1. **群聊** — 主要通信渠道（自然语言）
 2. **协作卡片（Collab Card）** — 结构化工作流协议，定义角色、阶段和规则
-3. **共享文件工作区** — `workspace/collab/` 目录，用于跨 Agent 的可见性
+3. **协作看板（Collaboration Board）** — 每张协作一张看板，存在**拥有该群的那台机器**上
+   （`collab_board.py`），以 6 位 `collab_id` 为键，通过看板工具读写
 
-系统没有集中式黑板或共享数据库。状态以分布式方式存储在共享文件工作区中各 Agent 的备注文件里。
+看板是**每台机器上集中**的，不是一堆各写各的 Agent 备注：需求、方案、任务、进度、讨论都是看板
+上分区的条目，所有 Agent 用同一套工具读写它；由对端机器拥有的协作会经中继访问。存储、归属与转
+发规则见 `COLLAB_BOARD_DESIGN.md`。
 
 ---
 
@@ -17,7 +20,7 @@ OpenSquad 使用**协作卡片驱动**的协作模型。Agent 之间通过以下
 - **建议角色**（仅供参考——由 PM 决定实际邀请谁）
 - **工作流阶段**（规划、执行、评审、用户验收）
 - **通信规则**（@提及、睡眠/唤醒模式）
-- **共享文件工作区规则**（PM 职责）
+- **看板规则**（谁写哪个分区、什么时候写）
 
 当前可用的卡片：
 - `software_dev_team` — 完整软件开发生命周期（PM / Developer / QA）
@@ -54,17 +57,18 @@ min_members: 2
 
 ### Board & Task 工具
 
-| 工具 | 作用 |
-|------|------|
-| `create_board(name, description?)` | 创建看板 |
-| `get_board(board_id)` | 获取看板详情 |
-| `list_boards()` | 列出所有看板 |
-| `create_task(board_id, title, description?, assignee?)` | 在看板上创建任务 |
-| `update_task(task_id, status?, title?, assignee?)` | 更新任务状态 |
-| `get_task(task_id)` | 获取任务详情 |
-| `list_tasks(board_id?, status?)` | 列出任务（可按看板或状态筛选） |
-| `delete_task(task_id)` | 删除任务 |
-| `delete_board(board_id)` | 删除看板 |
+| 工具 | 调用方 | 作用 |
+|------|--------|------|
+| `assign_task(collab_id, worker_id, task_name, ...)` | PM | 给 Worker 派活，带检查项 |
+| `add_subtask(collab_id, item_key, title, ...)` | PM / Worker | 给已有任务项加子任务 |
+| `update_task_progress(collab_id, item_key, subtask_id, ...)` | Worker | 更新某个子任务的进度 |
+| `batch_update_tasks(collab_id, item_key, updates)` | Worker | 批量更新多个任务项 |
+| `board_update(collab_id, task_name?, title?, ...)` | PM / Worker | 更新协作看板条目 |
+| `board_list(collab_id, agent_id?, scope?, item_type?)` | 任意人 | 读取协作看板条目 |
+| `board_view(collab_id)` | 任意人 | 查看完整协作看板（全部分区） |
+| `board_list_tasks(collab_id)` | 任意人 | 查看该协作的全部派活 |
+| `board_list_my_tasks(collab_id, scope?, debug?)` | Worker | 列出当前 Agent 自己的检查项 |
+| `board_post_public_discussion(collab_id, task_name, title, content)` | 任意人 | 发布对全队可见的讨论/决策 |
 
 ### PM 主导模型
 
@@ -77,19 +81,28 @@ PM Agent 自主推进协作：
 
 ---
 
-## 共享文件工作区（`workspace/collab/`）
+## 协作看板（Collaboration Board）
 
-### PM 手动维护文件
-PM 应通过 `filesystem.write_file` 手动创建并维护 `workspace/collab/pm_tasks.md`，内容包含：
-- 需求摘要和验收标准
-- 成员分工（谁负责什么）
-- 当前阶段（规划 / 执行 / 评审 / 验收）
-- 关键决策与变更日志
+每张协作拥有一块看板（一个 `collab_id`），看板就是这次协作的记忆：需求、方案、任务分工、进度与
+讨论全都在上面，作为分区（`requirement` / `plan` / `task` / `status` / `discussion`）里的条目。
 
-### PM 监控协议
-1. PM 定期通过 `filesystem.read_file("workspace/collab/{agent_id}_tasks.md")` 读取 Worker 文件
-2. 阶段切换前，PM 读取所有协作文件
-3. 向用户输出最终报告前，PM 读取所有协作文件
+- **归属**：看板属于**拥有该群的那台机器**，看板工具会按 `collab_id` 解析出主人 —— 所以对端机器
+  上的 Agent 读写的是**同一块**看板（经中继），而不是自己的一份副本。
+- **读**：`board_view(collab_id)` 看整块看板；`board_list(...)` 过滤；`board_list_tasks(collab_id)`
+  看派活；`board_list_my_tasks(collab_id)` 看自己的活。
+- **写**：`board_update(...)` 写条目；`assign_task(...)` 建任务项与检查项；`update_task_progress(...)`
+  推进某个子任务；`board_post_public_discussion(...)` 发布全队可见的决策。
+- **审批**：四道门（确定需求 / 讨论方案 / 任务分配 / 任务验收）是看板上 `approval` 类型的条目。
+  用户在任务窗里批准它们，而前两道未通过前 `assign_task` 会拒绝派活。
+
+阶段切换前**读看板**、而不是读某个人的私有备注；决策**写进看板**、而不是只在群聊里说一遍 ——
+消息会被刷走，看板条目不会。
+
+### 结构化任务项
+
+`assign_task` 写入的任务项在 `extra` 里带结构化子任务（id / 标题 / 状态 / 进度 / 备注），
+`update_task_progress` 一次推进一个子任务。条目渲染出来的正文由这些子任务生成 —— 所以检查项标记
+和子任务表是**同一份事实**，不是两份副本。
 
 ---
 
@@ -129,19 +142,19 @@ Agent 在本地协作时，经常需要与远程仓库（GitHub）交互。OpenS
 4. PM 通过群聊中的 @提及分配任务
 
 ### 阶段 2：执行
-1. Worker 在群聊中读取 PM 的分配内容
-2. Worker 通过 `filesystem.write_file` 在 `workspace/collab/` 中维护自己的任务备注
-3. Worker 实现功能，随着进度更新备注
+1. Worker 在群聊中读取 PM 的分配内容，并在看板上看自己的任务项
+2. Worker 用 `update_task_progress(collab_id, item_key, subtask_id, ...)` 推进自己的子任务
+3. Worker 实现功能，进度随做随写看板
 4. Worker 在群聊中汇报完成情况或阻塞问题
-5. PM 通过读取 `workspace/collab/` 文件监控进度
+5. PM 通过读看板（`board_list_tasks`）跟进进度，而不是轮询文件
 
 ### 阶段 3：评审与迭代
-1. PM 审查完成的工作（读取代码、检查输出、读取协作文件）
-2. 通过：PM 在群聊中确认
+1. PM 审查完成的工作（读取代码、检查输出、读看板）
+2. 通过：PM 在群聊中确认，并把子任务推进到 done
 3. 拒绝：PM 提供反馈，Worker 修改后重新提交
 
 ### 阶段 4：用户验收
-1. PM 审查所有完成的工作和所有协作文件
+1. PM 审查所有完成的工作与看板
 2. PM 通过 `<to_user>` 向用户报告摘要
 3. 用户同意：PM 调用 `end_collaboration(card="software_dev_team")` 关闭协作
 4. 用户要求变更：返回阶段 2
@@ -176,7 +189,7 @@ Agent 在本地协作时，经常需要与远程仓库（GitHub）交互。OpenS
 | 协议存储 | `blueprints/{name}/BLUEPRINT.md`（子目录） | `collab_cards/{name}.md`（平铺文件） |
 | 角色分配 | `roles` 字段（隐含强制） | `suggested_roles`（建议，PM 决定） |
 | start 中的 members | 必填列表 | 可选——PM 通过群聊决定 |
-| 状态共享 | `workspace/` 中的黑板（ProjectBoard） | 共享文件工作区（`workspace/collab/`） |
+| 状态共享 | `workspace/` 中的黑板（ProjectBoard） | 协作看板，每台机器一块（`collab_board.py`） |
 | 团队注册 | `workspace/TEAM.md` 手动文件 | `get_team_status()` 实时 API |
-| PM 可见性 | 需要解析黑板 | 读取 `workspace/collab/` 中的文件 |
-| 任务持久化 | 仅内存 | `workspace/collab/` 中的文件（手动维护） |
+| PM 可见性 | 需要解析黑板 | `board_view` / `board_list_tasks` |
+| 任务持久化 | 仅内存 | 看板条目，持久化在拥有它的机器上 |
