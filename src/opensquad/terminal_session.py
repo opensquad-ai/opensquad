@@ -248,9 +248,16 @@ class TerminalSession:
 
     def _pump(self) -> None:
         """Read the child's output and stream it, until it exits."""
+        import codecs
+
         stream = getattr(self.process, "stdout", None)
         if stream is None:
             return
+        # One decoder for the whole run. A character can be split across two reads — the console
+        # code page spends two bytes on a Chinese character — and decoding each read on its own
+        # turns that character into two replacement marks instead of the character. That is how
+        # the copyright line came back as garbage.
+        decoder = codecs.getincrementaldecoder(self.encoding)(errors="replace")
         try:
             while True:
                 data = stream.read(READ_CHUNK)
@@ -259,11 +266,14 @@ class TerminalSession:
                 if isinstance(data, bytes):
                     # The shell's own encoding (cp936 for a Windows console shell); a byte that
                     # does not fit is replaced rather than killing the stream.
-                    text = data.decode(self.encoding, errors="replace")
+                    text = decoder.decode(data)
                 else:
                     text = str(data)
                 if text:
                     self._emit_stdout(text)
+            tail = decoder.decode(b"", final=True)
+            if tail:
+                self._emit_stdout(tail)
         except Exception as exc:  # noqa: BLE001 - a closed pipe on exit is normal
             logger.debug("[Terminal] %s read loop ended: %s", self.id, exc)
         finally:
