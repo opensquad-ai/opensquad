@@ -1049,27 +1049,74 @@ def _one_task_rule_message(agent_id: str, tasks: list[dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
+_GATE_STALL_SECONDS = 30 * 60
+
+
+def _human_age(seconds: int) -> str:
+    if seconds < 60:
+        return f"{seconds} 秒"
+    if seconds < 3600:
+        return f"{seconds // 60} 分钟"
+    if seconds < 86400:
+        return f"{seconds // 3600} 小时"
+    return f"{seconds // 86400} 天"
+
+
+def _gate_state_of(report: dict[str, Any], step: str) -> tuple[str, int | None]:
+    """One gate's state and age, from whatever shape the board answered with.
+
+    A peer running an older build still answers with ``gate_states``' plain state string, and the
+    hint that routes to it is resolved from the keyword arguments of the call — so this reads both
+    shapes rather than assuming the machine on the other side was upgraded with us.
+    """
+    info = report.get(step)
+    if isinstance(info, str):
+        return (info or "missing"), None
+    if isinstance(info, dict):
+        age = info.get("age_seconds")
+        return str(info.get("state") or "missing"), (age if isinstance(age, int) else None)
+    return "missing", None
+
+
 def _gate_requirement_message(collab_id: str, needed: tuple[str, ...]) -> str:
-    """Why the next phase is blocked, and the exact steps that unblock it.
+    """Why the next phase is blocked, how long it has been blocked, and the exact way out.
 
     The four gates (确定需求 / 讨论方案 / 任务分配 / 任务验收) are the user's approvals. This
     refuses to move past an unapproved one — the field report was a task that ran to
     completion with all four still 未开始 — and it names what to call, in order, instead
     of only saying that something is missing.
+
+    It also says how long each gate has been waiting, because "unapproved" and "stalled" are
+    different problems: a missing gate means nobody ever asked the user and there is nothing for
+    them to click, and a gate pending for hours means the request is sitting unseen. Neither one is
+    ever passed automatically — a gate that approves itself is not a gate.
     """
     if not collab_id:
         return ""
     try:
-        from ..collab_board import gate_states
+        from ..collab_board import gate_report
 
-        states = gate_states(collab_id=collab_id)
+        report = gate_report(collab_id=collab_id)
     except Exception:
         return ""
-    blockers = [step for step in needed if states.get(step) != "approved"]
+    blockers = [step for step in needed if _gate_state_of(report, step)[0] != "approved"]
     if not blockers:
         return ""
+
     lines = [f"协作任务 {collab_id} 不能进入下一步：以下门尚未获得用户批准 —— "]
-    lines += [f"  · {step}：{states.get(step, 'missing')}" for step in blockers]
+    stalled = False
+    for step in blockers:
+        state, age = _gate_state_of(report, step)
+        if state == "missing":
+            lines.append(f"  · {step}：从未发起审批（看板上没有这道门的条目，用户无从批准）")
+            continue
+        if age is None:
+            lines.append(f"  · {step}：{state}")
+            continue
+        lines.append(f"  · {step}：{state}（已等待 {_human_age(age)}）")
+        if age >= _GATE_STALL_SECONDS:
+            stalled = True
+
     lines += [
         "",
         "解决步骤（按顺序）：",
@@ -1079,6 +1126,12 @@ def _gate_requirement_message(collab_id: str, needed: tuple[str, ...]) -> str:
         "3) 收到批准后，再重新调用刚刚被拒的这个工具。",
         "门通过之前不要分配任务、也不要推进进度——分步确认是用户的要求。",
     ]
+    if stalled:
+        lines.append(
+            f"注意：有一道门已经卡住超过 {_human_age(_GATE_STALL_SECONDS)}。不要再默默等下去，"
+            "把这件事明确说给用户（哪个门、等了多久、需要他做什么），由用户决定补批准、调整需求，"
+            "还是结束这次协作——门不会自动通过。"
+        )
     return "\n".join(lines)
 
 

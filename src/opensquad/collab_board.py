@@ -1242,6 +1242,59 @@ def gate_states(collab_id: str) -> dict[str, str]:
     return {step: (latest.get(step) or ("missing", ""))[0] for step in GATE_STEPS}
 
 
+def gate_report(collab_id: str) -> dict[str, dict[str, Any]]:
+    """Each gate's state, and how long it has been in it.
+
+    ``gate_states`` answers "approved or not"; this answers "and for how long", which is what tells
+    a collaborator that a gate is not merely unapproved but stalled. A ``missing`` gate means nobody
+    ever asked the user, so there is nothing for them to click; a ``pending`` one may have been
+    waiting for hours. Both are dead ends the caller has to be able to describe, and neither is a
+    reason to let the work through on its own.
+    """
+    from opensquad.collab_approval import normalize_step
+
+    latest: dict[str, tuple[str, str, str]] = {}
+    for item in _read_items():
+        if str(item.get("collab_id") or "") != str(collab_id):
+            continue
+        if str(item.get("item_type") or "") != "approval":
+            continue
+        extra = item.get("extra") if isinstance(item.get("extra"), dict) else {}
+        approval = extra.get("approval") if isinstance(extra.get("approval"), dict) else {}
+        try:
+            step = normalize_step(str(approval.get("step") or item.get("title") or ""))
+        except Exception:
+            step = str(approval.get("step") or "")
+        if step not in GATE_STEPS:
+            continue
+        stamp = str(item.get("updated_at") or item.get("created_at") or "")
+        state = str(item.get("status") or "pending").strip().lower()
+        if state not in ("approved", "pending", "rejected"):
+            state = "pending"
+        current = latest.get(step)
+        if current is None or stamp >= current[1]:
+            latest[step] = (state, stamp, str(item.get("item_key") or ""))
+
+    now = datetime.now(timezone.utc)
+    report: dict[str, dict[str, Any]] = {}
+    for step in GATE_STEPS:
+        found = latest.get(step)
+        if found is None:
+            report[step] = {"state": "missing", "since": "", "age_seconds": None, "approval_id": ""}
+            continue
+        state, stamp, approval_id = found
+        age: int | None = None
+        try:
+            when = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+            if when.tzinfo is None:
+                when = when.replace(tzinfo=timezone.utc)
+            age = max(0, int((now - when).total_seconds()))
+        except Exception:
+            age = None
+        report[step] = {"state": state, "since": stamp, "age_seconds": age, "approval_id": approval_id}
+    return report
+
+
 def pending_members(collab_id: str) -> list[dict[str, Any]]:
     """Members who have not accepted yet — what blocks assigning work.
 
@@ -1468,6 +1521,7 @@ REMOTE_OPS = (
     "save_plan_snapshot",
     "list_plan_snapshots",
     "gate_states",
+    "gate_report",
     "cleanup_stale_tasks",
 )
 
