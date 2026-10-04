@@ -592,6 +592,12 @@ def join_collaboration(card: str, collab_id: str = "", group_id: str = "") -> di
             except Exception as exc:  # noqa: BLE001 - reported below, not swallowed
                 join_error = str(exc) or type(exc).__name__
             if not join_error:
+                try:
+                    from ..collab_board import announce_participant
+
+                    announce_participant(collab_id, _agent_id, "accepted")
+                except Exception:
+                    pass
                 join_tracking = f"joined task {collab_id}"
         except Exception as e:
             join_error = str(e) or type(e).__name__

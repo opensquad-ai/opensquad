@@ -1650,6 +1650,41 @@ def _board_auth_headers(base: str) -> dict[str, str]:
     return headers
 
 
+def _owner_base(collab_id: str) -> str:
+    """The address of the machine that owns this board (loopback when that is us)."""
+    base = board_base_url(collab_id=collab_id)
+    if base:
+        return base
+    try:
+        from opensquad.system_config import syscfg
+
+        return f"http://127.0.0.1:{int(syscfg.port('gateway') or 9555)}"
+    except Exception:
+        return ""
+
+
+def _post_to_owner(collab_id: str, path: str, payload: dict[str, Any]) -> bool:
+    """POST to the owner's gateway, authenticated like a board call. Never raises."""
+    import urllib.request
+
+    cid = str(collab_id or "").strip()
+    base = _owner_base(cid) if cid else ""
+    if not cid or not base:
+        return False
+    req = urllib.request.Request(
+        f"{base}{path.format(collab_id=cid)}",
+        data=json.dumps(payload).encode("utf-8"),
+        headers=_board_auth_headers(base),
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=8.0) as resp:
+            return bool(json.loads(resp.read().decode("utf-8") or "{}").get("ok"))
+    except Exception:
+        logger.debug("[Board] %s failed for %s", path, cid, exc_info=True)
+        return False
+
+
 def notify_task_message(collab_id: str, content: str, *, mentions: list[str] | None = None, author: str = "") -> bool:
     """Ask the machine that owns this board to push a task-window message to its subscribers.
 
@@ -1663,35 +1698,33 @@ def notify_task_message(collab_id: str, content: str, *, mentions: list[str] | N
     Best effort by design: the message is already on the board, so a failure here must not fail the
     tool — it only means the push did not happen, and the pull still works.
     """
-    import urllib.request
-
-    cid = str(collab_id or "").strip()
-    if not cid:
-        return False
-    base = board_base_url(collab_id=cid)
-    if not base:
-        # The board is this machine's own, so its owner is its own gateway, on loopback.
-        try:
-            from opensquad.system_config import syscfg
-
-            base = f"http://127.0.0.1:{int(syscfg.port('gateway') or 9555)}"
-        except Exception:
-            return False
-    body = json.dumps(
-        {"content": str(content or ""), "mentions": [str(m) for m in (mentions or [])], "author": str(author or "")}
-    ).encode("utf-8")
-    req = urllib.request.Request(
-        f"{base}/api/ai-web/collab-board/tasks/{cid}/notify",
-        data=body,
-        headers=_board_auth_headers(base),
-        method="POST",
+    return _post_to_owner(
+        collab_id,
+        "/api/ai-web/collab-board/tasks/{collab_id}/notify",
+        {
+            "content": str(content or ""),
+            "mentions": [str(m) for m in (mentions or [])],
+            "author": str(author or ""),
+        },
     )
-    try:
-        with urllib.request.urlopen(req, timeout=8.0) as resp:
-            return bool(json.loads(resp.read().decode("utf-8") or "{}").get("ok"))
-    except Exception:
-        logger.debug("[Board] task-message notify failed for %s", cid, exc_info=True)
-        return False
+
+
+def announce_participant(collab_id: str, agent_id: str, state: str) -> bool:
+    """Ask the machine that owns this board to rewrite a collaboration card's participant state.
+
+    The card is a group message holding a snapshot of who was invited when it was sent.
+    ``mark_participant`` updates the board — written by the agent process — while the card is a
+    message this gateway owns, so a worker that joined showed as accepted in the task window and
+    still as invited on the card in the group. The user's own accept is patched by the respond
+    endpoint, which runs in the gateway; this is the same rewrite for the agent path.
+
+    Best effort by design: the board is already correct, so a failure here must not fail the join.
+    """
+    return _post_to_owner(
+        collab_id,
+        "/api/ai-web/collab-board/tasks/{collab_id}/participant",
+        {"agent_id": str(agent_id or ""), "state": str(state or "")},
+    )
 
 
 def _remote_call(op: str, args: tuple, kwargs: dict) -> Any:

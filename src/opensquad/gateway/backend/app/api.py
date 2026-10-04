@@ -2301,6 +2301,72 @@ async def respond_window_card(
     }
 
 
+@router.post("/collab-board/tasks/{collab_id}/participant")
+async def set_collab_task_participant(
+    collab_id: str,
+    request: Request,
+    body: dict = Body(default={}),
+    db: AsyncSession = Depends(get_db),
+):
+    """Rewrite a collaboration card's participant state on behalf of an agent.
+
+    The card is a snapshot taken when it was sent, and it is a message this gateway owns. A worker
+    that accepted through join_collaboration records its state on the board, which the agent
+    process writes — so the task window showed it as accepted while the card in the group still
+    said invited. The user's own accept is rewritten by the respond endpoint, in this process; this
+    is the same rewrite for the board bridge, authenticated the way the bridge is.
+    """
+    from app.ai_web.websocket import _check_node_secret
+    from opensquad import collab_board, node_peers
+    from opensquad.collab_approval import (
+        normalize_participant_state,
+        parse_collab_task_payload,
+        patch_collab_task_participant_in_content,
+    )
+
+    authorized = _check_node_secret(request.headers.get("X-Node-Secret", ""))
+    if not authorized:
+        peer_token = request.headers.get("X-Node-Token", "")
+        if peer_token:
+            peer = node_peers.verify(peer_token)
+            authorized = node_peers.has_scope(peer, "board:write")
+    if not authorized:
+        raise HTTPException(status_code=401, detail="Invalid or missing node secret (participant)")
+
+    participant = str((body or {}).get("agent_id") or "").strip()
+    if not participant:
+        raise HTTPException(status_code=400, detail="agent_id is required")
+    state = normalize_participant_state(str((body or {}).get("state") or "accepted"))
+
+    task = collab_board.local_call("get_task", task_id=str(collab_id or "")) or {}
+    group_id = str((task.get("extra") or {}).get("group_id") or "") if isinstance(task, dict) else ""
+    if not group_id:
+        return {"ok": False, "error": "this collaboration has no group, so it has no card to rewrite"}
+
+    found = await db.execute(
+        select(Message).where(Message.group_id == group_id).order_by(desc(Message.timestamp)).limit(80)
+    )
+    message = None
+    for candidate in found.scalars().all():
+        payload = parse_collab_task_payload(candidate.content or "")
+        if payload and str(payload.get("collab_id")) == str(collab_id):
+            message = candidate
+            break
+    if message is None:
+        return {"ok": False, "error": "no collaboration card for this task in its group"}
+
+    message.content = patch_collab_task_participant_in_content(message.content or "", participant, state)
+    message.is_edited = True
+    await db.commit()
+    refreshed = await db.execute(
+        select(Message)
+        .where(Message.id == message.id)
+        .options(selectinload(Message.attachments), selectinload(Message.sender))
+    )
+    await notify_message_update(group_id, format_message_response(refreshed.scalar_one()).model_dump(mode="json"))
+    return {"ok": True, "group_id": group_id, "agent_id": participant, "state": state}
+
+
 @router.post("/groups/{group_id}/collab-tasks/{collab_id}/respond")
 async def respond_collab_task(
     group_id: str,
