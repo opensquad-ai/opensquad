@@ -10,6 +10,7 @@ Key behaviors:
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -27,11 +28,29 @@ from opensquad.system_config import syscfg
 logger = logging.getLogger(__name__)
 
 _LOCK = threading.Lock()
+# How deep this thread is inside _board_lock, so a nested acquisition is a no-op rather than a
+# wait on the lock the same thread already holds.
+_lock_depth = threading.local()
 
 # Only replay WAL entries younger than this window. Stale entries left over from
 # a previous session must not revive data that was legitimately removed (e.g.
 # deleting the last task, which empties the main file).
 _WAL_REPLAY_WINDOW = 3600  # seconds
+
+
+def _board_key() -> str:
+    """A stable, filename-safe id for this workspace's board, so its lock file is its own.
+
+    The lock was one machine-wide resource named "collab_board", so a second deployment on the same
+    box — or a test — contended for the same file as the stack serving users, and a lost
+    acquisition was ignored rather than reported (a writer then went on unprotected). Keyed by the
+    board directory, every writer of a given board still shares one lock, and nothing else does.
+    """
+    try:
+        raw = _board_dir()
+    except Exception:
+        raw = "collab_board"
+    return hashlib.sha1(raw.encode("utf-8", "replace")).hexdigest()[:12]
 
 
 @contextmanager
@@ -46,13 +65,34 @@ def _board_lock(timeout: float = 15.0):
     A single cross-process resource (rather than separate items/tasks locks)
     avoids lock-ordering deadlocks for operations that touch both files
     (e.g. ``delete_task``, ``list_tasks``).
+
+    Re-entrant within a thread: a caller that wants a whole read-modify-write
+    sequence to be one critical section (``board_write_lock``) still calls
+    ``upsert_item`` inside it, and that inner call must not wait on the lock its
+    own thread is holding — the file lock would otherwise time out after 15s.
     """
-    with _LOCK:
-        lock = SessionLock("collab_board", timeout=timeout)
-        lock.acquire()
+    depth = getattr(_lock_depth, "depth", 0)
+    if depth:
+        _lock_depth.depth = depth + 1
         try:
             yield
         finally:
+            _lock_depth.depth = depth
+        return
+    with _LOCK:
+        from opensquad.distributed_lock import LockTimeoutError
+
+        lock = SessionLock(f"collab_board:{_board_key()}", timeout=timeout)
+        if not lock.acquire():
+            # acquire() returns False on timeout rather than raising, and this call used to ignore
+            # that: the board was then read and written with no mutual exclusion at all, which is
+            # exactly the lost update the file lock is here to prevent — and it failed quietly.
+            raise LockTimeoutError(f"collab_board lock not acquired within {timeout}s")
+        _lock_depth.depth = 1
+        try:
+            yield
+        finally:
+            _lock_depth.depth = 0
             lock.release()
 
 
@@ -466,6 +506,21 @@ def _derive_task_status_progress_from_content(content: str) -> tuple[str | None,
         status = "pending"
 
     return status, progress
+
+
+@contextmanager
+def board_write_lock():
+    """Hold the board's file lock across a whole read-modify-write sequence.
+
+    The lock is re-entrant, so the reads and writes inside the sequence (`list_items`,
+    `upsert_item`) take it again without deadlocking, and the whole sequence becomes one critical
+    section for every process on the machine. Callers used to hold a thread lock of their own
+    instead, which only ever serialised the threads of a single process: two agents updating
+    different subtasks of the same item could each read, then write, and the later write silently
+    dropped the earlier one.
+    """
+    with _board_lock():
+        yield
 
 
 def upsert_item(
