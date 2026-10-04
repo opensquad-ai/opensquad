@@ -27,10 +27,19 @@ describe('the folded view', () => {
     expect(expanded).toContain("t('chat.collapseText'");
   });
 
-  it('fades the last stretch with a mask and a touch of blur', () => {
-    expect(FOLD).toContain('[mask-image:linear-gradient(to_bottom,black,transparent)]');
-    expect(FOLD).toMatch(/blur-\[[\d.]+px\]/);
-    expect(FOLD).toContain('pointer-events-none');
+  it('fades the text itself, with the panel\'s own graduated mask', () => {
+    // The bug this guards: a mask or blur on an empty overlay blurs nothing and shows nothing.
+    const fade = FOLD.slice(FOLD.indexOf('data-testid="long-text-fade"'), FOLD.indexOf('</div>', FOLD.indexOf('data-testid="long-text-fade"')));
+    expect(fade).toContain('os-thought-tail');
+    expect(fade).toMatch(/blur-\[[\d.]+px\]/);
+    expect(fade).toContain('foldedText(text, limit)');
+  });
+
+  it('uses the same primitive the reasoning panel fades out with', () => {
+    const css = fs.readFileSync(path.resolve(__dirname, '../index.css'), 'utf8');
+
+    expect(css).toContain('.os-thought-tail');
+    expect(css).toMatch(/\.os-thought-tail \{[\s\S]*?mask-image: linear-gradient/);
   });
 
   it('offers both directions, by name', () => {
