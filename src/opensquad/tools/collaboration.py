@@ -1700,10 +1700,16 @@ def board_view(collab_id: str) -> dict[str, Any]:
             "status": [],
             "discussions": [],
         }
+        zone_for_type = {
+            "requirement": "requirements",
+            "task": "tasks",
+            "discussion": "discussions",
+        }
 
         for item in all_items:
             item_type = str(item.get("item_type", ""))
-            if item_type in zones:
+            zone = zone_for_type.get(item_type, item_type)
+            if zone in zones:
                 # Enrich task items with structured subtask info
                 if item_type == "task":
                     extra = item.get("extra") or {}
@@ -1712,7 +1718,7 @@ def board_view(collab_id: str) -> dict[str, Any]:
                         item["file_scope"] = extra.get("file_scope", "")
                         item["deadline"] = extra.get("deadline", "")
                         item["acceptance_criteria"] = extra.get("acceptance_criteria", "")
-                zones[item_type].append(item)
+                zones[zone].append(item)
 
         return {
             "status": "success",
@@ -2452,17 +2458,10 @@ def post_task_message(
             content=text,
         )
 
-        # The user's task-window message is pushed to the group's subscribers by the endpoint that
-        # receives it; an agent's write had no equivalent, so a worker on a paired machine only ever
-        # saw it by polling the board. Announce it to the machine that owns the board, which fans it
-        # out the same way. Best effort: the message is already on the board either way.
-        try:
-            from ..collab_board import notify_task_message
-
-            notify_task_message(collab_id, text, author=agent_id)
-        except Exception:
-            pass
-
+        # The task-window message is already fanned out by _deliver_to_agents below, which relays
+        # it to the group's subscribers on paired machines — announcing it here as well sent the
+        # same message twice, each with its own event id, so the receiver's dedup could not tell
+        # them apart.
         # Files/images attached to this message belong to the task itself, so they
         # are recorded on the board (the URL is served by the gateway, which is
         # what makes them visible from every machine).

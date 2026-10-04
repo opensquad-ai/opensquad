@@ -1686,30 +1686,6 @@ def _post_to_owner(collab_id: str, path: str, payload: dict[str, Any]) -> bool:
         return False
 
 
-def notify_task_message(collab_id: str, content: str, *, mentions: list[str] | None = None, author: str = "") -> bool:
-    """Ask the machine that owns this board to push a task-window message to its subscribers.
-
-    The user's own task-window message is fanned out by the endpoint that receives it. An *agent's*
-    message is a plain board write and nothing followed it, so a worker on a paired machine could
-    read it over the board API but never had it pushed — "pull works, push does not", for every
-    task-window message an agent posted. This is the missing half: the writer announces it to the
-    owner, the owner fans it out (``relay.fan_out_task``), and the paired agent's control channel
-    hears about it exactly as it does for the user's messages.
-
-    Best effort by design: the message is already on the board, so a failure here must not fail the
-    tool — it only means the push did not happen, and the pull still works.
-    """
-    return _post_to_owner(
-        collab_id,
-        "/api/ai-web/collab-board/tasks/{collab_id}/notify",
-        {
-            "content": str(content or ""),
-            "mentions": [str(m) for m in (mentions or [])],
-            "author": str(author or ""),
-        },
-    )
-
-
 def announce_participant(collab_id: str, agent_id: str, state: str) -> bool:
     """Ask the machine that owns this board to rewrite a collaboration card's participant state.
 

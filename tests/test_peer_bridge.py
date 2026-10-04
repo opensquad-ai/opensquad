@@ -495,7 +495,11 @@ def test_joining_a_group_on_a_peer_subscribes_for_its_messages(env, monkeypatch)
     assert res["ok"] is True
     assert posted[0]["url"] == "http://192.168.5.4:9555/api/relay/subscribe"
     assert posted[0]["headers"]["X-Node-Token"] == "peer-tok"
-    assert posted[0]["json"]["callback_url"] == "http://127.0.0.1:9555"
+    assert posted[0]["json"]["callback_url"].startswith("http://")
+    assert "127.0.0.1" not in posted[0]["json"]["callback_url"], (
+        "a loopback callback is this machine talking to itself: the peer pushes to it, reaches "
+        "itself and gets 401 on every message"
+    )
     assert posted[0]["json"]["user_id"] == "u-home"
     assert posted[0]["json"]["secret"]
     assert relay_link.verify_inbound("g-7f3a", posted[0]["json"]["secret"])

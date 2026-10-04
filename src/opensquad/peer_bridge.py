@@ -438,7 +438,25 @@ def _home_gateway_url() -> str:
             url = syscfg.gateway_http()
         except Exception:
             url = ""
-    return str(url or "").rstrip("/")
+    url = str(url or "").rstrip("/")
+    if url and "127.0.0.1" not in url and "localhost" not in url and "[::1]" not in url:
+        return url
+    try:
+        from opensquad.net_addresses import lan_addresses
+        from opensquad.system_config import syscfg
+
+        port = int(syscfg.port("gateway") or 9555)
+        for address in lan_addresses() or []:
+            candidate = str(address or "").strip()
+            for prefix in ("http://", "https://"):
+                if candidate.startswith(prefix):
+                    candidate = candidate[len(prefix) :]
+            candidate = candidate.split("/")[0]
+            if candidate and "127.0.0.1" not in candidate and "localhost" not in candidate:
+                return f"http://{candidate}:{port}"
+    except Exception:
+        pass
+    return url
 
 
 def _local_agent_id() -> str:
