@@ -1,6 +1,6 @@
 /**
- * The strip has to be above the composer (where a message cannot push it away), made of every
- * group's tasks, and able to open the task window that already exists.
+ * The strip is a control on the composer's toolbar line — not a block of list above it — and it
+ * has to be fed the cross-group list from the window that owns the fetch.
  */
 import fs from 'fs';
 import path from 'path';
@@ -8,19 +8,27 @@ import { describe, expect, it } from 'vitest';
 
 const read = (rel: string) => fs.readFileSync(path.resolve(__dirname, rel), 'utf8');
 
-describe('the task strip is mounted above the composer', () => {
-  it('sits inside the input area, before the composer host', () => {
-    const src = read('../components/ChatWindow.tsx');
+describe('where it sits', () => {
+  it('is on the toolbar line, after the rich-text controls and before the @ button', () => {
+    const src = read('../components/MessageInput.tsx');
 
-    expect(src).toContain('<TaskStrip tasks={useStripTasks()} />');
+    const divider = src.indexOf('h-4 w-px bg-gray-300');
     const strip = src.indexOf('<TaskStrip');
-    const composer = src.indexOf('<ChatComposerHost', strip);
+    const ai = src.indexOf('{/* AI 按钮 */}');
 
-    expect(strip).toBeGreaterThan(-1);
-    expect(composer).toBeGreaterThan(strip);
+    expect(strip).toBeGreaterThan(divider);
+    expect(ai).toBeGreaterThan(strip);
   });
 
-  it('reads the cross-group list, and refreshes when the window comes back', () => {
+  it('is fed the cross-group list, fetched once by the chat window', () => {
+    const src = read('../components/ChatWindow.tsx');
+
+    expect(src).toContain('tasks={useStripTasks()}');
+    expect(src).toContain('tasks={tasks}');
+    expect(src).toContain('tasks?: CollabBoardTask[]');
+  });
+
+  it('reads the list from the route that merges paired machines, and refreshes on return', () => {
     const hook = read('../hooks/useStripTasks.ts');
 
     expect(hook).toContain('collabBoardAPI.listTasks()');
@@ -30,20 +38,32 @@ describe('the task strip is mounted above the composer', () => {
   });
 });
 
-describe('the strip itself', () => {
-  it('opens the task window by task id, using the path the chat already uses', () => {
+describe('how it looks', () => {
+  it('is a compact pill that opens upward, since the composer is at the bottom', () => {
     const src = read('../components/TaskStrip.tsx');
 
+    expect(src).toContain('data-task-strip-trigger');
+    expect(src).toContain('absolute bottom-full');
+    expect(src).toContain('rounded-full');
+    expect(src).toContain('backdrop-blur');
+    expect(src).toContain('shadow-xl');
+  });
+
+  it('shows no list until it is opened, then one row per task that opens the task window', () => {
+    const src = read('../components/TaskStrip.tsx');
+
+    expect(src).toMatch(/if \(rows\.length === 0\) return null;/);
+    expect(src).toContain('{open && (');
     expect(src).toContain('openCollabTaskWindow(row.taskId)');
+    expect(src).toContain('data-task-id={row.taskId}');
     expect(src).toContain("from './CollabTaskCard'");
   });
 
-  it('collapses, and shows nothing when there is nothing to show', () => {
+  it('closes on an outside click or Escape', () => {
     const src = read('../components/TaskStrip.tsx');
 
-    expect(src).toContain('aria-expanded={expanded}');
-    expect(src).toMatch(/if \(rows\.length === 0\) return null;/);
-    expect(src).toContain('data-task-id={row.taskId}');
+    expect(src).toContain("document.addEventListener('mousedown'");
+    expect(src).toContain("event.key === 'Escape'");
   });
 
   it('takes its rows from the shared selector', () => {
@@ -61,6 +81,7 @@ describe('its wording', () => {
 
       expect(locale.taskStrip.title).toBeTruthy();
       expect(locale.taskStrip.within).toBeTruthy();
+      expect(locale.taskStrip.finished).toBeTruthy();
     }
   });
 });
