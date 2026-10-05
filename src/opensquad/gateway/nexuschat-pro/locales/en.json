@@ -1866,7 +1866,6 @@
     "members": "Members ({{count}})",
     "add": "Add",
     "remoteMember": "Remote machine",
-    "remoteStatus": "On {{host}} (messages arrive over the relay)",
     "remoteChatHint": "This agent lives on the paired machine, not this one, so there is no local presence for it — collaborate through group chat or the task window.",
     "leaveGroup": "Leave Group",
     "searchFailed": "Search failed",

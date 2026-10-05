@@ -308,7 +308,9 @@ const PRODUCERS_TO_VERIFY = [...SAFE_PRODUCERS].filter(
 const EXPECTED_SITES: Record<string, number> = {
   'components/AgentManagerPage.tsx': 1,
   'components/ChatList.tsx': 1,
-  'components/ChatWindow.tsx': 2,
+  // The fold renders the truncated text through the same pipeline as the full one, so each of its
+  // two rows is a site. Both go through parseContent, which sanitizes.
+  'components/ChatWindow.tsx': 4,
   'components/CollabBoardPage.tsx': 1,
   // The task window renders board text through renderFencedMarkdown (MarkdownText);
   // R2/R3 keep that producer honest, so this site is classified like the others.
@@ -322,7 +324,7 @@ const EXPECTED_SITES: Record<string, number> = {
   'components/ai-chat/FileDiffBlock.tsx': 3,
   'components/ai-chat/FileDocumentEditor.tsx': 3,
   'components/ai-chat/MarkdownScrollBody.tsx': 1,
-  'components/ai-chat/MessageBubble.tsx': 2,
+  'components/ai-chat/MessageBubble.tsx': 3,
   'components/ai-chat/ProjectFilesPanel.tsx': 2,
   'components/ai-chat/StreamingMessage.tsx': 1,
   'components/ai-chat/ToolCallBlock.tsx': 1,

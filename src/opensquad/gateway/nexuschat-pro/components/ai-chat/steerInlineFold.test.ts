@@ -408,9 +408,10 @@ describe('R5 — 接线', () => {
   it('the consumer nests into the fold instead of sealing', () => {
     const svc = PAGE.slice(PAGE.indexOf("svc.on('steer_consumed'"));
     // 必须是真的调用结果；`null && append…` 这种「看起来调用了」不算接线。
-    expect(svc).toMatch(
-      /const steered = appendUserSteerToTimeline\(prevBucket, \{ text, source, sender_name: senderName \}\);/,
-    );
+    // The call grew to several lines when the steer gained an id (so a re-delivered frame cannot add
+    // a second row), so this pins the call and its message_id rather than one line of it.
+    expect(svc).toMatch(/const steered = appendUserSteerToTimeline\(prevBucket, \{/);
+    expect(svc).toContain('message_id: messageId,');
   });
 
   it('an incoming message keeps its origin all the way into the fold row', () => {
