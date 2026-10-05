@@ -19,6 +19,7 @@ import { agentAvatar, agentLabel, agentRowKey, agentStatusOf, AGENT_STATUS_DOT }
 import { useChatContacts } from '../hooks/useChatContacts';
 import { UiModeSwitch, type UiMode } from './ai-chat/UiModeSwitch';
 import { AccountRailFooter, type AccountUser } from './AccountRailFooter';
+import { OpenSquadLoader } from './OpenSquadLoader';
 
 export interface ContactsRailProps {
   uiMode: UiMode;
@@ -195,7 +196,7 @@ export const ContactsRail: React.FC<ContactsRailProps> = ({
             title={t('aiChat.agentRefresh')}
             aria-label={t('aiChat.agentRefresh')}
           >
-            <RefreshCw size={13} className={loading ? 'animate-spin' : undefined} />
+            {loading ? <OpenSquadLoader size={13} /> : <RefreshCw size={13} />}
           </button>
         </div>
 

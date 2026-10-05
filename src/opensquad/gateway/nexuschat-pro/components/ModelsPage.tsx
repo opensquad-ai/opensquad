@@ -2146,7 +2146,7 @@ const ModelsPage: React.FC<ModelsPageProps> = ({ onBack }) => {
                         aria-label={t('modelsPage.presetRefreshBtn')}
                         className="p-1.5 rounded-lg text-textMuted hover:bg-hover disabled:opacity-40 transition-colors"
                       >
-                        <RefreshCw size={16} className={presetsRefreshing ? 'animate-spin' : ''} />
+                        {presetsRefreshing ? <OpenSquadLoader size={16} /> : <RefreshCw size={16} />}
                       </button>
                       <button onClick={closeConnect} className="p-1.5 rounded-lg text-textMuted hover:bg-hover transition-colors">
                         <X size={18} />

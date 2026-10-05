@@ -204,7 +204,7 @@ export const AgentTokenStatsPage: React.FC<AgentTokenStatsPageProps> = ({ agentI
             className={adminHeaderGhostBtn}
             title={t('agentTokenStats.refresh')}
           >
-            <RefreshCw size={15} className={loading ? 'animate-spin' : ''} />
+            {loading ? <OpenSquadLoader size={15} /> : <RefreshCw size={15} />}
           </button>
         </div>
       </div>

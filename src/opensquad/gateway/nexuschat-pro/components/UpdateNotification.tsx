@@ -17,6 +17,7 @@ import {
   markDesktopUpdateDownloaded,
   type DesktopUpdateOverlayState,
 } from '../services/desktopUpdateOverlay';
+import { OpenSquadLoader } from './OpenSquadLoader';
 
 function formatBytes(bytes: number): string {
   if (!bytes || bytes <= 0) return '0 B';
@@ -171,7 +172,7 @@ export const UpdateNotification: React.FC<Props> = ({
           </>
         ) : phase === 'downloading' ? (
           <span className="text-[11px] text-textMuted inline-flex items-center gap-1">
-            <RefreshCw size={11} className="animate-spin" />
+            <OpenSquadLoader size={11} />
             {t('systemConfig.about.updateNotifyDownloadingBg')}
           </span>
         ) : (

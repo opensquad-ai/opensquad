@@ -454,7 +454,7 @@ export const PluginSetupWizard: React.FC<PluginSetupWizardProps> = ({
                     data-testid="setup-test-connection"
                     className="inline-flex items-center gap-1.5 rounded-lg bg-primary px-3 py-1.5 text-[12px] text-white hover:opacity-90 disabled:opacity-50"
                   >
-                    {testing ? <Loader2 size={12} className="animate-spin" /> : <CheckCircle2 size={12} />}
+                    {testing ? <OpenSquadLoader size={12} /> : <CheckCircle2 size={12} />}
                     {recipe?.verify?.label || t('pluginSetup.testConnection', { defaultValue: '测试连接' })}
                   </button>
 

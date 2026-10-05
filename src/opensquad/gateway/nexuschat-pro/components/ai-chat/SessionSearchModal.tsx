@@ -28,6 +28,7 @@ import {
 import { SoftOverlay } from '../SoftOverlay';
 import { agentSessionAPI, type AgentSession } from '../../services/api';
 import { POPOVER_SURFACE_CLASS } from './popoverSurface';
+import { OpenSquadLoader } from '../OpenSquadLoader';
 
 type SearchMatch = {
   role: 'user' | 'assistant';
@@ -450,7 +451,7 @@ export const SessionSearchModal: React.FC<SessionSearchModalProps> = ({
           className="flex-1 bg-transparent outline-none text-[14px] text-textMain placeholder:text-textMuted/60"
         />
         {loading ? (
-          <Loader2 size={14} className="text-textMuted animate-spin shrink-0" />
+          <OpenSquadLoader size={14} className="shrink-0" />
         ) : null}
         <button
           type="button"

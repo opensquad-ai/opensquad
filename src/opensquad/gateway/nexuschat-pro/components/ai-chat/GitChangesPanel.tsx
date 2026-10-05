@@ -304,7 +304,7 @@ export const GitChangesPanel: React.FC<GitChangesPanelProps> = ({
           title={t('git.refresh')}
           className="p-1 rounded text-textMuted/60 hover:text-textMain hover:bg-black/[0.05] dark:hover:bg-white/[0.08] disabled:opacity-40"
         >
-          <RefreshCw size={12} className={loading ? 'animate-spin' : ''} />
+          {loading ? <OpenSquadLoader size={12} /> : <RefreshCw size={12} />}
         </button>
       </div>
 

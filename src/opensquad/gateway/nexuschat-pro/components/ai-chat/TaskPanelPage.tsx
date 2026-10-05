@@ -412,7 +412,7 @@ const TaskStatusBadge: React.FC<{ status: string }> = ({ status }) => {
   const Icon = m.Icon;
   return (
     <span className={`inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[9px] font-medium ${m.c}`}>
-      <Icon size={10} className={status === 'running' ? 'animate-spin' : ''} />
+      {status === 'running' ? <OpenSquadLoader size={10} /> : <Icon size={10} />}
       {status}
     </span>
   );

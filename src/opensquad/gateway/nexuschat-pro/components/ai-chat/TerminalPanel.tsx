@@ -19,6 +19,7 @@ import { useTranslation } from 'react-i18next';
 import { Ban, Eraser, Loader2, RotateCw, Terminal as TerminalIcon } from 'lucide-react';
 
 import { terminalAPI, type TerminalShellProfile } from '../../services/api';
+import { OpenSquadLoader } from '../OpenSquadLoader';
 
 /** Trim the local scrollback so a long-running shell cannot grow without bound. */
 const MAX_CHARS = 200_000;
@@ -309,7 +310,7 @@ export const TerminalPanel: React.FC<TerminalPanelProps> = ({ agentId, rootPath 
             placeholder={state === 'running' ? '' : t('aiChat.terminal.placeholder')}
             className="min-w-0 flex-1 bg-transparent font-mono text-[11.5px] text-neutral-100 caret-neutral-100 outline-none placeholder:text-neutral-600 disabled:opacity-50"
           />
-          {state === 'starting' ? <Loader2 size={11} className="shrink-0 animate-spin text-neutral-500" /> : null}
+          {state === 'starting' ? <OpenSquadLoader size={11} className="shrink-0" /> : null}
         </div>
       </div>
 
