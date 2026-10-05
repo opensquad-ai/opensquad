@@ -254,29 +254,48 @@ async def _build_email_agent_id_map() -> dict[str, str]:
     return mapping
 
 
-def _relay_member_origins(group_id: str) -> dict[str, str]:
+def _agent_name_key(value: str) -> str:
+    """An agent's name with any trailing instance number removed, lowercased.
+
+    A peer subscribes as `pm-001` while the member it stands for is `pm`, and the subscription is
+    the only runtime record that places it — so the two have to be comparable. This is deliberately
+    narrow: it is applied only to the agents a peer has subscribed for *this group*, never to the
+    whole member list.
+    """
+    return re.sub(r"-\d+$", "", str(value or "").strip().lower())
+
+
+def _relay_member_origins(group_id: str) -> tuple[dict[str, str], dict[str, str]]:
     """Which group members are on a paired machine, and where — from the relay subscriptions.
 
     A member that lives elsewhere has no socket on this gateway, so its local status is always
     offline, and the row reads "Offline" while the agent is in fact working: its messages arrive
-    over the relay. The subscription is this machine's own runtime record of that, and it is exact
-    — subscribe() is called with the member's user id on this gateway. The origin record written at
-    registration only catches one registration path, which is how a remote agent could still be
-    shown as offline.
+    over the relay.
 
-    Returns ``user_id -> host`` (host may be empty; the caller falls back to a generic label).
+    Two keys, because neither alone is enough. The subscription's ``user_id`` is the id that user
+    has on *its own* gateway — 200978 for a member this gateway knows as 856700 — so it identifies
+    nobody here. Its ``agent_id`` (`pm-001`) does name the agent, and matching that against the
+    member names is safe precisely because the list is per group: it contains only the agents that
+    subscribed to this group, so a local agent that is merely offline is never in it.
+
+    Returns ``(by_user_id, by_agent_name)``, both mapping to the peer's host.
     """
-    origins: dict[str, str] = {}
+    by_user: dict[str, str] = {}
+    by_agent: dict[str, str] = {}
     try:
         from opensquad import relay_link
 
         for entry in relay_link.subscribers(group_id):
+            host = str(entry.get("host") or "")
             user_id = str(entry.get("user_id") or "")
             if user_id:
-                origins[user_id] = str(entry.get("host") or "")
+                by_user[user_id] = host
+            agent_id = str(entry.get("agent_id") or "")
+            if agent_id:
+                by_agent[_agent_name_key(agent_id)] = host
     except Exception:
-        return {}
-    return origins
+        return {}, {}
+    return by_user, by_agent
 
 
 def _member_info(
@@ -1082,7 +1101,7 @@ async def get_group(
     settings = settings_result.scalar_one_or_none()
 
     email_agent_id_map = await _build_email_agent_id_map()
-    relay_origins = _relay_member_origins(group_id)
+    relay_by_user, relay_by_agent = _relay_member_origins(group_id)
     member_statuses = {}
     members_info = []
     avatar_dirty = False
@@ -1093,11 +1112,12 @@ async def get_group(
         member_agent_id = None
         if _is_agent_email(getattr(member, "email", None)):
             member_agent_id = email_agent_id_map.get(member.email or "")
+        relay_host = relay_by_user.get(member.id) or relay_by_agent.get(_agent_name_key(str(member.name or "")))
         info = _member_info(
             member,
             member_statuses[member.id],
             agent_id=member_agent_id,
-            remote_label=relay_origins.get(member.id) or None,
+            remote_label=relay_host or None,
         )
         if (member.avatar or "") != before:
             avatar_dirty = True
