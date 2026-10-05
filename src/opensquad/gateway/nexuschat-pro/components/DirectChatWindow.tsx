@@ -400,6 +400,7 @@ export const DirectChatWindow: React.FC<DirectChatWindowProps> = ({
                 key={b.id}
                 message={b.message}
                 variant="messenger"
+                foldLongText
                 senderName={b.mine ? (currentUser?.name || undefined) : contactLabel}
                 senderAvatar={b.mine ? (currentUser?.avatar ?? null) : (contactAvatar ?? null)}
                 agentId={contactName}

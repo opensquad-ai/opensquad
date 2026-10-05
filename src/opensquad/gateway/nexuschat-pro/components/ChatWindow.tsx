@@ -294,11 +294,24 @@ const MessageRowImpl: React.FC<MessageRowProps> = ({
           </div>
         ) : (
           <div className="max-w-[90%] md:max-w-[75%] px-4 py-3 bg-primary/5 border border-primary/20 rounded-xl text-sm text-textMain whitespace-pre-wrap break-words text-center">
-            <div
-              className="prose prose-sm max-w-full prose-p:my-0 inline-block text-left"
-              dangerouslySetInnerHTML={{ __html: parseContent(msg.content, msg.id) }}
-              onClick={(e) => actions.contentClick(e, msg.id)}
-            />
+            {shouldFold(msg.content) ? (
+              <LongTextFold
+                text={msg.content}
+                renderFull={() => (
+                  <div
+                    className="prose prose-sm max-w-full prose-p:my-0 inline-block text-left"
+                    dangerouslySetInnerHTML={{ __html: parseContent(msg.content, msg.id) }}
+                    onClick={(e) => actions.contentClick(e, msg.id)}
+                  />
+                )}
+              />
+            ) : (
+              <div
+                className="prose prose-sm max-w-full prose-p:my-0 inline-block text-left"
+                dangerouslySetInnerHTML={{ __html: parseContent(msg.content, msg.id) }}
+                onClick={(e) => actions.contentClick(e, msg.id)}
+              />
+            )}
           </div>
         )}
       </div>
