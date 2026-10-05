@@ -11,8 +11,11 @@ import { useTranslation } from 'react-i18next';
 import { Check, Copy, UserPlus } from 'lucide-react';
 
 import { GATEWAY_ENDPOINT, groupsAPI, nodesAPI } from '../services/api';
-import { buildInviteString } from '../utils/invite';
 import { NodePairingPanel } from './NodePairingPanel';
+
+/** An address another machine cannot dial — and the one a browser page is usually served from. */
+const isLoopbackHost = (value: string): boolean =>
+  /^(localhost|127\.|0\.0\.0\.0|\[?::1\]?)/i.test(String(value || '').trim());
 
 interface Props {
   group: { id: string; name: string; isPrivate?: boolean };
@@ -26,29 +29,22 @@ export const GroupAccessPanel: React.FC<Props> = ({ group, isOwner }) => {
   const [requests, setRequests] = useState<{ id: string; user_id: string; message: string }[]>([]);
   const [busy, setBusy] = useState('');
 
-  // The other machine needs THIS deployment's gateway, not whatever address this
-  // browser happens to use: under Vite DEV the page sits on :5173 while agents
-  // talk to the gateway on :9555 — the invite used to read "127.0.0.1:5173".
+  // The other machine needs THIS deployment's gateway, not whatever address this browser happens to
+  // use: under Vite DEV the page sits on :5173 while agents talk to the gateway on :9555. And the
+  // page is usually served from a loopback address the peer cannot reach, while the browser cannot
+  // read this host's interfaces — so the address always comes from the backend, which can.
   const [inviteHost, setInviteHost] = useState(GATEWAY_ENDPOINT.host);
-  const inviteHostEdited = useRef(false);
-  const hostIsLoopback = /^(localhost|127\.|0\.0\.0\.0|\[?::1\]?)/i.test(inviteHost.trim());
-  const invite = buildInviteString(inviteHost.trim(), group.id, {
-    port: GATEWAY_ENDPOINT.port,
-    secure: GATEWAY_ENDPOINT.secure,
-  });
+  const hostIsLoopback = isLoopbackHost(inviteHost);
 
-  // A page served from 127.0.0.1 yields an invite no other machine can dial, and the
-  // browser cannot read this host's interfaces — so ask the backend for this machine's own
-  // LAN address and use it, unless the operator has already typed one.
   useEffect(() => {
-    if (inviteHostEdited.current) return;
-    if (!/^(localhost|127\.|0\.0\.0\.0|\[?::1\]?)/i.test(GATEWAY_ENDPOINT.host)) return;
     let alive = true;
     void nodesAPI
       .localAddresses()
       .then((res) => {
-        const best = String((res?.addresses || [])[0] || '');
-        if (alive && best && !inviteHostEdited.current) setInviteHost(best);
+        const best = (res?.addresses || [])
+          .map((address) => String(address || '').trim())
+          .find((address) => address && !isLoopbackHost(address));
+        if (alive && best) setInviteHost(best);
       })
       .catch(() => undefined);
     return () => {
@@ -86,41 +82,13 @@ export const GroupAccessPanel: React.FC<Props> = ({ group, isOwner }) => {
         <div className="mb-1 text-xs font-semibold uppercase tracking-wide text-textMuted">
           {t('groupAccess.inviteTitle')}
         </div>
-        <input
-          value={inviteHost}
-          onChange={(e) => {
-            inviteHostEdited.current = true;
-            setInviteHost(e.target.value);
-          }}
-          placeholder={t('groupAccess.hostLabel')}
-          aria-label={t('groupAccess.hostLabel')}
-          data-testid="group-invite-host"
-          className="mb-1 w-full rounded-lg border border-border bg-bgLight px-2 py-1 text-[11px] text-textMain outline-none focus:border-primary/40"
-        />
+        {/* The host is detected, not typed: only the paired invite below is needed, and the one
+            thing worth saying is when detection could not find a reachable address. */}
         {hostIsLoopback ? (
-          <p className="mb-1 text-[11px] text-amber-600" data-testid="group-invite-loopback">
+          <p className="text-[11px] text-amber-600" data-testid="group-invite-loopback">
             {t('groupAccess.loopbackWarning')}
           </p>
         ) : null}
-        <div className="flex items-center gap-1">
-          <code className="min-w-0 flex-1 truncate rounded-lg border border-border bg-bgLight px-2 py-1 text-[11px] text-textMain">
-            {invite}
-          </code>
-          <button
-            type="button"
-            className="shrink-0 rounded-lg border border-border p-1.5 text-textMuted hover:text-textMain"
-            title={t('common.copy')}
-            aria-label={t('common.copy')}
-            onClick={() => {
-              void navigator.clipboard?.writeText(invite).catch(() => undefined);
-              setCopied(true);
-              window.setTimeout(() => setCopied(false), 1200);
-            }}
-          >
-            {copied ? <Check size={13} /> : <Copy size={13} />}
-          </button>
-        </div>
-        <p className="mt-1 text-[11px] text-textMuted">{t('groupAccess.inviteHint')}</p>
       </div>
 
       {group.isPrivate ? (
