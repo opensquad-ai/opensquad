@@ -613,9 +613,17 @@ class GatewayAdapter(BaseAgent):
                 )
                 logger.info(f"[Adapter] switch_and_reply → session inbox sid={sid}, content_len={len(str(reply))}")
             else:
-                cmd = f"__SWITCH_AND_REPLY__:{sid}:{reply}"
-                input_hub.push_urgent(cmd, source="gateway", session_id=str(sid) if sid else "")
-                logger.info(f"[Adapter] Switch and reply command sent via urgent queue: {cmd[:80]}")
+                # No session id means the pane has no session yet (its first message, before the new
+                # session was confirmed) or a client did not send one. Pushing a bare command here
+                # addresses "whichever session the agent still considers current" — the one the user
+                # just left — so the message quietly continues the old conversation, and its working
+                # directory comes from that session too. Refuse instead: an unaddressed message is
+                # never delivered to a guess.
+                logger.warning(
+                    "[Adapter] switch_and_reply without a session_id -> refused (sid=%r, content_len=%d)",
+                    sid,
+                    len(str(reply or "")),
+                )
             await self._try_wake_agent("urgent-command")
             return
 
