@@ -48,11 +48,14 @@ describe('invite strings', () => {
       path.resolve(__dirname, '..', 'components', 'GroupAccessPanel.tsx'),
       'utf8',
     );
-    expect(panel).toContain('GATEWAY_ENDPOINT.port');
+    // The port lives in the string the pairing panel builds; what matters here is that the host
+    // comes from the gateway endpoint rather than from the page the browser happens to sit on.
+    expect(panel).toContain('useState(GATEWAY_ENDPOINT.host)');
     expect(panel).not.toContain('window.location');
-    // and the operator can correct the host when it is a loopback address
+    // The host is detected rather than typed: only the paired invite is offered now, and the one
+    // thing the panel still says is when detection came back with an address nobody can dial.
     expect(panel).toContain('groupAccess.loopbackWarning');
-    expect(panel).toContain('data-testid="group-invite-host"');
+    expect(panel).not.toContain('data-testid="group-invite-host"');
     // the panel hands host + group to the pairing panel so the code can be merged
     expect(panel).toContain('host={inviteHost}');
     expect(panel).toContain('groupId={group.id}');
@@ -66,7 +69,7 @@ describe('invite strings', () => {
     expect(pairing).toContain('data-testid="node-pairing-coded-invite"');
   });
 
-  it('fills a reachable host from the backend when the page address is loopback', () => {
+  it('takes the host from the backend, and prefers an address a peer can dial', () => {
     const panel = fs.readFileSync(
       path.resolve(__dirname, '..', 'components', 'GroupAccessPanel.tsx'),
       'utf8',
@@ -75,10 +78,12 @@ describe('invite strings', () => {
     // the browser cannot read this host's interfaces: the backend detects them
     expect(panel).toContain('nodesAPI');
     expect(panel).toContain('.localAddresses()');
-    // only when the page's own address is loopback…
-    expect(panel).toMatch(/if \(!\/\^\(localhost\|127\\\./);
-    // …and never over what the operator typed
-    expect(panel).toContain('if (inviteHostEdited.current) return;');
-    expect(panel).toContain('inviteHostEdited.current = true;');
+    // always, not only when the page happens to be served from loopback — the page often is, and
+    // that is precisely when the browser's own address is useless to the peer
+    expect(panel).toContain('const hostIsLoopback = isLoopbackHost(inviteHost);');
+    expect(panel).not.toContain('if (!/^(localhost|127\\.');
+    // and a loopback answer is never taken from the list
+    expect(panel).toContain('.find((address) => address && !isLoopbackHost(address));');
+    expect(panel).toContain('const isLoopbackHost = (value: string): boolean =>');
   });
 });
