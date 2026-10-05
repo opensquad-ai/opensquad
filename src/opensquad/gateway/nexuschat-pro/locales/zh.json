@@ -946,6 +946,8 @@
     },
     "openView": "打开视图",
     "views": {
+      "newSession": "创建新会话",
+      "newSessionHint": "在这个工作区里开一个新会话",
       "changes": "更改",
       "changesHint": "逐个文件查看未提交的更改",
       "files": "文件",

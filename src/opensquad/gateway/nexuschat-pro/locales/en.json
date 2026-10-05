@@ -946,6 +946,8 @@
     },
     "openView": "Open view",
     "views": {
+      "newSession": "New session",
+      "newSessionHint": "Start a new session in this workspace",
       "changes": "Changes",
       "changesHint": "Review uncommitted changes file by file",
       "files": "Files",
