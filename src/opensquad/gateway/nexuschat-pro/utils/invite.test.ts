@@ -78,6 +78,13 @@ describe('invite strings', () => {
     // the browser cannot read this host's interfaces: the backend detects them
     expect(panel).toContain('nodesAPI');
     expect(panel).toContain('.localAddresses()');
+    // The client must ask under /ai-web: the route lives on the ai-web router, and asking for
+    // /api/node/local-addresses answered 404 — which the panel then swallowed, leaving the loopback
+    // address in place and looking for all the world like detection simply did not work.
+    const api = fs.readFileSync(path.resolve(__dirname, '..', 'services', 'api.ts'), 'utf8');
+    expect(api).toContain("apiRequest<{ ok: boolean; addresses: string[]; hostname?: string }>('/ai-web/node/local-addresses')");
+    expect(api).not.toContain("hostname?: string }>('/node/local-addresses')");
+    expect(panel).not.toContain('.catch(() => undefined);');
     // always, not only when the page happens to be served from loopback — the page often is, and
     // that is precisely when the browser's own address is useless to the peer
     expect(panel).toContain('const hostIsLoopback = isLoopbackHost(inviteHost);');

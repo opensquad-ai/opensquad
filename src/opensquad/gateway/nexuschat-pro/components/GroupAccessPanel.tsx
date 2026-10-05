@@ -46,7 +46,11 @@ export const GroupAccessPanel: React.FC<Props> = ({ group, isOwner }) => {
           .find((address) => address && !isLoopbackHost(address));
         if (alive && best) setInviteHost(best);
       })
-      .catch(() => undefined);
+      .catch((error) => {
+        // Do not swallow this: the invite then silently keeps a loopback address, which is exactly
+        // how "the LAN address never shows up" looked from the outside.
+        console.warn("[Invite] could not detect this machine's LAN address:", error);
+      });
     return () => {
       alive = false;
     };
