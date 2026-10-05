@@ -282,11 +282,11 @@ export const TerminalPanel: React.FC<TerminalPanelProps> = ({ agentId, rootPath 
         ref={scrollerRef}
         data-testid="terminal-output"
         onClick={() => inputRef.current?.focus()}
-        className="flex-1 min-h-0 overflow-auto bg-neutral-950/95 px-2 py-1.5 font-mono text-[11.5px] leading-[1.45] text-neutral-200"
+        className="flex-1 min-h-0 overflow-auto bg-bgLight px-2 py-1.5 font-mono text-[11.5px] leading-[1.45] text-textMain"
       >
         <div className="whitespace-pre-wrap break-words">{output}</div>
         {!output && state !== 'running' ? (
-          <div className="text-neutral-500">
+          <div className="text-textMuted/70">
             {state === 'failed'
               ? error || t('aiChat.terminal.openFailed')
               : state === 'starting'
@@ -297,7 +297,7 @@ export const TerminalPanel: React.FC<TerminalPanelProps> = ({ agentId, rootPath 
         {/* The prompt line is IN the terminal — click anywhere in the surface and type here,
             the way a real terminal works, instead of a separate box along the bottom. */}
         <div className="flex items-center gap-1.5">
-          <span className="shrink-0 text-neutral-400">{PROMPT}</span>
+          <span className="shrink-0 text-textMuted">{PROMPT}</span>
           <input
             ref={inputRef}
             value={input}
@@ -308,7 +308,7 @@ export const TerminalPanel: React.FC<TerminalPanelProps> = ({ agentId, rootPath 
             data-testid="terminal-input"
             disabled={state === 'failed'}
             placeholder={state === 'running' ? '' : t('aiChat.terminal.placeholder')}
-            className="min-w-0 flex-1 bg-transparent font-mono text-[11.5px] text-neutral-100 caret-neutral-100 outline-none placeholder:text-neutral-600 disabled:opacity-50"
+            className="min-w-0 flex-1 bg-transparent font-mono text-[11.5px] text-textMain caret-textMain outline-none placeholder:text-textMuted/60 disabled:opacity-50"
           />
           {state === 'starting' ? <OpenSquadLoader size={11} className="shrink-0" /> : null}
         </div>

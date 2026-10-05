@@ -35,7 +35,6 @@ import { BrowserPanel } from './BrowserPanel';
 import { TerminalPanel } from './TerminalPanel';
 import { getLangForFile, highlightLine, HLJS_THEME_CSS } from '../../utils/codeHighlight';
 import { FILE_MARKDOWN_CLASS, renderFencedMarkdown } from '../../utils/fencedMarkdown';
-import { FileIndentGuides } from './FileIndentGuides';
 import { UnifiedDiffView, type DiffLine } from './UnifiedDiffView';
 import { GitChangesPanel } from './GitChangesPanel';
 import { fillDiffCollapseHidden, flattenDiffCollapses } from './fillDiffCollapseHidden';
@@ -492,7 +491,6 @@ const CodePreview: React.FC<{ fileName: string; content: string }> = ({ fileName
     <div className="flex-1 min-h-0 overflow-auto file-code-surface font-mono text-[11px] leading-5">
       <style>{HLJS_THEME_CSS}</style>
       <div className="min-w-full inline-block relative">
-        <FileIndentGuides padLeft="calc(2.5rem + 0.5rem)" text={content} />
         {lines.map((line, i) => (
           <div key={i} className="relative z-[1] flex items-start hover:bg-primary/10">
             <span className="select-none w-10 shrink-0 text-right pr-2 text-textMuted tabular-nums text-[10px] border-r border-border/70">
