@@ -46,9 +46,15 @@ def _resolve_session_project_cwd() -> str:
     API). It must NOT be confused with the OpenSquad data root (agents/, data/, …).
     """
     try:
-        from opensquad.utils.path_utils import get_session_cwd_override
+        from opensquad.utils.path_utils import (
+            current_session_id,
+            get_session_cwd_for,
+            get_session_cwd_override,
+        )
 
-        override = get_session_cwd_override()
+        override = (get_session_cwd_for(current_session_id()) or "").strip() or (
+            get_session_cwd_override() or ""
+        ).strip()
         if override and os.path.isdir(override):
             return os.path.normcase(os.path.abspath(override))
     except Exception:

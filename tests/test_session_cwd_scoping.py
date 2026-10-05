@@ -104,6 +104,36 @@ def test_the_turn_start_check_uses_the_message_that_starts_it():
     assert "\n        self._check_session_cwd()\n" not in INPUT_HUB
 
 
+def test_the_tool_reports_the_executing_sessions_folder(tmp_path):
+    """Two panes, two projects, one process: each turn must see its own folder.
+
+    workspace.get_current() read only the process-wide override, which is why both panes were told
+    the same directory — whichever one had written it last.
+    """
+    from opensquad.tools import workspace as ws
+    from opensquad.utils import path_utils as pu
+
+    a = tmp_path / "proj-a"
+    b = tmp_path / "proj-b"
+    a.mkdir()
+    b.mkdir()
+
+    original_sid = pu._current_turn_sid
+    try:
+        pu.set_session_cwd_override(str(b))  # the other pane's value, process-wide
+        pu.set_session_cwd_for("sid-a", str(a))  # this turn's own
+        pu._current_turn_sid = lambda: "sid-a"
+
+        got = ws.get_current()
+    finally:
+        pu._current_turn_sid = original_sid
+        pu.set_session_cwd_override("")
+        pu.set_session_cwd_for("sid-a", "")
+
+    assert Path(got["session_cwd"]).name == "proj-a", got
+    assert Path(got["workspace_root"]).name == "proj-a", got
+
+
 def test_the_hub_says_which_session_and_origin_it_applied(caplog):
     """The line that turns the next mix-up into a one-minute answer."""
     import logging
