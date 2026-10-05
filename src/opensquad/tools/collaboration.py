@@ -1228,6 +1228,15 @@ def assign_task(
         # to accept builds a team that never assembled.
         import re as _re
 
+        def _member_id(m: Any) -> str:
+            # ``pending_members`` returns records ({"agent_id", "state", "name"}), not bare ids.
+            # Testing the record itself matched nothing, so every real member was classified
+            # "cannot be an agent name" and dropped — which silently switched the check off and
+            # handed work to invitees who had not accepted.
+            if isinstance(m, dict):
+                return str(m.get("agent_id") or "")
+            return str(m or "")
+
         def _usable_member(agent_id: str) -> bool:
             return bool(_re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{1,63}", str(agent_id or "")))
 
@@ -1237,12 +1246,12 @@ def assign_task(
         # exists to accept — and, because dispatch validates the same table, they blocked every
         # assignment. Real members, here or on a paired machine, have ordinary names, so only
         # these are stepped over, and they are named rather than silently dropped.
-        unusable = [m for m in pending if not _usable_member(m)]
-        pending = [m for m in pending if _usable_member(m)]
+        unusable = [m for m in pending if not _usable_member(_member_id(m))]
+        pending = [m for m in pending if _usable_member(_member_id(m))]
         if unusable:
             logger.warning(
                 "[Collab] Ignoring member ids that cannot be agent names: %s (collab %s)",
-                ", ".join(repr(m) for m in unusable),
+                ", ".join(repr(_member_id(m)) for m in unusable),
                 collab_id,
             )
         if pending:
