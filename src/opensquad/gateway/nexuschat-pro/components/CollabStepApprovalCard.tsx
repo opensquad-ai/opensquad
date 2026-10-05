@@ -6,6 +6,8 @@
 import React, { useState } from 'react';
 import { Check, X, ClipboardCheck, RefreshCw, Hand } from 'lucide-react';
 
+import { collabBoardAPI } from '../services/api';
+
 export interface GroupApprovalPayload {
   v?: number;
   id: string;
@@ -205,6 +207,9 @@ export const CollabStepApprovalCard: React.FC<CollabStepApprovalCardProps> = ({
 }) => {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [supplementOpen, setSupplementOpen] = useState(false);
+  const [supplement, setSupplement] = useState('');
+  const [supplementSent, setSupplementSent] = useState(false);
   const pending = (payload.status || 'pending') === 'pending';
   const { label, Icon } = kindMeta(payload.kind);
   const kind = (payload.kind || '').toLowerCase();
@@ -215,6 +220,35 @@ export const CollabStepApprovalCard: React.FC<CollabStepApprovalCardProps> = ({
       : kind === 'collab_step'
         ? `环节：${payload.step || payload.title}`
         : null;
+
+  /**
+   * 补充：ask for a change without deciding.
+   *
+   * 确定 and 拒绝 are both answers, and neither fits "not this, here is what I need instead" — which
+   * is why the only way to say it was to type into the group chat, where it was exposed to everyone
+   * and the gate sat untouched. The note is posted to the collaboration's task window instead: the
+   * agent reads it there and is woken by it, and the gate stays pending so the user can still
+   * approve once they are satisfied. Only the collaboration gates offer it — a mode switch has
+   * nothing to supplement.
+   */
+  const canSupplement = kind === 'collab_step' && !!payload.collab_id;
+
+  const sendSupplement = async () => {
+    const text = supplement.trim();
+    if (!text || !canSupplement || busy || disabled) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await collabBoardAPI.postTaskMessage(String(payload.collab_id), text);
+      setSupplement('');
+      setSupplementOpen(false);
+      setSupplementSent(true);
+    } catch (e: any) {
+      setError(e?.message || String(e) || '补充发送失败');
+    } finally {
+      setBusy(false);
+    }
+  };
 
   const handle = async (action: 'approve' | 'reject') => {
     if (!pending || busy || disabled) return;
@@ -251,26 +285,77 @@ export const CollabStepApprovalCard: React.FC<CollabStepApprovalCardProps> = ({
         <div className="mb-3" />
       )}
       {pending ? (
-        <div className="flex items-center gap-2">
-          <button
-            type="button"
-            disabled={busy || disabled}
-            onClick={() => handle('approve')}
-            className="inline-flex items-center gap-1 px-3 py-1.5 rounded-lg text-[12px] font-medium bg-primary text-white hover:opacity-90 border-0 cursor-pointer disabled:opacity-50"
-          >
-            <Check size={13} />
-            确定
-          </button>
-          <button
-            type="button"
-            disabled={busy || disabled}
-            onClick={() => handle('reject')}
-            className="inline-flex items-center gap-1 px-3 py-1.5 rounded-lg text-[12px] font-medium text-textMuted hover:bg-black/[0.05] dark:hover:bg-white/[0.06] border border-border cursor-pointer bg-transparent disabled:opacity-50"
-          >
-            <X size={13} />
-            拒绝
-          </button>
-        </div>
+        <>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              disabled={busy || disabled}
+              onClick={() => handle('approve')}
+              className="inline-flex items-center gap-1 px-3 py-1.5 rounded-lg text-[12px] font-medium bg-primary text-white hover:opacity-90 border-0 cursor-pointer disabled:opacity-50"
+            >
+              <Check size={13} />
+              确定
+            </button>
+            <button
+              type="button"
+              disabled={busy || disabled}
+              onClick={() => handle('reject')}
+              className="inline-flex items-center gap-1 px-3 py-1.5 rounded-lg text-[12px] font-medium text-textMuted hover:bg-black/[0.05] dark:hover:bg-white/[0.06] border border-border cursor-pointer bg-transparent disabled:opacity-50"
+            >
+              <X size={13} />
+              拒绝
+            </button>
+            {canSupplement ? (
+              <button
+                type="button"
+                disabled={busy || disabled}
+                onClick={() => setSupplementOpen((open) => !open)}
+                data-testid="approval-supplement-toggle"
+                title="不通过也可以先补充要求"
+                className="ml-auto text-[11px] text-textMuted underline decoration-dotted hover:text-textMain border-0 bg-transparent cursor-pointer disabled:opacity-50"
+              >
+                补充
+              </button>
+            ) : null}
+          </div>
+          {canSupplement && supplementOpen ? (
+            <div className="mt-2" data-testid="approval-supplement">
+              <textarea
+                value={supplement}
+                onChange={(e) => setSupplement(e.target.value)}
+                rows={3}
+                autoFocus
+                placeholder="需要补充什么？这条会发到协作任务窗口，卡片的审批保持待办"
+                className="w-full rounded-lg border border-border bg-bgLight px-2 py-1.5 text-[12px] text-textMain outline-none focus:border-primary/40 resize-y"
+              />
+              <div className="mt-1 flex items-center gap-2">
+                <button
+                  type="button"
+                  disabled={busy || disabled || !supplement.trim()}
+                  onClick={() => void sendSupplement()}
+                  className="rounded-lg bg-primary px-2.5 py-1 text-[11px] text-white hover:opacity-90 border-0 cursor-pointer disabled:opacity-50"
+                >
+                  发送补充
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setSupplementOpen(false);
+                    setSupplement('');
+                  }}
+                  className="rounded-lg border border-border px-2.5 py-1 text-[11px] text-textMuted hover:text-textMain cursor-pointer bg-transparent"
+                >
+                  取消
+                </button>
+              </div>
+            </div>
+          ) : null}
+          {supplementSent ? (
+            <div className="mt-1 text-[11px] text-textMuted" data-testid="approval-supplement-sent">
+              已补充，等待 agent 回应
+            </div>
+          ) : null}
+        </>
       ) : (
         <div className="text-[11px] text-textMuted">
           {payload.status === 'approved' ? '已确定 ✓' : '已拒绝 ✗'}
