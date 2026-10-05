@@ -97,22 +97,40 @@ export const CollabTaskCard: React.FC<CollabTaskCardProps> = ({ payload, onOpen,
    * the difference the field kept seeing between the card and the task window. The board is the
    * live record, so the card reads it — and keeps its own snapshot on screen when the board cannot
    * be reached, because a stale name beats an empty card.
+   *
+   * Reading it once on mount was not enough: the card then only changed when it happened to be
+   * mounted again, which is a page refresh. The board page polls for the same reason, so this polls
+   * on the same five-second beat, stops once the collaboration is finished, and only stores a value
+   * that actually differs.
    */
   const [liveParticipants, setLiveParticipants] = React.useState<CollabTaskParticipant[] | null>(null);
   const collabId = payload.collab_id;
   React.useEffect(() => {
     if (!collabId) return;
     let alive = true;
-    void (async () => {
+    let timer: number | undefined;
+
+    const read = async (): Promise<void> => {
       try {
         const summary = await collabBoardAPI.taskSummary(collabId);
-        if (alive && Array.isArray(summary?.participants)) setLiveParticipants(summary.participants);
+        if (!alive) return;
+        if (Array.isArray(summary?.participants)) {
+          setLiveParticipants((prev) =>
+            JSON.stringify(prev) === JSON.stringify(summary.participants) ? prev : summary.participants,
+          );
+        }
+        const finished = ['done', 'failed', 'archived'].includes(String(summary?.status || ''));
+        if (finished) return;
       } catch {
         /* the snapshot stays on screen */
       }
-    })();
+      if (alive) timer = window.setTimeout(() => void read(), 5000);
+    };
+
+    void read();
     return () => {
       alive = false;
+      if (timer) window.clearTimeout(timer);
     };
   }, [collabId]);
 
