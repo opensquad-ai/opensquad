@@ -3,6 +3,7 @@
  */
 import React, { useMemo, useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import { Plus } from 'lucide-react';
 import { OpenSquadLoader } from '../OpenSquadLoader';
 import { ContentTabBar, type ContentTabLabel } from './ContentTabBar';
 import { WorkspaceFileEditor } from './WorkspaceFileEditor';
@@ -279,6 +280,27 @@ export const WorkspacePaneShell: React.FC<WorkspacePaneShellProps> = ({
             <div className="text-[13px] font-medium text-textMain">{t('aiChat.welcome.title')}</div>
             <div className="mt-0.5 text-[11px] text-textMuted">{t('aiChat.welcome.subtitle')}</div>
             <div className="mt-3 space-y-0.5" data-testid="pane-welcome-rows">
+              {/* Starting a session is not a view, so it is a row of its own here rather than an
+                  entry in PANE_VIEWS — the tab bar and the files panel render that table too, and a
+                  session has no business appearing among the views they list. */}
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  handlers.onFocus();
+                  handlers.onNewSession();
+                }}
+                data-testid="pane-welcome-new-session"
+                className="flex w-full items-center gap-2.5 rounded-lg px-2 py-1.5 text-left hover:bg-primary/10"
+              >
+                <Plus size={13} className="shrink-0 text-textMuted" />
+                <span className="min-w-0 flex-1 truncate text-[12px] text-textMain">
+                  {t('aiChat.views.newSession')}
+                </span>
+                <span className="min-w-0 flex-[2] truncate text-[11px] text-textMuted">
+                  {t('aiChat.views.newSessionHint')}
+                </span>
+              </button>
               {PANE_VIEWS.map((view) => {
                 const Icon = view.Icon;
                 const onClick = viewHandlers[view.id];
