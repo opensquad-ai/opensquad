@@ -431,9 +431,7 @@ const MessageRowImpl: React.FC<MessageRowProps> = ({
                 : `relative px-3 md:px-4 py-2 md:py-2.5 shadow-sm text-sm leading-relaxed text-textMain break-all overflow-hidden max-w-full ${
                     isSelf
                       ? 'bg-chatBubbleSelf rounded-2xl rounded-tr-sm border border-border'
-                      : isMentioned
-                        ? 'bg-yellow-50 rounded-2xl rounded-tl-sm border border-yellow-300 ring-2 ring-yellow-100'
-                        : 'bg-chatBubbleOther rounded-2xl rounded-tl-sm border border-border'
+                      : 'bg-chatBubbleOther rounded-2xl rounded-tl-sm border border-border'
                   }`
             }
           >
