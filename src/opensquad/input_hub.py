@@ -316,6 +316,28 @@ class InputHub:
             logger.info("[InputHub] Cancelled steer item sid=%s client_id=%s", sid, cid)
         return removed
 
+    def _apply_cwd_for_message(self, message: dict[str, Any] | None) -> None:
+        """Apply the working directory of the session this message belongs to.
+
+        The message carries its own session id, which is the only correct answer to "whose turn is
+        this": the hub used to apply the value for whichever session it had last seen, so a turn
+        belonging to one workspace could run with another's directory. A message with no session id
+        (the serial path, the CLI) keeps the historical agent-level behaviour.
+
+        Also records the session on the hub, for the callers that still ask without one.
+        """
+        sid = ""
+        try:
+            sid = str((message or {}).get("session_id") or "").strip()
+        except Exception:
+            sid = ""
+        if sid:
+            self.current_session_id = sid
+        try:
+            self._check_session_cwd(sid)
+        except Exception as e:  # noqa: BLE001 - a cwd signal must never break input delivery
+            logger.debug(f"[InputHub] _apply_cwd_for_message skipped: {e}")
+
     async def get_user_response(self) -> dict[str, Any]:
         """
         Wait for user input while automatically checking the message pipeline.
@@ -331,9 +353,9 @@ class InputHub:
         # of every conversation turn) and apply it before processing the
         # next user message. This ensures the agent's shell commands and
         # file operations use the user-selected working directory.
-        # Pass on the session we last served: without it this reads the agent-level file, which is
-        # shared by every pane, so a folder chosen in one workspace re-rooted the others.
-        self._check_session_cwd(getattr(self, "current_session_id", ""))
+        # The working directory is applied for the session whose message starts this turn — see
+        # _apply_cwd_for_message below. Applying it here, for whichever session we last saw, is how a
+        # turn belonging to one workspace ran with another's directory.
 
         queue = self._get_queue()
         urgent_queue = self._get_urgent_queue()
@@ -344,6 +366,7 @@ class InputHub:
         # Check urgent queue first
         if not urgent_queue.empty():
             item = await urgent_queue.get()
+            self._apply_cwd_for_message(item)
             logger.info(
                 f"[InputHub] get_user_response EXIT (urgent) - source={item.get('source')}, content={str(item.get('content', ''))[:80]}"
             )
@@ -352,6 +375,7 @@ class InputHub:
         # If the normal queue is non-empty, return immediately
         if not queue.empty():
             user_input = await queue.get()
+            self._apply_cwd_for_message(user_input)
             logger.debug(
                 f"[InputHub] get_user_response EXIT (immediate) - source={user_input.get('source')}, content={str(user_input.get('content', ''))[:60]}"
             )
@@ -370,6 +394,7 @@ class InputHub:
 
                 # Retrieve the result
                 user_input = next(iter(done)).result()
+                self._apply_cwd_for_message(user_input)
                 logger.debug(
                     f"[InputHub] get_user_response EXIT (awaited) - source={user_input.get('source')}, content={str(user_input.get('content', ''))[:60]}"
                 )
