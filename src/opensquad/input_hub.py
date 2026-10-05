@@ -334,7 +334,16 @@ class InputHub:
         if sid:
             self.current_session_id = sid
         try:
-            self._check_session_cwd(sid)
+            applied = self._check_session_cwd(sid)
+            # Say which session asked and what it got. Without this the only evidence of a
+            # cross-workspace mix-up is the tool's own output, and the turn that applied the wrong
+            # directory is long gone by the time anyone looks.
+            logger.info(
+                "[InputHub] cwd for turn: sid=%s applied=%s origin=%s",
+                sid or "(none)",
+                getattr(applied, "get", lambda *_: applied)("path", applied) if isinstance(applied, dict) else applied,
+                "session file" if sid else "agent-level (no sid on the message)",
+            )
         except Exception as e:  # noqa: BLE001 - a cwd signal must never break input delivery
             logger.debug(f"[InputHub] _apply_cwd_for_message skipped: {e}")
 

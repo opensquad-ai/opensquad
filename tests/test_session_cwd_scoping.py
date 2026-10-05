@@ -104,6 +104,26 @@ def test_the_turn_start_check_uses_the_message_that_starts_it():
     assert "\n        self._check_session_cwd()\n" not in INPUT_HUB
 
 
+def test_the_hub_says_which_session_and_origin_it_applied(caplog):
+    """The line that turns the next mix-up into a one-minute answer."""
+    import logging
+
+    from opensquad.input_hub import input_hub
+
+    original = input_hub._check_session_cwd
+    try:
+        input_hub._check_session_cwd = lambda sid="": {"path": "C:/w/" + (sid or "shared")}
+        with caplog.at_level(logging.INFO, logger="opensquad.input_hub"):
+            input_hub._apply_cwd_for_message({"session_id": "sid-A", "content": "hi"})
+            input_hub._apply_cwd_for_message({"content": "no sid"})
+    finally:
+        input_hub._check_session_cwd = original
+
+    logged = [r.getMessage() for r in caplog.records]
+    assert any("sid=sid-A" in m and "C:/w/sid-A" in m and "session file" in m for m in logged)
+    assert any("sid=(none)" in m and "C:/w/shared" in m and "agent-level" in m for m in logged), logged
+
+
 def test_the_hub_applies_the_message_session_not_the_remembered_one():
     from opensquad.input_hub import input_hub
 
