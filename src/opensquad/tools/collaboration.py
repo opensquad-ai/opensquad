@@ -2241,6 +2241,48 @@ def check_worker_status(collab_id: str = "", worker_id: str = "") -> dict[str, A
         return {"error": str(e)}
 
 
+def _live_gate_card(collab_id: str, step_label: str) -> dict[str, Any] | None:
+    """The newest pending-or-approved approval item for this gate, if there already is one.
+
+    Rejected gates are not reused: a rejection is an answer, and asking again after revising is a new
+    question.
+
+    This is a read followed by a decision, so two callers arriving in the same instant can still both
+    create a card. The duplicates seen in the field were twenty-three seconds apart, which this
+    catches; making it airtight would mean holding the board lock across the group post, and that
+    cost is not worth paying for the phantom.
+    """
+    try:
+        from opensquad.collab_approval import normalize_step
+
+        from ..collab_board import list_items
+
+        items = list_items(collab_id=collab_id, visibility="public")
+    except Exception:
+        return None
+
+    best: dict[str, Any] | None = None
+    best_stamp = ""
+    for item in items:
+        if str(item.get("item_type") or "") != "approval":
+            continue
+        approval = (item.get("extra") or {}).get("approval")
+        approval = approval if isinstance(approval, dict) else {}
+        try:
+            step = normalize_step(str(approval.get("step") or item.get("title") or ""))
+        except Exception:
+            step = str(approval.get("step") or "")
+        if step != step_label:
+            continue
+        if str(item.get("status") or "pending").strip().lower() not in ("pending", "approved"):
+            continue
+        stamp = str(item.get("created_at") or item.get("updated_at") or "")
+        if best is None or stamp >= best_stamp:
+            best = item
+            best_stamp = stamp
+    return best
+
+
 def request_step_approval(
     collab_id: str,
     step: str,
@@ -2322,8 +2364,35 @@ def request_step_approval(
                 ),
             }
 
-        approval_id = new_approval_id()
+        # One live card per step, however many callers ask at once.
+        #
+        # Two sessions racing on the same collaboration produced three identical 确定需求 cards within
+        # thirty-five seconds, each carrying the requirement text into the group again — that is the
+        # duplication the operator saw, and it survived every retry because each call minted a fresh
+        # card. A step that already has a pending card is answered with that card; one already
+        # approved is reported as approved so the caller can move on.
         step_label = normalize_step(step)
+        existing = _live_gate_card(str(collab_id), step_label)
+        if existing:
+            state = str(existing.get("status") or "pending").strip().lower()
+            return {
+                "status": state,
+                "approval_id": str(existing.get("item_key") or ""),
+                "collab_id": str(collab_id),
+                "step": step_label,
+                "reused": True,
+                "message": (
+                    f"「{step_label}」已经有一张{'已批准' if state == 'approved' else '待批准'}的卡"
+                    f"（{existing.get('item_key')}），没有重复发卡。"
+                    + (
+                        "该门已通过，继续下一步即可。"
+                        if state == "approved"
+                        else "请等用户在任务窗或群里的卡上点「确定」。"
+                    )
+                ),
+            }
+
+        approval_id = new_approval_id()
         payload = build_approval_payload(
             approval_id=approval_id,
             collab_id=str(collab_id),
