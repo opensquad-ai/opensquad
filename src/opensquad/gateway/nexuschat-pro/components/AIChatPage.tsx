@@ -3338,7 +3338,36 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
           (e) => e.kind === 'workflow' && !(e as { data: WorkflowBlock }).data.completed,
         );
         if (diskHasLive) return entries;
-        return [...entries, ...liveWfs];
+
+        // A steer (插话 / a chat message that arrived mid-turn) is recorded on disk as soon as it is
+        // injected, so the rebuilt rows already carry it while the live fold still holds its own
+        // copy. Concatenating the two rendered the same 群消息 twice — and once more on every adopt,
+        // which is why the conversation grew until a refresh. Keep the disk row (it is the record)
+        // and drop the live duplicate.
+        type LooseEvent = { type?: string; content?: { message_id?: string } };
+        const seenSteers = new Set<string>();
+        const collect = (rows: any[]) => {
+          for (const row of rows) {
+            for (const evt of (row?.data?.events || []) as LooseEvent[]) {
+              const id = String(evt?.content?.message_id || '');
+              if (evt?.type === 'user_steer' && id) seenSteers.add(id);
+            }
+          }
+        };
+        collect(entries);
+
+        const dedupedLive = liveWfs.map((row: any) => {
+          const events = (row?.data?.events || []) as LooseEvent[];
+          if (!events.length) return row;
+          const kept = events.filter((evt) => {
+            const id = String(evt?.content?.message_id || '');
+            return !(evt?.type === 'user_steer' && id && seenSteers.has(id));
+          });
+          if (kept.length === events.length) return row;
+          return { ...row, data: { ...row.data, events: kept } };
+        });
+
+        return [...entries, ...dedupedLive];
       });
       setShellStreams(rebuildShellStreamsFromTimeline(entries));
       agentCurrentSessionIdRef.current = currentSid;

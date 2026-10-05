@@ -1356,7 +1356,10 @@ function sealWorkflowAfterUserStop(
 export function makeUserSteerEvent(payload: SteerPayload): WorkflowEvent {
   const { text, source, sender_name, message_id } = steerParts(payload);
   return {
-    _uid: genTimelineUID(),
+    // The event id is the steer's identity across both paths: the rebuild path
+    // (convertSessionEventsToWorkflow) derives the same one, so when a session is adopted the
+    // live row and the rebuilt row are recognisably the same steer instead of two cards.
+    _uid: message_id ? `steer:${message_id}` : genTimelineUID(),
     type: 'user_steer',
     content: { text, source, sender_name, message_id },
     timestamp: Date.now(),
@@ -3990,13 +3993,24 @@ export function convertSessionEventsToWorkflow(rawEvents: any[]): WorkflowEvent[
       const steerData = typeof data === 'object' && data !== null ? (data as Record<string, unknown>) : null;
       const steerText = typeof data === 'string' ? data : ((steerData?.text as string) || '');
       if (String(steerText).trim()) {
+        // A steer carries the id of the chat message it came from — the live row
+        // (makeUserSteerEvent) already does. Dropping it here is what made a rebuilt row
+        // unrecognisable next to the live one, so adopting a session rendered the same
+        // 群消息 twice (and again on every adopt): the screenshot's repeating cards.
+        const steerId = String(
+          (steerData?.message_id as string) ||
+            ((steerData?.content as Record<string, unknown>)?.message_id as string) ||
+            '',
+        );
         result.push({
-          _uid: genTimelineUID(),
+          // Stable id when we have one, so the same steer is the same row on both paths.
+          _uid: steerId ? `steer:${steerId}` : genTimelineUID(),
           type: 'user_steer',
           content: {
             text: String(steerText),
             source: String(steerData?.source || ''),
             sender_name: String(steerData?.sender_name || ''),
+            message_id: steerId,
           },
           timestamp: eventTimestamp,
         });
