@@ -4032,10 +4032,14 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     // Wait for profile — agentId alone may not match the on-disk agent directory.
     const dirName = agentProfile?.dir_name;
     if (!dirName || !path) return;
-    void adminAPI.setWorkingDirectory(dirName, path).catch((err: any) => {
+    // Scope the value to the session that is asking. Without the id the write lands in the shared
+    // agent-level file, which every pane reads — so switching a workspace re-rooted the others, and
+    // a question asked in one project was answered against another's directory. Both ends already
+    // accept a session id; this call was the half that did not send one.
+    void adminAPI.setWorkingDirectory(dirName, path, currentSessionId || undefined).catch((err: any) => {
       console.error('[AIChatPage] Failed to set cwd for workspace:', err);
     });
-  }, [activeWorkspace?.id, activeWorkspace?.rootPath, agentId, agentProfile?.dir_name]);
+  }, [activeWorkspace?.id, activeWorkspace?.rootPath, agentId, agentProfile?.dir_name, currentSessionId]);
 
   useEffect(() => {
     if (!currentSessionId || !activeWorkspace) return;
