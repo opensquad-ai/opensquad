@@ -104,6 +104,49 @@ def test_the_turn_start_check_uses_the_message_that_starts_it():
     assert "\n        self._check_session_cwd()\n" not in INPUT_HUB
 
 
+def test_two_turns_running_at_once_never_see_each_others_folder(tmp_path):
+    """The claim under test: concurrent turns, one process, no mixing.
+
+    Two turns with two session ids run interleaved — asyncio.gather puts each coroutine in its own
+    task, so each gets its own copy of the context, and sleep(0) hands control back and forth. Every
+    single time, both the tool-layer root and what the agent-facing tool reports must be the turn's
+    own folder.
+    """
+    import asyncio
+
+    from opensquad.session_parallel import TurnLocal, set_turn_local
+    from opensquad.tools import workspace as ws
+    from opensquad.utils import path_utils as pu
+
+    a = tmp_path / "proj-a"
+    b = tmp_path / "proj-b"
+    a.mkdir()
+    b.mkdir()
+
+    async def one(sid: str, expect: str) -> int:
+        set_turn_local(TurnLocal(sid=sid))
+        for _ in range(50):
+            assert Path(pu.get_workspace_root()).name == expect, (sid, pu.get_workspace_root())
+            got = ws.get_current()
+            assert Path(got["session_cwd"]).name == expect, (sid, got)
+            assert Path(got["workspace_root"]).name == expect, (sid, got)
+            await asyncio.sleep(0)
+        return 50
+
+    async def main() -> int:
+        return sum(await asyncio.gather(one("sid-a", "proj-a"), one("sid-b", "proj-b")))
+
+    try:
+        pu.set_session_cwd_for("sid-a", str(a))
+        pu.set_session_cwd_for("sid-b", str(b))
+        checked = asyncio.run(main())
+    finally:
+        pu.set_session_cwd_for("sid-a", "")
+        pu.set_session_cwd_for("sid-b", "")
+
+    assert checked == 100, "both turns ran their full loop"
+
+
 def test_a_gateway_message_without_a_session_applies_nothing():
     """The new-session case: the frontend has no id to send yet.
 
