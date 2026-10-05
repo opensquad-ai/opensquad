@@ -62,9 +62,7 @@ export function TaskStrip({ tasks, nowMs }: TaskStripProps) {
           className={`w-1.5 h-1.5 rounded-full ${running > 0 ? 'bg-emerald-500' : 'bg-gray-300'}`}
           aria-hidden="true"
         />
-        <span className="tabular-nums">
-          {running > 0 ? running : t('taskStrip.none', { defaultValue: '无' })}
-        </span>
+        <span className="tabular-nums">{running}</span>
         <svg
           viewBox="0 0 12 12"
           className={`w-2.5 h-2.5 transition-transform ${open ? 'rotate-180' : ''}`}

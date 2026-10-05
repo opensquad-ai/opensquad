@@ -50,13 +50,15 @@ describe('how it looks', () => {
   });
 
   it('counts what is running, not everything it lists', () => {
-    // The pill read 2 while both rows were 已结束: the number has to mean 进行中, and say 无 when
-    // there are none — the list may still hold what finished within the day.
+    // The pill read 2 while both rows were 已结束: the number has to mean 进行中 — it is the running
+    // count, and 0 when nothing is running — while the list may still hold what finished within the
+    // day.
     const src = read('../components/TaskStrip.tsx');
 
     expect(src).toContain("const running = rows.filter((row) => row.state === 'running').length;");
-    expect(src).toContain("{running > 0 ? running : t('taskStrip.none', { defaultValue: '无' })}");
+    expect(src).toContain('<span className="tabular-nums">{running}</span>');
     expect(src).not.toMatch(/>\s*\{rows\.length\}\s*</);
+    expect(src).not.toContain('taskStrip.none');
   });
 
   it('shows no list until it is opened, then one row per task that opens the task window', () => {
