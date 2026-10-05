@@ -852,6 +852,7 @@
   },
   "taskStrip": {
     "title": "Tasks in progress",
+    "none": "None",
     "within": "including those finished in the last day",
     "running": "running",
     "finished": "finished"
