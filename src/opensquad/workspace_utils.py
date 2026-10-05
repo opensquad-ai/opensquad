@@ -4,6 +4,7 @@ OpenSquad Workspace Utilities
 Workspace management tools: detect, initialize, and record recently used workspaces.
 """
 
+import hashlib
 import json
 import logging
 import os
@@ -18,7 +19,102 @@ if platform.system() == "Windows":
 else:
     GLOBAL_CONFIG_DIR = Path.home() / ".opensquad"
 
-LAST_WORKSPACE_FILE = GLOBAL_CONFIG_DIR / "last_workspace.json"
+LAST_WORKSPACE_FILENAME = "last_workspace.json"
+# The pre-isolation location, shared by every installation on the machine. Read
+# once as a migration source, never written again.
+LEGACY_LAST_WORKSPACE_FILE = GLOBAL_CONFIG_DIR / LAST_WORKSPACE_FILENAME
+
+# Kept for callers that imported the old constant: it points at the legacy file,
+# not at the per-installation one. New code wants ``last_workspace_path()``.
+LAST_WORKSPACE_FILE = LEGACY_LAST_WORKSPACE_FILE
+
+
+def instance_slug() -> str:
+    """A stable short id for *this installation*.
+
+    Two installations on one machine — a source checkout and the packaged desktop
+    app — must not share "the last workspace I used". They previously did, because
+    that pointer lives in ``~/.opensquad/last_workspace.json``, which is per user,
+    not per installation: the desktop app wrote its choice there and the source
+    install then booted into it (and the reverse).
+
+    ``OPENSQUAD_INSTANCE`` overrides it; otherwise it is derived from the install
+    root, which differs by construction (the repo, vs ``_internal`` in the
+    packaged app).
+    """
+    raw = os.environ.get("OPENSQUAD_INSTANCE", "").strip()
+    if raw:
+        safe = "".join(c if (c.isalnum() or c in "-_") else "-" for c in raw)
+        return safe[:40] or "default"
+    try:
+        from opensquad.system_config import syscfg
+
+        root = syscfg.get_builtin_root()
+    except Exception:
+        root = str(Path(__file__).resolve().parents[1])
+    digest = hashlib.sha1(os.path.normcase(os.path.abspath(str(root))).encode("utf-8")).hexdigest()
+    return digest[:10]
+
+
+def instance_config_dir() -> Path:
+    """Per-installation directory for state that used to be global."""
+    return GLOBAL_CONFIG_DIR / "instances" / instance_slug()
+
+
+def last_workspace_path() -> Path:
+    """This installation's workspace pointer file."""
+    return instance_config_dir() / LAST_WORKSPACE_FILENAME
+
+
+def read_last_workspace_path(path: Path | str | None = None) -> str | None:
+    """The workspace recorded in a pointer file (this installation's by default).
+
+    Also used by the ``syscfg`` config loader and the shipped plugins, which used
+    to open ``~/.opensquad/last_workspace.json`` themselves — one copy of "where is
+    the workspace" per installation, not four.
+    """
+    if path is None:
+        target = last_workspace_path()
+        if not target.exists():
+            # Upgrade path: fall back to the machine-global file this pointer replaced, so
+            # an existing install keeps the workspace it was already on and the plugins /
+            # standalone adapters that only ever knew that file keep working.
+            target = LEGACY_LAST_WORKSPACE_FILE
+    else:
+        target = Path(path)
+    if not target.exists():
+        return None
+    try:
+        with open(target, encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception:
+        return None
+    value = (data or {}).get("last_workspace")
+    return str(value) if value else None
+
+
+def _load_last_workspace_raw() -> dict:
+    """Load raw workspace metadata with in-process caching.
+
+    Reads this installation's file; falls back to the legacy global one exactly
+    once (when the instance file does not exist yet), so an upgrade keeps the
+    workspace the user was already on.
+    """
+    global _last_workspace_cache, _last_workspace_cache_loaded
+    if _last_workspace_cache_loaded:
+        return _last_workspace_cache
+    source = last_workspace_path()
+    if not source.exists():
+        source = LEGACY_LAST_WORKSPACE_FILE
+    if source.exists():
+        try:
+            with open(source, encoding="utf-8") as f:
+                _last_workspace_cache = json.load(f)
+        except Exception:
+            _last_workspace_cache = {}
+    _last_workspace_cache_loaded = True
+    return _last_workspace_cache
+
 
 # Desktop (Electron) app stores its workspace preference under Electron
 # userData (OPENSQUAD_APP_DATA). The workspace itself may live elsewhere.
@@ -104,8 +200,15 @@ def save_last_workspace(workspace_path: str, workspace_name: str | None = None, 
     global _last_workspace_cache
     _last_workspace_cache = data
 
-    with open(LAST_WORKSPACE_FILE, "w", encoding="utf-8") as f:
+    # Write THIS installation's pointer, atomically. The legacy global file is
+    # deliberately never written again: it is exactly what let a desktop launch
+    # re-point a source install (see :func:`instance_slug`).
+    target = last_workspace_path()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    tmp = target.with_suffix(".json.tmp")
+    with open(tmp, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2, ensure_ascii=False)
+    os.replace(tmp, target)
 
 
 def detect_legacy_data(install_dir: str) -> bool:
@@ -294,8 +397,120 @@ class _BootstrapLock:
         self._fh = None
 
 
+def _try_lock_file(path: str):
+    """Take a non-blocking exclusive OS lock on *path*; the handle returned holds it.
+
+    Holding the handle for the process lifetime is the liveness signal: the OS drops it
+    when the process dies, so a crashed owner never leaves a lock that has to be cleared
+    by hand (which is why this file previously had a pid check to get wrong).
+    """
+    handle = open(path, "a+", encoding="utf-8")
+    try:
+        if platform.system() == "Windows":
+            import msvcrt
+
+            handle.seek(0)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        handle.close()
+        return None
+    return handle
+
+
+class WorkspaceRunLock:
+    """Ownership of one workspace by one *installation*, held for the process lifetime.
+
+    The bootstrap lock above is short-lived: it only serialises first-run init. This one
+    answers a different question — "is another OpenSquad installation already running
+    against this workspace?" — because sharing one is not a feature: the two fight over
+    the same ports (9555/9600/9720), the same ``chat.db`` and the same plugin data
+    (websearch's browser_profile, the sensevoice model), and the loser half-starts with
+    silently failing plugin services instead of an error.
+
+    Sibling services of the same installation (gateway, launcher, registry) are allowed:
+    they share a slug. A different installation is refused, with the owner named.
+    """
+
+    OWNER_FILE = "instance.json"
+    LOCK_FILE = "instance.lock"
+
+    def __init__(self, workspace_path: str):
+        self.workspace_path = os.path.abspath(str(workspace_path))
+        self.meta_dir = os.path.join(self.workspace_path, ".opensquad")
+        self.owner_file = os.path.join(self.meta_dir, self.OWNER_FILE)
+        self.lock_file = os.path.join(self.meta_dir, self.LOCK_FILE)
+        self._fh = None
+
+    def owner(self) -> dict:
+        try:
+            with open(self.owner_file, encoding="utf-8") as f:
+                data = json.load(f)
+            return data if isinstance(data, dict) else {}
+        except Exception:
+            return {}
+
+    def acquire(self) -> None:
+        os.makedirs(self.meta_dir, exist_ok=True)
+        slug = instance_slug()
+        owner = self.owner()
+        if owner.get("slug") == slug:
+            return  # our own sibling service: same installation, same workspace
+
+        handle = _try_lock_file(self.lock_file)
+        if handle is None:
+            who = str(owner.get("slug") or "an unknown installation")
+            pid = owner.get("pid") or "?"
+            raise RuntimeError(
+                f"[Workspace] Refusing to start: {self.workspace_path} is already in use by "
+                f"another OpenSquad installation (instance {who}, pid {pid}).\n"
+                f"[Workspace] This install is instance {slug}.\n"
+                "[Workspace] Two installations sharing one workspace collide on ports "
+                "(9555/9600/9720), chat.db and plugin data. Do one of:\n"
+                "  - stop the other stack, or\n"
+                "  - point this install at its own workspace (Settings -> Workspace), or\n"
+                "  - run it as a separate instance: OPENSQUAD_INSTANCE=<name> with its own workspace."
+            )
+        self._fh = handle
+
+        from datetime import datetime, timezone
+
+        payload = {
+            "slug": slug,
+            "pid": os.getpid(),
+            "workspace": self.workspace_path,
+            "since": datetime.now(timezone.utc).isoformat(),
+        }
+        tmp = self.owner_file + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2, ensure_ascii=False)
+        os.replace(tmp, self.owner_file)
+
+
+_RUN_LOCKS: dict[str, WorkspaceRunLock] = {}
+
+
+def ensure_workspace_owner(workspace_path: str) -> None:
+    """Take ownership of *workspace_path* for this process, once, or refuse to start."""
+    key = os.path.normcase(os.path.abspath(str(workspace_path)))
+    if key in _RUN_LOCKS:
+        return
+    lock = WorkspaceRunLock(workspace_path)
+    lock.acquire()
+    _RUN_LOCKS[key] = lock
+
+
 def workspace_bootstrap_lock(workspace_path: str):
-    """Return a context manager locking ``{workspace}/.opensquad/bootstrap.lock``."""
+    """Lock ``{workspace}/.opensquad/bootstrap.lock`` and claim the workspace.
+
+    Every bootstrap path goes through here, so this is also where the per-installation
+    ownership check happens (see :class:`WorkspaceRunLock`): a second installation on the
+    same workspace is refused loudly rather than allowed to half-start.
+    """
+    ensure_workspace_owner(workspace_path)
     lock_path = os.path.join(workspace_path, ".opensquad", "bootstrap.lock")
     return _BootstrapLock(lock_path)
 

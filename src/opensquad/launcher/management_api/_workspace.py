@@ -33,7 +33,9 @@ class WorkspaceMixin:
 
         default_path = get_default_workspace_path()
 
-        record_file = os.path.expanduser("~/.opensquad/last_workspace.json")
+        from opensquad.workspace_utils import last_workspace_path
+
+        record_file = str(last_workspace_path())
         recent_paths: list = []
         if os.path.exists(record_file):
             try:

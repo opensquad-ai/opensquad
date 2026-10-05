@@ -48,7 +48,15 @@ def _load() -> dict:
         return _cache
 
     if not os.path.exists(cfg_path):
-        last_ws_file = os.path.join(os.path.expanduser("~"), ".opensquad", "last_workspace.json")
+        # This installation's pointer first, then the machine-global file it replaced.
+        # Independent adapters (python -m plugins.<x>.adapter, started by start_*.bat)
+        # never receive set_workspace() and rely on this branch to find the workspace,
+        # so the legacy path has to keep working.
+        from opensquad.workspace_utils import LEGACY_LAST_WORKSPACE_FILE, last_workspace_path
+
+        last_ws_file = str(last_workspace_path())
+        if not os.path.exists(last_ws_file):
+            last_ws_file = str(LEGACY_LAST_WORKSPACE_FILE)
         if os.path.exists(last_ws_file):
             try:
                 with open(last_ws_file, encoding="utf-8") as f:

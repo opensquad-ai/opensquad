@@ -18,14 +18,18 @@ logger = logging.getLogger("plugins.self_learn.query")
 
 
 def _get_last_workspace() -> str:
+    """This installation's last workspace, for fallback agent scanning.
+
+    Went through ~/.opensquad/last_workspace.json directly, which is shared by every
+    installation on the machine — so a desktop launch could send this scan at the
+    source install's workspace, or the reverse.
+    """
     try:
-        lw_path = os.path.join(os.path.expanduser("~"), ".opensquad", "last_workspace.json")
-        if os.path.isfile(lw_path):
-            with open(lw_path, encoding="utf-8") as f:
-                data = json.load(f)
-            ws = data.get("last_workspace", "")
-            if ws and os.path.isdir(os.path.join(ws, "agents")):
-                return ws
+        from opensquad.workspace_utils import read_last_workspace_path
+
+        ws = read_last_workspace_path() or ""
+        if ws and os.path.isdir(os.path.join(ws, "agents")):
+            return ws
     except Exception:
         pass
     return ""

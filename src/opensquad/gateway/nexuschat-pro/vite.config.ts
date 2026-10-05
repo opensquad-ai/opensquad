@@ -1,3 +1,4 @@
+import crypto from 'crypto';
 import path from 'path';
 import fs from 'fs';
 import os from 'os';
@@ -45,10 +46,32 @@ function loadSystemConfig(): { ports: Record<string, number>; hosts: Record<stri
         return null;
     }
 
-    // 1. 尝试从 ~/.opensquad/last_workspace.json 读取当前工作区
+    // 1. 本安装的工作区指针优先，其次才是被它取代的全局文件。
+    //    路径算法必须与 src/opensquad/workspace_utils.py 的 instance_slug() 一致：
+    //    sha1(normcase(安装根))[:10]（安装根 = <repo>/src，即 __dirname/../../..），
+    //    否则开发服务器会去读桌面版写下的工作区（或反之）。
     try {
-        const lastWsFile = path.join(os.homedir(), '.opensquad', 'last_workspace.json');
-        if (fs.existsSync(lastWsFile)) {
+        const installRoot = path.resolve(__dirname, '../../..');
+        const normcase = (p: string) =>
+            process.platform === 'win32' ? path.resolve(p).replace(/\//g, '\\').toLowerCase() : path.resolve(p);
+        const slug = crypto.createHash('sha1').update(normcase(installRoot)).digest('hex').slice(0, 10);
+        const envInstance = (process.env.OPENSQUAD_INSTANCE || '').trim();
+        const candidates = [
+            envInstance
+                ? path.join(
+                      os.homedir(),
+                      '.opensquad',
+                      'instances',
+                      envInstance.replace(/[^A-Za-z0-9_-]/g, '-').slice(0, 40),
+                      'last_workspace.json',
+                  )
+                : null,
+            path.join(os.homedir(), '.opensquad', 'instances', slug, 'last_workspace.json'),
+            path.join(os.homedir(), '.opensquad', 'last_workspace.json'),
+        ].filter(Boolean) as string[];
+
+        for (const lastWsFile of candidates) {
+            if (!fs.existsSync(lastWsFile)) continue;
             const wsData = JSON.parse(fs.readFileSync(lastWsFile, 'utf-8'));
             const wsPath = wsData?.last_workspace;
             if (wsPath) {
