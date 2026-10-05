@@ -8,8 +8,15 @@
  * is highlighted wherever the message is rendered.
  */
 
-/** Classes on the mention span: the chat CSS and the click handler key off it. */
-export const MENTION_CLASS = 'mention-link text-primary font-bold cursor-pointer hover:underline';
+/**
+ * Classes on the mention span: the chat CSS and the click handler key off it.
+ *
+ * The highlight lives here rather than on the bubble. Marking the whole message amber because it
+ * mentions you painted a paragraph (and any table inside it) the colour of a warning, while the
+ * thing worth spotting is the two characters that carry the name.
+ */
+export const MENTION_CLASS =
+  'mention-link text-primary font-bold cursor-pointer hover:underline rounded px-0.5 bg-black/[0.06] dark:bg-white/[0.10]';
 
 /**
  * Unicode letters/digits plus the separators names actually use. The lookbehind
