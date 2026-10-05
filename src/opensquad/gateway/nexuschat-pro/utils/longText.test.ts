@@ -39,6 +39,12 @@ describe('shouldFold', () => {
   });
 });
 
+describe('the threshold', () => {
+  it('is a thousand characters', () => {
+    expect(LONG_TEXT_LIMIT).toBe(1000);
+  });
+});
+
 describe('foldedText', () => {
   it('keeps exactly the visible stretch', () => {
     expect(foldedText(long(LONG_TEXT_LIMIT + 500))).toHaveLength(LONG_TEXT_LIMIT);

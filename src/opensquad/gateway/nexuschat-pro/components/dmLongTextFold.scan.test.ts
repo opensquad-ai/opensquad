@@ -25,20 +25,27 @@ describe('the direct-message window', () => {
 
 describe('the bubble', () => {
   it('folds a long body by default, and can be told not to', () => {
-    expect(BUBBLE).toContain('foldLongText && shouldFold(safeContent) ? (');
+    expect(BUBBLE).toContain("foldLongText && message.role === 'user' && shouldFold(safeContent) ? (");
     expect(BUBBLE).toContain('foldLongText = true');
     expect(BUBBLE).toContain('foldLongText?: boolean;');
   });
 
-  it('folds the raw content and renders the markup only when expanded', () => {
+  it('never folds what an agent wrote, however long it is', () => {
+    // The rule lives in the bubble, so it covers the direct-message window, the agent session and
+    // the group chat in one place; the group chat applies the same test through the sender.
+    expect(BUBBLE).toContain("message.role === 'user'");
+    expect(CHAT).toContain('sender?.is_agent !== true && shouldFold(msg.content) ? (');
+  });
+
+  it('folds the raw content and renders each view through the same pipeline', () => {
     const folded = BUBBLE.slice(
-      BUBBLE.indexOf('foldLongText && shouldFold(safeContent) ? ('),
-      BUBBLE.indexOf('{isStoppedTurn && !isUser &&', BUBBLE.indexOf('foldLongText && shouldFold(safeContent) ? (')),
+      BUBBLE.indexOf("foldLongText && message.role === 'user' && shouldFold(safeContent) ? ("),
+      BUBBLE.indexOf('{isStoppedTurn && !isUser &&', BUBBLE.indexOf("foldLongText && message.role === 'user' && shouldFold(safeContent) ? (")),
     );
 
     expect(folded).toContain('<LongTextFold');
     expect(folded).toContain('text={safeContent}');
-    expect(folded).toContain('renderFull={() => (');
+    expect(folded).toContain('render={(text) => (');
   });
 
   it('leaves the body untouched otherwise, stopped badge and all', () => {
@@ -48,8 +55,8 @@ describe('the bubble', () => {
 });
 
 describe('the group chat', () => {
-  it('folds both of its message bodies, not just the main one', () => {
-    const sites = (CHAT.match(/shouldFold\(msg\.content\) \? \(/g) || []).length;
+  it('folds both of its message bodies, both gated on a human sender', () => {
+    const sites = (CHAT.match(/sender\?\.is_agent !== true && shouldFold\(msg\.content\) \? \(/g) || []).length;
 
     expect(sites).toBe(2);
     expect(CHAT).toContain('<LongTextFold');

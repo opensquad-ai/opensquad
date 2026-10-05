@@ -294,13 +294,13 @@ const MessageRowImpl: React.FC<MessageRowProps> = ({
           </div>
         ) : (
           <div className="max-w-[90%] md:max-w-[75%] px-4 py-3 bg-primary/5 border border-primary/20 rounded-xl text-sm text-textMain whitespace-pre-wrap break-words text-center">
-            {shouldFold(msg.content) ? (
+            {sender?.is_agent !== true && shouldFold(msg.content) ? (
               <LongTextFold
                 text={msg.content}
-                renderFull={() => (
+                render={(text) => (
                   <div
                     className="prose prose-sm max-w-full prose-p:my-0 inline-block text-left"
-                    dangerouslySetInnerHTML={{ __html: parseContent(msg.content, msg.id) }}
+                    dangerouslySetInnerHTML={{ __html: parseContent(text, msg.id) }}
                     onClick={(e) => actions.contentClick(e, msg.id)}
                   />
                 )}
@@ -571,14 +571,14 @@ const MessageRowImpl: React.FC<MessageRowProps> = ({
                       />
                     );
                   }
-                  return shouldFold(msg.content) ? (
+                  return sender?.is_agent !== true && shouldFold(msg.content) ? (
                     <LongTextFold
                       text={msg.content}
-                      renderFull={() => (
+                      render={(text) => (
                         <div
                           className="ai-markdown prose prose-sm max-w-full prose-p:my-0 prose-ul:my-1 break-all"
                           style={{ wordBreak: 'break-all', overflowWrap: 'break-word' }}
-                          dangerouslySetInnerHTML={{ __html: parseContent(msg.content, msg.id) }}
+                          dangerouslySetInnerHTML={{ __html: parseContent(text, msg.id) }}
                           onClick={(e) => actions.contentClick(e, msg.id)}
                         />
                       )}
