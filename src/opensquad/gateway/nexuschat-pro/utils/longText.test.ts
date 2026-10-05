@@ -22,15 +22,14 @@ describe('shouldFold', () => {
     expect(shouldFold(long(LONG_TEXT_LIMIT))).toBe(false);
   });
 
-  it('never folds a collaboration or approval card', () => {
-    const card = `[[COLLAB_TASK]]{"collab_id":"A1"}`.padEnd(LONG_TEXT_LIMIT + 50, 'x');
-    expect(shouldFold(card)).toBe(false);
-    expect(shouldFold('[[COLLAB_APPROVAL]]' + long(LONG_TEXT_LIMIT))).toBe(false);
+  it('folds code and tables like anything else — expanding brings them back', () => {
+    expect(shouldFold('前言\n```\n' + long(LONG_TEXT_LIMIT) + '\n```')).toBe(true);
+    expect(shouldFold('| a | b |\n| - | - |\n' + long(LONG_TEXT_LIMIT))).toBe(true);
   });
 
-  it('never folds code or a table', () => {
-    expect(shouldFold('前言\n```\n' + long(LONG_TEXT_LIMIT) + '\n```')).toBe(false);
-    expect(shouldFold('| a | b |\n| - | - |\n' + long(LONG_TEXT_LIMIT))).toBe(false);
+  it('only the cards the UI parses are exempt', () => {
+    expect(shouldFold(`[[COLLAB_TASK]]{"collab_id":"A1"}`.padEnd(LONG_TEXT_LIMIT + 50, 'x'))).toBe(false);
+    expect(shouldFold('[[COLLAB_APPROVAL]]' + long(LONG_TEXT_LIMIT))).toBe(false);
   });
 
   it('survives nothing at all', () => {

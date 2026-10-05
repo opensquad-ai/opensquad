@@ -14,6 +14,8 @@ import { AI_MARKDOWN_CLASS, renderFencedMarkdown } from '../../utils/fencedMarkd
 import { useMermaidHydration } from '../../hooks/useMermaidHydration';
 import { useTableCopyButtons } from '../../hooks/useTableCopyButtons';
 import { VoicePlayer } from './VoicePlayer';
+import { LongTextFold } from '../LongTextFold';
+import { shouldFold } from '../../utils/longText';
 import { MachineUserNotice } from './MachineUserNotice';
 import { parseMachineUserMessage } from '../../utils/machineUserMessage';
 import { OpenSquadLoader } from '../OpenSquadLoader';
@@ -80,6 +82,12 @@ export interface ChatMessage {
 }
 
 export interface MessageBubbleProps {
+  /**
+   * Fold a very long body to its first stretch. On by default: the same bubble renders the direct
+   * message window, the agent session and the group chat, and a wall of text is a wall in all of
+   * them. Callers that want a body whole can turn it off.
+   */
+  foldLongText?: boolean;
   message: ChatMessage;
   isStreaming?: boolean;
   /** Display name shown above the message */
@@ -161,6 +169,7 @@ const MessageBubbleInner: React.FC<MessageBubbleProps> = ({
   canWithdraw,
   onWithdraw,
   onReply,
+  foldLongText = true,
 }) => {
   const { t, i18n } = useTranslation();
   const [copied, setCopied] = React.useState(false);
@@ -693,11 +702,24 @@ const MessageBubbleInner: React.FC<MessageBubbleProps> = ({
         </>
       ) : (
         <>
-          <div
-            ref={mermaidRef}
-            className={AI_MARKDOWN_CLASS}
-            dangerouslySetInnerHTML={{ __html: renderedHtml }}
-          />
+          {foldLongText && shouldFold(safeContent) ? (
+            <LongTextFold
+              text={safeContent}
+              renderFull={() => (
+                <div
+                  ref={mermaidRef}
+                  className={AI_MARKDOWN_CLASS}
+                  dangerouslySetInnerHTML={{ __html: renderedHtml }}
+                />
+              )}
+            />
+          ) : (
+            <div
+              ref={mermaidRef}
+              className={AI_MARKDOWN_CLASS}
+              dangerouslySetInnerHTML={{ __html: renderedHtml }}
+            />
+          )}
           {isStoppedTurn && !isUser && (
             <div
               data-testid="msg-stopped-badge"
