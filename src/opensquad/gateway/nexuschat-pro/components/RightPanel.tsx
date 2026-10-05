@@ -591,12 +591,13 @@ export const RightPanel: React.FC<RightPanelProps> = ({ isOpen, onClose, group, 
                       </div>
                       {/* An agent on a paired machine has no socket on THIS gateway, so its local
                           status is always "offline" — true here, misleading to read: it is working,
-                          and its messages arrive over the relay. Say where it is instead. */}
-                      <p className={`text-xs capitalize ${user.is_remote ? 'text-sky-600/80' : 'text-gray-400'}`}>
-                        {user.is_remote
-                          ? t('rightPanel.remoteStatus', { host: user.remote_label || t('rightPanel.remoteMember') })
-                          : user.status}
-                      </p>
+                          and its messages arrive over the relay. The line is dropped rather than
+                          reworded, because the chip beside the name already says which machine it
+                          is on: saying it twice in one row is noise. The dot stays sky-coloured,
+                          which is what keeps it from reading as offline. */}
+                      {user.is_remote ? null : (
+                        <p className="text-xs capitalize text-gray-400">{user.status}</p>
+                      )}
                     </div>
                   </div>
                 );

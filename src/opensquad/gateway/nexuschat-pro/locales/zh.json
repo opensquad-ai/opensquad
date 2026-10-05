@@ -1864,7 +1864,6 @@
     "members": "成员 ({{count}})",
     "add": "添加",
     "remoteMember": "远程机器",
-    "remoteStatus": "在 {{host}} 上（消息经中继到达）",
     "remoteChatHint": "这个 agent 在配对的那台机器上、不在这台，所以这里没有它的在线状态——用群消息或任务窗口与它协作。",
     "leaveGroup": "退出群组",
     "searchFailed": "搜索失败",
