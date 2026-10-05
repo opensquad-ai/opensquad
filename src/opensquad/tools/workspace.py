@@ -45,14 +45,20 @@ def get_current() -> dict[str, Any]:
     except Exception as e:
         return {"status": "error", "message": f"Cannot read workspace config: {e}"}
 
-    # Session-level working directory (folder-picker / working-directory API)
+    # Session-level working directory (folder-picker / working-directory API).
+    # The executing turn's session comes first: reading only the process-wide global is how two
+    # panes in two projects were both told the same folder — whichever one wrote it last.
     session_cwd = ""
     try:
-        from opensquad.utils.path_utils import get_session_cwd_override
+        from opensquad.utils.path_utils import (
+            current_session_id,
+            get_session_cwd_for,
+            get_session_cwd_override,
+        )
 
-        override = get_session_cwd_override()
-        if override:
-            session_cwd = override
+        session_cwd = (get_session_cwd_for(current_session_id()) or "").strip() or (
+            get_session_cwd_override() or ""
+        ).strip()
     except Exception:
         pass
     if not session_cwd:
