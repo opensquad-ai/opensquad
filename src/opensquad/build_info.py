@@ -27,13 +27,15 @@ _SKIP_DIRS = {"__pycache__", "node_modules", ".git", "build", "dist"}
 
 def _git(args: list[str], cwd: Path) -> str:
     try:
+        from opensquad.proc_text import utf8_text_kwargs
+
         out = subprocess.run(
             ["git", *args],
             cwd=str(cwd),
             capture_output=True,
-            text=True,
             timeout=5,
             check=False,
+            **utf8_text_kwargs(),
         )
     except Exception:
         return ""

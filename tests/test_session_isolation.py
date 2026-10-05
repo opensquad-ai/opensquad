@@ -179,10 +179,15 @@ def test_signal_file_is_per_session_with_agent_level_fallback(tmp_path: Path):
     # No file of its own and no agent-level file → nothing to apply.
     assert read_session_cwd(str(agent_dir), "sess-c") is None
 
-    # Agent-level file is the fallback, and never overrides a session's own.
+    # Agent-level file never overrides a session's own file ...
     write_session_cwd(str(agent_dir), str(b))
     assert read_session_cwd(str(agent_dir), "sess-a")["path"] == os.path.abspath(str(a))
-    assert read_session_cwd(str(agent_dir), "sess-c")["path"] == os.path.abspath(str(b))
+    # ... and a session with no file of its own does NOT fall back to it. That fallback is what put
+    # two panes in one folder: a brand-new session (no signal file yet) inherited whichever value an
+    # agent-level write left behind. With no session id at all — CLI, scheduled tasks, serial turns —
+    # the agent-level file still applies.
+    assert read_session_cwd(str(agent_dir), "sess-c") is None
+    assert read_session_cwd(str(agent_dir), "")["path"] == os.path.abspath(str(b))
 
 
 def test_session_ids_with_path_separators_do_not_collide(tmp_path: Path):
