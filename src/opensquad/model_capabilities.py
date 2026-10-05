@@ -345,6 +345,11 @@ class ModelCapabilityRegistry:
                 notes="Unknown Gemini model, assuming Function Calling support",
             )
         else:
+            # Deliberate: an unknown model from an openai-compatible vendor is assumed to support
+            # Function Calling. That is the project's choice, pinned by
+            # test_tool_call_strategy.py::test_unknown_model_is_assumed_to_support_function_calling.
+            # The guard against the assumption going wrong lives in the strategy layer, not here:
+            # native mode falls back to XML when the provider's native FC is not implemented.
             return ModelCapability(
                 supports_function_calling=True,
                 supports_streaming=True,
