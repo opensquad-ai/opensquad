@@ -27,9 +27,18 @@ describe('the card reads the live record', () => {
     expect(src).toMatch(/data-live=\{liveParticipants \? '1' : '0'\}/);
   });
 
+  it('keeps reading it, on the same beat the board page uses', () => {
+    // Reading once on mount meant the card only changed on a page refresh — which is what the
+    // field reported. It polls now, and stops once the collaboration is over.
+    expect(src).toContain('window.setTimeout(() => void read(), 5000)');
+    expect(src).toMatch(/\[.done., .failed., .archived.\]/);
+    expect(src).toContain('JSON.stringify(prev) === JSON.stringify(summary.participants) ? prev : summary.participants');
+  });
+
   it('does not update after it is gone, and survives a failed read', () => {
     expect(src).toContain('let alive = true');
     expect(src).toContain('alive = false');
+    expect(src).toContain('window.clearTimeout(timer)');
     expect(src).toMatch(/catch \{\s*\/\* the snapshot stays on screen \*\//);
   });
 });
