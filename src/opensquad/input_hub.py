@@ -331,6 +331,24 @@ class InputHub:
             sid = str((message or {}).get("session_id") or "").strip()
         except Exception:
             sid = ""
+        if not sid:
+            # A gateway message with no session id is a pane whose session had not been created yet:
+            # the frontend has nothing to put in the frame (AIChatPage sends
+            # ``session_id: targetSessionId || undefined``) and the adapter's switch_and_reply
+            # fallback sends an empty one. Applying the agent-level file here is how two new sessions
+            # in two workspaces landed in the same folder — both applied whichever value was written
+            # last. Apply nothing instead, and never another pane's path.
+            src = ""
+            try:
+                src = str((message or {}).get("source") or "").strip().lower()
+            except Exception:
+                src = ""
+            if src in ("gateway", "web", "ai-web"):
+                logger.info(
+                    "[InputHub] cwd for turn: sid=(none) applied=- origin=gateway without a session "
+                    "id -> leaving the working directory alone"
+                )
+                return
         if sid:
             self.current_session_id = sid
         try:

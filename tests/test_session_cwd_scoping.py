@@ -104,6 +104,27 @@ def test_the_turn_start_check_uses_the_message_that_starts_it():
     assert "\n        self._check_session_cwd()\n" not in INPUT_HUB
 
 
+def test_a_gateway_message_without_a_session_applies_nothing():
+    """The new-session case: the frontend has no id to send yet.
+
+    Both panes sent session_id="" (AIChatPage → session_id: targetSessionId || undefined, then the
+    adapter's switch_and_reply fallback). Applying the agent-level file for those is what put two
+    workspaces in one folder, so with no id the working directory is left alone.
+    """
+    from opensquad.input_hub import input_hub
+
+    seen: list[str] = []
+    original = input_hub._check_session_cwd
+    try:
+        input_hub._check_session_cwd = lambda sid="": seen.append(str(sid))
+        input_hub._apply_cwd_for_message({"source": "gateway", "content": "hi"})
+        input_hub._apply_cwd_for_message({"source": "cli", "content": "hi"})
+    finally:
+        input_hub._check_session_cwd = original
+
+    assert seen == [""], seen  # gateway: skipped; cli: the legacy agent-level path
+
+
 def test_the_tool_reports_the_executing_sessions_folder(tmp_path):
     """Two panes, two projects, one process: each turn must see its own folder.
 
