@@ -3239,18 +3239,11 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     }
 
     pendingOpenSessionTabRef.current = true;
-    // Only abort the session we are leaving — never bare stopTask() (that is
-    // agent-wide and cancels every parallel pane mid-turn).
-    const prevBusy =
-      !!previousSid &&
-      (busySessionsRef.current.includes(previousSid) ||
-        isStreamingBySessionRef.current[previousSid] ||
-        (previousSid === (currentSessionIdRef.current || '') &&
-          (isStreaming || agentStatus === 'thinking' || agentStatus === 'working')));
-    if (prevBusy && previousSid) {
-      userStoppedBySidRef.current[previousSid] = true;
-      wsServiceRef.current?.stopTask({ session_id: previousSid });
-    }
+    // Starting a session here must not stop a turn somewhere else. This used to stop "the previous
+    // session" whenever it was busy — which is how starting a session in one workspace killed the
+    // turn running in another: the id came from the focused pane, not from this one. Nothing needs
+    // stopping anyway: the parallel turn scheduler defers a busy session and runs it when a slot
+    // frees. The other switch paths already go without stop_task for the same reason.
     if (previousSid) delete finalizingBySidRef.current[previousSid];
     clearSessionRunState(previousSid);
     newSessionPendingRef.current = true;
