@@ -80,13 +80,18 @@ _TEXT_EXTS = {
 }
 
 
-def resolve_agent_root(agent_dir: str, workspace_root: str) -> str:
-    """Return absolute active cwd for an agent (session override or workspace)."""
+def resolve_agent_root(agent_dir: str, workspace_root: str, session_id: str = "") -> str:
+    """Return absolute active cwd for an agent (session override or workspace).
+
+    ``session_id`` scopes which override is read. Without one the agent-level file is used, and that
+    file is shared by every pane — so two workspaces on one agent can each re-root the other's file
+    operations, which is how a write that had been legal a second earlier came back 403.
+    """
     session_cwd = ""
     try:
         from opensquad.utils.session_cwd import read_session_cwd
 
-        data = read_session_cwd(agent_dir)
+        data = read_session_cwd(agent_dir, session_id)
         if data:
             session_cwd = str(data.get("path") or "").strip()
     except Exception:

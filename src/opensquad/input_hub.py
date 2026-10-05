@@ -76,6 +76,12 @@ class InputHub:
         from opensquad.utils.session_cwd import read_session_cwd
 
         sid = (session_id or "").strip()
+        if sid:
+            # Remember who we are serving. The turn-start check calls this without an id, and with
+            # an id the session-scoped file is read first — while without one it reads the
+            # agent-level file, which any other pane's folder choice overwrites. That fallback is
+            # what let two workspaces on one agent keep re-rooting each other.
+            self.current_session_id = sid
         data = read_session_cwd(self.agent_dir, sid)
         if not data:
             # Nothing set (neither a session-scoped nor an agent-level file) —
@@ -325,7 +331,9 @@ class InputHub:
         # of every conversation turn) and apply it before processing the
         # next user message. This ensures the agent's shell commands and
         # file operations use the user-selected working directory.
-        self._check_session_cwd()
+        # Pass on the session we last served: without it this reads the agent-level file, which is
+        # shared by every pane, so a folder chosen in one workspace re-rooted the others.
+        self._check_session_cwd(getattr(self, "current_session_id", ""))
 
         queue = self._get_queue()
         urgent_queue = self._get_urgent_queue()
