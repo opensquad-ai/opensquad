@@ -91,10 +91,29 @@ def test_the_sandbox_root_still_works_without_a_session(tmp_path):
     assert resolve_agent_root(agent_dir, "", "").endswith("raven")
 
 
-def test_the_turn_start_check_passes_the_session_it_was_serving():
-    """The hub's own check ran without an id, so every turn fell back to the shared file — the
-    flip-flop. It remembers the session and passes it now; a hub that never saw one keeps the
-    historical agent-level behaviour."""
-    assert "self.current_session_id = sid" in INPUT_HUB
-    assert 'self._check_session_cwd(getattr(self, "current_session_id", ""))' in INPUT_HUB
+def test_the_turn_start_check_uses_the_message_that_starts_it():
+    """The session id comes from the message, not from whichever session was seen last.
+
+    That was the last hole: the hub remembered the most recent session, so a turn belonging to one
+    workspace could be re-rooted by a message that had arrived for another.
+    """
+    assert "def _apply_cwd_for_message(self, message" in INPUT_HUB
+    assert 'sid = str((message or {}).get("session_id") or "").strip()' in INPUT_HUB
+    assert INPUT_HUB.count("self._apply_cwd_for_message(") >= 3, "every return path applies it"
+    assert "self._check_session_cwd(getattr(self" not in INPUT_HUB
     assert "\n        self._check_session_cwd()\n" not in INPUT_HUB
+
+
+def test_the_hub_applies_the_message_session_not_the_remembered_one():
+    from opensquad.input_hub import input_hub
+
+    seen: list[str] = []
+    original = input_hub._check_session_cwd
+    try:
+        input_hub._check_session_cwd = lambda sid="": seen.append(str(sid))
+        input_hub._apply_cwd_for_message({"session_id": "session-A", "content": "hi"})
+        input_hub._apply_cwd_for_message({"content": "no sid"})
+    finally:
+        input_hub._check_session_cwd = original
+
+    assert seen == ["session-A", ""], "the message's own session, then the legacy path"
