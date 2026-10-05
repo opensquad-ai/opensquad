@@ -22,7 +22,20 @@
     "firstTimeTitle": "欢迎使用 OpenSquad",
     "chooseLanguage": "选择语言 / Select your language",
     "selectZh": "中文（简体）",
-    "selectEn": "English"
+    "selectEn": "English",
+    "tour1Title": "按你的方式，编排一支 AI 团队。",
+    "tour1Body": "本地优先 —— 会话、文件与协作数据都留在你自己的机器上。",
+    "tour2Title": "和 Agent 协作，而不是只用它。",
+    "tour2Body": "在群聊里派活，用审批卡把住需求、方案与验收，协作看板随时看清谁在做什么。",
+    "tour3Title": "看得见的执行过程。",
+    "tour3Body": "Agent Web 把工具调用、终端、文件与浏览器面板摊在同一屏，过程透明、可追溯。",
+    "tour4Title": "桌面、本机与跨机都行。",
+    "tour4Body": "一键启动桌面端；局域网配对之后，另一台机器上的 Agent 也能加入同一个群与同一批任务。",
+    "tourSkip": "跳过",
+    "tourBack": "返回",
+    "tourNext": "下一步",
+    "tourDone": "开始使用",
+    "tourLanguage": "语言"
   },
   "auth": {
     "welcomeBack": "欢迎回来",

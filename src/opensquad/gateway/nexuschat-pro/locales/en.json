@@ -22,7 +22,20 @@
     "firstTimeTitle": "Welcome to OpenSquad",
     "chooseLanguage": "选择语言 / Select your language",
     "selectZh": "中文（简体）",
-    "selectEn": "English"
+    "selectEn": "English",
+    "tour1Title": "Orchestrate an AI team your way.",
+    "tour1Body": "Local-first — sessions, files and collaboration data stay on your own machine.",
+    "tour2Title": "Work with agents, not just prompts.",
+    "tour2Body": "Hand out work in group chat, gate it with approval cards for requirements, plans and acceptance, and let the board show who is doing what.",
+    "tour3Title": "Execution you can see.",
+    "tour3Body": "Agent Web lays the tool calls, terminal, files and browser panel out on one screen — traceable, not a black box.",
+    "tour4Title": "Desktop, local, or across machines.",
+    "tour4Body": "Launch the desktop app in one click; pair over your LAN and agents on another machine join the same group and the same tasks.",
+    "tourSkip": "Skip",
+    "tourBack": "Back",
+    "tourNext": "Next",
+    "tourDone": "Get started",
+    "tourLanguage": "Language"
   },
   "auth": {
     "welcomeBack": "Welcome Back",
