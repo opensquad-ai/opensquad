@@ -11,7 +11,7 @@
  * was ever shown.
  */
 
-export const LONG_TEXT_LIMIT = 200;
+export const LONG_TEXT_LIMIT = 1000;
 
 const STRUCTURED_MARKERS = [
   '[[COLLAB_TASK]]',

@@ -702,14 +702,18 @@ const MessageBubbleInner: React.FC<MessageBubbleProps> = ({
         </>
       ) : (
         <>
-          {foldLongText && shouldFold(safeContent) ? (
+          {foldLongText && message.role === 'user' && shouldFold(safeContent) ? (
+            // Only what a person wrote is folded. An agent's answer is the thing the turn was for,
+            // so it is shown whole however long it runs.
             <LongTextFold
               text={safeContent}
-              renderFull={() => (
+              render={(text) => (
                 <div
-                  ref={mermaidRef}
+                  ref={text === safeContent ? mermaidRef : undefined}
                   className={AI_MARKDOWN_CLASS}
-                  dangerouslySetInnerHTML={{ __html: renderedHtml }}
+                  dangerouslySetInnerHTML={{
+                    __html: text === safeContent ? renderedHtml : renderFencedMarkdown(text),
+                  }}
                 />
               )}
             />
