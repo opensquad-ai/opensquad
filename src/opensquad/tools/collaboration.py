@@ -420,9 +420,15 @@ def start_collaboration(
             "5. MUST use collaboration.board_update to write Requirements Zone (goals/scope/constraints/acceptance)\n"
             "6. MUST use collaboration.board_update to write Plan Zone (architecture/workflow/module boundaries/risks)\n"
             "7. ⚠️ MUST use collaboration.assign_task (NOT board_update) to assign tasks to each worker — call it once PER worker with a unique item_key\n"
-            "8. Discuss assignment with team via @mention in group chat\n"
+            "8. Discuss the assignment with each worker IN THE TASK WINDOW (post_task_message) — the group gets only the @mention that wakes them\n"
             "9. At each 四门闸 gate, call collaboration.request_step_approval(...) so the user can click 确定/拒绝 in the group — do NOT proceed until approved\n"
-            "10. Continuously monitor progress via board_list and worker updates"
+            "10. Continuously monitor progress via board_list and worker updates\n"
+            "11. @用户只在确有必要时（只有他能做的决定 / 需要授权 / 自己被卡住）——不要把进度播报给用户；"
+            "worker 同样如此\n"
+            "12. 交付时：在任务窗口用 1–2 句话汇报完成，然后直接 request_step_approval 提交「任务验收」请用户通过；"
+            "长篇汇报放看板与文档，不要发到群里\n"
+            "13. 除 @消息外，协作期间的一切沟通都在任务窗口（post_task_message）里进行——"
+            "不要发到群里直接暴露"
         ),
         "task_assignment_guide": {
             "description": "Use this guide to write properly structured task assignments on the collaboration board.",

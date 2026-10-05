@@ -384,6 +384,15 @@ Word count: approx. 2000 words
 - **No assumptions**: When unsure about research direction, @Lead to confirm rather than deciding independently
 - **Document everything**: All important decisions, data sources, and analysis results must be recorded in group chat or shared documents
 - **Quality first**: Do not sacrifice accuracy for speed; raise issues promptly
+- **Quiet by default**: a worker @-mentions the user only when it is genuinely needed — a decision
+  only they can make, a permission, or being blocked. The PM holds the same rule and leans on the
+  task window rather than the group. Progress is not news to the user.
+- **Talk inside the collaboration**: everything that is not an @message belongs in the task window
+  (`post_task_message`). Do not post task talk into the group chat, where it is exposed to
+  everyone — the group gets the @mention that wakes someone, and nothing more.
+- **Deliver in one or two sentences**: when the work is done, say so briefly in the task window,
+  then submit the acceptance approval request and let the user decide. Reports belong on the board
+  and in documents, not in the group.
 
 ---
 
@@ -459,21 +468,32 @@ Check that the returned list includes the newly created `my_research_team`.
    - Report immediately upon completing a task
    - Immediately @PM when blocked
    - At least one progress update per day
+   - Report in the task window, and keep it short: an update is one line, not a report
+   - @-mention the user only when it is genuinely needed — never to narrate progress
 
-3. **Follow conventions**:
+3. **Stay out of the group**:
+   - Task talk, progress, decisions and reports go in the task window (`post_task_message`)
+   - The group chat carries the @mention that wakes someone, and the approval cards, nothing else
+
+4. **Finish with a decision, not a monologue**:
+   - One or two sentences in the task window when the work is done
+   - Then submit the acceptance approval request and let the user approve or reject
+
+5. **Follow conventions**:
    - Use the message formats defined by the collaboration card
    - Do not overstep and execute another role's tasks
    - Do not assume requirements; confirm immediately when in doubt
 
-4. **Documentation**:
-   - Record important decisions in group chat
+6. **Documentation**:
+   - Record important decisions in the task window, not the group chat
    - Submit code changes via Git commits
    - Record test results in a test report
 
 ### After Collaboration Ends
 
 - [ ] PM confirms all deliverables are complete
-- [ ] Send project summary to group chat
+- [ ] One or two sentences in the task window: done, and what changed. The long version belongs on
+      the board and in the documents
 - [ ] Call `end_collaboration` to formally end
 - [ ] Workers call `leave_collaboration` to leave
 - [ ] Archive project documents and code
