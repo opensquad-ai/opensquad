@@ -56,13 +56,20 @@ def test_selector_picks_native_fc_for_capable_model():
 
 
 def test_selector_falls_back_to_xml_for_unknown_model():
-    """能力未知时必须退回 XML，不能乐观地发 tools 参数。"""
+    """能力未知时按项目决定：假定支持（XML 只在实现层面缺失时才回退）。
+
+    这条锁原先要求"未知即 XML"，但它与更明确的一组意图冲突 ——
+    test_tool_call_strategy.py 里三条测试（名字即意图）钉住的是：
+    未识别的 openai-compatible 厂商【假定】支持 Function Calling，
+    因此走 Native-FC。真正的安全网在 tool_call_strategy：native 模式下若
+    该 provider 的原生 FC【未实现】，则回退 XML，绝不"警告一声照样发 tools"。
+    """
     strategy = ToolCallStrategySelector().select(
         {"model": {"provider": "UnknownVendor", "model_name": "some-unknown-model-xyz"}},
         _registry(),
     )
 
-    assert strategy.get_strategy_name() == "XML"
+    assert strategy.get_strategy_name() == "Native-FC"
 
 
 def test_explicit_tool_call_mode_overrides_capability_detection():

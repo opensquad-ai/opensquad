@@ -493,12 +493,15 @@ class ToolCallStrategySelector:
             # Check if we have implemented Native FC for this provider
             is_implemented = ToolCallStrategySelector._is_native_fc_implemented(provider)
             if not is_implemented:
+                # Warning and carrying on is not a fallback: the API accepts the tools parameter and
+                # ignores it, so the model gets no tools at all. Auto mode already refuses in this
+                # case; native mode warned and proceeded anyway, which is how an unknown provider
+                # ended up on Native-FC with tools silently unavailable.
                 logger.warning(
-                    f"Native FC not yet implemented for {provider} (provider). "
-                    f"The API will accept tools parameter but ignore it. "
-                    f"Tools will be unavailable. "
-                    f"Recommend using 'tool_call_mode: auto' or 'xml' instead."
+                    f"Native FC not implemented for provider {provider}; falling back to XML. "
+                    f"The API would accept the tools parameter and ignore it, leaving tools unavailable."
                 )
+                return XMLToolCallStrategy(tool_registry)
 
             logger.info(f"Using Native Function Calling for {model_name} (filter: {tool_filter})")
             return NativeToolCallStrategy(tool_registry, tool_filter=tool_filter)
@@ -541,7 +544,8 @@ class ToolCallStrategySelector:
             - [x] Claude (ClaudeAPI): Fully implemented (v1.2)
             - [x] Google (GoogleAPI): Fully implemented (v1.2)
         """
-        # Normalize provider name
+        # Normalize provider name. Unrecognised providers are treated as openai-compatible — that is
+        # the project's design (see ``openai_compat``), so the default stays "openai" here.
         provider_map = {
             "openai_compat": "openai",
             "openai": "openai",
