@@ -4331,7 +4331,12 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
       setSessionSidebarOpen(false);
       setFilesPanelOpen(false);
     }
-    const path = (projectPath || activeWorkspace?.rootPath || '').trim();
+    // Anchor the new session to the workspace the operator is looking at — the same value the
+    // composer shows beneath them, since agentCwd follows the workspace — and only fall back to the
+    // chrome's active workspace. Those two can differ: a session started while viewing raven came
+    // up running in the agent's own directory, because the chrome's active workspace was another
+    // one and the empty path was taken to mean "the agent's default".
+    const path = (projectPath || agentCwd || defaultCwd || activeWorkspace?.rootPath || '').trim();
     // Sidebar / global new-session → anchored pane
     if (!pendingTargetPaneIdRef.current && focusedPaneId) {
       pendingTargetPaneIdRef.current = focusedPaneId;
