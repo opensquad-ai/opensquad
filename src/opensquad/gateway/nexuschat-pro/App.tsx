@@ -9,6 +9,8 @@ import { ChatWindow } from './components/ChatWindow';
 import { RightPanel } from './components/RightPanel';
 import { AuthScreen } from './components/AuthScreen';
 import { LanguageSelectScreen } from './components/LanguageSelectScreen';
+import { OnboardingTour } from './components/onboarding/OnboardingTour';
+import { hasSeenOnboarding, markOnboardingSeen, forceOnboarding } from './utils/onboarding';
 import { ElectronShell } from './components/ElectronShell';
 import { DesktopUpdateOverlay } from './components/DesktopUpdateOverlay';
 import { UpdateNotification } from './components/UpdateNotification';
@@ -1446,6 +1448,24 @@ const App: React.FC = () => {
     // deployment on the same browser must not skip the wizard on a
     // fresh deployment.
     if (registrationStatus === 'required' && !langPicked) {
+      // A truly fresh install opens on the tour instead of the language list: the tour carries its
+      // own language switch, so it answers that question while introducing the product, and it
+      // exits through the same ``handleLanguagePicked`` path (``onFinish``), which is what the
+      // registration flow waits for. The backend decision above is untouched — this only chooses
+      // which screen presents it.
+      if (!hasSeenOnboarding() || forceOnboarding()) {
+        return (
+          <ElectronShell>
+            <OnboardingTour
+              onFinish={(lang) => {
+                markOnboardingSeen();
+                setLanguage(lang);
+                setLangPicked(true);
+              }}
+            />
+          </ElectronShell>
+        );
+      }
       return (
         <ElectronShell>
           <LanguageSelectScreen onSelect={handleLanguagePicked} />
