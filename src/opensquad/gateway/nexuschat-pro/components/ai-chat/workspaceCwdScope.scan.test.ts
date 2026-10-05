@@ -23,6 +23,17 @@ describe('setting the working directory', () => {
     );
   });
 
+  it('does it from every call site, not just the workspace switch', () => {
+    // The remaining four wrote the shared agent-level file, which every session without a file of
+    // its own then reads — so a folder picked anywhere re-rooted the others.
+    const calls = PAGE.match(/adminAPI\.setWorkingDirectory\([^;]*/g) || [];
+
+    expect(calls.length).toBeGreaterThanOrEqual(6);
+    for (const call of calls) {
+      expect(call).toMatch(/(currentSessionId \|\| undefined|\bsid\b|sid\))/);
+    }
+  });
+
   it('re-applies when the session changes, so each one writes its own value', () => {
     const effect = PAGE.slice(
       PAGE.indexOf('setAgentCwd((prev) =>'),

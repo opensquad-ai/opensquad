@@ -3230,7 +3230,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
           pendingProjectPathRef.current = boundPath;
           setAgentCwd(boundPath);
           const dirName = agentProfile?.dir_name || agentId;
-          void adminAPI.setWorkingDirectory(dirName, boundPath).catch((err: any) => {
+          void adminAPI.setWorkingDirectory(dirName, boundPath, currentSessionId || undefined).catch((err: any) => {
             console.error('[AIChatPage] Failed to set working directory for folder session:', err);
           });
         }
@@ -3298,7 +3298,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
       pendingProjectPathRef.current = boundPath;
       setAgentCwd(boundPath);
       const dirName = agentProfile?.dir_name || agentId;
-      void adminAPI.setWorkingDirectory(dirName, boundPath).catch((err: any) => {
+      void adminAPI.setWorkingDirectory(dirName, boundPath, currentSessionId || undefined).catch((err: any) => {
         console.error('[AIChatPage] Failed to set working directory for folder session:', err);
       });
       try {
@@ -3935,7 +3935,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
           }
           setPreWorktreeCwd(root);
           setAgentCwd(res.worktree_path);
-          void adminAPI.setWorkingDirectory(dirName, res.worktree_path).catch((err: any) => {
+          void adminAPI.setWorkingDirectory(dirName, res.worktree_path, currentSessionId || undefined).catch((err: any) => {
             console.error('[AIChatPage] Failed to rebind cwd to worktree:', err);
           });
           return { ok: true };
@@ -3947,7 +3947,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
       if (!restore) return { ok: false, error: 'no root to restore' };
       setPreWorktreeCwd(null);
       setAgentCwd(restore);
-      void adminAPI.setWorkingDirectory(dirName, restore).catch((err: any) => {
+      void adminAPI.setWorkingDirectory(dirName, restore, currentSessionId || undefined).catch((err: any) => {
         console.error('[AIChatPage] Failed to restore cwd from worktree:', err);
       });
       return { ok: true };
