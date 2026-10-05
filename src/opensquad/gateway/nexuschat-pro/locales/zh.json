@@ -852,6 +852,7 @@
   },
   "taskStrip": {
     "title": "进行中的任务",
+    "none": "无",
     "within": "含 24 小时内结束",
     "running": "进行中",
     "finished": "已结束"
