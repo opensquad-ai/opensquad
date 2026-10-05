@@ -4,10 +4,11 @@ The launcher writes this file when the user picks a working directory; the
 agent process reads it at the start of each conversation turn.
 
 The file is **per session** when a session id is supplied
-(``.session_cwd.<key>``) and falls back to the historical agent-level
-``.session_cwd`` otherwise. Before this split, one agent process serving
-several panes had a single signal file: whichever pane touched the folder
-picker last re-rooted every other pane's file operations, and a write that had
+(``.session_cwd.<key>``), and a session that has never chosen a folder reads as unset rather than
+borrowing the agent-level file — borrowing it is how one workspace's folder choice came back as
+another's answer. Callers that pass no session id use the historical agent-level ``.session_cwd``.
+Before this split, one agent process serving several panes had a single signal file: whichever pane
+touched the folder picker last re-rooted every other pane's file operations, and a write that had
 been legal a second earlier came back ``403 Path outside project root``.
 """
 
@@ -128,13 +129,18 @@ def read_session_cwd(agent_dir: str, session_id: str = "") -> dict[str, Any] | N
     """Read and validate the signal file for *session_id*.
 
     Returns ``{"version": int, "path": str, "ts": float}`` (plus
-    ``session_id`` when the file carries one), or ``None`` if neither the
-    session-scoped file nor the agent-level fallback exists / is corrupt.
-    Missing ``version`` defaults to 1 for backward compatibility with
-    pre-schema files.
+    ``session_id`` when the file carries one), or ``None`` when it is missing or corrupt.
+    Missing ``version`` defaults to 1 for backward compatibility with pre-schema files.
+
+    A session that has never chosen a folder reports **nothing** rather than borrowing the
+    agent-level file. That file is shared by every pane, so borrowing it is how a question asked in
+    one workspace came back answered against another: the second session had no file of its own and
+    read the first one's pick. Reporting nothing lets the caller fall back to the session's own
+    workspace, which is what the operator expects.
+
+    Callers that pass no session id — the serial path, the launcher's own read — keep reading the
+    agent-level file exactly as they always have.
     """
     if _sid_key(session_id):
-        data = _read_cwd_file(session_cwd_path(agent_dir, session_id))
-        if data is not None:
-            return data
+        return _read_cwd_file(session_cwd_path(agent_dir, session_id))
     return _read_cwd_file(session_cwd_path(agent_dir))

@@ -44,12 +44,26 @@ def test_a_session_keeps_its_own_directory_when_another_session_writes(tmp_path)
     assert read_session_cwd(agent_dir, "session-B")["path"] == str(Path(repo).resolve())
 
 
-def test_a_session_with_no_file_of_its_own_falls_back_to_the_agent_level_one(tmp_path):
+def test_a_session_with_no_file_of_its_own_reports_nothing(tmp_path):
+    """It must not borrow another pane's pick — the caller uses the session's own workspace then.
+
+    This was the second half of the report: asking in the raven session answered raven, then asking
+    in the deploy_test session also answered raven, because that session had no file and read the
+    shared one.
+    """
     agent_dir, raven, _repo = _dirs(tmp_path)
     write_session_cwd(agent_dir, raven)
 
-    assert read_session_cwd(agent_dir, "session-never-seen")["path"] == str(Path(raven).resolve())
+    assert read_session_cwd(agent_dir, "session-never-seen") is None
+
+
+def test_a_reader_with_no_session_id_still_sees_the_agent_level_file(tmp_path):
+    """The serial path and the launcher's own read have no session, and are unchanged."""
+    agent_dir, raven, _repo = _dirs(tmp_path)
+    write_session_cwd(agent_dir, raven)
+
     assert read_session_cwd(agent_dir, "")["path"] == str(Path(raven).resolve())
+    assert resolve_agent_root(agent_dir, "", "").endswith("raven")
 
 
 def test_the_two_files_are_different_files(tmp_path):
