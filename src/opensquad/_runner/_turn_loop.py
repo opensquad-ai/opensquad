@@ -355,6 +355,10 @@ class TurnLoop:
                             "requirement": task_req,
                             "source": self.runner._current_input_source,
                             "agent_id": self.runner._agent_id,
+                            # Session facts for plugins. A live UI event without a
+                            # sid used to land in whichever pane was focused — see
+                            # useAgentWebSocket's routing comment.
+                            "sid": getattr(self.runner, "_turn_sid", ""),
                         },
                     )
 
@@ -530,6 +534,9 @@ class TurnLoop:
                         {
                             "message": _send_msg,
                             "agent_id": self.runner._agent_id,
+                            # Session facts for plugins, same as on_task_start:
+                            # a slot push without a sid has no pane to land in.
+                            "sid": getattr(self.runner, "_turn_sid", ""),
                         },
                     )
 
@@ -1234,6 +1241,9 @@ class TurnLoop:
                             "tools_used": completed.get("tools_used", []),
                             "turns": completed.get("turns", 0),
                             "agent_id": self.runner._agent_id,
+                            # Without this the bridge cannot remember the session,
+                            # and every slot push is dropped for want of an sid.
+                            "sid": getattr(self.runner, "_turn_sid", ""),
                         },
                     )
                 await _get_state_manager().set_state("idle")

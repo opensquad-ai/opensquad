@@ -493,6 +493,9 @@ class AgentRunner:
                         "old_state": old_state,
                         "new_state": new_state,
                         "agent_id": _aid,
+                        # Session facts for plugins; without one, a slot push has
+                        # no pane to land in and is dropped.
+                        "sid": getattr(self, "_turn_sid", ""),
                     },
                 )
             )
@@ -2815,6 +2818,9 @@ class AgentRunner:
                             "chat_name": getattr(self, "_current_chat_name", ""),
                             "source_chat_id": self._current_source_chat_id,
                             "input_source": self._current_input_source,
+                            # Session facts for plugins (a command answer has to be
+                            # spoken back into the right pane).
+                            "sid": getattr(self, "_turn_sid", ""),
                         },
                     )
                     initial_query = _hook_ctx.get("message", initial_query)
