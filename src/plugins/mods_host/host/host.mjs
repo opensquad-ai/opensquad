@@ -75,7 +75,16 @@ function callParent(method, params, timeoutMs = HOST_CALL_TIMEOUT_MS) {
 //   * the registry then grows forever on a host that re-renders each turn.
 let renderSeq = 0
 const pendingActions = new Map() // this render only: placeholder seq -> handler
-const actions = new Map() // live: stable id -> handler (exactly the current tree)
+// Live actions, **keyed by the surface they belong to**. A render may only
+// replace its own bucket, never the whole registry: the plugin pushes several
+// slots per hook (`AbovePrompt`, then each open pane, then `AssistantMessage`),
+// so a single registry cleared on every render left the earlier surfaces
+// pointing at nothing — a band or pane button answered `unknown_action` as soon
+// as any later slot was drawn. Because an unchanged tree is deduped by the
+// plugin and never redrawn, those buttons then stayed dead for the rest of the
+// turn instead of recovering on the next render.
+const actionBuckets = new Map() // bucketKey -> string[] of ids it owns
+const actionIndex = new Map() // stable id -> handler
 // Panes a mod has asked the surface to place: paneId -> mod. One entry per open
 // pane, so Python can render each one's `ui.render {component:'Pane'}`.
 const openPanes = new Map()
@@ -387,7 +396,13 @@ const diagnostics = []
 const BUILD_SUFFIX = '.mods-build.mjs'
 
 /**
- * Return the path to import: the source itself, or a transpiled sibling for JSX.
+ * Return the path to import: the source itself, or a transpiled sibling.
+ *
+ * `.ts` and `.tsx` are both transpiled here rather than relying on Node's native
+ * type stripping: that needs Node >=22.6, so a `.ts` mod on Node 20 failed with
+ * an obscure syntax error while `.tsx` worked. Going through the vendored sucrase
+ * in both cases makes the host's floor a single, lower one (`module.register`,
+ * i.e. Node >=20.6) and keeps the two extensions on one code path.
  *
  * The build file is written **next to the source** so the mod's own relative
  * imports (`./model.ts`) still resolve — a cache directory would break them. It
@@ -395,10 +410,12 @@ const BUILD_SUFFIX = '.mods-build.mjs'
  * the scanner's view (it reads declared modules, not the directory).
  */
 async function prepareModule(absPath) {
-  if (!absPath.toLowerCase().endsWith('.tsx')) return absPath
+  const lower = absPath.toLowerCase()
+  const isTsx = lower.endsWith('.tsx')
+  if (!isTsx && !lower.endsWith('.ts')) return absPath
 
   const fs = await import('node:fs')
-  const buildPath = absPath.replace(/\.tsx$/i, BUILD_SUFFIX)
+  const buildPath = absPath.replace(/\.tsx?$/i, BUILD_SUFFIX)
   const src = await fs.promises.stat(absPath)
   try {
     const built = await fs.promises.stat(buildPath)
@@ -412,7 +429,7 @@ async function prepareModule(absPath) {
   const out = transform(code, {
     // NOT `imports`: that transform rewrites ESM into CJS (`exports is not
     // defined in ES module scope`). We keep the module syntax and let Node run it.
-    transforms: ['jsx', 'typescript'],
+    transforms: isTsx ? ['jsx', 'typescript'] : ['typescript'],
     jsxRuntime: 'classic',
     production: true,
   }).code
@@ -545,26 +562,37 @@ async function handle(msg) {
           props: { component, ...geometry },
         }),
       )
-      // Bind this tree's buttons to stable ids, replacing the previous registry
-      // wholesale so it can never outgrow one tree.
-      actions.clear()
+      // Bind this tree's buttons, replacing only *this surface's* bucket. Ids
+      // carry the slot and the pane instance so two panes cannot collide now
+      // that other surfaces survive.
+      const bucketKey = `${component}\u0000${String(params.requestId || '')}`
+      // Ids keep their historical shape for slots (`AbovePrompt:1`) so the
+      // wire contract does not change; a pane instance, which coexists with
+      // its siblings, adds its own id to stay unique across panes.
+      const idSpace = params.requestId ? `${component}:${String(params.requestId)}` : component
+      for (const stale of actionBuckets.get(bucketKey) || []) actionIndex.delete(stale)
+      const owned = []
       let bound = 0
       const bind = (item) => {
         if (!item || typeof item !== 'object') return
         const action = item.props?.action
         if (item.type === 'Button' && typeof action === 'string' && action.startsWith('#')) {
           const handler = pendingActions.get(Number(action.slice(1)))
-          const stable = `${component}:${++bound}`
-          if (typeof handler === 'function') actions.set(stable, handler)
+          const stable = `${idSpace}:${++bound}`
+          if (typeof handler === 'function') {
+            actionIndex.set(stable, handler)
+            owned.push(stable)
+          }
           item.props.action = stable
         }
         for (const child of item.children || []) bind(child)
       }
       for (const each of nodes) bind(each)
+      actionBuckets.set(bucketKey, owned)
       return respond(id, { nodes, invalidations })
     }
     case 'action.invoke': {
-      const fn = actions.get(String(params.action || ''))
+      const fn = actionIndex.get(String(params.action || ''))
       if (typeof fn !== 'function') return respondError(id, 'unknown_action', String(params.action || ''))
       // The host owns the invocation and its reporting (铁律 2). The callback
       // closes over its own `$`, so it is called with no arguments.
@@ -594,7 +622,7 @@ async function handle(msg) {
         traced: TRACE,
         invocations: runtime.stats().invocations,
         missingDollar: { ...missingDollar },
-        actions: actions.size,
+        actions: actionIndex.size,
         invalidations,
       })
     default:

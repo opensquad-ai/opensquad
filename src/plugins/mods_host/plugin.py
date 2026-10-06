@@ -436,6 +436,15 @@ class ModsHostPlugin(Plugin):
         """
         if not self._mods:
             return
+        # Only the slots the UI actually mounts are worth a render round trip.
+        # `ToolUse`/`StatusBar`/`Spinner` were pushed on every tool call and every
+        # state change while nothing rendered them: the tree was built, sent and
+        # dropped. `WIRED["slots"]` *is* the mounted set — the guard test asserts
+        # each advertised slot has a frontend mount.
+        from opensquad import mods_compat
+
+        if slot not in mods_compat.WIRED["slots"]:
+            return
         if not sid:
             logger.debug("[mods_host] %s not pushed: no session id for this turn", slot)
             return
