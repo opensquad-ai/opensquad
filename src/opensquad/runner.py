@@ -2416,9 +2416,13 @@ class AgentRunner:
                             + formatted
                             + "[Messages received, please decide how to reply based on the source]"
                         )
-                        source = "chatpro"
+                        # Label the batch by what it actually holds (a DM drain is not
+                        # the group channel) — see chatpro_ingress_labels.
+                        from opensquad.ingress_policy import chatpro_ingress_labels
+
+                        source, _batch_channel = chatpro_ingress_labels(m.type for m in _pending_group_messages)
                         self._current_input_source = source
-                        self._current_channel = "chatpro_group"
+                        self._current_channel = _batch_channel
                     logger.info(f"[Runner] Merged {len(_pending_group_messages)} pending group messages into input")
                     _pending_group_messages = []  # Clear after merge
 
@@ -2481,9 +2485,11 @@ class AgentRunner:
                             + "\n".join(msg_parts)
                             + "[Messages received, please decide how to reply based on the source]"
                         )
-                        source = "chatpro"
+                        from opensquad.ingress_policy import chatpro_ingress_labels
+
+                        source, _batch_channel = chatpro_ingress_labels(m.type for m in pending)
                         self._current_input_source = source
-                        self._current_channel = "chatpro_group"
+                        self._current_channel = _batch_channel
                         if _extra_web:
                             _web_parts = []
                             for _wd in _extra_web:
@@ -2890,9 +2896,12 @@ class AgentRunner:
                 initial_query = None
                 continue
 
-            # For group message sources, do not store as user message in history or display
-            if self._current_input_source == "chatpro":
-                # Group messages are only passed to AI as context, not displayed in the chat box
+            # For ChatPro sources (group AND dm), do not store as user message in
+            # history or display: those conversations are only passed to the AI as
+            # context, they are not the Agent Web chat box. ``dm`` belongs here for the
+            # same reason ``chatpro`` does — it arrives through the same IM account.
+            if self._current_input_source in ("chatpro", "dm"):
+                # IM messages are only passed to AI as context, not displayed in the chat box
                 self._last_user_input = initial_query
                 self._turn_sid = _get_session_manager().get_current_session_id()
                 # Do not call _get_session_manager().add_message("user", ...)
@@ -2911,25 +2920,41 @@ class AgentRunner:
             # Initialize task
             initial_query, task_id = self._prepare_task(initial_query)
 
-            # Add source label for AI (does not affect storage or frontend display)
+            # Add source label for AI (does not affect storage or frontend display).
+            # This is the ONLY place a ChatPro/IM turn's origin reaches the model: the
+            # user message itself carries no channel. Label the channel, not just the
+            # source — a DM and a group message both arrive on the "chatpro" account,
+            # and without the channel the model can only guess which one it is (asked
+            # "which channel is this?", it called a DM an Agent Web message).
             channel = getattr(self, "_current_channel", "") or ""
             sender_name = getattr(self, "_current_sender_name", "") or ""
             chat_name = getattr(self, "_current_chat_name", "") or ""
-            if self._current_input_source in ("web", "gateway"):
-                # Map channel to human-readable label
-                _channel_labels = {
-                    "web": "Web UI",
-                    "feishu": "Feishu",
-                    "feishu_group": "Feishu Group",
-                    "feishu_private": "Feishu Private",
-                    "telegram": "Telegram",
-                    "telegram_group": "Telegram Group",
-                    "telegram_private": "Telegram Private",
-                    "api": "External API",
-                    "external": "External Integration",
-                    "external-ws": "External WebSocket",
-                }
-                label = _channel_labels.get(channel, channel if channel else "Web UI")
+            _channel_labels = {
+                "web": "Web UI",
+                "feishu": "Feishu",
+                "feishu_group": "Feishu Group",
+                "feishu_private": "Feishu Private",
+                "telegram": "Telegram",
+                "telegram_group": "Telegram Group",
+                "telegram_private": "Telegram Private",
+                "api": "External API",
+                "external": "External Integration",
+                "external-ws": "External WebSocket",
+                # ChatPro / IM: the gateway serves this one account, and a group and a
+                # direct message are different conversations on it.
+                "chatpro": "IM Group",
+                "chatpro_group": "IM Group",
+                "chatpro_dm": "IM Direct Message",
+                "dm": "IM Direct Message",
+                "wake": "IM (queued drain)",
+            }
+            if channel or self._current_input_source in ("web", "gateway", "chatpro", "dm"):
+                label = (
+                    _channel_labels.get(channel)
+                    or _channel_labels.get(self._current_input_source)
+                    or channel
+                    or "Web UI"
+                )
                 # Build context parts
                 ctx_parts = [f"Source: {label}"]
                 if chat_name:
@@ -2939,7 +2964,9 @@ class AgentRunner:
                 source_chat_id = getattr(self, "_current_source_chat_id", "") or ""
                 if source_chat_id:
                     ctx_parts.append(f"chat_id: {source_chat_id}")
-                f"[{', '.join(ctx_parts)}] {initial_query}"
+                # NOTE: this used to be a bare f-string expression — computed and thrown
+                # away, so no turn ever carried the prefix it was written for.
+                initial_query = f"[{', '.join(ctx_parts)}] {initial_query}"
             elif self._current_input_source == "cli":
                 pass
             # chatpro group messages already prefixed in __PROCESS_QUEUE__ path
@@ -4051,6 +4078,7 @@ class AgentRunner:
                                         self._current_channel = "chatpro_group"
                                 elif msg.type == "dm":
                                     msg_text = f"[DM] {msg.sender_name}: {msg.content}"
+                                    self._current_channel = "chatpro_dm"
                                 else:
                                     msg_text = f"[{msg.type}] {msg.sender_name}: {msg.content}"
                                 evt_source = msg.type
@@ -4559,6 +4587,7 @@ class AgentRunner:
             current_turn=self._current_turn,
             current_round=self._current_round,
             chat_api=self.chat_api,
+            current_channel=self._current_channel,
         )
 
         # Store tools parameter for later use in chat() call

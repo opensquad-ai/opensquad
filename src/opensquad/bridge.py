@@ -802,38 +802,47 @@ class ChatProBridge:
             # Put into queue
             from datetime import datetime
 
-            from opensquad.message_queue import QueueMessage, message_queue
-
-            queue_msg = QueueMessage(
-                id=msg_data.get("id", f"dm_{datetime.now().timestamp()}"),
-                type="dm",
-                source_id=sender_id,
-                source_name="Direct Message",
-                sender_id=sender_id,
-                sender_name=sender_name,
-                content=content,
-                timestamp=msg_data.get("timestamp", datetime.now().timestamp()),
-                mentions=[],
-                raw_data=msg_data,
-                images=image_paths,
-            )
-            await message_queue.put(queue_msg)
-
-            # Direct messages always push onto the primary ingress session
             from opensquad.ingress_policy import push_ingress, trigger_process_queue
 
+            # Exactly ONE of the two deliveries below may carry this DM. The queue is
+            # what a sleeping turn drains (the wake sentinel carries no content), while
+            # an awake agent gets the content straight onto its primary session. Doing
+            # both — until 2026-10-06 — ran one DM as two turns: one labelled
+            # ``chatpro``, one ``dm``, so the model answered the same message twice and
+            # named two different channels to the user for it.
             if ai_state == "sleeping":
                 sleep_controller.wake_up(f"DM-{sender_name}")
-                # Queue already holds the DM; drain via primary (same as group path).
+                # The queue holds the DM; the sentinel only triggers the drain, so the
+                # message has to be enqueued before the agent wakes.
+                from opensquad.message_queue import QueueMessage, message_queue
+
+                await message_queue.put(
+                    QueueMessage(
+                        id=msg_data.get("id", f"dm_{datetime.now().timestamp()}"),
+                        type="dm",
+                        source_id=sender_id,
+                        source_name="Direct Message",
+                        sender_id=sender_id,
+                        sender_name=sender_name,
+                        content=content,
+                        timestamp=msg_data.get("timestamp", datetime.now().timestamp()),
+                        mentions=[],
+                        raw_data=msg_data,
+                        images=image_paths,
+                    )
+                )
                 trigger_process_queue(
                     source="wake",
                     channel="chatpro_dm",
                     images=image_paths if image_paths else None,
                 )
             else:
+                # ``dm`` (not ``chatpro``): the source is what the agent is told, and
+                # a DM is not the group channel. ``classify()`` treats it as external
+                # either way, so the message still binds to the primary session.
                 push_ingress(
                     f"[DM] {sender_name}: {content}",
-                    source="chatpro",
+                    source="dm",
                     channel="chatpro_dm",
                     images=image_paths if image_paths else None,
                 )

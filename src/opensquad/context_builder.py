@@ -181,6 +181,7 @@ class ContextBuilder:
         current_round: int,
         *,
         chat_api=None,
+        current_channel: str = "",
     ) -> tuple[str, str, dict[str, Any], bool]:
         """Build the system prompt and dynamic context for this turn.
 
@@ -245,6 +246,7 @@ class ContextBuilder:
         context = {
             "query": last_user_input,
             "source": current_input_source,
+            "channel": current_channel,
             "chat_api": api,
             "tool_registry": getattr(self, "_tool_registry", None),
             "task_manager": self.task_manager,

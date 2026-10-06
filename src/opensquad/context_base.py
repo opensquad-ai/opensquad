@@ -249,6 +249,8 @@ def inject_standard(context: dict) -> tuple:
     context must include:
         - query:            current user input
         - source:           input source (cli/web/chatpro/gateway)
+        - channel:          specific channel (chatpro_dm/chatpro_group/telegram…),
+                            so a DM is not reported as a group or Web message
         - chat_api:         ChatAPI instance (to read _latest_summary)
         - memory_manager:   MemoryManager instance (optional, can use module cache)
         - recent_messages:  recent message list
@@ -257,6 +259,7 @@ def inject_standard(context: dict) -> tuple:
     """
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     source = context.get("source", "unknown")
+    channel = str(context.get("channel", "") or "").strip()
     query = context.get("query", "")
     current_state = context.get("current_state", "unknown")
     current_wake = context.get("current_wake", "unknown")
@@ -388,8 +391,14 @@ def inject_standard(context: dict) -> tuple:
     # ======== dynamic_vars (dynamic layer, injected into user message prefix) ========
 
     # --- Runtime state (timestamp changes every turn) ---
+    # The channel rides along: "source" alone cannot separate a DM from a group
+    # message (both are the "chatpro" family), and the model is asked exactly that —
+    # "which channel is this?". This string is the only origin hint the Agent Web
+    # (parallel) turn gets; the serial path also prefixes the user message.
     dynamic_vars["RUNTIME_STATE"] = (
-        f"Current time: {now}\nInput source: {source}\nWorking state: {current_state}\nWakeup level: {current_wake}"
+        f"Current time: {now}\nInput source: {source}"
+        + (f" (channel: {channel})" if channel else "")
+        + f"\nWorking state: {current_state}\nWakeup level: {current_wake}"
     )
 
     # --- Long-term memory (semantic recall based on current query, different each turn) ---
