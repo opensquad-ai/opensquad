@@ -215,6 +215,28 @@ class ModsHostPlugin(Plugin):
                 logger.warning("[mods_host] could not subscribe to mod_action: %s", exc)
         logger.info("[mods_host] loaded (host lazy, %d enabled mod(s))", len(self._mods))
 
+        # Warm the host in the background when there is something to serve. Mods
+        # register their slash commands on `session.start`, so with a cold host
+        # the *first* message after an agent restart cannot be a mod command —
+        # measured on the live agent: `/azioni` reached the model because the
+        # host only started on the first hook that needed it.
+        if self._mods:
+            try:
+                import asyncio as _asyncio
+
+                _asyncio.get_running_loop().create_task(self._warm())
+            except RuntimeError:
+                pass  # no running loop (import path) — the first hook will start it
+
+    async def _warm(self) -> None:
+        """Start the host and run its handshake, off the boot path."""
+        try:
+            client = await self._ensure_client()
+            await self._ensure_init(client)
+            self._announce_commands()
+        except Exception as exc:  # noqa: BLE001 - warming must never break boot
+            logger.debug("[mods_host] host warm-up skipped: %s", exc)
+
     async def _on_mod_action(self, payload: dict) -> None:
         """Run a button press the host hoisted, then refresh the band."""
         action = str((payload or {}).get("action") or "")
@@ -747,7 +769,13 @@ class ModsHostPlugin(Plugin):
         elif isinstance(verdict, str):
             text = verdict
         if not text:
+            # A command whose whole job is to open a panel (quick-buttons'
+            # `/azioni`) returns no text — and returning here meant the user saw
+            # nothing at all: the pane existed in the host but the UI was never
+            # told. Redraw the surfaces anyway.
             logger.info("[mods_host] command /%s produced no text", name)
+            await self._push_slot(sid=sid)
+            await self._push_panes(sid)
             return
         bus = getattr(self.context, "event_bus", None)
         if bus is None:
@@ -757,6 +785,7 @@ class ModsHostPlugin(Plugin):
             {"sid": sid, "data": text, "agent_id": self._agent_id(), "turn_id": 0, "round_id": 0},
         )
         # Commands are how a mod opens its panel, so panes are re-read here too.
+        await self._push_slot(sid=sid)
         await self._push_panes(sid)
 
     async def run_command(

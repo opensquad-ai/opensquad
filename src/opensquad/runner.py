@@ -1695,6 +1695,32 @@ class AgentRunner:
                 # (matches serial _input_handler SWITCH_AND_REPLY empty-reply path).
                 return
 
+            # --- Plugin Hook: on_message_received ---
+            # This dispatcher is the live path for Agent Web messages; the serial
+            # loop's copy of this hook (`run`) never runs here, so a plugin that
+            # intercepts typed text — a mod's slash command — had no effect at all
+            # until this call was added (measured: typing `/azioni` reached the
+            # model instead). `__stop__` means the plugin consumed the message and
+            # already spoke its answer, so no model turn starts — same contract as
+            # the serial path, which skips the message on the same flag.
+            if self._plugin_manager:
+                _hook_ctx = await self._plugin_manager.run_hook(
+                    "on_message_received",
+                    {
+                        "message": content,
+                        "channel": item.get("channel") or "web",
+                        "sender_name": getattr(self, "_current_sender_name", ""),
+                        "chat_name": getattr(self, "_current_chat_name", ""),
+                        "source_chat_id": item.get("source_chat_id") or "",
+                        "input_source": item.get("source") or "gateway",
+                        "sid": sid,
+                    },
+                )
+                if _hook_ctx.get("__stop__"):
+                    logger.info("[Runner] on_message_received consumed sid=%s — skipping the model turn", sid)
+                    return
+                content = str(_hook_ctx.get("message", content) or "")
+
             self._current_images = item.get("images") or []
             self._current_attachments = item.get("attachments") or []
             self._current_channel = item.get("channel") or "web"
