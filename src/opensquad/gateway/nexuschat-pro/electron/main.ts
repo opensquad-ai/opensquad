@@ -790,6 +790,44 @@ async function openExternal(url: string): Promise<void> {
   }
 }
 
+/**
+ * Startup splash, resolved like the setup wizard's HTML (`assets/` next to the
+ * compiled `dist-electron/`, or `resources/assets/` when packaged).
+ */
+function resolveSplashHtmlPath(): string {
+  const devPath = path.join(__dirname, '..', 'assets', 'splash.html')
+  if (!app.isPackaged) return devPath
+  const packaged = path.join(process.resourcesPath, 'assets', 'splash.html')
+  return fs.existsSync(packaged) ? packaged : devPath
+}
+
+/** Last resort if the splash asset is missing: the app must never start blank. */
+const STARTUP_FALLBACK_HTML =
+  `data:text/html,` +
+  `<html><head><meta charset="utf-8"></head>` +
+  `<body style="background:#0f0f1a;display:flex;flex-direction:column;` +
+  `align-items:center;justify-content:center;height:100vh;margin:0;` +
+  `font-family:sans-serif;color:#aaa">` +
+  `<div style="font-size:2rem;margin-bottom:.5rem">⚡</div>` +
+  `<div>Starting ${APP_DISPLAY_NAME}…</div>` +
+  `</body></html>`
+
+/**
+ * Show the animated startup splash. Purely decorative, so it must never gate
+ * startup: a missing or unloadable asset falls back to the plain placeholder.
+ */
+function showStartupSplash(win: BrowserWindow): void {
+  const splashPath = resolveSplashHtmlPath()
+  if (fs.existsSync(splashPath)) {
+    win.loadFile(splashPath).catch((err) => {
+      console.warn('[electron] splash failed to load, using fallback:', err)
+      void win.loadURL(STARTUP_FALLBACK_HTML)
+    })
+  } else {
+    void win.loadURL(STARTUP_FALLBACK_HTML)
+  }
+}
+
 async function createWindow(): Promise<void> {
   mainWindow = new BrowserWindow({
     width:     1280,
@@ -831,21 +869,14 @@ async function createWindow(): Promise<void> {
     mainWindow.on('unmaximize', () => mainWindow?.webContents.send('electron:maximized-changed', false))
   }
 
-  // 启动中占位页
-  mainWindow.loadURL(
-    `data:text/html,` +
-    `<html><head><meta charset="utf-8"></head>` +
-    `<body style="background:#0f0f1a;display:flex;flex-direction:column;` +
-    `align-items:center;justify-content:center;height:100vh;margin:0;` +
-    `font-family:sans-serif;color:#aaa">` +
-    `<div style="font-size:2rem;margin-bottom:.5rem">⚡</div>` +
-    `<div>Starting ${APP_DISPLAY_NAME}…</div>` +
-    `</body></html>`
-  )
+  // 首帧显示启动动画 splash（装饰性；缺失时退回纯文本占位页）。在真 URL 加载
+  // 之前，did-fail-load 一律忽略，避免 splash 自身的失败被当成应用加载失败。
+  let startupComplete = false
+  showStartupSplash(mainWindow)
   mainWindow.show()
 
   mainWindow.webContents.on('did-fail-load', (_event, errorCode, errorDescription, validatedURL) => {
-    if (!mainWindow || validatedURL.startsWith('data:')) return
+    if (!mainWindow || validatedURL.startsWith('data:') || !startupComplete) return
     console.error(`[electron] did-fail-load ${validatedURL}: ${errorCode} ${errorDescription}`)
     void mainWindow.loadURL(
       `data:text/html,` +
@@ -870,6 +901,8 @@ async function createWindow(): Promise<void> {
         console.error(`[electron] Launcher did not bind port ${LAUNCHER_PORT} in time; Agent Workstation will be unavailable.`)
       }
     }
+    // Past the splash: from here a failed load means the app itself failed.
+    startupComplete = true
     await mainWindow.loadURL(APP_URL)
     if (!USE_CUSTOM_TITLEBAR) {
       mainWindow.setTitle(APP_DISPLAY_NAME)

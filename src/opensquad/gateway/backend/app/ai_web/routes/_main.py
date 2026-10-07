@@ -8,6 +8,7 @@ HTTP APIs for the frontend:
   - Admin management (proxy to launcher.py)
 """
 
+import asyncio
 import logging
 import os
 import re
@@ -280,6 +281,46 @@ _REPO_ROOT = syscfg.project_root()
 
 router = APIRouter(prefix="/api/ai-web")
 router.include_router(audit_router)
+
+
+@router.get("/boot-screen")
+async def get_boot_screen() -> dict[str, Any]:
+    """Which enabled plugin, if any, contributes a startup animation (缝 B).
+
+    Public by design: the shell's boot loader runs **before login**, so it has no
+    token to present. The payload exposes only *what to play* — a URL under this
+    same router — never plugin code. On any failure it answers
+    ``{"enabled": false}``; the boot loader then shows its default loader, so a
+    broken resolver can never block startup.
+
+    Priority is workspace-over-shipped, so a private animation wins locally while
+    a clean public install falls back to what the release ships.
+    """
+    from opensquad import plugin_boot_screen
+
+    try:
+        return await asyncio.to_thread(plugin_boot_screen.resolve_boot_screen)
+    except Exception:  # noqa: BLE001 - a decorative endpoint must never 500
+        logger.exception("[boot-screen] resolve failed; falling back to the default loader")
+        return {"enabled": False}
+
+
+@router.get("/boot-screen/asset")
+async def get_boot_screen_asset(kind: str = "video"):
+    """Stream the animation asset the config just advertised.
+
+    Confined by construction: the only caller input is ``kind`` (an enum), and the
+    file served is whatever the resolver picked — this route can never be pointed
+    at an arbitrary path, and it never exposes a plugin directory. ``FileResponse``
+    handles Range, which is what a ``<video>`` element streams with.
+    """
+    from opensquad import plugin_boot_screen
+
+    path = await asyncio.to_thread(plugin_boot_screen.resolve_asset, kind)
+    if not path:
+        raise HTTPException(status_code=404, detail="no boot-screen asset")
+    return FileResponse(path)
+
 
 # ── P1-5: admin/market routers are mounted LAZILY (first admin request, or
 # once the background startup task finishes). Importing ``_admin`` pulls in

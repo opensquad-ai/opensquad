@@ -84,6 +84,7 @@
       "assets/icon.ico",
       "assets/icon.png",
       "assets/tray.png",
+      "assets/splash.html",
       "assets/setup/**",
       "!dist-electron/**/*.map"
     ],
@@ -116,6 +117,7 @@
           "icon.ico",
           "icon.png",
           "tray.png",
+          "splash.html",
           "setup/**"
         ]
       }

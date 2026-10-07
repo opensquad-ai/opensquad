@@ -499,8 +499,76 @@
              加过渡让背景平滑渐变到主题色，logo 视觉尺寸保持恒定。 */
           transition: background-color 260ms ease;
         }
+
+        /* 插件贡献的开屏动画（缝 B）：核心渲染，插件只提供素材。覆盖层放在
+           #root 内，所以 React 挂载时会连同默认 loader 一起被替换——无需握手。 */
+        .boot-screen {
+          position: fixed;
+          inset: 0;
+          z-index: 10;
+          background: var(--boot-bg, #F6F3EC);
+          opacity: 1;
+          transition: opacity 320ms ease;
+        }
+        .boot-screen.is-leaving { opacity: 0; }
+        .boot-screen video {
+          display: block;
+          width: 100%;
+          height: 100%;
+          object-fit: cover;
+        }
+        @media (prefers-reduced-motion: reduce) {
+          .boot-screen { transition: none; }
+        }
       </style>
     </div>
+  <script>
+    /* 插件贡献的开屏动画（缝 B）。核心拥有开屏位置，这里只向后端问一句"有没有
+       插件声明了开屏动画、放什么"。覆盖层挂在 body 上（不是 #root），所以 React
+       挂载不会把它清掉——桌面版在后端就绪后加载 App URL 时也能看到。任何失败、
+       没有声明、或用户设置了"减少动效"，都什么都不做，退回默认四象限加载动画。
+       这是装饰，绝不允许拖住启动：到时 / 播完 / 点击 / 按键，任一条都会移除它。 */
+    (function () {
+      try {
+        if (window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+        fetch('/api/ai-web/boot-screen', { headers: { Accept: 'application/json' } })
+          .then(function (r) { return r.ok ? r.json() : null; })
+          .then(function (data) {
+            if (!data || !data.enabled || !data.video || !document.body) return;
+            var box = document.createElement('div');
+            box.className = 'boot-screen';
+            var video = document.createElement('video');
+            video.src = data.video;
+            video.muted = true;
+            video.autoplay = true;
+            video.setAttribute('playsinline', '');
+            video.setAttribute('aria-hidden', 'true');
+            if (data.poster) video.poster = data.poster;
+            box.appendChild(video);
+            document.body.appendChild(box);
+
+            var leaving = false;
+            var done = function () {
+              if (leaving) return;
+              leaving = true;
+              video.pause();
+              box.classList.add('is-leaving');
+              setTimeout(function () { if (box.parentNode) box.parentNode.removeChild(box); }, 340);
+              window.removeEventListener('keydown', done);
+            };
+            video.addEventListener('ended', done);
+            video.addEventListener('error', done);
+            box.addEventListener('click', done);
+            window.addEventListener('keydown', done);
+            // 播放上限：插件给了就用它，没给（0 = 放完为止）留一个安全上限，
+            // 免得一段长片把用户永远挡在开屏页。
+            var hold = Number(data.holdMs);
+            setTimeout(done, hold > 0 ? hold : 30000);
+          })
+          .catch(function () { /* fail-open: 退回默认 loader */ });
+      } catch (e) { /* 装饰性，绝不阻塞启动 */ }
+    })();
+  </script>
   <script type="module" src="/index.tsx"></script>
 </body>
 </html>
