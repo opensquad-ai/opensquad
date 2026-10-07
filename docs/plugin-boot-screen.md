@@ -81,9 +81,17 @@ GET /api/ai-web/boot-screen/asset?kind=video|poster   # 素材本身
 一段内联脚本（无框架），把覆盖层插到 **`document.body`** 上（不是 `#root`——React 挂载会替换
 `#root`，插在那里等于永远看不见）：
 
+- **播到片尾才进**：`ended` 后淡出移除；用户中途**点击或按任意键**立刻进入；
+- **加载完成才提示可跳过**：React 换上真实界面（默认 boot loader 被替换，用 `MutationObserver`
+  观测 `#root`）之后，底部才显形"加载完成 · 点击或按任意键跳过动画"。在应用起来之前不给这个
+  提示——那等于告诉用户"可以走了"，而界面还没准备好；
+- 未给 `holdMs` 时有 **30s 兜底上限**（只防"永远卡死"，正常片子远短于此）；
 - `prefers-reduced-motion: reduce` → 直接不注入，走默认 loader；
-- `fetch` 失败 / 无声明 / 视频 `error` → 静默移除，走默认 loader；
-- `ended` / `holdMs` / 点击 / 任意按键 → 淡出并移除；未给 `holdMs` 时有 30s 安全上限。
+- `fetch` 失败 / 无声明 / 视频 `error` → 静默移除，走默认 loader。
+
+**`z-index` 必须极高**（`2147483000`）：应用自己有不透明的全屏层（`App.tsx` 的
+`fixed inset-0 z-50 bg-panel`、`DesktopUpdateOverlay` 的 `z-[9999]` 等），覆盖层低于它们时动画
+还在放、只是被盖住——表现就是"动画没播完就进界面了"。`bootScreen.scan.test.ts` 把这个数值钉住。
 
 ## 3. 改动清单
 

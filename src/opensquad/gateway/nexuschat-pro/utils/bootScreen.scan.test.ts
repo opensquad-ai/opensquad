@@ -62,6 +62,16 @@ describe('L3 — it survives React mounting', () => {
     expect(SHELL).toMatch(/\.boot-screen\s*\{/);
     expect(SHELL).toMatch(/\.boot-screen\.is-leaving\s*\{/);
   });
+
+  it('stacks above every layer the app itself uses', () => {
+    // The app has opaque full-screen panels at z-50 / z-[100] / z-[9999]. An overlay
+    // below them is visible only until the UI mounts — which reads as "the animation
+    // stopped early". Pinned as a number so a later tidy-up cannot quietly lower it.
+    const block = SHELL.match(/\.boot-screen\s*\{([^}]*)\}/);
+    expect(block, '.boot-screen rule went missing').toBeTruthy();
+    const z = Number((block![1].match(/z-index:\s*(\d+)/) || [])[1]);
+    expect(z).toBeGreaterThan(9999);
+  });
 });
 
 describe('L4 — it always has a way out', () => {

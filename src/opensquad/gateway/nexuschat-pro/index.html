@@ -500,12 +500,16 @@
           transition: background-color 260ms ease;
         }
 
-        /* 插件贡献的开屏动画（缝 B）：核心渲染，插件只提供素材。覆盖层放在
-           #root 内，所以 React 挂载时会连同默认 loader 一起被替换——无需握手。 */
+        /* 插件贡献的开屏动画（缝 B）：核心渲染，插件只提供素材。覆盖层挂在 body
+           上（不是 #root），所以 React 挂载不会把它清掉——桌面版在后端就绪后加载
+           App URL 时也看得到。
+           z-index 必须高过应用自己的每一层：应用里有 z-50 / z-[100] / z-[9999] 的
+           不透明全屏面板（App 的移动布局、DesktopUpdateOverlay 等），低于它们会被
+           盖住——表现就是"动画还没播完就进界面了"。 */
         .boot-screen {
           position: fixed;
           inset: 0;
-          z-index: 10;
+          z-index: 2147483000;
           background: var(--boot-bg, #F6F3EC);
           opacity: 1;
           transition: opacity 320ms ease;
@@ -517,8 +521,25 @@
           height: 100%;
           object-fit: cover;
         }
+        /* 加载完成后才显形的"可跳过"提示：让用户知道动画会自己放完，急着进去可以
+           点一下。React 挂载之前不显示——否则等于告诉用户"可以走了"，而应用还没起来。 */
+        .boot-screen-hint {
+          position: absolute;
+          left: 0;
+          right: 0;
+          bottom: 30px;
+          text-align: center;
+          font-size: 12.5px;
+          color: rgba(255, 255, 255, 0.86);
+          text-shadow: 0 1px 3px rgba(0, 0, 0, 0.6);
+          opacity: 0;
+          transition: opacity 240ms ease;
+          pointer-events: none;
+        }
+        .boot-screen-hint.is-shown { opacity: 1; }
         @media (prefers-reduced-motion: reduce) {
           .boot-screen { transition: none; }
+          .boot-screen-hint { transition: none; }
         }
       </style>
     </div>
@@ -527,7 +548,9 @@
        插件声明了开屏动画、放什么"。覆盖层挂在 body 上（不是 #root），所以 React
        挂载不会把它清掉——桌面版在后端就绪后加载 App URL 时也能看到。任何失败、
        没有声明、或用户设置了"减少动效"，都什么都不做，退回默认四象限加载动画。
-       这是装饰，绝不允许拖住启动：到时 / 播完 / 点击 / 按键，任一条都会移除它。 */
+
+       行为：**一直播到片尾**，然后淡出进界面。React 挂载（= 应用可以用了）之后，
+       底部才显形一句"点击跳过"提示；用户点一下或按任意键就立刻进入。 */
     (function () {
       try {
         if (window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
@@ -545,13 +568,39 @@
             video.setAttribute('aria-hidden', 'true');
             if (data.poster) video.poster = data.poster;
             box.appendChild(video);
+            var hint = document.createElement('div');
+            hint.className = 'boot-screen-hint';
+            hint.setAttribute('role', 'status');
+            box.appendChild(hint);
             document.body.appendChild(box);
+
+            // "加载完成" = React 已经换上真实界面（默认 boot loader 被替换掉）。
+            // 在这之前不给"跳过"提示，否则等于说"可以走了"，而应用其实还没起来。
+            var watcher = null;
+            var ready = false;
+            var markReady = function () {
+              if (ready) return;
+              ready = true;
+              if (watcher) watcher.disconnect();
+              hint.textContent = '加载完成 · 点击或按任意键跳过动画';
+              hint.classList.add('is-shown');
+            };
+            var root = document.getElementById('root');
+            if (!root || !root.querySelector('.boot-loader-wrap')) {
+              markReady();
+            } else {
+              watcher = new MutationObserver(function () {
+                if (!root.querySelector('.boot-loader-wrap')) markReady();
+              });
+              watcher.observe(root, { childList: true, subtree: true });
+            }
 
             var leaving = false;
             var done = function () {
               if (leaving) return;
               leaving = true;
               video.pause();
+              if (watcher) watcher.disconnect();
               box.classList.add('is-leaving');
               setTimeout(function () { if (box.parentNode) box.parentNode.removeChild(box); }, 340);
               window.removeEventListener('keydown', done);
@@ -560,8 +609,7 @@
             video.addEventListener('error', done);
             box.addEventListener('click', done);
             window.addEventListener('keydown', done);
-            // 播放上限：插件给了就用它，没给（0 = 放完为止）留一个安全上限，
-            // 免得一段长片把用户永远挡在开屏页。
+            // 播完为止；这里的上限只是"永远不把用户卡死"的兜底（插件给了 holdMs 就用它的）。
             var hold = Number(data.holdMs);
             setTimeout(done, hold > 0 ? hold : 30000);
           })

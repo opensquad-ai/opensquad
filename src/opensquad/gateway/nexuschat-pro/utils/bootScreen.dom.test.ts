@@ -50,10 +50,16 @@ function runLoader(): void {
 }
 
 beforeEach(() => {
-  document.body.innerHTML = '<div id="root"></div>';
+  // The default shell: #root still holds the boot loader, i.e. React has not mounted.
+  document.body.innerHTML = '<div id="root"><div class="boot-loader-wrap"></div></div>';
   // jsdom logs "Not implemented" for media control; the loader pauses on exit.
   vi.spyOn(window.HTMLMediaElement.prototype, 'pause').mockImplementation(() => {});
 });
+
+/** React replacing the boot loader — the signal the loader treats as "app is ready". */
+function mountApp(): void {
+  document.getElementById('root')!.innerHTML = '<div data-app="ready"></div>';
+}
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -104,6 +110,46 @@ describe('a declared animation', () => {
     runLoader();
     await vi.waitFor(() => expect(document.querySelector('.boot-screen')).not.toBeNull());
 
+    await vi.waitFor(() => expect(document.querySelector('.boot-screen')).toBeNull(), { timeout: 2000 });
+  });
+});
+
+describe('the skip affordance', () => {
+  it('stays hidden until the app is ready, then invites a click', async () => {
+    stubFetch(CONFIG);
+    runLoader();
+    await vi.waitFor(() => expect(document.querySelector('.boot-screen')).not.toBeNull());
+
+    const hint = document.querySelector('.boot-screen-hint') as HTMLElement;
+    expect(hint).not.toBeNull();
+    expect(hint.classList.contains('is-shown'), 'no "you can leave" hint while the app is still booting').toBe(false);
+
+    mountApp();
+    await vi.waitFor(() => expect(hint.classList.contains('is-shown')).toBe(true));
+    expect(hint.textContent).toMatch(/跳过/);
+  });
+
+  it('does not cut the clip short when the app becomes ready', async () => {
+    // The regression a user hit: the animation ended the moment the UI appeared.
+    stubFetch(CONFIG);
+    runLoader();
+    await vi.waitFor(() => expect(document.querySelector('.boot-screen')).not.toBeNull());
+
+    mountApp();
+    await new Promise((r) => setTimeout(r, 30));
+
+    const box = document.querySelector('.boot-screen');
+    expect(box, 'the overlay must outlive the app mounting — it plays to the end').not.toBeNull();
+    expect(box!.classList.contains('is-leaving')).toBe(false);
+  });
+
+  it('leaves as soon as it is clicked', async () => {
+    stubFetch(CONFIG);
+    runLoader();
+    await vi.waitFor(() => expect(document.querySelector('.boot-screen')).not.toBeNull());
+    mountApp();
+
+    document.querySelector('.boot-screen')!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
     await vi.waitFor(() => expect(document.querySelector('.boot-screen')).toBeNull(), { timeout: 2000 });
   });
 });
