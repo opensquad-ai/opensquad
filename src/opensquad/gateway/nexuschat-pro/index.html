@@ -479,6 +479,10 @@
         width: 100%;
         height: 100%;
         object-fit: cover;
+        /* App 首屏渲染会阻塞主线程（实测有 350~500ms 的长任务），届时画面会"卡住"
+           而声音继续走。把视频提成独立合成层，主线程忙时仍由合成器推进画面。 */
+        will-change: transform;
+        transform: translateZ(0);
       }
       /* 加载完成后才显形的"可跳过"提示：让用户知道动画会自己放完，急着进去可以
          点一下。React 挂载之前不显示——否则等于告诉用户"可以走了"，而应用还没起来。 */
@@ -674,7 +678,9 @@
             pbox.className = 'boot-screen';
             var pvideo = document.createElement('video');
             pvideo.src = cached.videos[0];
-            pvideo.muted = true;
+            // 片子自带 BGM：先按"有声音"起播，被浏览器的自动播放策略拦下时再退回静音
+            // （见 tryPlay 的 NotAllowedError 分支）。静音起播只是保底手段，不是默认。
+            pvideo.muted = false;
             pvideo.autoplay = true;
             pvideo.setAttribute('playsinline', '');
             pvideo.setAttribute('aria-hidden', 'true');
@@ -703,12 +709,15 @@
             var playlist = Array.isArray(data.videos) ? data.videos.filter(Boolean) : [];
             if (!data || !data.enabled || !playlist.length || !document.body) {
               mark('skip:no-declaration', { enabled: !!(data && data.enabled) });
-              // 缓存说有、联网说没有：收掉预载覆盖层并恢复默认 loader。
+              // 缓存说有、联网说没有（插件被关了 / 撤了声明）：收掉预载覆盖层、恢复
+              // 默认 loader，并把本地那份播放列表清掉——否则每次加载都会先闪一下
+              // 缓存里的动画再被撤掉。
               if (pre) {
                 if (pre.box.parentNode) pre.box.parentNode.removeChild(pre.box);
                 pre = null;
               }
               restoreGlyph();
+              try { localStorage.removeItem(CACHE_KEY); } catch (e) { /* 清不掉也无妨 */ }
               return;
             }
             try {
@@ -736,7 +745,7 @@
               box.className = 'boot-screen';
               video = document.createElement('video');
               video.src = playlist[0];
-              video.muted = true;
+              video.muted = false; // 同上：先要声音，被拦才退回静音
               video.autoplay = true;
               video.setAttribute('playsinline', '');
               video.setAttribute('aria-hidden', 'true');
@@ -768,11 +777,24 @@
                   grabFrame(preloader, function (dataUrl) {
                     rememberPoster(nextUrl, dataUrl);
                     mark('poster', { next: true, ok: !!dataUrl });
-                    preloader.removeAttribute('src');
+                    // **刻意不卸 src**：卸掉等于把下载掐断，缓存里只留一小段，换段时
+                    // 还得重新缓冲（用户看到的"首帧大图停住一会"）。留着它，浏览器会把
+                    // 整段吃完，换段那次 load 基本命中缓存。
                   });
                 });
               }
               preloader.src = nextUrl;
+            };
+            // 别在当前这段刚开播时就去拉下一段——那时 React 首屏也在抢带宽/解码，实测会
+            // 卡顿（音频照走、画面掉帧，看起来就是"音画不同步"）。等这段放到四成左右
+            // 再抓，留给它一帧的时间仍然绰绰有余。
+            var preloadTimer = null;
+            var schedulePreloadNext = function () {
+              if (preloadTimer) clearTimeout(preloadTimer);
+              var secs = isFinite(video.duration) && video.duration > 0 ? video.duration : 8;
+              // 两成处就开始（不是四成）：要留够时间把**整段**吃完，换段才不卡。最早
+              // 0.8s 起，免得跟 App 首屏最忙的那一下抢带宽。
+              preloadTimer = setTimeout(preloadNextFrame, Math.min(Math.max(secs * 200, 800), 6000));
             };
             // 当前这段的首帧也存下来：下次一访问就靠它立刻出画面。
             var captureCurrentPoster = function () {
@@ -801,6 +823,7 @@
             var playToken = 0;
             var playRetries = 0;
             var tryPlay = function () {
+              if (leaving) return; // 已退场：别再把（可能已移出 DOM 的）元素放起来
               var token = ++playToken;
               try {
                 var p = video.play();
@@ -808,6 +831,14 @@
                   p.catch(function (err) {
                     if (token !== playToken) return;
                     var name = (err && err.name) || String(err);
+                    // 未静音起播被自动播放策略拦下（NotAllowedError）→ 退回静音重试。
+                    // **动画无论如何都要出来**：声音是加分项，静音是保底。
+                    if (!video.muted && name !== 'AbortError') {
+                      video.muted = true;
+                      mark('audio:blocked', { name: name });
+                      tryPlay();
+                      return;
+                    }
                     if (name === 'AbortError' && playRetries < 5) {
                       playRetries += 1;
                       mark('play-retry', { name: name, n: playRetries, rs: video.readyState, ns: video.networkState });
@@ -843,8 +874,18 @@
             var done = function (reason) {
               if (leaving) return;
               leaving = true;
+              // 作废所有在途的 play()/重试：`tryPlay` 的 AbortError 重试是延迟 150ms
+              // 再播的，不拦住它就会在 pause() 之后把元素重新放起来——元素即便已被移出
+              // DOM 也会继续出声（用户报的"进了界面 BGM 还在响"）。
+              playToken += 1;
+              if (preloadTimer) clearTimeout(preloadTimer);
               mark('leave', { reason: reason || 'unknown' });
               video.pause();
+              // 再卸掉源：游离的媒体元素不会自己停，卸源才是"一定不再出声"的保证。
+              try {
+                video.removeAttribute('src');
+                video.load();
+              } catch (e) { /* 环境不支持也就算了，pause + 移出 DOM 已经足够 */ }
               if (watcher) watcher.disconnect();
               if (rootWatcher) rootWatcher.disconnect();
               box.classList.add('is-leaving');
@@ -861,9 +902,11 @@
               if (cover) video.poster = cover;
               else video.removeAttribute('poster');
               video.src = nextUrl;
-              mark('advance', { i: index, cover: !!cover });
+              // pre= 下一段在切换前的缓冲程度（0-4；≥3 基本能立刻放），用来判断换段
+              // 会不会卡在上一帧。
+              mark('advance', { i: index, cover: !!cover, pre: preloader ? preloader.readyState : -1 });
               tryPlay();
-              preloadNextFrame();
+              schedulePreloadNext();
             };
 
             // "加载完成" = **两件事同时成立**：App 走出了它自己的启动 gate（App.tsx 在
@@ -899,14 +942,21 @@
             };
             // MutationObserver 在 #root 每次变动都会回调；合并到下一个 macrotask 再查，
             // 否则首屏渲染那几千次 DOM 变动会各查一遍整棵子树。
+            // 节流：React 首屏那几百毫秒里 #root 会被改上千次，而每次检查都要整棵子树
+            // 查一遍 `svg[role=status]`——按"每个宏任务一次"跑会明显卡住正在播的动画
+            // （实测的卡顿/音画不同步）。限制到 ≥200ms 一次，尾随那次保证不漏最终状态。
             var readyQueued = false;
+            var lastReadyCheck = 0;
+            var READY_CHECK_MIN_MS = 200;
             var checkReady = function () {
               if (readyQueued || leaving) return;
+              var wait = READY_CHECK_MIN_MS - (Date.now() - lastReadyCheck);
               readyQueued = true;
               setTimeout(function () {
                 readyQueued = false;
+                lastReadyCheck = Date.now();
                 applyReady();
-              }, 0);
+              }, wait > 0 ? wait : 0);
             };
             applyReady();
             watcher = new MutationObserver(checkReady);
@@ -925,9 +975,13 @@
             video.addEventListener('playing', function () {
               failures = 0;
               playRetries = 0; // 真的放起来了，重试额度重置
-              mark('playing', { i: index, dur: isFinite(video.duration) ? Math.round(video.duration * 10) / 10 : null });
-              captureCurrentPoster(); // 存下这段的首帧，供下次访问立刻出画面
-              preloadNextFrame();     // 并提前准备下一段的封面
+              mark('playing', {
+                i: index,
+                dur: isFinite(video.duration) ? Math.round(video.duration * 10) / 10 : null,
+                muted: video.muted,
+              });
+              captureCurrentPoster();   // 存下这段的首帧，供下次访问立刻出画面
+              schedulePreloadNext();    // 下一段的封面稍后再抓（见上：避免抢带宽）
             });
             // 核心规则：**永远接着轮换**。就绪前是"盖住启动窗口"，就绪后是"继续放、
             // 等用户手动退出"——唯一的差别是就绪后**不再自动进界面**（下面这句话在

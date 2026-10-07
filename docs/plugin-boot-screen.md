@@ -99,6 +99,21 @@ GET /api/ai-web/boot-screen/asset?kind=video|poster[&index=N] # 素材本身
   `top` = 视口高度 = 579），用户看到的是 **App 自己的四象限**。现象极具误导性：埋点里 `vis=0`
   （CSS 可见性判据）却肉眼看见四象限——因为 `vis` 不看遮挡、也看不出"样式表被删了"。
   `bootScreen.scan.test.ts` 用"规则必须出现在 `</head>` 之前、`#root` 必须在其后"把这条钉住；
+- **卡顿 / 音画不同步**：主要来自 **App 自己首屏渲染阻塞主线程**（Long Task 实测动画窗口内 14 次
+  长任务、最坏 348ms / 496ms 都在 1.8–2.3s 的 React 首屏），画面停住而声音继续。loader 一侧做了三件事：
+  ① 就绪判定**节流到 ≥200ms 一次**（原先"每个宏任务"都要整棵 `#root` 查一遍 `svg[role=status]`，
+  恰好砸在最忙的那几百毫秒上）；② **下一段的首帧预取推迟到当前段放到约四成**，不在开播瞬间并行拉
+  一个 10MB 级文件；③ `.boot-screen video` 加 `will-change: transform` 提成独立合成层，主线程忙时
+  画面仍由合成器推进；
+- **退场必须"一定不再出声"**：`done()` 里 `playToken += 1` 作废在途的 `play()`/150ms 重试
+  （否则它会在 `pause()` 之后把元素重新放起来——元素即便移出 DOM 也继续出声，用户报的
+  "进了界面 BGM 还在响"），并 `removeAttribute('src') + load()` 卸源；`tryPlay` 里再加 `if (leaving) return`。
+  实测点掉后页面里 `<video>` 数量为 0、全部 paused、`currentTime` 不再前进；
+- **BGM**：素材自带音轨（实测三段都是 AAC 立体声 32kHz）。**未静音的自动播放会被浏览器拦**（页面加载
+  没有用户手势），所以策略是"**先按有声音起播，被拦（`NotAllowedError`）再退回静音重试**"——出声是
+  加分项，动画必须一定出来。埋点 `playing` 那条带 `muted=` 是实际结果，被拦时会多一条 `audio:blocked`。
+  隐藏的抓帧 `preloader` 始终静音（`preloader.muted = true`），不会重复出声。浏览器是否放行取决于该
+  站点的媒体参与度/用户交互历史：用户常访问时通常直接有声音；
 - **首帧封面（poster）让首屏与换段都不空**：`<video>` 换 `src` 会丢帧、首帧又要等媒体解码
   （实测首段首帧 ~2.2s 才上屏——媒体请求排在启动期几百个模块请求后面），这两处原本露出的
   就是**底色**（用户看到的"白屏"）。做法：
@@ -106,6 +121,9 @@ GET /api/ai-web/boot-screen/asset?kind=video|poster[&index=N] # 素材本身
   `localStorage['opensquad.bootScreen:posters']`，**下次访问在 0ms 就挂上**，首屏立刻有画面；
   ② 隐藏的 `preloader` 视频提前抓**下一段**首帧，`advance()` 里**先挂 poster 再换 src**
   （`advance` 埋点带 `cover=true` 即表示生效）——段与段之间没有底色空档。
+  ③ 预取的 `preloader` **刻意保留 `src`**（不卸载）——只抓到一帧就卸源等于掐断下载，缓存里只剩
+  一小段，换段那次 load 还得重新缓冲，画面就**停在下一段的首帧封面上"卡一会"**（用户报的正是这个）。
+  留着它，浏览器会把整段吃完留在缓存里；实测换段时下一段基本已是 `readyState=4`，到新帧 57–76ms。
   首次访问（无缓存且插件没给 `poster`）仍有一瞬底色；插件在 `plugin.json` 里声明 `poster` 即可消除；
 - **按播放列表轮换**：`ended` 就换下一段（`index = (index + 1) % len`，走完最后一段回到第一段）；
 - **就绪 = 两件事同时成立**：① App 走出自己的启动 gate（`App.tsx` 在离开
@@ -159,6 +177,7 @@ GET /api/ai-web/boot-screen/asset?kind=video|poster[&index=N] # 素材本身
 | **几何验证**（修掉"样式长在 #root 里"之后，登录态、覆盖 App 的 gate + agent-web 加载） | 175 次 / 200ms 采样：覆盖层恒为 `position:fixed` / `z-index:2147483000` / `top=0`，**屏幕中心最顶层元素 175/175 是 `VIDEO`**，四象限 0 次——同一时段埋点记到 App 确有 `quads=18,18,18,18`（vis=5）与 `quads=13`（vis=1）在转 | App 自己的 loader 全被盖住 |
 | **无缝验证**（像素 + `readyState` 采样，修好封面之前） | 首段：`inject` 91ms → `playing` 1281ms → **首帧上屏 ~2.2s**（此前 1.3~2.2s 是底色）；换段：`advance` 9403ms（`readyState` 掉到 1、无帧）→ 新帧 9613ms，**中间 ~150ms 底色** | 两处空档实测存在，已由首帧封面消掉 |
 | **封面生效**（同一页实测） | `localStorage['opensquad.bootScreen:posters']` 抓到 3 张（2.1KB / 2.0KB / 13.4KB）；两次 `advance` 埋点均为 **`cover=true`**；首屏视频 `poster` = 2127 字符的 JPEG dataURL | 首屏与换段都有画面 |
+| **换段（冷缓存，`touch` 三个 mp4 让 `v=` 变新从而缓存失效）** | 三次 `advance` 埋点都是 **`pre=4`**（下一段已完全缓冲），到新帧分别 **57 / 61 / 76ms** | 换段不再停在封面上 |
 
 **剩下的那个空窗**：只在**从未访问过**（或清了 localStorage）时存在——覆盖层要等
 `/api/ai-web/boot-screen` 返回才知道播什么，这段显示的是主题底色（glyph 已藏，**不是四象限**）。
@@ -263,11 +282,11 @@ JSON
 | 端点契约（eager router、两个都**免鉴权**、配置失败 fail-open、素材缺失 404） | 同上 |
 | 真链路（配置 → URL → 素材）：**真实 3.6MB mp4 实跑** | 私有插件胜出；整片 `200` / 3675935 bytes / `content-type: video/mp4`；`Range` → **206** `bytes 0-1023/3675935`；`kind=poster`（无）与 `kind=/etc/passwd` 均 **404** |
 | 挂载顺序（路由必须在静态 catch-all 之前） | 同上（源码守卫，对照 `main.py`） |
-| 加载脚本**真跑**（jsdom）：注入到 body / 未就绪时 `ended` 换下一段 / 走完一圈回到第一段 / 一整圈都失败才放手 / 挂载了但还在 gate 里继续轮换 / gate 已过但 App 仍显示四象限时不退场 / **就绪后 `ended` 也不退场（用户退出才算）** / 点击 / `holdMs` / 无声明 / 请求失败 / reduced-motion / **有缓存时不等网络就起播** / **藏掉内置 glyph** / **App 回到加载态时收回提示** | `vitest utils/bootScreen.dom.test.ts` — **19 passed** |
-| 加载脚本契约（含"轮换不是单条重放"、"失败满一圈才放手"、"就绪 = 标志 + 无四象限"、"退场只由用户触发"、"缓存优先"、**"覆盖层 CSS 必须在 `</head>` 之前"**、"换段先挂 poster 再换 src"、120s 上限） | `vitest utils/bootScreen.scan.test.ts` — **18 passed** |
+| 加载脚本**真跑**（jsdom）：注入到 body / 未就绪时 `ended` 换下一段 / 走完一圈回到第一段 / 一整圈都失败才放手 / 挂载了但还在 gate 里继续轮换 / gate 已过但 App 仍显示四象限时不退场 / **就绪后 `ended` 也不退场（用户退出才算）** / 点击 / `holdMs` / 无声明 / 请求失败 / reduced-motion / **有缓存时不等网络就起播** / **藏掉内置 glyph** / **App 回到加载态时收回提示** | `vitest utils/bootScreen.dom.test.ts` — **21 passed** |
+| 加载脚本契约（含"轮换不是单条重放"、"失败满一圈才放手"、"就绪 = 标志 + 无四象限"、"退场只由用户触发"、"缓存优先"、**"覆盖层 CSS 必须在 `</head>` 之前"**、"换段先挂 poster 再换 src"、120s 上限） | `vitest utils/bootScreen.scan.test.ts` — **21 passed** |
 | App↔shell 对接口径（`data-opensquad-ready` 两边同名，改一边即红） | `vitest utils/bootReadySignal.scan.test.ts` — **3 passed** |
 | **埋点与端到端时间线**：真机重启 + 首访/再访、5s 慢启动、就绪按住 60s、点击退场 —— 见 §2.4 的实测表 | 浏览器里读 `window.__opensquadBoot` 与 `[boot-screen]` 日志（:5173） |
-| 回归（读 `index.html` 的既有测试 + 挂在同一 router 上的 mods 路由） | 前端整棵树 `vitest run` — **151 files / 1587 passed**；后端 `test_gateway_mods_routes.py` — **13 passed** |
+| 回归（读 `index.html` 的既有测试 + 挂在同一 router 上的 mods 路由） | 前端整棵树 `vitest run` — **152 files / 1594 passed**；后端 `test_gateway_mods_routes.py` — **13 passed** |
 
 未验证的一步：在**跑着的实例**上肉眼看画面——需要按 §8 放一段真片并重启。代码链路已实测到
 "字节能从 URL 取回 200/206"，剩下的只是浏览器解码显示。

@@ -94,7 +94,9 @@ describe('a declared animation', () => {
     const video = box.querySelector('video') as HTMLVideoElement;
     expect(video.getAttribute('src')).toBe(CLIPS[0]);
     expect(video.getAttribute('poster')).toBe(CONFIG.poster);
-    expect(video.muted).toBe(true); // autoplay policy: must start muted
+    // Sound is requested up front (the clips carry a BGM); a refused autoplay is what
+    // mutes it — covered by 'asks for sound first and falls back to muted'.
+    expect(video.muted).toBe(false);
   });
 
   it('plays the next clip while the app is still booting', async () => {
@@ -329,6 +331,46 @@ describe('covering the built-in quad loader', () => {
 
     const video = document.querySelector('.boot-screen video') as HTMLVideoElement;
     expect(video.poster).toBe('data:image/jpeg;base64,AAAA');
+  });
+
+  it('asks for sound first and falls back to muted when the browser refuses', async () => {
+    // The clips carry a BGM track. An unmuted autoplay is usually blocked on a cold
+    // page, so the loader asks for sound first and, only if refused, mutes — the
+    // animation must appear either way.
+    stubFetch(CONFIG);
+    const play = vi.spyOn(window.HTMLMediaElement.prototype, 'play')
+      .mockImplementationOnce(() => Promise.reject(Object.assign(new Error('blocked'), { name: 'NotAllowedError' })))
+      .mockResolvedValue(undefined as unknown as void);
+
+    runLoader();
+    const video = await vi.waitFor(() => {
+      const v = document.querySelector('.boot-screen video') as HTMLVideoElement | null;
+      expect(v, 'the overlay is up regardless of the autoplay policy').not.toBeNull();
+      return v!;
+    });
+
+    expect(play.mock.calls.length, 'it retried after muting').toBeGreaterThan(1);
+    expect(video.muted, 'refused sound → muted fallback').toBe(true);
+  });
+
+  it('stops the media for good when it leaves — no BGM left behind', async () => {
+    // A paused-but-detached <video> keeps playing on its own, and our AbortError retry
+    // fires 150ms later — either one leaves the BGM running over the app.
+    stubFetch(CONFIG);
+    runLoader();
+    await vi.waitFor(() => expect(document.querySelector('.boot-screen')).not.toBeNull());
+
+    mountApp();
+    const video = document.querySelector('.boot-screen video') as HTMLVideoElement;
+    await vi.waitFor(() => {
+      const h = document.querySelector('.boot-screen-hint') as HTMLElement;
+      expect(h.classList.contains('is-shown')).toBe(true);
+    });
+    document.querySelector('.boot-screen')!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    await vi.waitFor(() => expect(document.querySelector('.boot-screen')).toBeNull(), { timeout: 2000 });
+
+    expect(video.paused, 'paused on the way out').toBe(true);
+    expect(video.getAttribute('src'), 'source released, so nothing can resume it').toBeNull();
   });
 
   it('hides the built-in glyph instead of leaving it on screen', () => {

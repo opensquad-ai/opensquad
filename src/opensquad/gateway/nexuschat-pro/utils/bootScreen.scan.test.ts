@@ -121,6 +121,34 @@ describe('L5 — the built-in quad is never what the user sees', () => {
     expect(posterAt, 'poster must be set before src').toBeLessThan(srcAt);
   });
 
+  it('guards the late play() so the BGM cannot outlive the hand-over', () => {
+    // The AbortError retry runs 150ms later; without these two guards it restarts the
+    // media after `pause()`, and a detached <video> keeps playing its audio.
+    const at = SHELL.indexOf('var tryPlay = function');
+    expect(SHELL.slice(at, at + 120)).toContain('if (leaving) return;');
+    expect(SHELL).toContain('video.removeAttribute(\'src\')');
+    expect(SHELL).toContain('playToken += 1;');
+  });
+
+  it('throttles the readiness check and defers the next-clip preload', () => {
+    // Both run during the app's own boot; unthrottled they starve the playing clip
+    // (the reported stutter / A/V drift).
+    expect(SHELL).toMatch(/READY_CHECK_MIN_MS = \d+/);
+    expect(SHELL).toContain('schedulePreloadNext');
+    const playingAt = SHELL.indexOf("addEventListener('playing'");
+    const body = SHELL.slice(playingAt, playingAt + 700);
+    expect(body, 'the next clip is preloaded on a delay, not on the spot').toContain('schedulePreloadNext');
+    expect(body).not.toContain('preloadNextFrame();');
+  });
+
+  it('asks for sound first, keeps the frame grabber silent', () => {
+    // The clips ship a BGM track; only the hidden frame grabber stays muted.
+    expect(SHELL).toContain('video.muted = false');
+    expect(SHELL).toContain('pvideo.muted = false');
+    expect(SHELL).toContain('preloader.muted = true');
+    expect(SHELL).toMatch(/mark\('audio:blocked'/);
+  });
+
   it('hides the static glyph before the network answers', () => {
     // The glyph node stays in #root (the readiness check counts it); only its
     // visibility goes away, so the first moments are animation-only.
