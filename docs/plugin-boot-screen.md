@@ -34,7 +34,7 @@
   "enabled": true,
   "contributes": {
     "bootScreen": {
-      "video": "assets/boot.mp4",
+      "videos": ["assets/1.mp4", "assets/2.mp4", "assets/3.mp4"],
       "poster": "assets/boot.jpg",
       "holdMs": 6000
     }
@@ -44,50 +44,64 @@
 
 | 字段 | 必填 | 含义 |
 |---|---|---|
-| `video` | 是 | 相对**本插件目录**的路径；拒绝绝对路径、`..`、URL scheme，且文件必须真实存在 |
+| `videos` | 二选一 | **播放列表**，按声明顺序轮换；每条是相对**本插件目录**的路径（拒绝绝对路径、`..`、URL scheme），文件不存在的条目被丢弃 |
+| `video` | 二选一 | 单片简写，等价于 `videos: [x]` |
 | `poster` | 否 | 视频首帧封面，同样相对插件目录 |
-| `holdMs` | 否 | 播放上限（毫秒）；`0`/缺省 = 放完为止。硬上限 120000 |
+| `holdMs` | 否 | 退出上限（毫秒）；后端把值夹到硬上限 `120000`，`0`/缺省 = 用默认 `120000` |
+
+`videos` 与 `video` 至少给一个，且解析后至少要有一条真实存在的文件，否则视为没有声明。
+声明**多条**才有轮换效果；只给一条时，表现就是那一条重播。
 
 插件**不需要**写 Python、不需要 `tools`/`hooks`——它就是一个清单 + 素材。
 
 ### 2.2 后端（只读、免鉴权）
 
 ```
-GET /api/ai-web/boot-screen          # 放什么
-GET /api/ai-web/boot-screen/asset?kind=video|poster   # 素材本身
+GET /api/ai-web/boot-screen                                   # 放什么
+GET /api/ai-web/boot-screen/asset?kind=video|poster[&index=N] # 素材本身
 ```
 
 - **免鉴权**：boot loader 在 React/登录之前运行，没有 token 可带。
 - 配置端点只暴露"哪个已启用插件要放什么"，失败一律返回 `{"enabled": false}`（fail-open，
   退回默认四象限加载动画）。
-- 素材端点**受限**：唯一入参是 `kind`（枚举），文件由解析器决定——**不能指向任意路径，也不暴露插件目录**。
+- 素材端点**受限**：入参只有 `kind`（枚举）和 `index`（播放列表下标，只对 `kind=video` 有意义）。
+  文件由解析器决定——**不能指向任意路径，也不暴露插件目录**；`index` 非整数或越界一律 404。
   用 `FileResponse` 服务，因此天然支持 `Range`（`<video>` 流式播放依赖它）。
 
 响应：
 
 ```jsonc
 { "enabled": true, "source": "my_boot_screen", "plugin": "my_boot_screen",
-  "video": "/api/ai-web/boot-screen/asset?kind=video&v=1791345040",
+  "videos": ["/api/ai-web/boot-screen/asset?kind=video&index=0&v=1791345040",
+             "/api/ai-web/boot-screen/asset?kind=video&index=1&v=1791345041"],
   "poster": "/api/ai-web/boot-screen/asset?kind=poster&v=1791345031",
   "holdMs": 6000 }
 // 或
 { "enabled": false }
 ```
 
-`v=` 是素材 mtime，**换片子不需要清缓存**。
+`v=` 是素材 mtime（**换片子不需要清缓存**）；`index` 是它在播放列表里的位置。
 
 ### 2.3 前端（`index.html` boot loader）
 
 一段内联脚本（无框架），把覆盖层插到 **`document.body`** 上（不是 `#root`——React 挂载会替换
 `#root`，插在那里等于永远看不见）：
 
-- **播到片尾才进**：`ended` 后淡出移除；用户中途**点击或按任意键**立刻进入；
-- **加载完成才提示可跳过**：React 换上真实界面（默认 boot loader 被替换，用 `MutationObserver`
-  观测 `#root`）之后，底部才显形"加载完成 · 点击或按任意键跳过动画"。在应用起来之前不给这个
-  提示——那等于告诉用户"可以走了"，而界面还没准备好；
-- 未给 `holdMs` 时有 **30s 兜底上限**（只防"永远卡死"，正常片子远短于此）；
-- `prefers-reduced-motion: reduce` → 直接不注入，走默认 loader；
-- `fetch` 失败 / 无声明 / 视频 `error` → 静默移除，走默认 loader。
+- **按播放列表轮换，直到应用就绪**：未就绪时 `ended` 就换下一段（`index = (index + 1) % len`，
+  走完最后一段回到第一段）；**就绪后不打断当前这段**，让它放完再淡出进入——用户遇到的回归正是
+  "界面一出现动画就被切掉"；
+- **就绪信号**：React 换上真实界面（默认 boot loader `.boot-loader-wrap` 被替换，用
+  `MutationObserver` 观测 `#root`）才算就绪，此后底部才显形"加载完成 · 点击或按任意键跳过动画"。
+  在应用起来之前不给这个提示——那等于告诉用户"可以走了"，而界面还没准备好。页面本来就没有
+  `.boot-loader-wrap` 时立即算就绪；
+- **轮完一整圈都放不出来才放手**：单段 `error` 只是换下一段；连续 `playlist.length` 次失败
+  （期间没有 `playing`）才淡出。注意轮换只由 `ended` 触发——**卡住但不发 `ended`** 的片段不会被跳过，
+  只能等上限兜底；
+- **上限 120s**（`holdMs` 给了用它，后端夹到 `120000`；缺省也是 `120000`）：只防"应用永远加载不出来，
+  把用户永远挡在开屏页"这一种情况；
+- **自动播放被拒 / 环境没有媒体栈** → 立即放手（一个放不出声画的覆盖层比默认 loader 更糟）；
+- `prefers-reduced-motion: reduce` → 直接不注入；
+- `fetch` 失败 / 无声明 → 静默不注入，走默认 loader。
 
 **`z-index` 必须极高**（`2147483000`）：应用自己有不透明的全屏层（`App.tsx` 的
 `fixed inset-0 z-50 bg-panel`、`DesktopUpdateOverlay` 的 `z-[9999]` 等），覆盖层低于它们时动画
@@ -97,8 +111,8 @@ GET /api/ai-web/boot-screen/asset?kind=video|poster   # 素材本身
 
 | 文件 | 改动 |
 |---|---|
-| `src/opensquad/plugin_boot_screen.py` | 新增。纯函数：按优先级扫插件目录 → 解析 `contributes.bootScreen` → 产出 URL + 定位素材 |
-| `src/opensquad/gateway/backend/app/ai_web/routes/_main.py` | 新增两个免鉴权端点（配置 + 受限素材） |
+| `src/opensquad/plugin_boot_screen.py` | 纯函数：按优先级扫插件目录 → 解析 `contributes.bootScreen`（`videos`/`video`，丢掉不存在的条目）→ 产出播放列表 URL + 按 `index` 定位素材 |
+| `src/opensquad/gateway/backend/app/ai_web/routes/_main.py` | 两个免鉴权端点（配置 + 受限素材；素材端点带 `index`） |
 | `src/opensquad/gateway/nexuschat-pro/index.html` | `.boot-screen` 样式 + 内联加载脚本 |
 | `docs/plugin-boot-screen.md` | 本文 |
 | `tests/test_plugin_boot_screen.py` | 解析器 / 优先级 / 受限 kind / 路由契约 / ASGI 端到端 |
@@ -127,8 +141,8 @@ GET /api/ai-web/boot-screen/asset?kind=video|poster   # 素材本身
 
 - **插件不在 shell 里执行代码**：核心只读 JSON 声明、由核心播放媒体。没有扩大信任边界
   （对照 mods 矩阵铁律 1/3：`Client` 元素被 refused 正是因为"让插件加载任意前端模块"）。
-- **路径安全**：`video`/`poster` 必须是插件内的相对路径（拒绝绝对路径、`..`、scheme），解析后要求文件存在。
-- **素材端点受限**：只接受 `kind` 枚举；没有"按路径取文件"的入口，也不整目录暴露
+- **路径安全**：`videos`/`video`/`poster` 必须是插件内的相对路径（拒绝绝对路径、`..`、scheme），解析后要求文件存在。
+- **素材端点受限**：只接受 `kind` 枚举和 `index` 下标（下标非整数/越界即 404）；没有"按路径取文件"的入口，也不整目录暴露
   （这一点比 `/api/plugins/static` 的整目录挂载更紧）。
 - **同源**：URL 由后端拼出，不能指向外部域。
 
@@ -155,15 +169,16 @@ PLUGINS=$(python -c "import sys;sys.path.insert(0,'src');from opensquad.system_c
 # 1. 建插件目录
 mkdir -p "$PLUGINS/boot_mine/assets"
 
-# 2. 放你的片子（mp4/webm；16:9 比较合适，时长即你想让用户看到的时长）
-cp your-clip.mp4 "$PLUGINS/boot_mine/assets/boot.mp4"
+# 2. 放你的片子（mp4/webm；16:9 比较合适）。放多条就按顺序轮换，直到应用就绪
+cp your-clip.mp4 "$PLUGINS/boot_mine/assets/1.mp4"
+cp your-clip-2.mp4 "$PLUGINS/boot_mine/assets/2.mp4"
 
-# 3. 声明它
+# 3. 声明它（只要一条也可以：写 "video": "assets/1.mp4"）
 cat > "$PLUGINS/boot_mine/plugin.json" <<'JSON'
 {
   "name": "boot_mine",
   "enabled": true,
-  "contributes": { "bootScreen": { "video": "assets/boot.mp4", "holdMs": 6000 } }
+  "contributes": { "bootScreen": { "videos": ["assets/1.mp4", "assets/2.mp4"], "holdMs": 6000 } }
 }
 JSON
 ```
@@ -172,22 +187,22 @@ JSON
 
 - **网页版**：刷新 `http://127.0.0.1:9555`（开发态 :5173 走同一条 `/api` 代理）。
 - **桌面版**：重启 App。后端就绪前显示静态 `splash.html`，App URL 加载后由本特性接管。
-- 换片子：直接替换 `assets/boot.mp4`，刷新即可（URL 带 mtime，不需要清缓存）。
+- 换片子：直接替换 `assets/1.mp4` 等，刷新即可（URL 带 mtime，不需要清缓存）。
 - 关掉：删 `contributes.bootScreen`，或把 `enabled` 设为 `false`。
 
 ## 9. 验证（已跑通）
 
 | 面 | 证据 |
 |---|---|
-| 解析器（禁用 / 缺文件 / 路径穿越 / 上限 / 优先级） | `pytest tests/test_plugin_boot_screen.py` — **27 passed** |
+| 解析器（禁用 / 缺文件 / 路径穿越 / 上限 / 优先级 / `videos` 与 `video` / 播放列表丢死条目） | `pytest tests/test_plugin_boot_screen.py` — **33 passed** |
 | **私有优先**：workspace 插件压过字母序在前的随包插件；干净安装落到随包；都没有则默认 loader | 同上（`test_the_operators_own_plugins_win_over_the_shipped_ones`） |
-| 素材端点**受限**：`kind` 只认枚举，`../plugin.json`、`assets/boot.mp4` 这类值一律拒绝 | 同上（`test_resolve_asset_only_accepts_the_enum`） |
+| 素材端点**受限**：`kind` 只认枚举，`../plugin.json`、`assets/boot.mp4` 这类值一律拒绝；`index` 非整数/越界不服务 | 同上（`test_resolve_asset_only_accepts_the_enum`、`test_an_out_of_range_index_is_not_served`） |
 | 端点契约（eager router、两个都**免鉴权**、配置失败 fail-open、素材缺失 404） | 同上 |
 | 真链路（配置 → URL → 素材）：**真实 3.6MB mp4 实跑** | 私有插件胜出；整片 `200` / 3675935 bytes / `content-type: video/mp4`；`Range` → **206** `bytes 0-1023/3675935`；`kind=poster`（无）与 `kind=/etc/passwd` 均 **404** |
 | 挂载顺序（路由必须在静态 catch-all 之前） | 同上（源码守卫，对照 `main.py`） |
-| 加载脚本**真跑**（jsdom）：注入到 body / `ended` / 点击 / `holdMs` / 无声明 / 请求失败 / reduced-motion | `vitest utils/bootScreen.dom.test.ts` — **7 passed** |
-| 加载脚本契约 | `vitest utils/bootScreen.scan.test.ts` — **10 passed** |
-| 回归（会读 `index.html` 的既有测试 + mods 路由） | 前端 **100 passed**；后端 `test_gateway_mods_routes.py` **4 passed** |
+| 加载脚本**真跑**（jsdom）：注入到 body / 未就绪时 `ended` 换下一段 / 走完一圈回到第一段 / 一整圈都失败才放手 / 就绪后 `ended` 才退出 / 点击 / `holdMs` / 无声明 / 请求失败 / reduced-motion | `vitest utils/bootScreen.dom.test.ts` — **13 passed** |
+| 加载脚本契约（含"轮换不是单条重放"、"失败满一圈才放手"、120s 上限） | `vitest utils/bootScreen.scan.test.ts` — **12 passed** |
+| 回归（读 `index.html` 的既有测试 + 挂在同一 router 上的 mods 路由） | 前端整棵树 `vitest run` — **150 files / 1572 passed**；后端 `test_gateway_mods_routes.py` — **13 passed** |
 
 未验证的一步：在**跑着的实例**上肉眼看画面——需要按 §8 放一段真片并重启。代码链路已实测到
 "字节能从 URL 取回 200/206"，剩下的只是浏览器解码显示。

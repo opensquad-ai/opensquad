@@ -10,9 +10,13 @@
  *      not inside `#root`, which React replaces on mount (a #root-hosted
  *      overlay would vanish before it is ever seen, and the desktop app would
  *      show nothing at all);
- *   2. it always cleans itself up — on `ended`, on click, and on `holdMs`;
+ *   2. it always cleans itself up — on `ended` once the app is ready, on click, on
+ *      a whole lap of load failures, and on `holdMs`;
  *   3. the three fallbacks (no declaration / request failure / reduced motion)
- *      produce no overlay and never block startup.
+ *      produce no overlay and never block startup;
+ *   4. it plays the *playlist*: while the app is still booting, an `ended` clip is
+ *      followed by the next one (wrapping around), so the startup screen keeps
+ *      moving until React is up.
  */
 import fs from 'node:fs';
 import path from 'node:path';
@@ -29,12 +33,16 @@ function loaderSource(): string {
   return head.slice(start + '<script>'.length, end);
 }
 
+const CLIPS = [
+  '/api/ai-web/boot-screen/asset?kind=video&index=0&v=1',
+  '/api/ai-web/boot-screen/asset?kind=video&index=1&v=2',
+];
 const CONFIG = {
   enabled: true,
   source: 'theme',
   plugin: 'theme',
-  video: '/api/plugins/static/theme/assets/boot.mp4',
-  poster: '/api/plugins/static/theme/assets/boot.jpg',
+  videos: CLIPS,
+  poster: '/api/ai-web/boot-screen/asset?kind=poster&v=1',
   holdMs: 0,
 };
 
@@ -77,15 +85,64 @@ describe('a declared animation', () => {
     expect(document.getElementById('root')!.contains(box)).toBe(false);
 
     const video = box.querySelector('video') as HTMLVideoElement;
-    expect(video.getAttribute('src')).toBe(CONFIG.video);
+    expect(video.getAttribute('src')).toBe(CLIPS[0]);
     expect(video.getAttribute('poster')).toBe(CONFIG.poster);
     expect(video.muted).toBe(true); // autoplay policy: must start muted
   });
 
-  it('leaves on `ended`', async () => {
+  it('plays the next clip while the app is still booting', async () => {
     stubFetch(CONFIG);
     runLoader();
     await vi.waitFor(() => expect(document.querySelector('.boot-screen')).not.toBeNull());
+
+    const video = document.querySelector('.boot-screen video') as HTMLVideoElement;
+    // No mountApp() here: React has not replaced the default loader, so `ended`
+    // must keep the animation going instead of ending it.
+    video.dispatchEvent(new Event('ended'));
+
+    expect(video.getAttribute('src')).toBe(CLIPS[1]);
+    expect(document.querySelector('.boot-screen')!.classList.contains('is-leaving')).toBe(false);
+  });
+
+  it('wraps back to the first clip after the last one', async () => {
+    stubFetch(CONFIG);
+    runLoader();
+    await vi.waitFor(() => expect(document.querySelector('.boot-screen')).not.toBeNull());
+
+    const video = document.querySelector('.boot-screen video') as HTMLVideoElement;
+    video.dispatchEvent(new Event('ended'));
+    video.dispatchEvent(new Event('ended'));
+
+    expect(video.getAttribute('src')).toBe(CLIPS[0]);
+  });
+
+  it('gives up only after every clip has failed once', async () => {
+    stubFetch(CONFIG);
+    runLoader();
+    await vi.waitFor(() => expect(document.querySelector('.boot-screen')).not.toBeNull());
+
+    const video = document.querySelector('.boot-screen video') as HTMLVideoElement;
+    video.dispatchEvent(new Event('error'));
+    // One dead clip rotates past; it does not end the animation.
+    expect(document.querySelector('.boot-screen')).not.toBeNull();
+    expect(video.getAttribute('src')).toBe(CLIPS[1]);
+
+    video.dispatchEvent(new Event('error'));
+    await vi.waitFor(() => expect(document.querySelector('.boot-screen')).toBeNull(), { timeout: 2000 });
+  });
+
+  it('leaves on `ended` once the app is ready', async () => {
+    stubFetch(CONFIG);
+    runLoader();
+    await vi.waitFor(() => expect(document.querySelector('.boot-screen')).not.toBeNull());
+
+    mountApp();
+    // `ready` arrives through a MutationObserver (async) — the hint appearing is
+    // how the loader signals it. Dispatching `ended` before that just rotates.
+    await vi.waitFor(() => {
+      const hint = document.querySelector('.boot-screen-hint') as HTMLElement;
+      expect(hint.classList.contains('is-shown')).toBe(true);
+    });
 
     const box = document.querySelector('.boot-screen') as HTMLElement;
     box.querySelector('video')!.dispatchEvent(new Event('ended'));

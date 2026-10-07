@@ -7,14 +7,16 @@
  *
  *   L1  it asks the read-only endpoint `/api/ai-web/boot-screen` (no token — the
  *       loader runs before login);
- *   L2  it is **fail-open**: no declaration, a failed fetch, a video error, or a
- *       `prefers-reduced-motion` user all fall back to the default loader and
- *       must never block startup;
+ *   L2  it is **fail-open**: no declaration, a failed fetch, or a
+ *       `prefers-reduced-motion` user falls back to the default loader, and a clip
+ *       that cannot play is rotated past rather than treated as fatal — only a full
+ *       lap of failures gives up. It must never block startup;
  *   L3  the overlay is appended to `document.body`, NOT `#root` — React replaces
  *       `#root` on mount, so a `#root`-hosted overlay would be wiped before it is
  *       ever seen (this is what makes it visible in the desktop app too);
- *   L4  it always has an exit: `ended` / `holdMs` / click / key, plus a safety
- *       cap when the plugin gave no `holdMs`.
+ *   L4  it always has an exit: the playlist rotates until the app is ready, then the
+ *       current clip ends it — plus click / key and a hard cap that does not depend
+ *       on the plugin.
  */
 import fs from 'node:fs';
 import path from 'node:path';
@@ -48,7 +50,9 @@ describe('L2 — fail-open, never blocks startup', () => {
   });
 
   it('treats a missing or disabled declaration as a no-op', () => {
-    expect(SHELL).toMatch(/if \(!data \|\| !data\.enabled \|\| !data\.video/);
+    // The response carries a *playlist*; the loader normalises it before deciding.
+    expect(SHELL).toMatch(/var playlist = Array\.isArray\(data\.videos\)/);
+    expect(SHELL).toMatch(/if \(!data \|\| !data\.enabled \|\| !playlist\.length/);
   });
 });
 
@@ -75,9 +79,17 @@ describe('L3 — it survives React mounting', () => {
 });
 
 describe('L4 — it always has a way out', () => {
-  it('removes on the video ending or erroring', () => {
-    expect(SHELL).toContain("addEventListener('ended', done)");
-    expect(SHELL).toContain("addEventListener('error', done)");
+  it('rotates the playlist instead of stopping at the first clip', () => {
+    // Not one clip on repeat: the shell walks the list and wraps around.
+    expect(SHELL).toMatch(/index = \(index \+ 1\) % playlist\.length/);
+    expect(SHELL).toMatch(/addEventListener\('ended', function/);
+    expect(SHELL).toMatch(/addEventListener\('error', function/);
+  });
+
+  it('gives up only after a whole lap of failures', () => {
+    // One dead clip must not end the animation; a full lap must not hang it.
+    expect(SHELL).toMatch(/failures \+= 1/);
+    expect(SHELL).toMatch(/failures >= playlist\.length/);
   });
 
   it('lets the user skip with a click or a key', () => {
@@ -86,6 +98,7 @@ describe('L4 — it always has a way out', () => {
   });
 
   it('caps the wait when the plugin gave no holdMs', () => {
-    expect(SHELL).toMatch(/hold > 0 \? hold : \d+/);
+    // 120s — the documented hard cap, matching the backend's MAX_HOLD_MS.
+    expect(SHELL).toMatch(/hold > 0 \? hold : 120000/);
   });
 });
