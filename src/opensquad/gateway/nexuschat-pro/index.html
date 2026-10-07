@@ -557,11 +557,14 @@
         fetch('/api/ai-web/boot-screen', { headers: { Accept: 'application/json' } })
           .then(function (r) { return r.ok ? r.json() : null; })
           .then(function (data) {
-            if (!data || !data.enabled || !data.video || !document.body) return;
+            // `videos` 是会被轮换的播放列表；`video` 是单片的简便写法。
+            var playlist = Array.isArray(data.videos) ? data.videos.filter(Boolean) : [];
+            if (!data || !data.enabled || !playlist.length || !document.body) return;
             var box = document.createElement('div');
             box.className = 'boot-screen';
+            var index = 0;
             var video = document.createElement('video');
-            video.src = data.video;
+            video.src = playlist[0];
             video.muted = true;
             video.autoplay = true;
             video.setAttribute('playsinline', '');
@@ -573,6 +576,33 @@
             hint.setAttribute('role', 'status');
             box.appendChild(hint);
             document.body.appendChild(box);
+
+            // 自动播放被拒（或 jsdom 这类没有媒体栈的环境）时，别让一个放不出声画
+            // 的覆盖层把用户挡在外面——放手，退回默认 loader。
+            var tryPlay = function () {
+              try {
+                var p = video.play();
+                if (p && typeof p.catch === 'function') p.catch(done);
+              } catch (e) {
+                done();
+              }
+            };
+
+            var leaving = false;
+            var done = function () {
+              if (leaving) return;
+              leaving = true;
+              video.pause();
+              if (watcher) watcher.disconnect();
+              box.classList.add('is-leaving');
+              setTimeout(function () { if (box.parentNode) box.parentNode.removeChild(box); }, 340);
+              window.removeEventListener('keydown', done);
+            };
+            var advance = function () {
+              index = (index + 1) % playlist.length;
+              video.src = playlist[index];
+              tryPlay();
+            };
 
             // "加载完成" = React 已经换上真实界面（默认 boot loader 被替换掉）。
             // 在这之前不给"跳过"提示，否则等于说"可以走了"，而应用其实还没起来。
@@ -595,23 +625,39 @@
               watcher.observe(root, { childList: true, subtree: true });
             }
 
-            var leaving = false;
-            var done = function () {
-              if (leaving) return;
-              leaving = true;
-              video.pause();
-              if (watcher) watcher.disconnect();
-              box.classList.add('is-leaving');
-              setTimeout(function () { if (box.parentNode) box.parentNode.removeChild(box); }, 340);
-              window.removeEventListener('keydown', done);
-            };
-            video.addEventListener('ended', done);
-            video.addEventListener('error', done);
+            var failures = 0;
+            video.addEventListener('playing', function () {
+              failures = 0;
+            });
+            // 核心规则：**放完还没就绪 → 换下一段继续放，直到就绪**；就绪了，当前
+            // 这段放完就进界面（而不是立刻打断它）。
+            video.addEventListener('ended', function () {
+              if (ready) {
+                done();
+                return;
+              }
+              advance();
+            });
+            // 一段放不出来不该整个停掉；轮完整圈都不行才放手。
+            video.addEventListener('error', function () {
+              if (ready) {
+                done();
+                return;
+              }
+              failures += 1;
+              if (failures >= playlist.length) {
+                done();
+                return;
+              }
+              advance();
+            });
             box.addEventListener('click', done);
             window.addEventListener('keydown', done);
-            // 播完为止；这里的上限只是"永远不把用户卡死"的兜底（插件给了 holdMs 就用它的）。
+            // 兜底上限：现在是"循环到就绪为止"，所以给得比单条片长宽得多——它只防
+            // "应用永远加载不出来，把用户永远挡在开屏页"这一种情况。
             var hold = Number(data.holdMs);
-            setTimeout(done, hold > 0 ? hold : 30000);
+            setTimeout(done, hold > 0 ? hold : 120000);
+            tryPlay();
           })
           .catch(function () { /* fail-open: 退回默认 loader */ });
       } catch (e) { /* 装饰性，绝不阻塞启动 */ }

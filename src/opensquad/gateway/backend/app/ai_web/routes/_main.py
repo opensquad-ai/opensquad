@@ -306,17 +306,18 @@ async def get_boot_screen() -> dict[str, Any]:
 
 
 @router.get("/boot-screen/asset")
-async def get_boot_screen_asset(kind: str = "video"):
-    """Stream the animation asset the config just advertised.
+async def get_boot_screen_asset(kind: str = "video", index: int = 0):
+    """Stream one animation asset the config just advertised.
 
-    Confined by construction: the only caller input is ``kind`` (an enum), and the
-    file served is whatever the resolver picked — this route can never be pointed
-    at an arbitrary path, and it never exposes a plugin directory. ``FileResponse``
-    handles Range, which is what a ``<video>`` element streams with.
+    Confined by construction: the only caller inputs are ``kind`` (an enum) and
+    ``index`` (which clip of the playlist) — the file served is whatever the
+    resolver picked, so this route can never be pointed at an arbitrary path and
+    never exposes a plugin directory. ``FileResponse`` handles Range, which is
+    what a ``<video>`` element streams with.
     """
     from opensquad import plugin_boot_screen
 
-    path = await asyncio.to_thread(plugin_boot_screen.resolve_asset, kind)
+    path = await asyncio.to_thread(plugin_boot_screen.resolve_asset, kind, index)
     if not path:
         raise HTTPException(status_code=404, detail="no boot-screen asset")
     return FileResponse(path)

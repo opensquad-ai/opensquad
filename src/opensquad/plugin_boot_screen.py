@@ -6,9 +6,17 @@ A plugin may declare a startup animation in its manifest::
       "name": "my_boot_screen",
       "enabled": true,
       "contributes": {
-        "bootScreen": {"video": "assets/boot.mp4", "poster": "assets/boot.jpg", "holdMs": 3000}
+        "bootScreen": {
+          "videos": ["assets/1.mp4", "assets/2.mp4", "assets/3.mp4"],
+          "poster": "assets/boot.jpg",
+          "holdMs": 3000
+        }
       }
     }
+
+``videos`` is the playlist the shell rotates through while the app is still
+loading (it loops until the app is ready, then the current clip finishes and
+the UI shows); ``video`` stays as the one-clip shorthand.
 
 Unlike an "inject a script into index.html" seam (缝 A), the core owns the boot
 loader and only asks *what to play*: this module turns the enabled plugin's
@@ -92,6 +100,24 @@ def _asset_path(plugin_dir: str, rel: str) -> str:
     return os.path.join(plugin_dir, *rel.split("/"))
 
 
+def _safe_videos(contribution: dict[str, Any]) -> list[str]:
+    """Every declared clip, in declaration order, as a safe relative path.
+
+    ``videos`` (a list) is the playlist the shell rotates through; ``video`` (a
+    single path) stays as the one-clip shorthand. Non-strings, absolute paths,
+    ``..`` and schemes are dropped rather than breaking the whole playlist.
+    """
+    raw = contribution.get("videos")
+    if not isinstance(raw, list):
+        raw = [contribution.get("video")]
+    out: list[str] = []
+    for item in raw:
+        rel = _safe_rel(item)
+        if rel:
+            out.append(rel)
+    return out
+
+
 def _hold_ms(value: Any) -> int:
     try:
         n = int(value)
@@ -120,7 +146,7 @@ def boot_screen_roots() -> list[str]:
 
 
 def _pick(roots: list[str]) -> dict[str, Any] | None:
-    """The first enabled plugin (in root, then name order) with a usable video."""
+    """The first enabled plugin (in root, then name order) with a usable clip."""
     for root in roots:
         if not root or not os.path.isdir(root):
             continue
@@ -136,20 +162,22 @@ def _pick(roots: list[str]) -> dict[str, Any] | None:
             contribution = (meta.get("contributes") or {}).get("bootScreen")
             if not isinstance(contribution, dict):
                 continue
-            video_rel = _safe_rel(contribution.get("video"))
-            if not video_rel or not os.path.isfile(_asset_path(plugin_dir, video_rel)):
+            # Only clips that really exist: a dead entry must not be advertised.
+            videos = [rel for rel in _safe_videos(contribution) if os.path.isfile(_asset_path(plugin_dir, rel))]
+            if not videos:
                 continue
-            return {"dir": plugin_dir, "name": entry, "meta": meta, "contribution": contribution}
+            return {"dir": plugin_dir, "name": entry, "meta": meta, "contribution": contribution, "videos": videos}
     return None
 
 
-def _asset_url(kind: str, path: str) -> str:
+def _asset_url(kind: str, path: str, index: int = 0) -> str:
     """A cache-busting URL for one asset, so a replaced clip is never served stale."""
     try:
         version = int(os.path.getmtime(path))
     except OSError:
         version = 0
-    return f"{ASSET_ROUTE}?kind={kind}&v={version}"
+    suffix = f"&index={index}" if kind == "video" else ""
+    return f"{ASSET_ROUTE}?kind={kind}{suffix}&v={version}"
 
 
 def resolve_boot_screen(roots: list[str] | None = None) -> dict[str, Any]:
@@ -158,11 +186,8 @@ def resolve_boot_screen(roots: list[str] | None = None) -> dict[str, Any]:
     if picked is None:
         return {"enabled": False}
 
-    contribution = picked["contribution"]
-    video_path = _asset_path(picked["dir"], _safe_rel(contribution.get("video")))
-
     poster = ""
-    poster_rel = _safe_rel(contribution.get("poster"))
+    poster_rel = _safe_rel(picked["contribution"].get("poster"))
     if poster_rel:
         poster_path = _asset_path(picked["dir"], poster_rel)
         if os.path.isfile(poster_path):
@@ -172,24 +197,31 @@ def resolve_boot_screen(roots: list[str] | None = None) -> dict[str, Any]:
         "enabled": True,
         "source": str(picked["meta"].get("name") or picked["name"]),
         "plugin": picked["name"],
-        "video": _asset_url("video", video_path),
+        "videos": [_asset_url("video", _asset_path(picked["dir"], rel), i) for i, rel in enumerate(picked["videos"])],
         "poster": poster,
-        "holdMs": _hold_ms(contribution.get("holdMs")),
+        "holdMs": _hold_ms(picked["contribution"].get("holdMs")),
     }
 
 
-def resolve_asset(kind: str, roots: list[str] | None = None) -> str:
+def resolve_asset(kind: str, index: int = 0, roots: list[str] | None = None) -> str:
     """Absolute path of an asset the config just advertised, or ``""``.
 
-    ``kind`` is the only thing that comes from the caller — and it is an enum,
-    never a path. The file served is whatever the resolver itself picked.
+    ``kind`` is an enum and ``index`` selects which clip of the playlist — those
+    are the only things that come from the caller, never a path. The file served
+    is whatever the resolver itself picked.
     """
     if kind not in _ASSET_KINDS:
         return ""
     picked = _pick(roots if roots is not None else boot_screen_roots())
     if picked is None:
         return ""
-    rel = _safe_rel(picked["contribution"].get(kind))
+    if kind == "poster":
+        rel = _safe_rel(picked["contribution"].get("poster"))
+    else:
+        videos = picked["videos"]
+        if not isinstance(index, int) or isinstance(index, bool) or not 0 <= index < len(videos):
+            return ""
+        rel = videos[index]
     if not rel:
         return ""
     path = _asset_path(picked["dir"], rel)
