@@ -1426,9 +1426,24 @@ const App: React.FC = () => {
   // (handleOpenSettings already exists above, next to handleAIChatBack.)
   const handleOpenCollabBoard = useCallback(() => setIsCollabBoardOpen(true), []);
 
+  // 插件开屏动画靠这个标志判断"应用真的可用了"。只置位、从不撤销——整页刷新会
+  // 重建 document，标志自然回到未就绪。React 挂载不算就绪：挂载后 App 还要加载
+  // 配置/注册状态，那几秒它自己也在显示四象限 loader。
+  const bootGateOpen = isLoading || registrationStatus === 'unknown';
+  useEffect(() => {
+    // 埋点：开屏动画那份 [boot-screen] 时间线把这里记成 app-ready。记两个方向——
+    // gate 关过之后再开（依赖会变），开屏动画已经退场，那几秒会露出自带 loader。
+    console.info(
+      '[boot] startup gate ' + (bootGateOpen ? 'OPEN' : 'closed → data-opensquad-ready'),
+      Math.round(performance.now()) + 'ms(abs)',
+    );
+    if (bootGateOpen) return;
+    document.documentElement.dataset.opensquadReady = '1';
+  }, [bootGateOpen]);
+
   // Render gates — derived from (isLoading, currentUser, registrationStatus,
   // langPicked). No explicit stage state machine.
-  if (isLoading || registrationStatus === 'unknown') {
+  if (bootGateOpen) {
     return (
       <ElectronShell className="bg-bgLight text-textMuted">
         <div className="h-full w-full flex items-center justify-center">

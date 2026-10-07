@@ -54,12 +54,27 @@ describe('L2 — fail-open, never blocks startup', () => {
     expect(SHELL).toMatch(/var playlist = Array\.isArray\(data\.videos\)/);
     expect(SHELL).toMatch(/if \(!data \|\| !data\.enabled \|\| !playlist\.length/);
   });
+
+  it('waits for the app to be usable, not merely mounted', () => {
+    // Two conditions, and either one alone is a bug the user can see:
+    //   - mounting is not readiness (the app shows the same quad loader while it
+    //     fetches its config), so the static-loader signal is gone;
+    //   - leaving the gate is not readiness either (the app keeps showing that quad
+    //     loader while it loads sessions), so it must also be gone from #root.
+    expect(SHELL).toMatch(/data-opensquad-ready/);
+    expect(SHELL).not.toMatch(/querySelector\('\.boot-loader-wrap'\)/);
+    expect(SHELL).toMatch(/!quadLoaders\(\)/);
+    expect(SHELL).toMatch(/#root svg\[role="status"\]/);
+  });
 });
 
 describe('L3 — it survives React mounting', () => {
   it('appends the overlay to document.body, not #root', () => {
     expect(SHELL).toContain('document.body.appendChild(box)');
-    expect(SHELL).not.toMatch(/#root[\s\S]{0,80}appendChild/);
+    // No appendChild onto the root element anywhere (a #root-hosted overlay would be
+    // wiped by React on mount). Kept per-statement so a selector string mentioning
+    // `#root` on another line cannot trip it.
+    expect(SHELL).not.toMatch(/(rootEl|getElementById\('root'\))[^;\n]{0,60}appendChild/);
   });
 
   it('styles the overlay and its leave state', () => {
@@ -78,6 +93,55 @@ describe('L3 — it survives React mounting', () => {
   });
 });
 
+describe('L5 — the built-in quad is never what the user sees', () => {
+  it('declares the overlay CSS in <head>, never inside #root', () => {
+    // React clears #root's children on mount. A `.boot-screen` rule living inside
+    // #root therefore vanishes ~600ms in: the overlay drops out of its fixed
+    // full-screen position into normal flow at the bottom of the page and the user
+    // sees the app's own quad instead. Measured: position:static, top=viewport height.
+    const headEnd = SHELL.indexOf('</head>');
+    const rootStart = SHELL.indexOf('<div id="root"');
+    const ruleAt = SHELL.indexOf('.boot-screen {');
+    expect(headEnd, 'no </head> in the shell').toBeGreaterThan(-1);
+    expect(ruleAt, 'the .boot-screen rule went missing').toBeGreaterThan(-1);
+    expect(ruleAt, 'overlay CSS must be declared before </head>').toBeLessThan(headEnd);
+    expect(rootStart, '#root must start after </head>').toBeGreaterThan(headEnd);
+  });
+
+  it('swaps the poster in before it swaps the clip, so a seam is never blank', () => {
+    // Changing src drops the current frame; the poster (next clip's captured first
+    // frame) has to be in place first, otherwise the seam shows the backdrop.
+    const at = SHELL.indexOf('var advance = function');
+    expect(at, 'advance() went missing').toBeGreaterThan(-1);
+    const body = SHELL.slice(at, at + 700);
+    const posterAt = body.indexOf('video.poster = cover');
+    const srcAt = body.indexOf('video.src = nextUrl');
+    expect(posterAt, 'advance() no longer sets a poster').toBeGreaterThan(-1);
+    expect(srcAt, 'advance() no longer swaps the clip').toBeGreaterThan(-1);
+    expect(posterAt, 'poster must be set before src').toBeLessThan(srcAt);
+  });
+
+  it('hides the static glyph before the network answers', () => {
+    // The glyph node stays in #root (the readiness check counts it); only its
+    // visibility goes away, so the first moments are animation-only.
+    expect(SHELL).toMatch(/#root \.boot-loader-wrap > svg\{visibility:hidden\}/);
+  });
+
+  it('plays the cached playlist first, so the first paint is already the animation', () => {
+    expect(SHELL).toContain('localStorage.getItem(CACHE_KEY)');
+    expect(SHELL).toContain('localStorage.setItem(');
+  });
+
+  it('hands over only when the user says so', () => {
+    // A clip ending must never take the user in — ready or not. The only exits are the
+    // user (click/key), a whole lap of load failures, and the cap.
+    expect(SHELL).not.toMatch(/done\('ended-ready'\)/);
+    expect(SHELL).not.toMatch(/done\('error-ready'\)/);
+    expect(SHELL).toMatch(/box\.addEventListener\('click', onClick\)/);
+    expect(SHELL).toMatch(/window\.addEventListener\('keydown', onKey\)/);
+  });
+});
+
 describe('L4 — it always has a way out', () => {
   it('rotates the playlist instead of stopping at the first clip', () => {
     // Not one clip on repeat: the shell walks the list and wraps around.
@@ -93,8 +157,10 @@ describe('L4 — it always has a way out', () => {
   });
 
   it('lets the user skip with a click or a key', () => {
-    expect(SHELL).toContain("box.addEventListener('click', done)");
-    expect(SHELL).toContain("window.addEventListener('keydown', done)");
+    // Named handlers: the keydown one is also what gets removed on exit.
+    expect(SHELL).toMatch(/box\.addEventListener\('click', onClick\)/);
+    expect(SHELL).toMatch(/window\.addEventListener\('keydown', onKey\)/);
+    expect(SHELL).toMatch(/removeEventListener\('keydown', onKey\)/);
   });
 
   it('caps the wait when the plugin gave no holdMs', () => {

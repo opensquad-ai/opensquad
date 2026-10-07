@@ -16,7 +16,12 @@
  *      produce no overlay and never block startup;
  *   4. it plays the *playlist*: while the app is still booting, an `ended` clip is
  *      followed by the next one (wrapping around), so the startup screen keeps
- *      moving until React is up.
+ *      moving until the app is up;
+ *   5. "up" is the app leaving its gate (`<html data-opensquad-ready>`) **and** no
+ *      longer rendering a four-quadrant loader of its own — NOT React mounting.
+ *      After mounting the app shows the *same* loader while it fetches its config and
+ *      then its sessions, which on a cold start is seconds; either signal alone hands
+ *      those seconds back to the built-in loader.
  */
 import fs from 'node:fs';
 import path from 'node:path';
@@ -58,15 +63,17 @@ function runLoader(): void {
 }
 
 beforeEach(() => {
-  // The default shell: #root still holds the boot loader, i.e. React has not mounted.
-  document.body.innerHTML = '<div id="root"><div class="boot-loader-wrap"></div></div>';
+  // The default shell: React has not mounted, and the app has not left its gate.
+  document.body.innerHTML = '<div id="root"></div>';
+  document.documentElement.removeAttribute('data-opensquad-ready');
+  localStorage.removeItem('opensquad.bootScreen');
   // jsdom logs "Not implemented" for media control; the loader pauses on exit.
   vi.spyOn(window.HTMLMediaElement.prototype, 'pause').mockImplementation(() => {});
 });
 
-/** React replacing the boot loader — the signal the loader treats as "app is ready". */
+/** The app leaving its startup gate — the signal the loader treats as "ready". */
 function mountApp(): void {
-  document.getElementById('root')!.innerHTML = '<div data-app="ready"></div>';
+  document.documentElement.setAttribute('data-opensquad-ready', '1');
 }
 
 afterEach(() => {
@@ -96,8 +103,24 @@ describe('a declared animation', () => {
     await vi.waitFor(() => expect(document.querySelector('.boot-screen')).not.toBeNull());
 
     const video = document.querySelector('.boot-screen video') as HTMLVideoElement;
-    // No mountApp() here: React has not replaced the default loader, so `ended`
-    // must keep the animation going instead of ending it.
+    // No mountApp() here: the app has not left its gate, so `ended` must keep the
+    // animation going instead of ending it.
+    video.dispatchEvent(new Event('ended'));
+
+    expect(video.getAttribute('src')).toBe(CLIPS[1]);
+    expect(document.querySelector('.boot-screen')!.classList.contains('is-leaving')).toBe(false);
+  });
+
+  it('keeps rotating when the app is mounted but still inside its gate', async () => {
+    // The reported bug: React mounts in well under a second, then the app renders the
+    // same four-quadrant loader for seconds while it fetches its config. Treating
+    // "mounted" as ready handed the screen over to exactly that loader.
+    stubFetch(CONFIG);
+    runLoader();
+    await vi.waitFor(() => expect(document.querySelector('.boot-screen')).not.toBeNull());
+
+    document.getElementById('root')!.innerHTML = '<div data-app="mounted"></div>';
+    const video = document.querySelector('.boot-screen video') as HTMLVideoElement;
     video.dispatchEvent(new Event('ended'));
 
     expect(video.getAttribute('src')).toBe(CLIPS[1]);
@@ -131,7 +154,39 @@ describe('a declared animation', () => {
     await vi.waitFor(() => expect(document.querySelector('.boot-screen')).toBeNull(), { timeout: 2000 });
   });
 
-  it('leaves on `ended` once the app is ready', async () => {
+  it('does not leave while the app still shows a quad loader of its own', async () => {
+    // The reported tail: past the gate the app keeps rendering the same four-quadrant
+    // loader for seconds (sessions/workspace loading). Keying on the gate alone handed
+    // those seconds back to the built-in loader.
+    stubFetch(CONFIG);
+    runLoader();
+    await vi.waitFor(() => expect(document.querySelector('.boot-screen')).not.toBeNull());
+
+    mountApp();
+    // The app is past its gate but still loading: an OpenSquadLoader is on screen.
+    document.getElementById('root')!.innerHTML = '<svg role="status" aria-label="加载中" width="72"></svg>';
+    await new Promise((r) => setTimeout(r, 30));
+
+    const hint = document.querySelector('.boot-screen-hint') as HTMLElement;
+    expect(hint.classList.contains('is-shown'), 'not usable yet — the app is still loading').toBe(false);
+
+    const video = document.querySelector('.boot-screen video') as HTMLVideoElement;
+    video.dispatchEvent(new Event('ended'));
+    expect(video.getAttribute('src')).toBe(CLIPS[1]);
+
+    // That loader gone + the gate closed → the hint shows. But the clip ending still
+    // must not take the user in on its own: leaving is the user's call.
+    document.getElementById('root')!.innerHTML = '<div data-app="ready"></div>';
+    await vi.waitFor(() => expect(hint.classList.contains('is-shown')).toBe(true));
+    video.dispatchEvent(new Event('ended'));
+    await new Promise((r) => setTimeout(r, 30));
+    expect(document.querySelector('.boot-screen'), 'the user leaves, not the clip').not.toBeNull();
+
+    document.querySelector('.boot-screen')!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    await vi.waitFor(() => expect(document.querySelector('.boot-screen')).toBeNull(), { timeout: 2000 });
+  });
+
+  it('stays put on `ended` once the app is ready — the user leaves, not the clip', async () => {
     stubFetch(CONFIG);
     runLoader();
     await vi.waitFor(() => expect(document.querySelector('.boot-screen')).not.toBeNull());
@@ -145,20 +200,40 @@ describe('a declared animation', () => {
     });
 
     const box = document.querySelector('.boot-screen') as HTMLElement;
-    box.querySelector('video')!.dispatchEvent(new Event('ended'));
+    const video = box.querySelector('video') as HTMLVideoElement;
+    video.dispatchEvent(new Event('ended'));
 
-    expect(box.classList.contains('is-leaving')).toBe(true);
+    expect(box.classList.contains('is-leaving')).toBe(false);
+    expect(video.getAttribute('src')).toBe(CLIPS[1]);
+
+    box.dispatchEvent(new MouseEvent('click', { bubbles: true }));
     await vi.waitFor(() => expect(document.querySelector('.boot-screen')).toBeNull(), { timeout: 2000 });
   });
 
-  it('leaves when the user clicks it', async () => {
+  it('ignores a click while the app is still loading', async () => {
+    // Clicking before the app is usable would drop the user onto the app's own
+    // loading screen — the thing the animation exists to cover.
     stubFetch(CONFIG);
     runLoader();
     await vi.waitFor(() => expect(document.querySelector('.boot-screen')).not.toBeNull());
 
     const box = document.querySelector('.boot-screen') as HTMLElement;
     box.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    await new Promise((r) => setTimeout(r, 30));
 
+    expect(document.querySelector('.boot-screen'), 'still loading — the click must not land').not.toBeNull();
+  });
+
+  it('leaves when the user clicks it once the app is ready', async () => {
+    stubFetch(CONFIG);
+    runLoader();
+    await vi.waitFor(() => expect(document.querySelector('.boot-screen')).not.toBeNull());
+
+    mountApp();
+    const hint = document.querySelector('.boot-screen-hint') as HTMLElement;
+    await vi.waitFor(() => expect(hint.classList.contains('is-shown')).toBe(true));
+
+    document.querySelector('.boot-screen')!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
     await vi.waitFor(() => expect(document.querySelector('.boot-screen')).toBeNull(), { timeout: 2000 });
   });
 
@@ -200,15 +275,6 @@ describe('the skip affordance', () => {
     expect(box!.classList.contains('is-leaving')).toBe(false);
   });
 
-  it('leaves as soon as it is clicked', async () => {
-    stubFetch(CONFIG);
-    runLoader();
-    await vi.waitFor(() => expect(document.querySelector('.boot-screen')).not.toBeNull());
-    mountApp();
-
-    document.querySelector('.boot-screen')!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
-    await vi.waitFor(() => expect(document.querySelector('.boot-screen')).toBeNull(), { timeout: 2000 });
-  });
 });
 
 describe('the fallbacks', () => {
@@ -231,5 +297,71 @@ describe('the fallbacks', () => {
     const fetchMock = stubFetch(CONFIG);
     runLoader();
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+});
+
+describe('covering the built-in quad loader', () => {
+  it('starts from the cached playlist without waiting for the network', () => {
+    // "一访问就是自定义动画": the last playlist is cached on this machine, so the
+    // overlay is on screen before the request even answers.
+    localStorage.setItem('opensquad.bootScreen', JSON.stringify({ videos: CLIPS, poster: '', holdMs: 0 }));
+    vi.stubGlobal('fetch', vi.fn(() => new Promise(() => {})));
+
+    runLoader();
+
+    const box = document.querySelector('.boot-screen');
+    expect(box, 'the cached clip covers the screen immediately').not.toBeNull();
+    expect(box!.querySelector('video')!.getAttribute('src')).toBe(CLIPS[0]);
+  });
+
+  it('covers the first paint with the frame captured last time', () => {
+    // The video element has no frame for the first second or two (the media request
+    // queues behind the app's own boot), which used to show as a blank screen. The
+    // captured first frame is set as the poster, so there is something to look at.
+    localStorage.setItem('opensquad.bootScreen', JSON.stringify({ videos: CLIPS, poster: '', holdMs: 0 }));
+    localStorage.setItem(
+      'opensquad.bootScreen:posters',
+      JSON.stringify({ map: { [CLIPS[0]]: 'data:image/jpeg;base64,AAAA' }, order: [CLIPS[0]] }),
+    );
+    vi.stubGlobal('fetch', vi.fn(() => new Promise(() => {})));
+
+    runLoader();
+
+    const video = document.querySelector('.boot-screen video') as HTMLVideoElement;
+    expect(video.poster).toBe('data:image/jpeg;base64,AAAA');
+  });
+
+  it('hides the built-in glyph instead of leaving it on screen', () => {
+    // The static quad sits in #root until React replaces it. Hiding it is what makes
+    // even the first moments animation-only (the node stays for the readiness check).
+    document.body.innerHTML =
+      '<div id="root"><div class="boot-loader-wrap"><svg role="status" width="96"></svg></div></div>';
+    stubFetch(CONFIG);
+    runLoader();
+
+    const css = Array.from(document.head.querySelectorAll('style'))
+      .map((s) => s.textContent || '')
+      .join('\n');
+    expect(css).toContain('#root .boot-loader-wrap > svg');
+    expect(css).toContain('visibility:hidden');
+  });
+
+  it('takes the hint back if the app returns to a full-screen load', async () => {
+    stubFetch(CONFIG);
+    runLoader();
+    await vi.waitFor(() => expect(document.querySelector('.boot-screen')).not.toBeNull());
+
+    mountApp();
+    const hint = document.querySelector('.boot-screen-hint') as HTMLElement;
+    await vi.waitFor(() => expect(hint.classList.contains('is-shown')).toBe(true));
+
+    // The gate re-opens: a full-screen quad is back, so "点击跳过" would be a lie and
+    // the animation must not hand over.
+    document.getElementById('root')!.innerHTML = '<svg role="status" aria-label="加载中" width="96"></svg>';
+    await vi.waitFor(() => expect(hint.classList.contains('is-shown')).toBe(false));
+
+    const video = document.querySelector('.boot-screen video') as HTMLVideoElement;
+    video.dispatchEvent(new Event('ended'));
+    expect(video.getAttribute('src'), 'still not usable → keep rotating').toBe(CLIPS[1]);
   });
 });
