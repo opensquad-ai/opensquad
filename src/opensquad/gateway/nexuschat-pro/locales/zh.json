@@ -1038,6 +1038,10 @@
     },
     "browser": {
       "hint": "在内置浏览器里打开网页（桌面端是真正的浏览器，网页端受目标网站是否允许被嵌入限制）",
+      "modeMine": "我的浏览器",
+      "modeAgent": "Agent 浏览器",
+      "agentIdle": "Agent 还没有打开浏览器。",
+      "agentReadOnly": "只读预览：这是 agent 正在用的同一个浏览器，点击不会回传——要操作请在对话里让 agent 去做，或用「在系统浏览器中打开」。",
       "back": "后退",
       "forward": "前进",
       "reload": "刷新",

@@ -152,12 +152,61 @@ def _env_has_playwright_user_data_dir(env: dict | None) -> bool:
     return bool((merged.get("PLAYWRIGHT_MCP_USER_DATA_DIR") or "").strip())
 
 
+def _strip_flag(args: list, name: str, *, takes_value: bool) -> list:
+    """Drop ``--name``, ``--name=value`` (and ``--name value`` when it takes one) from args."""
+    out: list = []
+    skip_next = False
+    for arg in args:
+        if skip_next:
+            skip_next = False
+            continue
+        if isinstance(arg, str) and (arg == name or arg.startswith(name + "=")):
+            skip_next = takes_value and arg == name
+            continue
+        out.append(arg)
+    return out
+
+
+def _builtin_browser_endpoint() -> str:
+    """This agent's built-in browser, started on demand, as a CDP endpoint ("" if unavailable).
+
+    The built-in browser lives in the launcher, so this is an HTTP round-trip; callers run it
+    off the event loop.
+    """
+    try:
+        from opensquad.tools.browser import agent_browser_cdp_endpoint
+
+        return agent_browser_cdp_endpoint()
+    except Exception as exc:  # noqa: BLE001 - sharing is an upgrade, not a requirement
+        logger.info("[MCP] built-in browser not available for sharing: %s", exc)
+        return ""
+
+
 def ensure_playwright_persistent_profile(server_name: str, cfg: dict) -> tuple[list, dict | None]:
-    """Inject --user-data-dir for Playwright MCP when no explicit profile is configured."""
+    """Point the Playwright MCP at the agent's built-in browser.
+
+    The MCP is given a CDP endpoint rather than a profile of its own, so the plugin — which
+    still believes it owns a browser — navigates and clicks the very page the built-in browser
+    and the panel show. It keeps a standalone persistent profile only when that browser cannot
+    be reached, because a plugin with its own browser still beats a broken one.
+    """
     args = list(cfg.get("args") or [])
     env = cfg.get("env")
     if not _is_playwright_mcp_server(server_name, cfg):
         return args, env
+
+    endpoint = _builtin_browser_endpoint()
+    if endpoint:
+        # The shared browser owns the profile; a second --user-data-dir would make the MCP
+        # launch its own browser and the whole point would be lost.
+        args = _strip_flag(args, "--user-data-dir", takes_value=True)
+        args = _strip_flag(args, "--isolated", takes_value=False)
+        if env:
+            env = {k: v for k, v in env.items() if k != "PLAYWRIGHT_MCP_USER_DATA_DIR"} or None
+        args = [*args, "--cdp-endpoint", endpoint]
+        logger.info("[MCP] Playwright MCP shares the built-in browser at %s", endpoint)
+        return args, env
+
     if _args_have_isolated(args) or _args_have_user_data_dir(args) or _env_has_playwright_user_data_dir(env):
         return args, env
 
@@ -321,7 +370,9 @@ class MCPAdapter:
     async def _connect_server(self, server_name: str, cfg: dict):
         """Connect to a single MCP server (Custom Implementation avoiding stdio_client generator issues)"""
         command = cfg.get("command", "npx")
-        args, env = ensure_playwright_persistent_profile(server_name, cfg)
+        # Off the loop: resolving the shared browser's CDP endpoint is an HTTP call to the
+        # launcher, and it can also be the one that starts that browser.
+        args, env = await asyncio.to_thread(ensure_playwright_persistent_profile, server_name, cfg)
         # Ensure env is a dict if provided, else None
         if env:
             # Merge with system env to ensure basic paths are available

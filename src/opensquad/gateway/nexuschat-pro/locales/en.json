@@ -1038,6 +1038,10 @@
     },
     "browser": {
       "hint": "Open a page in the built-in browser (a real browser in the desktop app; in the web build it depends on whether the site allows framing)",
+      "modeMine": "My browser",
+      "modeAgent": "Agent browser",
+      "agentIdle": "The agent has not opened a browser yet.",
+      "agentReadOnly": "Read-only preview: this is the same browser the agent uses, and clicks here are not sent to it — ask the agent in the chat, or use \"Open in system browser\".",
       "back": "Back",
       "forward": "Forward",
       "reload": "Reload",

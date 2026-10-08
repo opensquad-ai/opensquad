@@ -9,9 +9,9 @@ watch what happens.
 The session id defaults to one per agent (`agent-<id>`), so an agent's tools and its panel are
 one browser rather than two; passing an id explicitly addresses another one.
 
-Not the same thing as the Playwright MCP server: that drives its own browser process, invisible
-to the user. Use these tools when the user should see the page (previews, walkthroughs,
-"look at this" screenshots); MCP stays fine for headless scraping.
+The Playwright MCP server is pointed at this same session: `agent_browser_cdp_endpoint()` opens
+the browser and hands the MCP its CDP port, so the plugin drives the page the user is looking at
+instead of a second browser nobody can see. See `opensquad/tools/mcp_adapter.py`.
 """
 
 from __future__ import annotations
@@ -170,5 +170,21 @@ def browser_screenshot(session_id: str = "", full_page: bool = False) -> dict[st
 
 
 def browser_close(session_id: str = "") -> dict[str, Any]:
-    """Stop the built-in browser and free the page."""
+    """Stop the built-in browser and free the page.
+
+    The Playwright MCP drives this same browser, so closing it detaches the plugin too.
+    """
     return _call("close", session_id=session_id)
+
+
+def agent_browser_cdp_endpoint(session_id: str = "") -> str:
+    """Start this agent's built-in browser (if needed) and return its CDP endpoint.
+
+    Handed to the Playwright MCP as ``--cdp-endpoint`` so the plugin drives the same Chromium
+    the `browser_use` tools and the panel use. Returns "" when the launcher is unreachable or
+    the session could not start — the caller then leaves the MCP with a browser of its own,
+    because a working plugin beats a shared one.
+    """
+    result = _call("open", session_id=session_id, headless=True)
+    port = result.get("cdp_port") if result.get("ok") else 0
+    return f"http://127.0.0.1:{port}" if port else ""
