@@ -389,6 +389,44 @@ class GatewayAdapter(BaseAgent):
                     logger.info(f"[Adapter] Stop task (legacy no-sid, no focus) → all by user {user_id}")
             return
 
+        if command == "mod_action":
+            # A Claude Code mod's button press. The UI never gets a handle: it
+            # sends back the id the *host* minted, and the mods_host plugin
+            # invokes the stored callback and redraws the band.
+            action = str(cmd_data.get("action") or "").strip()
+            if action:
+                from opensquad.events import bus as _bus
+
+                await _bus.emit_async(
+                    "mod_action",
+                    {
+                        "action": action,
+                        "sid": str(cmd_data.get("session_id") or ""),
+                        "user_id": user_id,
+                    },
+                )
+            return
+
+        if command == "mod_command":
+            # A surface invoked a Claude Code mod's slash command. The adapter
+            # cannot reach the plugin directly (it has no plugin manager
+            # reference), so it hands the request to the bus and the mods_host
+            # plugin both runs it and speaks the answer.
+            name = str(cmd_data.get("name") or "").lstrip("/+")
+            if name:
+                from opensquad.events import bus as _bus
+
+                await _bus.emit_async(
+                    "mod_command",
+                    {
+                        "name": name,
+                        "args": list(cmd_data.get("args") or []),
+                        "sid": str(cmd_data.get("session_id") or ""),
+                        "user_id": user_id,
+                    },
+                )
+            return
+
         if command == "stop_session_job":
             # Kill a single background shell job (composer terminal bar trash icon).
             # Two target kinds:

@@ -30,5 +30,6 @@
       "pydub",
       "imageio-ffmpeg"
     ]
-  }
+  },
+  "setup": {}
 }

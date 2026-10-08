@@ -204,3 +204,106 @@ describe('detail locale keys', () => {
     }
   });
 });
+
+describe('L6 — the agent-tools chip only appears for plugins that have tools', () => {
+  function renderChip(agentLoaded: boolean | null, tools: unknown[]) {
+    act(() => {
+      root.render(
+        h(PluginCard, {
+          plugin: { ...plugin, tools } as unknown as PluginInfo,
+          layout: 'list',
+          toggling: false,
+          onToggle: () => {},
+          configOpen: false,
+          onConfigToggle: () => {},
+          onOpenView: () => {},
+          starred: false,
+          onToggleStar: () => {},
+          agentLoaded,
+          onAgentToggle: () => {},
+          agentToolLevel: 'extended',
+          onToolLevelChange: () => {},
+          onUninstall: () => {},
+          onOpenDetail: () => {},
+        }),
+      );
+    });
+  }
+
+  it('hides it for a manifest-only plugin — nothing to add to the agent', () => {
+    // boot_private is exactly this shape: contributes.bootScreen + assets, tools: [].
+    // Its "Off" chip read as "the plugin is disabled" (2026-10-07).
+    renderChip(false, []);
+    expect(byText('button', 'Off'), 'no tools → no chip').toBeUndefined();
+    expect(byText('button', 'On')).toBeUndefined();
+  });
+
+  it('keeps it for a plugin that does have tools', () => {
+    renderChip(false, [{ name: 'create_agent', level: 'core' }]);
+    expect(byText('button', 'Off'), 'tool plugins keep the affordance').toBeDefined();
+  });
+});
+
+describe('L7 — a plugin you can disable always has its switch on the card', () => {
+  const zh = JSON.parse(read('locales/zh.json'));
+  const SERVICE_ONLY_TITLE = zh.pluginManager.serviceOnlyTitle as string;
+
+  function renderSwitch(opts: { serviceOnly: boolean; tools: unknown[]; enabled: boolean; onToggle: () => void }) {
+    act(() => {
+      root.render(
+        h(PluginCard, {
+          plugin: {
+            ...plugin,
+            tools: opts.tools,
+            enabled: opts.enabled,
+            service_only: opts.serviceOnly,
+          } as unknown as PluginInfo,
+          layout: 'list',
+          toggling: false,
+          onToggle: opts.onToggle,
+          configOpen: false,
+          onConfigToggle: () => {},
+          onOpenView: () => {},
+          starred: false,
+          onToggleStar: () => {},
+          agentLoaded: null,
+          onAgentToggle: () => {},
+          agentToolLevel: 'extended',
+          onToolLevelChange: () => {},
+          onUninstall: () => {},
+          onOpenDetail: () => {},
+        }),
+      );
+    });
+  }
+
+  it('gives a manifest-only plugin a working switch (no service, no tools, no service_toggle)', () => {
+    // boot_private's shape. Before: the switch was gated on service_toggle, so the only
+    // way to turn such a plugin off was to edit its plugin.json by hand.
+    const onToggle = vi.fn();
+    renderSwitch({ serviceOnly: false, tools: [], enabled: true, onToggle });
+
+    const sw = all('button').find((b) => b.title === 'Disable');
+    expect(sw, 'an enabled, disableable plugin shows the switch').toBeDefined();
+
+    act(() => { sw!.click(); });
+    expect(onToggle, 'the switch is wired to enable/disable').toHaveBeenCalledTimes(1);
+  });
+
+  it('shows the switch as Off when the plugin is disabled', () => {
+    renderSwitch({ serviceOnly: false, tools: [], enabled: false, onToggle: () => {} });
+    expect(all('button').find((b) => b.title === 'Enable'), 'disabled → Enable').toBeDefined();
+  });
+
+  it('keeps service_only plugins unswitchable', () => {
+    const onToggle = vi.fn();
+    renderSwitch({ serviceOnly: true, tools: [], enabled: true, onToggle });
+
+    const sw = all('button').find((b) => b.title === SERVICE_ONLY_TITLE);
+    expect(sw, 'the service-only affordance still renders (greyed)').toBeDefined();
+    expect(sw!.hasAttribute('disabled'), 'service-only plugins cannot be enabled').toBe(true);
+
+    act(() => { sw!.click(); });
+    expect(onToggle, 'clicking it must not enable a service-only plugin').not.toHaveBeenCalled();
+  });
+});

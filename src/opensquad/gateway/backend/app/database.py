@@ -136,3 +136,8 @@ async def ensure_indexes():
             await conn.execute(text("ALTER TABLE attachments ADD COLUMN duration INTEGER"))
         except Exception:
             pass  # Column already exists
+        # Add folded column to user_group_settings if missing (群折叠, per user)
+        try:
+            await conn.execute(text("ALTER TABLE user_group_settings ADD COLUMN folded BOOLEAN DEFAULT 0"))
+        except Exception:
+            pass  # Column already exists

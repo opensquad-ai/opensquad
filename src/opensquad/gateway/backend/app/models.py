@@ -208,6 +208,7 @@ class UserGroupSettings(Base):
     unread_count = Column(Integer, default=0)
     has_unread_mention = Column(Boolean, default=False)
     notification_enabled = Column(Boolean, default=True)
+    folded = Column(Boolean, default=False)
     last_read_message_id = Column(String, nullable=True)
     updated_at = Column(DateTime, default=beijing_now, onupdate=beijing_now)
 

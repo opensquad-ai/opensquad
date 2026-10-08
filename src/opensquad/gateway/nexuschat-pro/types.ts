@@ -58,6 +58,8 @@ export interface Group {
   isPrivate: boolean;
   createdAt: number;
   notificationSoundEnabled: boolean; // Controls whether sound plays on new message
+  /** 群折叠（per-user）：true = 只在「折叠的群聊」里出现，角标灰、不响提示音。 */
+  folded: boolean;
 }
 
 export interface ChatState {

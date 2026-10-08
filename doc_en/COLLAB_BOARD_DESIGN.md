@@ -24,24 +24,21 @@ Each collaboration task has its own:
 
 All board reads and writes must include `collab_id` to ensure data isolation across tasks.
 
-### 2.2 Auto Task ID (6-character alphanumeric)
+### 2.2 Auto Task ID (6-character uppercase hex)
 
-A 6-character mixed ID (e.g. `a8K2pQ`) is auto-generated each time a collaboration task is started.
+A 6-character uppercase-hex ID (e.g. `A8F2C1`) is auto-generated each time a collaboration task is started — the uppercased first 6 characters of a UUID4 (`collab_board._gen_task_id`).
 
-### 2.3 Latest Tool Snapshot Strategy
+### 2.3 Latest Tool Snapshot Fields (no longer auto-written)
 
-Given high tool call volume, the board saves only the **latest tool call summary** by default, not the full tool history:
-
-- `latest_tool_name`
-- `latest_tool_summary`
+Items carry `latest_tool_name` / `latest_tool_summary` to hold the **latest tool call summary** rather than the full history. The runner-side auto-sync that used to fill them was retired (see 6); they are set today only when a caller passes them explicitly.
 
 ### 2.4 Public Discussion Area (Shared Memory)
 
 A `discussion` record type stores task plans, decisions, constraints, and key context visible to all.
 
-### 2.5 PM-Controlled Progress
+### 2.5 Checklist-Derived Progress
 
-Overall task progress is updated by the PM Agent or the Web admin panel (`task.progress`) for unified alignment.
+A task item's `status` and `progress` are **derived from the checklist markers in its own content** — `[x]` done, `[>]` doing, `[ ]` pending — matched at line start and outside fenced code blocks (`collab_board._derive_task_status_progress_from_content`). A worker advances a subtask with `collaboration.update_task_progress(subtask_id, status)` instead of rewriting Markdown, and agents are told **not** to use `board_update` for progress.
 
 ---
 
@@ -49,15 +46,15 @@ Overall task progress is updated by the PM Agent or the Web admin panel (`task.p
 
 ### 3.1 Task Record
 
-Storage file: `data/collab_board/board_tasks.json`
+Storage file: `<workspace>/data/collab_board/board_tasks.json` (`syscfg.workspace_data_dir("collab_board")` — one directory per workspace, so two installations on one machine never share a board)
 
 Key fields:
 
-- `task_id`: 6-character task ID
+- `task_id`: 6-character uppercase-hex task ID
 - `task_name`: Task name
 - `created_by`
-- `status`: `active | done | archived`
-- `progress`: 0–100 (maintained by PM)
+- `status`: `active | done | failed | archived | stale` (`stale` is written by `cleanup_stale_tasks`)
+- `progress`: 0–100 (derived from checklist markers — see 2.5)
 - `created_at`
 - `started_at` (defaults to `created_at`)
 - `ended_at` (written on completion)
@@ -67,7 +64,7 @@ Key fields:
 
 ### 3.2 Board Item
 
-Storage file: `data/collab_board/board_items.json`
+Storage file: `<workspace>/data/collab_board/board_items.json`
 
 Key fields:
 
@@ -75,7 +72,7 @@ Key fields:
 - `collab_id` / `task_id`
 - `task_name`
 - `agent_id`
-- `item_type`: `task | status | plan | progress | discussion | ...`
+- `item_type`: `requirement | requirement_doc | plan | task | discussion | change_request | approval | attachment` (plus `task_meta`) — the window's grouping keys are exactly `collab_board._SUMMARY_ITEM_TYPES`
 - `title`
 - `content`
 - `status`
@@ -161,15 +158,9 @@ Used to accumulate shareable, reviewable public collaboration decisions.
 
 ---
 
-## 6. Auto-Sync Behavior
+## 6. Auto-Sync Behavior (retired)
 
-In `runner.py`, after each tool call, a "latest tool snapshot" is auto-synced to the current active task:
-
-- Auto-updates `latest_tool_name`
-- Auto-updates `latest_tool_summary`
-- Does not write full history
-
-This keeps the board continuously reflecting Agent current actions without becoming unreadable due to log volume.
+The runner used to write an `item_type="status"` item after every tool call — a per-agent "latest tool call" feed, shown as the task window's 任务进度区 (Progress). That area is gone: progress is carried by the task items' own checklist markers, and nothing auto-writes status items any more. `latest_tool_name` / `latest_tool_summary` stay on the item schema (see 2.3) but are no longer filled automatically.
 
 ---
 
@@ -185,11 +176,11 @@ Supported capabilities:
 2. New task creation
    - Click "New Task", auto-generates 6-character task ID
 
-3. Member filtering
-   - View all members or single member status
+3. Requirement / plan document editing
+   - Edit and save the task's Requirements and Plan Markdown in place
 
-4. PM progress editing
-   - Directly edit and save overall task progress
+4. Plan history
+   - Browse the plan document's snapshot history
 
 5. Time info viewing
    - Start time `started_at`
@@ -209,7 +200,7 @@ Supported capabilities:
 3. Each Agent calls `board_update(collab_id=task_id, ...)` on start
 4. Update progress and status at key milestones
 5. Post `discussion` when there are disagreements or decisions to confirm
-6. PM continuously maintains overall task progress
+6. Each worker advances its subtasks with `update_task_progress(subtask_id, status)`; progress follows the checklist markers
 7. After task completion, update status to `done`, record end time
 
 ---
@@ -231,8 +222,8 @@ A: Key conclusions are accumulated in the task-level public discussion area for 
 
 - Storage layer: `src/opensquad/collab_board.py`
 - Agent tools: `src/opensquad/tools/collaboration.py`
-- Auto-sync: `src/opensquad/runner.py`
-- Backend API: `src/opensquad/gateway/backend/app/ai_web/routes.py`
+- Auto-sync: `src/opensquad/_runner/_tool_executor.py`, `src/opensquad/_runner/_turn_loop.py`
+- Backend API: `src/opensquad/gateway/backend/app/ai_web/routes/` (package; the collab-board routes live in `_main.py`)
 - Frontend API: `src/opensquad/gateway/nexuschat-pro/services/api.ts`
 - Board page: `src/opensquad/gateway/nexuschat-pro/components/CollabBoardPage.tsx`
 

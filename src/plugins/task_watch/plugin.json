@@ -43,5 +43,6 @@
   },
   "dependencies": {
     "pip": []
-  }
+  },
+  "setup": {}
 }

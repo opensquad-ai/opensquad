@@ -344,6 +344,7 @@ def ensure_lazy_routers(app: Any | None = None) -> None:
     try:
         from ._admin import admin_router
         from ._market import market_router
+        from ._mods import mods_router
 
         if app is not None:
             # Mount on the FastAPI app with the same /api/ai-web prefix the
@@ -360,6 +361,7 @@ def ensure_lazy_routers(app: Any | None = None) -> None:
             _lazy_api = APIRouter(prefix="/api/ai-web")
             _lazy_api.include_router(admin_router)
             _lazy_api.include_router(market_router)
+            _lazy_api.include_router(mods_router)
             new_routes = _lazy_api.routes
             routes = app.router.routes
             insert_at = len(routes)
@@ -374,7 +376,8 @@ def ensure_lazy_routers(app: Any | None = None) -> None:
             # this call.
             router.include_router(admin_router)
             router.include_router(market_router)
-        logging.getLogger(__name__).info("[routes] Lazy routers mounted (admin + market)")
+            router.include_router(mods_router)
+        logging.getLogger(__name__).info("[routes] Lazy routers mounted (admin + market + mods)")
     except Exception:
         logging.getLogger(__name__).exception("[routes] Lazy router mount failed")
         _LAZY_ROUTERS_MOUNTED = False  # allow retry

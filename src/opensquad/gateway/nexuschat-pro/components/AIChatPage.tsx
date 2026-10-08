@@ -15,7 +15,16 @@
  *   - Status indicators
  *   - Unified timeline: messages and workflow events interleaved
  */
-import React, { useState, useEffect, useLayoutEffect, useRef, useCallback, useMemo, Suspense } from 'react';
+import React, {
+  useState,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useCallback,
+  useMemo,
+  useSyncExternalStore,
+  Suspense,
+} from 'react';
 import {
   Send, Square,
   PanelLeftOpen, PanelLeftClose, PanelRightOpen, PanelRightClose, X, FileIcon, FileText, Upload,
@@ -181,6 +190,13 @@ import {
 import { TaskFoldBlock } from './ai-chat/TaskFoldBlock';
 import { TimelineRow } from './ai-chat/TimelineRow';
 import { ChatTimeline } from './ai-chat/ChatTimeline';
+import { ModSlotHost } from './ai-chat/ModSlotHost';
+import {
+  PANE_SCOPE,
+  getModSlotVersion,
+  listModPanes,
+  subscribe as subscribeModSlots,
+} from './ai-chat/modSlotStore';
 import { ChatScrollComposerHint, ChatScrollHud } from './ai-chat/ChatScrollHud';
 import { SoloModelPicker } from './ai-chat/SoloModelPicker';
 import { EffortPicker, type ReasoningEffort } from './ai-chat/EffortPicker';
@@ -4873,6 +4889,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     renderComposer: (sessionId: string) => (
       <AgentWebComposer
         key={`composer-${paneId}-${sessionId}`}
+        sid={sessionId}
         ref={(api) => {
           if (api) {
             composerApiByPaneRef.current.set(paneId, api);
@@ -5262,6 +5279,28 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
 
   const handleOpenTerminal = () => openPaneView('terminal');
   const handleOpenBrowser = () => openPaneView('browser');
+
+  // A mod pane is not in the pane menu — its id comes from the mod's own
+  // `$.ui.open` — so the arriving Pane frame is what opens its tab. Without this
+  // the tree would render into a tab nobody can reach.
+  const modPaneVersion = useSyncExternalStore(subscribeModSlots, getModSlotVersion, getModSlotVersion);
+  useEffect(() => {
+    if (!activeWorkspace) return;
+    // No session requirement: a mod pane belongs to the workspace, and its
+    // content is keyed by the pane id alone (see PANE_SCOPE).
+    const openKeys = new Set(
+      getFocusedPaneTabs(agentId, activeWorkspace.id).open.map((t) => `${t.kind}:${t.id}`),
+    );
+    for (const paneId of listModPanes(PANE_SCOPE)) {
+      if (openKeys.has(`mod:${paneId}`)) continue;
+      const pane = focusedPaneId;
+      openContentTab(agentId, activeWorkspace.id, { kind: 'mod', id: paneId }, pane);
+      if (pane) setFocusedPane(agentId, pane);
+      refreshWsSnap();
+    }
+    // `modPaneVersion` is the trigger; the rest is the context it needs.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [modPaneVersion, agentId, activeWorkspace?.id, currentSessionId, focusedPaneId]);
 
   // The shortcuts the welcome rows print. Bound once here so a row can never advertise a key
   // that does nothing; typing in a field is never intercepted.
@@ -5988,12 +6027,14 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
                 return (
                   <TimelineRow key={entryKey} lockLayout={lockLayout} style={revealStyle}>
                     <MessageBubble {...msgProps} anchorId={entryKey} />
+                    <ModSlotHost sid={currentSessionId || ''} slot="AssistantMessage" className="mt-1 flex flex-col gap-1" />
                   </TimelineRow>
                 );
               }
               return (
                 <TimelineRow key={entryKey} lockLayout={lockLayout} style={revealStyle}>
                   <MessageBubble {...msgProps} anchorId={entryKey} />
+                  <ModSlotHost sid={currentSessionId || ''} slot="AssistantMessage" className="mt-1 flex flex-col gap-1" />
                   {(replyEmbeds.length > 0 || turnFilesCard) && (
                     <div className="w-full mt-1 mb-4" data-html-embeds-below-reply={replyEmbeds.length > 0 ? '1' : undefined}>
                       {replyEmbeds.map((payload, ei) => (

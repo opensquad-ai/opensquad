@@ -594,6 +594,7 @@ const App: React.FC = () => {
         isPrivate: g.is_private,
         createdAt: parseTimestampMs(g.created_at) || Date.now(),
         notificationSoundEnabled: g.notification_sound_enabled,
+        folded: !!g.folded,
         pinnedMessageId: g.pinned_message_id ?? undefined,
       }));
 
@@ -1387,6 +1388,7 @@ const App: React.FC = () => {
                 isPrivate: g.is_private,
                 createdAt: Date.now(),
                 notificationSoundEnabled: true,
+                folded: false,
             }, ...prev.groups]
         }));
         handleSelectGroup(g.id);
@@ -1422,6 +1424,13 @@ const App: React.FC = () => {
     if (g) await groupAPI.updateGroup(id, { notification_sound_enabled: !g.notificationSoundEnabled });
     await loadGroups(true);
   }, [state.groups, loadGroups]);
+
+  // 群折叠：左栏（ContactsRail）自己那份列表刷新在它内部做；这里把 App 的
+  // state.groups 同步上，因为 ChatWindow 的 @提及提示音要读 folded 才不响。
+  const handleSetGroupFolded = useCallback(async (id: string, folded: boolean) => {
+    await groupAPI.updateGroup(id, { folded });
+    await loadGroups();
+  }, [loadGroups]);
 
   // (handleOpenSettings already exists above, next to handleAIChatBack.)
   const handleOpenCollabBoard = useCallback(() => setIsCollabBoardOpen(true), []);
@@ -1585,6 +1594,7 @@ const App: React.FC = () => {
                 void handleSelectGroup(id);
               }}
               onPickAgent={(agentId, dirName, status) => void resolveDmContact(agentId, dirName, status)}
+              onSetGroupFolded={handleSetGroupFolded}
               onUiModeChange={(mode) => {
                 window.dispatchEvent(new CustomEvent('opensquad-chat-ui-request', { detail: { uiMode: mode } }));
                 setCurrentView('ai-chat');

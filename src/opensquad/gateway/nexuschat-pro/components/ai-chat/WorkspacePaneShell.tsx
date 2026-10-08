@@ -18,6 +18,7 @@ import type { ContentTab, PaneTabs } from '../../utils/workspaceStore';
 import { parseContentTabKey } from '../../utils/workspaceStore';
 import { PANE_VIEWS, type PaneViewId } from '../../utils/paneViews';
 import { BrowserPanel } from './BrowserPanel';
+import { ModPaneView } from './ModPaneView';
 import { TerminalPanel } from './TerminalPanel';
 
 /** Optional Agent Web session bridge for scheduled-task exec UI (stay on scheduled-tasks tab). */
@@ -179,6 +180,7 @@ export const WorkspacePaneShell: React.FC<WorkspacePaneShellProps> = ({
   const showTasks = !!active && active.kind === 'tasks';
   const showTerminal = !!active && active.kind === 'terminal';
   const showBrowser = !!active && active.kind === 'browser';
+  const showMod = !!active && active.kind === 'mod';
 
   // One place from which both the welcome rows and the tab bar's menu take their action.
   const viewHandlers: Record<PaneViewId, (() => void) | undefined> = {
@@ -404,6 +406,14 @@ export const WorkspacePaneShell: React.FC<WorkspacePaneShellProps> = ({
         {showTasks ? (
           <ErrorBoundary label="tasks" resetKey={`${agentId}:tasks`}>
             <TaskPanelPage agentName={agentId} rootPath={rootPath} />
+          </ErrorBoundary>
+        ) : null}
+
+        {/* A mod's pane: the id is the one the mod passed to `$.ui.open`, and the
+            body is the same validated tree every other slot renders. */}
+        {showMod ? (
+          <ErrorBoundary label="mod-pane" resetKey={`${agentId}:${active?.id}`}>
+            <ModPaneView paneId={String(active?.id || '')} />
           </ErrorBoundary>
         ) : null}
 

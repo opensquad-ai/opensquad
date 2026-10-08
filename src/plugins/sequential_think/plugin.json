@@ -29,5 +29,6 @@
     "pip": [
       "portalocker"
     ]
-  }
+  },
+  "setup": {}
 }

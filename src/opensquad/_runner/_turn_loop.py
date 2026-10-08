@@ -700,53 +700,6 @@ class TurnLoop:
                                 session_id=getattr(self.runner, "_turn_sid", "") or None,
                             )
 
-                # Collaboration board auto-sync
-                try:
-                    import os as _os
-
-                    from opensquad.collab_board import update_latest_tool as _cb_update_latest_tool
-
-                    _agent_dir = getattr(self.runner, "_agent_dir", "") or ""
-                    _agent_id = _os.path.basename(_agent_dir) if _agent_dir else "unknown_agent"
-                    from opensquad.collab_board import list_tasks as _cb_list_tasks
-
-                    _tasks = _cb_list_tasks()
-                    _active_task_id = ""
-                    for _t in _tasks:
-                        if _t.get("status") == "active":
-                            _active_task_id = str(_t.get("task_id") or "")
-                            break
-                    if _active_task_id:
-                        _sensitive_tools = {
-                            "read_related_files",
-                            "glob",
-                            "grep",
-                            "rg",
-                            "filesystem__read",
-                            "filesystem__write",
-                            "filesystem__edit",
-                            "bash",
-                            "subprocess",
-                            "delegate_task",
-                            "system__send_file_to_web",
-                            "execute_command",
-                            "view_source_code",
-                            "find_files",
-                        }
-                        if t_name.startswith("collaboration.") or t_name.startswith("agent_setup."):
-                            _sensitive_tools.add(t_name)
-                        _should_sync = t_name not in _sensitive_tools
-                        if _should_sync:
-                            _cb_update_latest_tool(
-                                collab_id=_active_task_id,
-                                task_name="",
-                                agent_id=_agent_id,
-                                tool_name=t_name,
-                                tool_result=result,
-                            )
-                except Exception:
-                    pass
-
                 result_preview = str(result)[:300] if result else ""
                 if isinstance(result, str) and result.startswith("Error:"):
                     tc_log.warning("[runner] [FAIL] Tool %r returned ERROR: %s", t_name, result_preview)

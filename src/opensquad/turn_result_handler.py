@@ -306,6 +306,7 @@ class TurnResultHandler:
                         "tools_used": completed.get("tools_used", []),
                         "turns": completed.get("turns", 0),
                         "agent_id": self.runner._agent_id,
+                        "sid": getattr(self.runner, "_turn_sid", ""),
                     },
                 )
             await self.runner._state_manager.set_state("idle")

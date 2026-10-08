@@ -1274,14 +1274,16 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
     }
   };
 
-  // Listen for @mentions and play gentle notification sound
+  // Listen for @mentions and play gentle notification sound.
+  // 折叠进「折叠的群聊」的群不响提示音 —— 连 @提及也不例外（折叠＝静默）。
   useEffect(() => {
+    if (group.folded) return;
     // Check if there are new mentions in the current group
     if (group.hasUnreadMention) {
       // Play gentle notification sound
       playGentleNotificationSound();
     }
-  }, [group.hasUnreadMention, playGentleNotificationSound]);
+  }, [group.folded, group.hasUnreadMention, playGentleNotificationSound]);
 
   // Edit State
   const [editingId, setEditingId] = useState<string | null>(null);

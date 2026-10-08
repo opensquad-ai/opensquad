@@ -10,13 +10,15 @@
  */
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Check, CheckCircle2, ChevronDown, Circle, Copy, Loader2, Target, X } from 'lucide-react';
+import { Check, CheckCircle2, ChevronDown, Circle, Copy, FolderOpen, Loader2, MessageSquare, Target, X } from 'lucide-react';
 
 import { AI_MARKDOWN_CLASS, renderFencedMarkdown } from '../utils/fencedMarkdown';
 import { type ParsedStep, PlanStatusIcon, groupByWorker, parseTaskSteps } from '../utils/taskSteps';
 import { CollabTaskComposer } from './CollabTaskComposer';
+import { SoftOverlay } from './SoftOverlay';
 import {
   SERVER_BASE_URL,
+  adminAPI,
   collabBoardAPI,
   messageAPI,
   type CollabBoardItem,
@@ -314,32 +316,6 @@ export const AssignmentGroup: React.FC<{ agentId: string; tasks: CollabBoardItem
   );
 };
 
-/** A worker's progress notes, grouped the same way the assignments are. */
-export const ProgressGroup: React.FC<{ agentId: string; items: CollabBoardItem[] }> = ({
-  agentId,
-  items,
-}) => (
-  <div className="rounded-xl border border-border bg-panel p-3" data-testid="collab-progress-group" data-agent={agentId}>
-    <div className="mb-2 flex items-center justify-between gap-2">
-      <span className="min-w-0 truncate text-[12px] font-semibold text-primary">@{agentId}</span>
-      <Count n={items.length} />
-    </div>
-    <div className="space-y-1">
-      {items.map((it) => (
-        <StepRow
-          key={it.id}
-          testId="collab-progress-step"
-          step={{
-            title: String(it.title || it.item_key || ''),
-            detail: String(it.content || ''),
-            status: it.status || 'doing',
-          }}
-        />
-      ))}
-    </div>
-  </div>
-);
-
 const Section: React.FC<{ title: string; count?: number; children: React.ReactNode }> = ({ title, count, children }) => (
   <div className="mt-3">
     <div className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-textMuted">
@@ -353,6 +329,84 @@ const Section: React.FC<{ title: string; count?: number; children: React.ReactNo
 const Empty: React.FC = () => {
   const { t } = useTranslation();
   return <div className="text-[12px] text-textMuted">{t('collabTask.empty')}</div>;
+};
+
+const approvalStatusKey = (status?: string) => {
+  if (status === 'approved') return 'gateApproved';
+  if (status === 'rejected') return 'gateRejected';
+  if (status === 'pending') return 'gatePending';
+  return 'gateNone';
+};
+
+/**
+ * One approval item, drawn under the gate it belongs to.
+ *
+ * It used to be one flat list of every approval the task ever had, printed below the four
+ * gate chips — reading one gate meant finding its card in that list. It now lives on the
+ * gate's own page, so the card and the content it gates sit together.
+ */
+const GateApprovalCard: React.FC<{
+  item: CollabBoardItem;
+  groupId: string;
+  resolving: string | null;
+  onResolve: (item: CollabBoardItem, action: 'approve' | 'reject') => void;
+}> = ({ item, groupId, resolving, onResolve }) => {
+  const { t } = useTranslation();
+  const meta = (item.extra?.approval || {}) as Record<string, any>;
+  const approvalId = String(item.item_key || '');
+  const messageId = String((item.extra as any)?.message_id || '');
+  // Only a gate posted into a group can be resolved from here.
+  const canResolve = item.status === 'pending' && !!groupId && !!messageId;
+  return (
+    <div className="rounded-lg border border-border bg-bgLight px-2.5 py-2" data-testid="collab-gate-approval">
+      <div className="flex items-center gap-2">
+        <span className="min-w-0 flex-1 truncate text-[12px] font-semibold text-textMain">
+          {String(meta.step || item.title || '')}
+        </span>
+        <span className="shrink-0 rounded bg-panel px-1.5 py-0.5 text-[10px] text-textMuted">
+          {t(`collabTask.${approvalStatusKey(item.status)}`)}
+        </span>
+      </div>
+      {item.content ? <MarkdownText text={item.content} className="mt-1" /> : null}
+      <div className="mt-1 flex flex-wrap items-center gap-2 text-[10px] text-textMuted">
+        {meta.agent_name || meta.agent_id || item.agent_id ? (
+          <span>
+            {t('collabTask.requestedBy')}: {String(meta.agent_name || meta.agent_id || item.agent_id)}
+          </span>
+        ) : null}
+        {meta.resolved_by_name ? (
+          <span>
+            {t('collabTask.resolvedBy')}: {String(meta.resolved_by_name)}
+          </span>
+        ) : null}
+        {meta.resolve_note ? <span>· {String(meta.resolve_note)}</span> : null}
+      </div>
+      {item.status === 'pending' ? (
+        canResolve ? (
+          <div className="mt-1.5 flex gap-2">
+            <button
+              type="button"
+              disabled={resolving === approvalId}
+              onClick={() => onResolve(item, 'approve')}
+              className="rounded-lg bg-primary px-2.5 py-1 text-[12px] text-white hover:opacity-90 disabled:opacity-50"
+            >
+              {t('collabTask.approve')}
+            </button>
+            <button
+              type="button"
+              disabled={resolving === approvalId}
+              onClick={() => onResolve(item, 'reject')}
+              className="rounded-lg border border-border px-2.5 py-1 text-[12px] text-textMain hover:bg-primary/10 disabled:opacity-50"
+            >
+              {t('collabTask.reject')}
+            </button>
+          </div>
+        ) : (
+          <div className="mt-1 text-[10px] text-textMuted">{t('collabTask.approvalUnavailable')}</div>
+        )
+      ) : null}
+    </div>
+  );
 };
 
 export const CollabTaskWindow: React.FC<CollabTaskWindowProps> = ({ collabId, onClose, viewerName = '' }) => {
@@ -385,14 +439,25 @@ export const CollabTaskWindow: React.FC<CollabTaskWindowProps> = ({ collabId, on
 
   useEffect(() => {
     const timer = window.setInterval(() => void load(true), POLL_MS);
-    return () => window.clearInterval(timer);
+    // Refresh at once when the window is focused again, like the rest of the app
+    // (SessionSidebar / ProjectFilesPanel / GitRepoBar), instead of leaving up to a
+    // poll interval of stale board in front of the user.
+    const awake = (): void => {
+      if (document.visibilityState === 'visible') void load(true);
+    };
+    window.addEventListener('focus', awake);
+    document.addEventListener('visibilitychange', awake);
+    return () => {
+      window.clearInterval(timer);
+      window.removeEventListener('focus', awake);
+      document.removeEventListener('visibilitychange', awake);
+    };
   }, [load]);
 
   const items = summary?.items || {};
   const requirements = [...(items.requirement || []), ...(items.requirement_doc || [])];
   const plans = items.plan || [];
   const tasks = items.task || [];
-  const statuses = items.status || [];
   const discussions = [...(items.discussion || [])].sort((a, b) =>
     String(a.created_at || '').localeCompare(String(b.created_at || '')),
   );
@@ -410,6 +475,28 @@ export const CollabTaskWindow: React.FC<CollabTaskWindowProps> = ({ collabId, on
       setCopiedPath(true);
       window.setTimeout(() => setCopiedPath(false), 1500);
     });
+  };
+
+  /**
+   * "Open in the file manager" goes through the launcher that owns the agent: the
+   * browser cannot launch Explorer itself, and the launcher's `/fs/reveal` endpoint
+   * is what turns a path into an Explorer window. The task's creator is the agent
+   * that wrote the project directory, so it is the one asked to reveal it.
+   */
+  const ownerAgent = String(summary?.task?.created_by || '');
+  const [revealing, setRevealing] = useState('');
+  const [revealError, setRevealError] = useState('');
+  const reveal = async (key: string, path: string, root: string): Promise<void> => {
+    if (!ownerAgent || !root) return;
+    setRevealing(key);
+    setRevealError('');
+    try {
+      await adminAPI.revealProjectPath(ownerAgent, path, root);
+    } catch (e) {
+      setRevealError(String((e as Error)?.message || e));
+    } finally {
+      setRevealing('');
+    }
   };
   const GATES = ['确定需求', '讨论方案', '任务分配', '任务验收'];
 
@@ -434,7 +521,7 @@ export const CollabTaskWindow: React.FC<CollabTaskWindowProps> = ({ collabId, on
     });
   // The "nothing has started" notice is only true while the board is empty: with
   // requirements, a plan or assignments on it, a missing gate card is not a blocker.
-  const boardStarted = requirements.length + plans.length + tasks.length + statuses.length > 0;
+  const boardStarted = requirements.length + plans.length + tasks.length > 0;
   const blockingGate = boardStarted
     ? ''
     : GATES.find((gate) => gateDisplay(gate).key !== 'gateApproved') || '';
@@ -458,11 +545,48 @@ export const CollabTaskWindow: React.FC<CollabTaskWindowProps> = ({ collabId, on
     }
   };
 
-  const statusKey = (status?: string) => {
-    if (status === 'approved') return 'gateApproved';
-    if (status === 'rejected') return 'gateRejected';
-    if (status === 'pending') return 'gatePending';
-    return 'gateNone';
+  const OTHER_TAB = '__other__';
+  const gateApprovalsOf = (gate: string) =>
+    approvals
+      .filter((a) => gateOf(a) === gate)
+      .sort((a, b) => String(a.updated_at || '').localeCompare(String(b.updated_at || '')));
+  const tabs: { id: string; label: string }[] = [
+    ...GATES.map((gate) => ({ id: gate, label: gate })),
+    ...(otherApprovals.length
+      ? [{ id: OTHER_TAB, label: t('collabTask.otherApprovals', { defaultValue: '其他环节' }) }]
+      : []),
+  ];
+  // Which gate the task is on — only the tab shown until the reader picks one.
+  const [pickedTab, setPickedTab] = useState('');
+  const [threadOpen, setThreadOpen] = useState(false);
+  const currentGate = GATES.find((gate) => gateDisplay(gate).key !== 'gateApproved') || GATES[GATES.length - 1];
+  const tab = pickedTab || currentGate;
+
+  /** One gate's verdict cards, drawn on that gate's own page. */
+  const gateApprovalBlock = (gate: string) => {
+    const list = gateApprovalsOf(gate);
+    return (
+      <Section title={t('collabTask.approvals')} count={list.length} key={`approval-${gate}`}>
+        {list.length ? (
+          <div className="space-y-1.5" data-testid="collab-task-approvals">
+            {list.map((item) => (
+              <GateApprovalCard
+                key={item.id}
+                item={item}
+                groupId={groupId}
+                resolving={resolving}
+                onResolve={resolveApproval}
+              />
+            ))}
+          </div>
+        ) : (
+          <Empty />
+        )}
+        {resolveError ? (
+          <div className="mt-1 text-[11px] text-rose-500">{t('collabTask.resolveFailed')}</div>
+        ) : null}
+      </Section>
+    );
   };
 
   return (
@@ -496,6 +620,12 @@ export const CollabTaskWindow: React.FC<CollabTaskWindowProps> = ({ collabId, on
           <div className="py-3 text-[12px] text-rose-500">{t('collabTask.loadFailed')}</div>
         ) : (
           <>
+            {revealError ? (
+              <div className="mb-1 text-[11px] text-rose-500" data-testid="collab-reveal-error">
+                {revealError}
+              </div>
+            ) : null}
+
             <Section title={t('collabTask.card')} count={summary?.card ? 1 : 0}>
               {summary?.card ? (
                 <div className="rounded-lg border border-border bg-bgLight px-2.5 py-2 text-[12px] text-textMain">
@@ -536,10 +666,12 @@ export const CollabTaskWindow: React.FC<CollabTaskWindowProps> = ({ collabId, on
             ) : null}
 
             <Section title={t('collabTask.approvals')} count={approvals.length}>
-              <div className="flex flex-wrap gap-1.5" data-testid="collab-task-gates">
-                {GATES.map((gate) => {
-                  const display = gateDisplay(gate);
-                  const key = display.key;
+              {/* 四个门闸就是 tab：点哪个看哪个，它的内容渲染在下面那一页 */}
+              <div className="flex flex-wrap items-center gap-1.5" role="tablist" data-testid="collab-task-gates">
+                {tabs.map((tabDef) => {
+                  const isGate = GATES.includes(tabDef.id);
+                  const display = isGate ? gateDisplay(tabDef.id) : null;
+                  const key = display?.key;
                   const cls =
                     key === 'gateApproved'
                       ? 'border-emerald-500/40 text-emerald-600'
@@ -550,143 +682,39 @@ export const CollabTaskWindow: React.FC<CollabTaskWindowProps> = ({ collabId, on
                           : key === 'gateDoing'
                             ? 'border-sky-500/40 text-sky-600'
                             : 'border-border text-textMuted';
-                  const label =
-                    key === 'gateDoing'
-                      ? gate === '任务分配'
-                        ? t('collabTask.gateAssigned', { defaultValue: '已分配 {{n}} 项', n: display.count })
+                  const label = !isGate
+                    ? ''
+                    : key === 'gateDoing'
+                      ? tabDef.id === '任务分配'
+                        ? t('collabTask.gateAssigned', { defaultValue: '已分配 {{n}} 项', n: display?.count })
                         : t('collabTask.gateDoing', { defaultValue: '已有内容' })
                       : t(`collabTask.${key}`);
                   const Icon = key === 'gateApproved' ? CheckCircle2 : key === 'gateNone' ? Circle : Loader2;
+                  const active = tab === tabDef.id;
                   return (
-                    <span
-                      key={gate}
-                      className={`inline-flex items-center gap-1 rounded-lg border px-2 py-0.5 text-[11px] ${cls}`}
+                    <button
+                      key={tabDef.id}
+                      type="button"
+                      role="tab"
+                      aria-selected={active}
+                      data-testid="collab-gate-tab"
+                      data-gate={tabDef.id}
+                      onClick={() => setPickedTab(tabDef.id)}
+                      className={`inline-flex items-center gap-1 rounded-lg border px-2 py-0.5 text-[11px] transition-colors ${cls} ${
+                        active ? 'bg-primary/10 ring-1 ring-primary/40' : 'hover:bg-primary/5'
+                      }`}
                     >
                       <Icon size={11} />
-                      {gate}
-                      <span className="text-[10px] opacity-80">· {label}</span>
-                    </span>
+                      {tabDef.label}
+                      {label ? <span className="text-[10px] opacity-80">· {label}</span> : null}
+                    </button>
                   );
                 })}
               </div>
 
-              {approvals.length ? (
-                <div
-                  className="mt-2 space-y-1.5"
-                  data-testid="collab-task-approvals"
-                  data-others={otherApprovals.length}
-                >
-                  {[...approvals]
-                    .sort((a, b) => {
-                      const ga = GATES.includes(gateOf(a)) ? 0 : 1;
-                      const gb = GATES.includes(gateOf(b)) ? 0 : 1;
-                      return ga - gb || String(a.updated_at || '').localeCompare(String(b.updated_at || ''));
-                    })
-                    .map((item) => {
-                      const meta = (item.extra?.approval || {}) as Record<string, any>;
-                      const approvalId = String(item.item_key || '');
-                      const messageId = String((item.extra as any)?.message_id || '');
-                      // Only a gate posted into a group can be resolved from here.
-                      const canResolve = item.status === 'pending' && !!groupId && !!messageId;
-                      return (
-                        <div key={item.id} className="rounded-lg border border-border bg-bgLight px-2.5 py-2">
-                          <div className="flex items-center gap-2">
-                            <span className="min-w-0 flex-1 truncate text-[12px] font-semibold text-textMain">
-                              {String(meta.step || item.title || '')}
-                            </span>
-                            <span className="shrink-0 rounded bg-panel px-1.5 py-0.5 text-[10px] text-textMuted">
-                              {t(`collabTask.${statusKey(item.status)}`)}
-                            </span>
-                          </div>
-                          {item.content ? <MarkdownText text={item.content} className="mt-1" /> : null}
-                          <div className="mt-1 flex flex-wrap items-center gap-2 text-[10px] text-textMuted">
-                            {meta.agent_name || meta.agent_id || item.agent_id ? (
-                              <span>
-                                {t('collabTask.requestedBy')}:{' '}
-                                {String(meta.agent_name || meta.agent_id || item.agent_id)}
-                              </span>
-                            ) : null}
-                            {meta.resolved_by_name ? (
-                              <span>
-                                {t('collabTask.resolvedBy')}: {String(meta.resolved_by_name)}
-                              </span>
-                            ) : null}
-                            {meta.resolve_note ? <span>· {String(meta.resolve_note)}</span> : null}
-                          </div>
-                          {item.status === 'pending' ? (
-                            canResolve ? (
-                              <div className="mt-1.5 flex gap-2">
-                                <button
-                                  type="button"
-                                  disabled={resolving === approvalId}
-                                  onClick={() => void resolveApproval(item, 'approve')}
-                                  className="rounded-lg bg-primary px-2.5 py-1 text-[12px] text-white hover:opacity-90 disabled:opacity-50"
-                                >
-                                  {t('collabTask.approve')}
-                                </button>
-                                <button
-                                  type="button"
-                                  disabled={resolving === approvalId}
-                                  onClick={() => void resolveApproval(item, 'reject')}
-                                  className="rounded-lg border border-border px-2.5 py-1 text-[12px] text-textMain hover:bg-primary/10 disabled:opacity-50"
-                                >
-                                  {t('collabTask.reject')}
-                                </button>
-                              </div>
-                            ) : (
-                              <div className="mt-1 text-[10px] text-textMuted">{t('collabTask.approvalUnavailable')}</div>
-                            )
-                          ) : null}
-                        </div>
-                      );
-                    })}
-                </div>
-              ) : null}
-              {resolveError ? (
-                <div className="mt-1 text-[11px] text-rose-500">{t('collabTask.resolveFailed')}</div>
-              ) : null}
-            </Section>
-
-            <Section title={t('collabTask.requirement')} count={requirements.length}>
-              {requirements.length ? (
-                <div className="space-y-1.5">
-                  {requirements.map((it) => (
-                    <ItemBlock key={it.id} item={it} />
-                  ))}
-                </div>
-              ) : (
-                <Empty />
-              )}
-            </Section>
-
-            <Section title={t('collabTask.plan')} count={plans.length}>
-              {plans.length ? (
-                <div className="space-y-1.5">
-                  {plans.map((it) => (
-                    <ItemBlock key={it.id} item={it} />
-                  ))}
-                </div>
-              ) : (
-                <Empty />
-              )}
-            </Section>
-
-            <Section title={t('collabTask.assign')} count={tasks.length}>
-              {tasks.length ? (
-                <div className="space-y-2" data-testid="collab-task-assignments">
-                  {groupByWorker(tasks).map(({ agentId, items }) => (
-                    <AssignmentGroup key={agentId} agentId={agentId} tasks={items} />
-                  ))}
-                </div>
-              ) : (
-                <Empty />
-              )}
-            </Section>
-
-            <Section title={t('collabTask.progress')} count={statuses.length}>
               {blockingGate ? (
                 <div
-                  className="mb-1.5 rounded-lg border border-amber-500/40 bg-amber-500/5 px-2.5 py-1 text-[11px] text-amber-600"
+                  className="mt-1.5 rounded-lg border border-amber-500/40 bg-amber-500/5 px-2.5 py-1 text-[11px] text-amber-600"
                   data-testid="collab-task-blocking-gate"
                 >
                   {t('collabTask.waitingGate', {
@@ -695,108 +723,243 @@ export const CollabTaskWindow: React.FC<CollabTaskWindowProps> = ({ collabId, on
                   })}
                 </div>
               ) : null}
-              {statuses.length ? (
-                <div className="space-y-2" data-testid="collab-task-progress-groups">
-                  {groupByWorker(statuses).map(({ agentId, items }) => (
-                    <ProgressGroup key={agentId} agentId={agentId} items={items} />
-                  ))}
-                </div>
-              ) : (
-                <Empty />
-              )}
             </Section>
 
-            <Section title={t('collabTask.projectDir')} count={projectDir ? 1 : 0}>
-              {projectDir ? (
-                <div className="flex items-center gap-2">
-                  <code
-                    className="min-w-0 flex-1 truncate rounded-lg border border-border bg-bgLight px-2 py-1 font-mono text-[11px] text-textMain"
-                    data-testid="collab-project-dir"
-                    title={projectDir}
-                  >
-                    {projectDir}
-                  </code>
-                  <button
-                    type="button"
-                    onClick={copyProjectDir}
-                    className="shrink-0 rounded-lg border border-border p-1 text-textMuted hover:bg-primary/10 hover:text-textMain"
-                    aria-label={t('collabTask.copyProjectDir')}
-                  >
-                    {copiedPath ? <Check size={13} className="text-emerald-600" /> : <Copy size={13} />}
-                  </button>
-                </div>
-              ) : (
-                <div className="text-[12px] text-textMuted" data-testid="collab-project-dir-missing">
-                  {t('collabTask.projectDirMissing')}
-                </div>
-              )}
-            </Section>
-            <Section title={t('collabTask.attachments')} count={summary?.attachments?.length || 0}>
-              {(summary?.attachments || []).length ? (
-                <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
-                  {(summary?.attachments || []).map((a) => {
-                    const href = a.url.startsWith('http') ? a.url : `${SERVER_BASE_URL}${a.url}`;
-                    return (
-                      <a
-                        key={a.id || a.url}
-                        href={href}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        download
-                        title={t('collabTask.openAttachment')}
-                        data-testid="collab-attachment"
-                        className="flex min-w-0 flex-col gap-1 rounded-lg border border-border bg-bgLight p-2 hover:border-primary/40"
-                      >
-                        {a.kind === 'image' ? (
-                          <img
-                            src={href}
-                            alt={a.name}
-                            loading="lazy"
-                            className="h-24 w-full rounded object-cover"
-                          />
-                        ) : null}
-                        <span className="truncate text-[11px] text-textMain">{a.name}</span>
-                        <span className="truncate text-[10px] text-textMuted">
-                          {[a.size, a.uploader ? `@${a.uploader}` : ''].filter(Boolean).join(' · ')}
-                        </span>
-                      </a>
-                    );
-                  })}
-                </div>
-              ) : (
-                <Empty />
-              )}
-            </Section>
-
-            <Section title={t('collabTask.files')} count={summary?.files?.length || 0}>
-              {(summary?.files || []).length ? (
-                <div className="space-y-0.5">
-                  {(summary?.files || []).map((f) => (
-                    <div key={f} className="truncate font-mono text-[11px] text-textMain">
-                      {f}
+            {/* 当前 tab 的那一页：只渲染这一阶段的内容，像翻页一样 */}
+            {tab === '确定需求' ? (
+              <>
+                <Section title={t('collabTask.requirement')} count={requirements.length}>
+                  {requirements.length ? (
+                    <div className="space-y-1.5">
+                      {requirements.map((it) => (
+                        <ItemBlock key={it.id} item={it} />
+                      ))}
                     </div>
-                  ))}
-                </div>
-              ) : (
-                <Empty />
-              )}
-            </Section>
+                  ) : (
+                    <Empty />
+                  )}
+                </Section>
+                {gateApprovalBlock('确定需求')}
+              </>
+            ) : null}
 
-            <Section title={t('collabTask.discussion')} count={discussions.length}>
-              {discussions.length ? (
-                <div className="space-y-2" data-testid="collab-task-thread">
-                  {discussions.map((it) => (
-                    <DiscussionBubble key={it.id} item={it} self={!!viewerName && it.agent_id === viewerName} />
+            {tab === '讨论方案' ? (
+              <>
+                <Section title={t('collabTask.plan')} count={plans.length}>
+                  {plans.length ? (
+                    <div className="space-y-1.5">
+                      {plans.map((it) => (
+                        <ItemBlock key={it.id} item={it} />
+                      ))}
+                    </div>
+                  ) : (
+                    <Empty />
+                  )}
+                </Section>
+                {gateApprovalBlock('讨论方案')}
+              </>
+            ) : null}
+
+            {tab === '任务分配' ? (
+              <>
+                <Section title={t('collabTask.assign')} count={tasks.length}>
+                  {tasks.length ? (
+                    <div className="space-y-2" data-testid="collab-task-assignments">
+                      {groupByWorker(tasks).map(({ agentId, items }) => (
+                        <AssignmentGroup key={agentId} agentId={agentId} tasks={items} />
+                      ))}
+                    </div>
+                  ) : (
+                    <Empty />
+                  )}
+                </Section>
+                {gateApprovalBlock('任务分配')}
+              </>
+            ) : null}
+
+            {/* 任务验收：这道闸自己的审批卡，加上这次协作的产出物 */}
+            {tab === '任务验收' ? (
+              <>
+                {gateApprovalBlock('任务验收')}
+
+                <Section title={t('collabTask.projectDir')} count={projectDir ? 1 : 0}>
+                  {projectDir ? (
+                    <div className="flex items-center gap-2">
+                      <code
+                        className="min-w-0 flex-1 truncate rounded-lg border border-border bg-bgLight px-2 py-1 font-mono text-[11px] text-textMain"
+                        data-testid="collab-project-dir"
+                        title={projectDir}
+                      >
+                        {projectDir}
+                      </code>
+                      <button
+                        type="button"
+                        onClick={copyProjectDir}
+                        className="shrink-0 rounded-lg border border-border p-1 text-textMuted hover:bg-primary/10 hover:text-textMain"
+                        aria-label={t('collabTask.copyProjectDir')}
+                      >
+                        {copiedPath ? <Check size={13} className="text-emerald-600" /> : <Copy size={13} />}
+                      </button>
+                      <button
+                        type="button"
+                        disabled={!ownerAgent || revealing === 'dir'}
+                        onClick={() => void reveal('dir', '', projectDir)}
+                        className="shrink-0 rounded-lg border border-border p-1 text-textMuted hover:bg-primary/10 hover:text-textMain disabled:opacity-50"
+                        aria-label={t('collabTask.openProjectDir', { defaultValue: '在文件管理器中打开' })}
+                        title={t('collabTask.openProjectDir', { defaultValue: '在文件管理器中打开' })}
+                        data-testid="collab-open-project-dir"
+                      >
+                        <FolderOpen size={13} />
+                      </button>
+                    </div>
+                  ) : (
+                    <div className="text-[12px] text-textMuted" data-testid="collab-project-dir-missing">
+                      {t('collabTask.projectDirMissing')}
+                    </div>
+                  )}
+                </Section>
+
+                <Section title={t('collabTask.attachments')} count={summary?.attachments?.length || 0}>
+                  {(summary?.attachments || []).length ? (
+                    <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
+                      {(summary?.attachments || []).map((a) => {
+                        const href = a.url.startsWith('http') ? a.url : `${SERVER_BASE_URL}${a.url}`;
+                        return (
+                          <a
+                            key={a.id || a.url}
+                            href={href}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            download
+                            title={t('collabTask.openAttachment')}
+                            data-testid="collab-attachment"
+                            className="flex min-w-0 flex-col gap-1 rounded-lg border border-border bg-bgLight p-2 hover:border-primary/40"
+                          >
+                            {a.kind === 'image' ? (
+                              <img
+                                src={href}
+                                alt={a.name}
+                                loading="lazy"
+                                className="h-24 w-full rounded object-cover"
+                              />
+                            ) : null}
+                            <span className="truncate text-[11px] text-textMain">{a.name}</span>
+                            <span className="truncate text-[10px] text-textMuted">
+                              {[a.size, a.uploader ? `@${a.uploader}` : ''].filter(Boolean).join(' · ')}
+                            </span>
+                          </a>
+                        );
+                      })}
+                    </div>
+                  ) : (
+                    <Empty />
+                  )}
+                </Section>
+
+                <Section title={t('collabTask.files')} count={summary?.files?.length || 0}>
+                  {(summary?.files || []).length ? (
+                    <div className="space-y-0.5">
+                      {(summary?.files || []).map((f) => (
+                        <div key={f} className="flex items-center gap-2">
+                          <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-textMain" title={f}>
+                            {f}
+                          </span>
+                          <button
+                            type="button"
+                            disabled={!ownerAgent || !projectDir || revealing === `file:${f}`}
+                            onClick={() => void reveal(`file:${f}`, f, projectDir)}
+                            className="shrink-0 rounded border border-border p-0.5 text-textMuted hover:bg-primary/10 hover:text-textMain disabled:opacity-40"
+                            aria-label={t('collabTask.openFileLocation', { defaultValue: '在文件管理器中显示' })}
+                            title={t('collabTask.openFileLocation', { defaultValue: '在文件管理器中显示' })}
+                            data-testid="collab-open-file"
+                          >
+                            <FolderOpen size={12} />
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <Empty />
+                  )}
+                </Section>
+              </>
+            ) : null}
+
+            {/* 不属于四门闸的审批：有才出现这一页 */}
+            {tab === OTHER_TAB ? (
+              <Section title={t('collabTask.otherApprovals', { defaultValue: '其他环节' })} count={otherApprovals.length}>
+                <div className="space-y-1.5" data-testid="collab-task-approvals" data-others={otherApprovals.length}>
+                  {otherApprovals.map((item) => (
+                    <GateApprovalCard
+                      key={item.id}
+                      item={item}
+                      groupId={groupId}
+                      resolving={resolving}
+                      onResolve={resolveApproval}
+                    />
                   ))}
                 </div>
-              ) : (
-                <Empty />
-              )}
-            </Section>
+                {resolveError ? (
+                  <div className="mt-1 text-[11px] text-rose-500">{t('collabTask.resolveFailed')}</div>
+                ) : null}
+              </Section>
+            ) : null}
           </>
         )}
       </div>
-      <CollabTaskComposer collabId={collabId} onSent={() => void load(true)} />
+
+      {/* 讨论单独成一个窗口；正文留给四个阶段页 */}
+      <div className="shrink-0 border-t border-border px-4 py-2 flex items-center gap-2">
+        <button
+          type="button"
+          onClick={() => setThreadOpen(true)}
+          data-testid="collab-open-thread"
+          className="inline-flex items-center gap-1.5 rounded-lg border border-border px-2.5 py-1 text-[12px] text-textMain hover:bg-primary/10"
+        >
+          <MessageSquare size={13} />
+          {t('collabTask.discussion')}
+          <span className="rounded bg-bgLight px-1.5 py-0.5 text-[10px] text-textMuted">{discussions.length}</span>
+        </button>
+      </div>
+
+      <SoftOverlay
+        open={threadOpen}
+        onBackdrop={() => setThreadOpen(false)}
+        zClass="z-[200]"
+        panelClassName="w-full max-w-3xl h-[min(80vh,700px)]"
+      >
+        <div className="os-modal-shell flex h-full w-full flex-col overflow-hidden" data-testid="collab-thread-modal">
+          <div className="shrink-0 border-b border-border px-4 py-2.5 flex items-center gap-2">
+            <span className="min-w-0 flex-1 truncate text-sm font-bold text-textMain">
+              {t('collabTask.discussion')}
+            </span>
+            <span className="shrink-0 rounded-md bg-bgLight px-1.5 py-0.5 text-[11px] text-textMuted">
+              {discussions.length}
+            </span>
+            <button
+              type="button"
+              onClick={() => setThreadOpen(false)}
+              className="shrink-0 rounded-lg p-1 text-textMuted hover:bg-primary/10 hover:text-textMain"
+              aria-label={t('common.close')}
+            >
+              <X size={14} />
+            </button>
+          </div>
+          {/* 讨论内容自己滚，滑块在这一层 */}
+          <div className="flex-1 min-h-0 overflow-y-auto px-4 py-3" data-testid="collab-thread-scroll">
+            {discussions.length ? (
+              <div className="space-y-2" data-testid="collab-task-thread">
+                {discussions.map((it) => (
+                  <DiscussionBubble key={it.id} item={it} self={!!viewerName && it.agent_id === viewerName} />
+                ))}
+              </div>
+            ) : (
+              <Empty />
+            )}
+          </div>
+          <CollabTaskComposer collabId={collabId} onSent={() => void load(true)} />
+        </div>
+      </SoftOverlay>
     </div>
   );
 };

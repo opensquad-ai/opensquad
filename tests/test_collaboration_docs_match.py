@@ -26,6 +26,10 @@ COLLAB_CN = _ROOT / "doc_cn/COLLABORATION.md"
 ARCH_EN = _ROOT / "doc_en/ARCHITECTURE.md"
 ARCH_CN = _ROOT / "doc_cn/ARCHITECTURE.md"
 INTRO = _ROOT / "src/skills/opensquad_intro/SKILL.md"
+BOARD_EN = _ROOT / "doc_en/COLLAB_BOARD_DESIGN.md"
+BOARD_CN = _ROOT / "doc_cn/COLLAB_BOARD_DESIGN.md"
+WORKFLOW_SKILL = _ROOT / "src/skills/collaboration-workflow/SKILL.md"
+DEEP_RESEARCH_CARD = _ROOT / "src/collab_cards/distributed_deep_research.md"
 
 _CARD_TABLES = [
     (README, "## Built-in Collaboration Cards"),
@@ -93,3 +97,87 @@ def test_the_board_sections_name_the_real_tools():
         for tool in ("board_view(collab_id)", "board_list_tasks(collab_id)", "update_task_progress("):
             assert tool in text, (path.name, tool)
         assert "create_board(" not in text, f"{path.name} invents a board API that is not the board"
+
+
+# --------------------------------------------------------------------------
+# The board design doc describes fields the code decides. A stale description
+# sends a reader to a status / item type that does not exist (the doc listed a
+# `progress` item type that never was one, an `a8K2pQ` id the generator cannot
+# produce — ids are uppercase hex — and a PM-maintained progress that the code
+# derives from checklist markers instead).
+# --------------------------------------------------------------------------
+def _code() -> str:
+    return (_ROOT / "src" / "opensquad" / "collab_board.py").read_text(encoding="utf-8")
+
+
+def test_the_documented_statuses_are_the_ones_the_code_allows():
+    guard = re.search(r"status in \(([^)]*)\)", _code())
+    assert guard, "collab_board no longer validates task status against a literal tuple"
+    allowed = set(re.findall(r'"([a-z_]+)"', guard.group(1)))
+    assert {"active", "done", "archived"} <= allowed
+    for path in (BOARD_EN, BOARD_CN):
+        match = re.search(r"`(active[^`]*)`", path.read_text(encoding="utf-8"))
+        assert match, f"{path.name} no longer lists the task statuses"
+        documented = set(re.findall(r"[a-z_]+", match.group(1)))
+        assert documented == allowed, f"{path.name} documents {sorted(documented)}; the code allows {sorted(allowed)}"
+
+
+def test_the_documented_item_types_are_the_ones_the_window_groups():
+    block = re.search(r"_SUMMARY_ITEM_TYPES = \(([^)]*)\)", _code())
+    assert block, "collab_board no longer declares _SUMMARY_ITEM_TYPES"
+    real = set(re.findall(r'"([a-z_]+)"', block.group(1)))
+    assert "progress" not in real, "progress is derived, not an item type"
+    for path in (BOARD_EN, BOARD_CN):
+        match = re.search(r"`(requirement \| [^`]*)`", path.read_text(encoding="utf-8"))
+        assert match, f"{path.name} no longer lists the item types"
+        documented = set(re.findall(r"[a-z_]+", match.group(1)))
+        assert documented == real, f"{path.name} documents {sorted(documented)}; the window groups {sorted(real)}"
+
+
+def test_the_board_design_doc_drops_its_stale_claims():
+    stale = (
+        "a8K2pQ",  # ids are uppercase hex, not mixed case
+        "PM-controlled",
+        "PM 可控进度",
+        "PM progress editing",
+        "PM 进度编辑",
+        "maintained by PM",
+        "PM 维护",
+        "ai_web/routes.py",
+        "runner.py",
+    )
+    for path in (BOARD_EN, BOARD_CN):
+        text = path.read_text(encoding="utf-8")
+        for claim in stale:
+            assert claim not in text, f"{path.name} still says {claim!r}"
+
+
+def test_the_auto_synced_progress_area_is_gone_not_just_hidden():
+    """The `item_type="status"` feed lost its producer, its window area and its docs.
+
+    The half-removal is the failure this pins: the window dropping the section while the
+    runner kept writing items nobody can see (they pile up on every tool call), or a doc
+    still promising an auto-synced Progress area that nothing writes any more.
+    """
+    # 1. no producer left in the package (the bundled build copy under resources/ is skipped)
+    for path in (_ROOT / "src" / "opensquad").rglob("*.py"):
+        if "resources" in path.parts:
+            continue
+        assert "update_latest_tool" not in path.read_text(encoding="utf-8"), path
+
+    # 2. the window's grouping contract, and the doc that mirrors it, no longer carry the type
+    block = re.search(r"_SUMMARY_ITEM_TYPES = \(([^)]*)\)", _code())
+    assert block, "collab_board no longer declares _SUMMARY_ITEM_TYPES"
+    assert '"status"' not in block.group(1), "status is back among the window's item types"
+    documented = re.search(r"`(requirement \| [^`]*)`", BOARD_EN.read_text(encoding="utf-8"))
+    assert documented and "status" not in documented.group(1)
+
+    # 3. no document offers it as a live area
+    for path in (WORKFLOW_SKILL, DEEP_RESEARCH_CARD):
+        text = path.read_text(encoding="utf-8")
+        assert "Auto (runner)" not in text, path.name
+        assert "auto-syncs to" not in text, path.name
+        assert "Progress area shows" not in text, path.name
+    for path in (BOARD_EN, BOARD_CN):
+        text = path.read_text(encoding="utf-8")
+        assert "retired" in text or "已下线" in text, f"{path.name} does not record the retirement"

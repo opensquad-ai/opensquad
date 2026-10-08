@@ -12,7 +12,16 @@ export type Workspace = {
   createdAt: number;
 };
 
-export type ContentTabKind = 'session' | 'file' | 'scheduled-tasks' | 'tasks' | 'terminal' | 'browser';
+export type ContentTabKind =
+  | 'session'
+  | 'file'
+  | 'scheduled-tasks'
+  | 'tasks'
+  | 'terminal'
+  | 'browser'
+  // A Claude Code mod's pane (`$.ui.open({id})`). Dynamic ids, so the pane's
+  // content is looked up in the mod slot store rather than in a static registry.
+  | 'mod';
 
 export type ContentTab = {
   kind: ContentTabKind;
@@ -96,6 +105,7 @@ const CONTENT_TAB_KINDS: readonly ContentTabKind[] = [
   'tasks',
   'terminal',
   'browser',
+  'mod',
 ];
 
 export function parseContentTabKey(key: string | null): ContentTab | null {

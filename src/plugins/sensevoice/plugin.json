@@ -76,8 +76,8 @@
       "numpy",
       "pyyaml",
       "flask",
-      "flask-cors",
-      "imageio-ffmpeg"
+      "flask-cors"
     ]
-  }
+  },
+  "setup": {}
 }

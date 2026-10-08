@@ -175,18 +175,6 @@ def test_encode_keeps_agent_readable_fallback():
     assert "qa(已邀请)" in content
 
 
-def test_patch_status_is_idempotent():
-    content = _card_content(kind="progress")
-    once = ca.patch_collab_task_status_in_content(content, "done", note="ok")
-    twice = ca.patch_collab_task_status_in_content(once, "done", note="ok")
-    assert once == twice
-    payload = ca.parse_collab_task_payload(twice)
-    assert payload["status"] == "done"
-    assert payload["resolve_note"] == "ok"
-    # readable text survives the rewrite
-    assert "Task ID: AB12CD" in twice
-
-
 def test_patch_participant_updates_and_appends():
     content = _card_content(participants=[{"agent_id": "qa", "name": "QA", "state": "invited"}])
     updated = ca.patch_collab_task_participant_in_content(content, "qa", "accepted")

@@ -23,7 +23,6 @@ import {
   DiscussionBubble,
   ItemBlock,
   MarkdownText,
-  ProgressGroup,
   StepRow,
   gateDisplayFor,
 } from './CollabTaskWindow';
@@ -58,6 +57,20 @@ function discussionItem(over: Record<string, unknown> = {}) {
     created_at: '2026-10-02T10:00:00Z',
     ...over,
   } as never;
+}
+
+/**
+ * The source of one gate's page: from `tab === '<gate>'` to the next `{tab === `.
+ *
+ * Paginating by gate is the point of that layout, so a gate's content must not leak onto
+ * another gate's page. Comparing page bodies (not the whole file) is what proves it.
+ */
+function gatePage(src: string, gate: string): string {
+  const marker = `tab === '${gate}'`;
+  const start = src.indexOf(marker);
+  expect(start, `no page for ${gate}`).toBeGreaterThanOrEqual(0);
+  const next = src.indexOf('{tab === ', start + marker.length);
+  return src.slice(start, next === -1 ? undefined : next);
 }
 
 describe('collab task window', () => {
@@ -176,26 +189,88 @@ describe('collab task window', () => {
     expect(group).toContain('data-status="done"');
   });
 
-  it('groups progress the same way', () => {
-    const group = renderToStaticMarkup(
-      React.createElement(ProgressGroup, {
-        agentId: 'agent305',
-        items: [boardItem({ id: 's1', agent_id: 'agent305', item_type: 'status', title: '自测 6/6 通过', status: 'doing' })],
-      }),
-    );
-
-    expect(group).toContain('data-testid="collab-progress-group"');
-    expect(group).toContain('collab-progress-step');
-    expect(group).toContain('自测 6/6 通过');
-  });
-
-  it('assignment and progress lay out as the board does, with the blocking gate flagged', () => {
+  it('assignment and the blocking gate lay out as the board does', () => {
     const src = fs.readFileSync(path.resolve(__dirname, 'CollabTaskWindow.tsx'), 'utf8');
     expect(src).toContain('data-testid="collab-task-assignments"');
-    expect(src).toContain('data-testid="collab-task-progress-groups"');
     expect(src).toContain('groupByWorker(tasks)');
-    expect(src).toContain('groupByWorker(statuses)');
     expect(src).toContain('data-testid="collab-task-blocking-gate"');
+  });
+
+  it('has no progress area any more', () => {
+    // The board's `status` items were an auto-synced "latest tool call" feed; the
+    // collaboration mechanism no longer needs it, so neither the section nor the
+    // component that drew it may come back.
+    const src = fs.readFileSync(path.resolve(__dirname, 'CollabTaskWindow.tsx'), 'utf8');
+    expect(src).not.toContain('collabTask.progress');
+    expect(src).not.toContain('collab-task-progress-groups');
+    expect(src).not.toContain('ProgressGroup');
+    expect(src).not.toContain('items.status');
+  });
+
+  it('draws the four gates as tabs, with only the picked page underneath', () => {
+    const src = fs.readFileSync(path.resolve(__dirname, 'CollabTaskWindow.tsx'), 'utf8');
+    expect(src).toContain('role="tablist"');
+    expect(src).toContain('data-testid="collab-task-gates"');
+    expect(src).toContain('data-testid="collab-gate-tab"');
+    expect(src).toContain('data-gate={tabDef.id}');
+
+    // Each gate owns a page carrying its own content — and nothing else's, which is what
+    // "翻页" means here. Reading 确定需求 must not drag 方案 / 任务分配 onto the screen.
+    const requirementPage = gatePage(src, '确定需求');
+    expect(requirementPage).toContain('collabTask.requirement');
+    expect(requirementPage).toContain("gateApprovalBlock('确定需求')");
+    expect(requirementPage).not.toContain('collabTask.plan');
+
+    const planPage = gatePage(src, '讨论方案');
+    expect(planPage).toContain('collabTask.plan');
+    expect(planPage).not.toContain('collabTask.requirement');
+
+    const assignPage = gatePage(src, '任务分配');
+    expect(assignPage).toContain('collabTask.assign');
+    expect(assignPage).toContain('collab-task-assignments');
+
+    // 任务验收 = that gate's verdict + the products of the collaboration
+    const acceptPage = gatePage(src, '任务验收');
+    expect(acceptPage).toContain("gateApprovalBlock('任务验收')");
+    for (const product of ['collabTask.projectDir', 'collabTask.attachments', 'collabTask.files']) {
+      expect(acceptPage, product).toContain(product);
+    }
+    expect(acceptPage).toContain('collab-open-project-dir');
+    expect(acceptPage).toContain('collab-open-file');
+    expect(acceptPage).not.toContain('collabTask.requirement');
+  });
+
+  it('keeps the task thread in a window of its own, with its own scrollbar', () => {
+    const src = fs.readFileSync(path.resolve(__dirname, 'CollabTaskWindow.tsx'), 'utf8');
+    // opened from the bottom bar, drawn in a modal above the task window
+    expect(src).toContain('data-testid="collab-open-thread"');
+    expect(src).toContain('<SoftOverlay');
+    expect(src).toContain('data-testid="collab-thread-modal"');
+    expect(src).toContain('data-testid="collab-thread-scroll"');
+    // the scroller itself owns the scrollbar (className comes before the testid)
+    expect(src).toMatch(/className="[^"]*overflow-y-auto[^"]*"[^>]*data-testid="collab-thread-scroll"/);
+
+    // the thread and the composer that writes into it live inside that modal
+    const modal = src.slice(src.indexOf('collab-thread-modal'));
+    expect(modal).toContain('data-testid="collab-task-thread"');
+    expect(modal).toContain('<CollabTaskComposer');
+    // ...and nowhere else: the body is the four gate pages now
+    expect(src.match(/data-testid="collab-task-thread"/g)?.length).toBe(1);
+    expect(src.match(/<CollabTaskComposer/g)?.length).toBe(1);
+  });
+
+  it('opens the project directory and each file in the OS file manager', () => {
+    const src = fs.readFileSync(path.resolve(__dirname, 'CollabTaskWindow.tsx'), 'utf8');
+    // through the launcher that owns the agent — a browser cannot launch Explorer
+    expect(src).toContain('adminAPI.revealProjectPath(ownerAgent, path, root)');
+    expect(src).toMatch(/summary\?\.task\?\.created_by/);
+    // the project directory itself...
+    expect(src).toContain('data-testid="collab-open-project-dir"');
+    // ...and each entry of the files list
+    expect(src).toContain('data-testid="collab-open-file"');
+    expect(src).toContain('reveal(`file:${f}`, f, projectDir)');
+    // a failed reveal reports itself instead of failing silently
+    expect(src).toContain('data-testid="collab-reveal-error"');
   });
 
   it('an assigned task does not report its gate as not started', () => {

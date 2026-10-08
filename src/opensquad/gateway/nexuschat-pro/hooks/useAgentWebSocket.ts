@@ -69,6 +69,8 @@ import {
   parseFollowupSuggestions,
 } from '../components/ai-chat/FollowupSuggestions';
 import { parsePlanContent } from '../components/ai-chat/PlanBlock';
+import { setModSlashCommands } from '../components/ai-chat/slashCommands';
+import { PANE_SCOPE, setModSlot } from '../components/ai-chat/modSlotStore';
 import type { ChatMessage, FileAttachment } from '../components/ai-chat/MessageBubble';
 
 const genUID = (): string => genTimelineUID();
@@ -458,6 +460,42 @@ export function useAgentWebSocket(agentId: string, ctx: AgentWebWsCtx) {
       const stage = ((msg as any).data?.stage) || '';
       if (stage === 'extensions_ready') setToolsStage('loading');
       else if (stage === 'full_ready') setToolsStage('ready');
+    });
+
+    // Mods: a validated render tree for one slot, produced by `mods_host` in the
+    // agent. Python only emits this with an sid, so it routes to the right pane
+    // instead of whichever one is focused.
+    //
+    // The tree rides in `content`: the adapter's generic relay unwraps the bus
+    // envelope and `send_response` puts the payload there, and the gateway
+    // forwards the frame verbatim to the client. Reading `msg.data` alone yields
+    // undefined → zero nodes → an empty band with nothing in any log to say why.
+    const unsubModSlot = onWs('mod_slot', (msg: AIWSMessage) => {
+      const data = ((msg as any).content ?? (msg as any).data ?? {}) as {
+        slot?: string;
+        nodes?: unknown;
+        dropped?: number;
+        paneId?: string;
+      };
+      const sid = String((msg as any).sid || '').trim();
+      if (!sid) return;
+      const nodes = Array.isArray(data.nodes) ? data.nodes : [];
+      const paneId = data.paneId ? String(data.paneId) : undefined;
+      setModSlot(
+        // A pane belongs to the workspace, not the session that opened it.
+        paneId ? PANE_SCOPE : sid,
+        String(data.slot || 'AbovePrompt'),
+        nodes as never,
+        Number(data.dropped) || 0,
+        paneId,
+      );
+    });
+
+    // Mods: which slash commands they contribute, so the composer can offer
+    // them (typing one still works without this — this is discovery only).
+    const unsubModCommands = onWs('mod_commands', (msg: AIWSMessage) => {
+      const data = ((msg as any).content ?? (msg as any).data ?? {}) as { commands?: unknown };
+      setModSlashCommands(Array.isArray(data.commands) ? (data.commands as never) : []);
     });
 
     // Stream — accumulate chunks via ref, then sync to state (per-session)
@@ -3228,6 +3266,8 @@ export function useAgentWebSocket(agentId: string, ctx: AgentWebWsCtx) {
       unsubAuthExpired();
       unsubStatus();
       unsubReadyStage();
+      unsubModSlot();
+      unsubModCommands();
       unsubStream();
       unsubMessage();
       unsubResponse();

@@ -27,6 +27,7 @@ export const INITIAL_GROUPS: Group[] = [
     createdAt: Date.now() - 10000000,
     pinnedMessageId: 'm1',
     notificationSoundEnabled: true,
+    folded: false,
   },
   {
     id: 'g2',
@@ -39,6 +40,7 @@ export const INITIAL_GROUPS: Group[] = [
     isPrivate: true,
     createdAt: Date.now() - 20000000,
     notificationSoundEnabled: true,
+    folded: false,
   },
   {
     id: 'g3',
@@ -51,6 +53,7 @@ export const INITIAL_GROUPS: Group[] = [
     isPrivate: false,
     createdAt: Date.now() - 30000000,
     notificationSoundEnabled: false,
+    folded: false,
   }
 ];
 

@@ -179,9 +179,81 @@ COMMANDS: tuple[SlashCommand, ...] = (
 )
 
 
+# ── Runtime commands (Claude Code mods) ────────────────────────────────────
+#
+# A mod contributes commands with `$.command.register`. They live here, not in
+# `COMMANDS`, because they appear and disappear with the mods while the static
+# tuple stays the reviewable in-repo list. `source` matters to mods: quick-buttons
+# filters `c.source !== 'builtin'` when it builds its panel.
+
+_RUNTIME: list[SlashCommand] = []
+_RUNTIME_SOURCE: dict[str, str] = {}
+
+
+def register_runtime_command(
+    name: str,
+    *,
+    help: str = "",
+    usage: str = "",
+    subcommands: object = (),
+    aliases: object = (),
+    source: str = "",
+) -> SlashCommand | None:
+    """Add or replace one mod-contributed command. Returns None on a bad name."""
+    cleaned = str(name or "").strip().lstrip("/+").lower()
+    if not cleaned or any(ch.isspace() for ch in cleaned):
+        return None
+    # A mod may not claim a builtin's name. Registering one would also poison
+    # `command_source`, which the CLI uses to decide to hand the text to the
+    # agent — a hijacked `/help` would fall through and never be handled.
+    if any(cleaned == c.name or cleaned in c.aliases for c in COMMANDS):
+        return None
+    command = SlashCommand(
+        name=cleaned,
+        help=str(help or ""),
+        usage=str(usage or "") or f"/{cleaned}",
+        subcommands=tuple(subcommands or ()),  # type: ignore[arg-type]
+        aliases=tuple(aliases or ()),  # type: ignore[arg-type]
+        category="mods",
+    )
+    for index, existing in enumerate(_RUNTIME):
+        if existing.name == cleaned:
+            _RUNTIME[index] = command
+            break
+    else:
+        _RUNTIME.append(command)
+    _RUNTIME_SOURCE[cleaned] = str(source or "")
+    return command
+
+
+def clear_runtime_commands(source: str | None = None) -> None:
+    """Drop mod commands — every one, or only a single mod's (on unload)."""
+    if source is None:
+        _RUNTIME.clear()
+        _RUNTIME_SOURCE.clear()
+        return
+    for name in [n for n, s in _RUNTIME_SOURCE.items() if s == str(source)]:
+        _RUNTIME_SOURCE.pop(name, None)
+    _RUNTIME[:] = [c for c in _RUNTIME if c.name in _RUNTIME_SOURCE]
+
+
+def all_commands() -> tuple[SlashCommand, ...]:
+    """Static commands first; a mod may not shadow a builtin name."""
+    static_names = {c.name for c in COMMANDS}
+    return COMMANDS + tuple(c for c in _RUNTIME if c.name not in static_names)
+
+
+def command_source(token: str) -> str:
+    """'builtin', the contributing mod's name, or '' when unknown."""
+    name = token.lstrip("/+").lower()
+    if name in _RUNTIME_SOURCE:
+        return _RUNTIME_SOURCE[name]
+    return "builtin" if any(c.name == name or name in c.aliases for c in COMMANDS) else ""
+
+
 def all_names() -> list[str]:
     names: list[str] = []
-    for cmd in COMMANDS:
+    for cmd in all_commands():
         names.append(cmd.name)
         names.extend(cmd.aliases)
     return names
@@ -189,7 +261,7 @@ def all_names() -> list[str]:
 
 def resolve_command(token: str) -> SlashCommand | None:
     name = token.lstrip("/+").lower()
-    for cmd in COMMANDS:
+    for cmd in all_commands():
         if cmd.name == name or name in cmd.aliases:
             return cmd
     return None
@@ -207,23 +279,23 @@ def match_commands(prefix: str, *, fuzzy: bool = True) -> list[SlashCommand]:
         out.append(cmd)
 
     if not raw:
-        for cmd in COMMANDS:
+        for cmd in all_commands():
             _add(cmd)
         return out
 
-    for cmd in COMMANDS:
+    for cmd in all_commands():
         if cmd.name.startswith(raw) or any(a.startswith(raw) for a in cmd.aliases):
             _add(cmd)
 
     if out and not fuzzy:
         return out
 
-    for cmd in COMMANDS:
+    for cmd in all_commands():
         if raw in cmd.name or any(raw in a for a in cmd.aliases):
             _add(cmd)
 
     if fuzzy:
-        for cmd in COMMANDS:
+        for cmd in all_commands():
             candidates = (cmd.name, *cmd.aliases)
             if any(_is_subsequence(raw, c) for c in candidates):
                 _add(cmd)
@@ -243,10 +315,15 @@ def format_help(filter_text: str = "") -> str:
         "(slash / and plus + both work; Web buttons → numbered [1] [2] …)",
         "",
     ]
-    categories = ("session", "manage", "general")
-    titles = {"session": "Session, chat & group", "manage": "Manage resources", "general": "Other"}
+    categories = ("session", "manage", "general", "mods")
+    titles = {
+        "session": "Session, chat & group",
+        "manage": "Manage resources",
+        "general": "Other",
+        "mods": "From installed mods",
+    }
     for cat in categories:
-        cmds = [c for c in COMMANDS if c.category == cat]
+        cmds = [c for c in all_commands() if c.category == cat]
         if filt:
             cmds = [c for c in cmds if c in match_commands(filt)]
         if not cmds:

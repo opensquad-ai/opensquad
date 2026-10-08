@@ -158,4 +158,3 @@ Please check for gaps and coherence
 | **需求区** (requirements) | Research scope, user requirements, quality expectations | PM |
 | **方案区** (plan) | Final research report (markdown), report structure outline | PM + Analyst |
 | **任务分配区** (tasks) | Per-researcher task assignments with subtopic, angles, and key questions | PM |
-| **任务进度区** (progress) | Auto-synced: each researcher's latest tool calls and progress updates | Auto (runner) |

@@ -27,5 +27,6 @@
   "contributes": {},
   "dependencies": {
     "pip": []
-  }
+  },
+  "setup": {}
 }

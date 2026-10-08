@@ -16,6 +16,7 @@ import { PluginViewContainer } from './plugin-views/PluginViewContainer';
 import { GenericPluginView } from './plugin-views/GenericPluginView';
 import { PluginSetupWizard } from './PluginSetupWizard';
 import { PluginViewErrorBoundary } from './plugin-views/PluginViewErrorBoundary';
+import { notifyPluginsChanged } from '../utils/usePluginEnabled';
 import { useTranslation } from 'react-i18next';
 import {
   adminHeaderBar,
@@ -485,6 +486,9 @@ export const PluginManagerPage: React.FC<PluginManagerPageProps> = ({
       if (plugin.enabled) await pluginAPI.disablePlugin(plugin.name);
       else                 await pluginAPI.enablePlugin(plugin.name);
       await fetchPlugins();
+      // The settings rail gates entries on plugin state (Mods → mods_host), so a
+      // toggle here has to reach it without a reload.
+      notifyPluginsChanged();
     } catch (e: any) {
       alert(`Toggle failed: ${e.message}`);
     } finally {
@@ -1040,7 +1044,9 @@ export const PluginCard: React.FC<PluginCardProps> = ({
   const typeClass = TYPE_COLORS[plugin.type] || TYPE_COLORS.tool;
   const hasSettings = (plugin.config_schema && Object.keys(plugin.config_schema).length > 0) || !!plugin.service || agentLoaded !== null;
   const contributedViews = plugin.contributes?.views || [];
-  const showGlobalDisabledStyle = !!plugin.service_toggle && !plugin.enabled;
+  // 停用的插件整张卡变暗。原先只有 service_toggle 的插件会被标记，于是像 boot_private
+  // 这种纯清单插件停用后在列表里看不出任何变化。
+  const showGlobalDisabledStyle = !plugin.enabled;
   const isList = layout === 'list';
 
   // The card's read-only text is clamped (name truncated, description 2 lines),
@@ -1079,7 +1085,10 @@ export const PluginCard: React.FC<PluginCardProps> = ({
     </button>
   );
 
-  const serviceToggle = plugin.service_toggle && (
+  // 启用/停用开关：**任何能被停用的插件都给**（launcher 只拒绝 service_only）。
+  // 原先门控是 `plugin.service_toggle &&`，于是纯清单插件（boot_private：只声明
+  // contributes.bootScreen）在 UI 上根本没有开关，只能去改 plugin.json——用户问的就是这个。
+  const serviceToggle = (
     <button
       onClick={plugin.service_only ? undefined : onToggle}
       disabled={toggling || !!plugin.service_only}
@@ -1096,7 +1105,11 @@ export const PluginCard: React.FC<PluginCardProps> = ({
     </button>
   );
 
-  const agentChip = agentLoaded !== null && !SYSTEM_TOOLS.includes(plugin.name) && (
+  // 只有"确实有 agent 工具"的插件才显示这个 On/Off 药丸：纯清单插件（例如只声明
+  // contributes.bootScreen 的开屏动画插件、或纯服务插件）没有工具可以加入 agent，
+  // 显示 "Off" 会被误读成"插件被禁用了"——实测用户就是这么以为的（2026-10-07）。
+  const hasAgentTools = (plugin.tools?.length ?? 0) > 0;
+  const agentChip = agentLoaded !== null && hasAgentTools && !SYSTEM_TOOLS.includes(plugin.name) && (
     <button
       onClick={onAgentToggle}
       title={agentLoaded ? tr('pluginManager.removeFromAgent') : tr('pluginManager.addToAgent')}
