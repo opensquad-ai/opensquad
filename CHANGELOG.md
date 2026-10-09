@@ -51,6 +51,60 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### Added
 
+- **A plugin can own the startup screen.** The window that covers startup is no longer
+  built into the shell: a plugin contributes it, rotates a playlist until the app is
+  ready (audio included, stopped on exit and never stalling at a seam), and can keep a
+  private clip private.
+- **Claude Code mods: a host, and slots in the app.** A Node host speaks NDJSON to the
+  agent process; `mod_slot` / `mod_commands` events carry the validated render tree and
+  the commands a mod contributes, `ModSlotHost` / `ModPaneView` render them, the `/mods`
+  routes and the mod slash commands wire them up, and Settings gains a "mods" entry
+  gated on the `mods_host` plugin. Mods declare the tools they proxy in their manifests.
+- **A built-in browser the agent and the panel share.** Playwright renders in the
+  launcher and exposes a CDP port; the Playwright MCP is pointed at that port, so a
+  plugin that believes it owns a browser drives the very page the agent's `browser_*`
+  tools and the panel see, instead of a second and invisible one. The panel gains a
+  read-only "Agent browser" tab that polls frames — a change made over CDP, which calls
+  none of the session's own methods, still shows up a poll later. Input is never
+  forwarded: watching is the feature, driving stays with the agent.
+- **A terminal in the file rail, hosted by the launcher.** A shell is a workspace tool,
+  not an agent capability, so it must work with the agent stopped — it runs in the
+  launcher and the panel polls its output. The shell is picked from what the machine
+  actually has (cmd / PowerShell / pwsh / Git Bash / WSL / zsh / fish), you type in the
+  terminal surface itself, and a terminal now keeps its scrollback across a tab switch,
+  a panel close or a reload because it is addressed by slot and the launcher keeps its
+  buffer. There is no PTY: the panel says so rather than letting a full-screen program
+  look broken.
+- **The right panel becomes 浏览器 / 终端 / 文件**, and the workspace pane's tab bar
+  offers all three.
+- **A first-launch tour, with the language switch inside it.**
+- **A messenger-style chat layout for the agent web.** The rail becomes one contacts
+  list for group chat and 1:1; talking to one agent gets its own whole-page layout with
+  bubbles, attachments in an always-visible footer, quoting, paged history and history
+  search. Both rails share one footer action set.
+- **Collaboration, end to end.** A collaboration-task card protocol with participant
+  state, a task-scoped channel agents talk in, and a task window that draws the work the
+  way the board does and renders markdown progress. An invitation is delivered to the
+  agent and only the coded invite is shown; work is assigned once the whole team has
+  accepted; one collaboration runs at a time, enforced at every door in; 补充 asks for a
+  change on an approval card without deciding it; the closure is announced in the window.
+- **Pairing across machines that survives a restart.** The invite names this machine's
+  LAN address instead of `127.0.0.1`, the host is detected rather than typed, a paired
+  machine shows whether it has ever connected, and a restart resumes the pairs instead of
+  forgetting them.
+- **Relay: queue, retry and backfill** a push the peer could not receive.
+- **Guided, step-by-step setup** for the plugins that talk to external services.
+- **A wake mode in the composer's + menu**, wired to the agent's own setting, and a
+  cross-group task strip above the composer with the merged task list behind it.
+- **A process says which code it is running, and shouts if the files beside it have moved
+  on.** A fix that landed after a process started is not running, and that has been
+  mistaken for "the fix did not work" more than once.
+- **A per-agent token statistics page** in the session sidebar, with the input split and
+  cache share on the cards.
+- **A long group message folds to its first stretch, with a faded edge**, and a plugin's
+  full details open in a dialog.
+- **Mods: the compatibility surface is documented**, with the host's trust boundary
+  written down (declared capabilities, install-time consent) instead of implied.
 - **Desktop: background updates that don't interrupt work.** The app already
   downloaded installers in the background, but only when the user clicked
   "download in background", and installing always forced an immediate restart.
