@@ -8,10 +8,11 @@ import threading
 import time
 from functools import partial
 
+from opensquad.cli.tui._host import TuiHost
 from opensquad.cli.tui.i18n import t
 
 
-class WaitTimersMixin:
+class WaitTimersMixin(TuiHost):
     """Mixin methods moved from cli/tui/app.py (see app.py for the app class)."""
 
     def _schedule_ui(self, callback, *args, **kwargs) -> None:

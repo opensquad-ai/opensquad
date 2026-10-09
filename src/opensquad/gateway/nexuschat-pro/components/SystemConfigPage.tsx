@@ -27,8 +27,9 @@ import {
   writeWorkflowExpandLevel,
 } from '../utils/workflowExpandPref';
 import { setLanguage } from '../i18n';
-import { SETTINGS_APP_NAV_ITEMS } from '../utils/appNavItems';
+import { SETTINGS_APP_NAV_ITEMS, visibleAppNavItems } from '../utils/appNavItems';
 import { usePluginNavItems } from '../utils/usePluginNavItems';
+import { usePluginEnabled } from '../utils/usePluginEnabled';
 
 const PluginManagerPage = React.lazy(() =>
   import('./PluginManagerPage').then((m) => ({ default: m.PluginManagerPage })),
@@ -38,6 +39,9 @@ const ServiceManagerPage = React.lazy(() =>
 );
 const McpManagerPage = React.lazy(() =>
   import('./McpManagerPage').then((m) => ({ default: m.McpManagerPage })),
+);
+const ModsManagerPage = React.lazy(() =>
+  import('./ModsManagerPage').then((m) => ({ default: m.ModsManagerPage })),
 );
 const SkillManagerPage = React.lazy(() =>
   import('./SkillManagerPage').then((m) => ({ default: m.SkillManagerPage })),
@@ -795,6 +799,7 @@ export const SystemConfigPage: React.FC<SystemConfigPageProps> = ({
   );
   const [activeAppView, setActiveAppView] = useState<string | null>(null);
   const pluginNavItems = usePluginNavItems();
+  const pluginEnabled = usePluginEnabled();
 
   const selectConfigTab = (key: TabKey) => {
     setActiveAppView(null);
@@ -921,7 +926,7 @@ export const SystemConfigPage: React.FC<SystemConfigPageProps> = ({
     onSelect: () => selectConfigTab(item.key),
   }));
   const appNavItems = [
-    ...SETTINGS_APP_NAV_ITEMS.map((item) => {
+    ...visibleAppNavItems(SETTINGS_APP_NAV_ITEMS, pluginEnabled).map((item) => {
       const Icon = item.icon;
       return {
         key: item.view,
@@ -1029,6 +1034,9 @@ export const SystemConfigPage: React.FC<SystemConfigPageProps> = ({
                   <div className="flex h-full min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
                     {activeAppView === 'plugins' ? (
                       <PluginManagerPage onBack={backFromApp} />
+                    ) : null}
+                    {activeAppView === 'mods' ? (
+                      <ModsManagerPage onBack={backFromApp} />
                     ) : null}
                     {activeAppView === 'services' ? (
                       <ServiceManagerPage onBack={backFromApp} />

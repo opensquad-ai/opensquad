@@ -19,6 +19,7 @@ import { useTranslation } from 'react-i18next';
 import { Ban, Eraser, Loader2, RotateCw, Terminal as TerminalIcon } from 'lucide-react';
 
 import { terminalAPI, type TerminalShellProfile } from '../../services/api';
+import { ephemeralTerminalId, stableTerminalId } from '../../utils/terminalIdentity';
 import { OpenSquadLoader } from '../OpenSquadLoader';
 
 /** Trim the local scrollback so a long-running shell cannot grow without bound. */
@@ -32,15 +33,28 @@ export interface TerminalPanelProps {
   /** The workspace directory the shell starts in (the panel's project). */
   rootPath?: string;
   sessionId?: string;
+  /**
+   * A stable identity for this shell slot (`rail:<workspace>`, `pane:<paneId>`).
+   *
+   * With a key the panel reattaches to the launcher's shell for that slot after a
+   * remount, a tab switch or a page reload — same shell, same scrollback — instead of
+   * spawning a new one and starting from a blank screen. Without a key the id is minted
+   * per mount and the shell is closed on unmount, as before.
+   */
+  terminalKey?: string;
 }
 
-export const TerminalPanel: React.FC<TerminalPanelProps> = ({ agentId, rootPath = '' }) => {
+export const TerminalPanel: React.FC<TerminalPanelProps> = ({
+  agentId,
+  rootPath = '',
+  terminalKey,
+}) => {
   const { t } = useTranslation();
-  // Minted once per mount: the launcher keys the shell on it, so a second panel is a second
-  // shell rather than a shared one.
+  // A keyed terminal is addressed by slot rather than by mount, so coming back finds the
+  // same shell; the launcher keys shells on this id and keeps their scrollback.
   const terminalId = useMemo(
-    () => `t${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`,
-    [],
+    () => (terminalKey ? stableTerminalId(agentId, terminalKey) : ephemeralTerminalId()),
+    [agentId, terminalKey],
   );
   const [output, setOutput] = useState('');
   const [input, setInput] = useState('');
@@ -114,10 +128,13 @@ export const TerminalPanel: React.FC<TerminalPanelProps> = ({ agentId, rootPath 
     void open();
     return () => {
       aliveRef.current = false;
-      // Stop the shell when the panel goes away (fire and forget: the tab may be closing).
-      void terminalAPI.close(agentId, terminalId).catch(() => undefined);
+      // A keyed terminal outlives its component on purpose: the launcher keeps the shell
+      // and its scrollback, and the next mount reattaches and replays it. Only an
+      // anonymous per-mount terminal is closed here, so a shell nobody can name is never
+      // left behind.
+      if (!terminalKey) void terminalAPI.close(agentId, terminalId).catch(() => undefined);
     };
-  }, [agentId, terminalId, open]);
+  }, [agentId, terminalId, terminalKey, open]);
 
   /** Poll for output — the launcher cannot push it to us. */
   useEffect(() => {

@@ -96,14 +96,17 @@ by volume**: separate directories, files, modules, or API interfaces, so every u
 
 ### Collaboration Board — 4 Areas
 
-The collaboration board is the central coordination surface. It has four distinct areas:
+The collaboration board is the central coordination surface. It has three distinct areas:
 
 | Area | Purpose | Who writes | item_type |
 |------|---------|-----------|-----------|
 | **需求区** (Requirements) | Research scope, quality expectations | PM | `requirement` |
 | **方案区** (Plan) | Final report document, task checklist overview | PM + Analyst | `plan` + `task` |
 | **任务分配区** (Tasks) | Editable task list with inline editing | PM (create), any agent (edit) | `task` |
-| **任务进度区** (Progress) | Auto-synced per-agent progress, latest tool calls | Auto (runner) | `status` |
+
+A fourth area — **任务进度区** (Progress), an auto-synced `item_type="status"` feed of each
+agent's latest tool call — was retired: progress is carried by the task items' own
+checklist markers (`[x]` / `[>]` / `[ ]`), and the runner no longer writes status items.
 
 ### The `item_key` — Multiple Entries Per Type
 
@@ -149,7 +152,7 @@ board_update(
     status="doing",  # Status: pending/doing/done/blocked
     progress=0,  # Progress 0-100
     visibility="public",  # Visibility: public/private
-    item_type="task",  # Type: requirement/plan/task/status/discussion
+    item_type="task",  # Type: requirement/plan/task/discussion
     item_key="unique_key",  # Key to distinguish multiple entries of same type
 )
 ```
@@ -161,7 +164,7 @@ board_list(
     collab_id="abc123",  # Collaboration session ID (required)
     agent_id="",  # Optional: filter by agent
     scope="public",  # "public" or "all"
-    item_type="",  # Optional: filter by type (requirement/plan/task/status/discussion)
+    item_type="",  # Optional: filter by type (requirement/plan/task/discussion)
 )
 ```
 
@@ -301,14 +304,9 @@ board_update(
 # 1. Read assigned tasks
 tasks = board_list(collab_id="abc123", item_type="task")
 
-# 2. Execute research tools (runner auto-syncs to Progress area)
+# 2. Execute research tools
 web_search("AI radiology FDA approved systems 2026")
-# → Runner automatically calls:
-#   board_update(item_type="status", latest_tool_name="web_search", ...)
-# → Progress area shows: 🔧 web_search
-
 web_fetch("https://www.fda.gov/...")
-# → Progress area updates: 🔧 web_fetch
 
 # 3. Update task progress with sub-step checklist
 board_update(

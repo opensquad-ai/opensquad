@@ -319,6 +319,9 @@ jobs:
           uses: github/codeql-action/init@v3
           with:
             languages: python
+            # `py/path-injection` is suppressed for one module only; read the config's
+            # own comment for why the route is allowed to take a path from a request.
+            config-file: ./.github/codeql/codeql-config.yml
 
         - name: Autobuild
           uses: github/codeql-action/autobuild@v3

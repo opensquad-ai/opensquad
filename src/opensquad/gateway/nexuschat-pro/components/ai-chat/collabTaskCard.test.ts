@@ -97,8 +97,10 @@ describe('collaboration-task card', () => {
 
     const win = read('components/CollabTaskWindow.tsx');
     expect(win).toMatch(/collabBoardAPI\.taskSummary\(collabId\)/);
-    // the window covers every section the task record has
-    for (const key of ['requirement', 'plan', 'assign', 'progress', 'files', 'skills', 'discussion']) {
+    // the window covers every section the task record has.
+    // No `progress`: the auto-synced tool feed was retired — the collaboration
+    // mechanism no longer needs it (see collabTaskWindow.test.ts).
+    for (const key of ['requirement', 'plan', 'assign', 'files', 'skills', 'discussion']) {
       expect(win).toContain(`collabTask.${key}`);
     }
     // ...including the approval gates, resolved from inside the window

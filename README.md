@@ -34,15 +34,11 @@ OpenSquad is a local-first multi-agent collaboration framework. Multiple autonom
 ---
 
 <p align="center">
-  <img src="doc_en/screenshots/image_en0.png" alt="OpenSquad overview" width="900" />
+  <img src="doc_en/screenshots/agent_web.png" alt="OpenSquad single-agent web workspace" width="900" />
 </p>
 
 <p align="center">
-  <img src="doc_en/screenshots/agent-workstation.png" alt="OpenSquad Agent Workstation" width="900" />
-</p>
-
-<p align="center">
-  <img src="doc_en/screenshots/solo-agent-web-chat.png" alt="OpenSquad single-agent web chat" width="900" />
+  <img src="doc_shared/screenshots/chat_group.png" alt="OpenSquad group chat" width="900" />
 </p>
 
 ---
@@ -105,7 +101,9 @@ Details: [Architecture](doc_en/ARCHITECTURE.md) · [Documentation hub](docs/READ
 ### Prerequisites
 
 - Python 3.11+ (officially tested on 3.11 / 3.12 / 3.13)
-- Node.js 18+ (for frontend development)
+- Node.js 18+ for frontend development; **the Mods host needs Node.js 20.6+**
+  (it loads mods through `module.register`, and transpiles their `.ts` / `.tsx`
+  with a vendored sucrase — so no Node-version-dependent type stripping)
 - A compatible LLM API (DeepSeek, GPT-4, Claude, Gemini, GLM, etc.)
 
 ---
@@ -197,7 +195,7 @@ opensquad init
 opensquad start
 ```
 
-Requires Node.js 18+ and Python 3.11+. `npx opensquad-ai` works too, with
+Requires Node.js 18+ (Mods host: 20.6+) and Python 3.11+. `npx opensquad-ai` works too, with
 no global install.
 
 ### Option 5: Docker

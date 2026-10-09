@@ -50,7 +50,7 @@ def _board_key() -> str:
         raw = _board_dir()
     except Exception:
         raw = "collab_board"
-    return hashlib.sha1(raw.encode("utf-8", "replace")).hexdigest()[:12]
+    return hashlib.sha1(raw.encode("utf-8", "replace"), usedforsecurity=False).hexdigest()[:12]
 
 
 @contextmanager
@@ -716,27 +716,6 @@ def append_public_discussion(
         return rec
 
 
-def update_latest_tool(
-    *, collab_id: str, agent_id: str, tool_name: str, tool_result: Any, task_name: str = ""
-) -> dict[str, Any]:
-    summary = str(tool_result)
-    if len(summary) > 300:
-        summary = summary[:300] + "..."
-    return upsert_item(
-        collab_id=collab_id,
-        task_name=task_name,
-        agent_id=agent_id,
-        item_type="status",
-        title="Current status",
-        content="Auto-updated from latest tool call",
-        status="doing",
-        progress=0,
-        visibility="public",
-        latest_tool_name=tool_name,
-        latest_tool_summary=summary,
-    )
-
-
 def delete_item(*, item_id: str) -> bool:
     """Delete a board item by its unique id. Returns True if deleted, False if not found."""
     if not item_id:
@@ -1370,7 +1349,6 @@ _SUMMARY_ITEM_TYPES = (
     "requirement_doc",
     "plan",
     "task",
-    "status",
     "discussion",
     "change_request",
     "approval",
@@ -1509,7 +1487,6 @@ REMOTE_OPS = (
     "list_items",
     "append_public_discussion",
     "attach_files",
-    "update_latest_tool",
     "delete_item",
     "delete_task",
     "set_card_and_skills",

@@ -493,6 +493,9 @@ class AgentRunner:
                         "old_state": old_state,
                         "new_state": new_state,
                         "agent_id": _aid,
+                        # Session facts for plugins; without one, a slot push has
+                        # no pane to land in and is dropped.
+                        "sid": getattr(self, "_turn_sid", ""),
                     },
                 )
             )
@@ -1692,6 +1695,32 @@ class AgentRunner:
                 # (matches serial _input_handler SWITCH_AND_REPLY empty-reply path).
                 return
 
+            # --- Plugin Hook: on_message_received ---
+            # This dispatcher is the live path for Agent Web messages; the serial
+            # loop's copy of this hook (`run`) never runs here, so a plugin that
+            # intercepts typed text — a mod's slash command — had no effect at all
+            # until this call was added (measured: typing `/azioni` reached the
+            # model instead). `__stop__` means the plugin consumed the message and
+            # already spoke its answer, so no model turn starts — same contract as
+            # the serial path, which skips the message on the same flag.
+            if self._plugin_manager:
+                _hook_ctx = await self._plugin_manager.run_hook(
+                    "on_message_received",
+                    {
+                        "message": content,
+                        "channel": item.get("channel") or "web",
+                        "sender_name": getattr(self, "_current_sender_name", ""),
+                        "chat_name": getattr(self, "_current_chat_name", ""),
+                        "source_chat_id": item.get("source_chat_id") or "",
+                        "input_source": item.get("source") or "gateway",
+                        "sid": sid,
+                    },
+                )
+                if _hook_ctx.get("__stop__"):
+                    logger.info("[Runner] on_message_received consumed sid=%s — skipping the model turn", sid)
+                    return
+                content = str(_hook_ctx.get("message", content) or "")
+
             self._current_images = item.get("images") or []
             self._current_attachments = item.get("attachments") or []
             self._current_channel = item.get("channel") or "web"
@@ -2416,9 +2445,13 @@ class AgentRunner:
                             + formatted
                             + "[Messages received, please decide how to reply based on the source]"
                         )
-                        source = "chatpro"
+                        # Label the batch by what it actually holds (a DM drain is not
+                        # the group channel) — see chatpro_ingress_labels.
+                        from opensquad.ingress_policy import chatpro_ingress_labels
+
+                        source, _batch_channel = chatpro_ingress_labels(m.type for m in _pending_group_messages)
                         self._current_input_source = source
-                        self._current_channel = "chatpro_group"
+                        self._current_channel = _batch_channel
                     logger.info(f"[Runner] Merged {len(_pending_group_messages)} pending group messages into input")
                     _pending_group_messages = []  # Clear after merge
 
@@ -2481,9 +2514,11 @@ class AgentRunner:
                             + "\n".join(msg_parts)
                             + "[Messages received, please decide how to reply based on the source]"
                         )
-                        source = "chatpro"
+                        from opensquad.ingress_policy import chatpro_ingress_labels
+
+                        source, _batch_channel = chatpro_ingress_labels(m.type for m in pending)
                         self._current_input_source = source
-                        self._current_channel = "chatpro_group"
+                        self._current_channel = _batch_channel
                         if _extra_web:
                             _web_parts = []
                             for _wd in _extra_web:
@@ -2809,6 +2844,9 @@ class AgentRunner:
                             "chat_name": getattr(self, "_current_chat_name", ""),
                             "source_chat_id": self._current_source_chat_id,
                             "input_source": self._current_input_source,
+                            # Session facts for plugins (a command answer has to be
+                            # spoken back into the right pane).
+                            "sid": getattr(self, "_turn_sid", ""),
                         },
                     )
                     initial_query = _hook_ctx.get("message", initial_query)
@@ -2890,9 +2928,12 @@ class AgentRunner:
                 initial_query = None
                 continue
 
-            # For group message sources, do not store as user message in history or display
-            if self._current_input_source == "chatpro":
-                # Group messages are only passed to AI as context, not displayed in the chat box
+            # For ChatPro sources (group AND dm), do not store as user message in
+            # history or display: those conversations are only passed to the AI as
+            # context, they are not the Agent Web chat box. ``dm`` belongs here for the
+            # same reason ``chatpro`` does — it arrives through the same IM account.
+            if self._current_input_source in ("chatpro", "dm"):
+                # IM messages are only passed to AI as context, not displayed in the chat box
                 self._last_user_input = initial_query
                 self._turn_sid = _get_session_manager().get_current_session_id()
                 # Do not call _get_session_manager().add_message("user", ...)
@@ -2911,25 +2952,41 @@ class AgentRunner:
             # Initialize task
             initial_query, task_id = self._prepare_task(initial_query)
 
-            # Add source label for AI (does not affect storage or frontend display)
+            # Add source label for AI (does not affect storage or frontend display).
+            # This is the ONLY place a ChatPro/IM turn's origin reaches the model: the
+            # user message itself carries no channel. Label the channel, not just the
+            # source — a DM and a group message both arrive on the "chatpro" account,
+            # and without the channel the model can only guess which one it is (asked
+            # "which channel is this?", it called a DM an Agent Web message).
             channel = getattr(self, "_current_channel", "") or ""
             sender_name = getattr(self, "_current_sender_name", "") or ""
             chat_name = getattr(self, "_current_chat_name", "") or ""
-            if self._current_input_source in ("web", "gateway"):
-                # Map channel to human-readable label
-                _channel_labels = {
-                    "web": "Web UI",
-                    "feishu": "Feishu",
-                    "feishu_group": "Feishu Group",
-                    "feishu_private": "Feishu Private",
-                    "telegram": "Telegram",
-                    "telegram_group": "Telegram Group",
-                    "telegram_private": "Telegram Private",
-                    "api": "External API",
-                    "external": "External Integration",
-                    "external-ws": "External WebSocket",
-                }
-                label = _channel_labels.get(channel, channel if channel else "Web UI")
+            _channel_labels = {
+                "web": "Web UI",
+                "feishu": "Feishu",
+                "feishu_group": "Feishu Group",
+                "feishu_private": "Feishu Private",
+                "telegram": "Telegram",
+                "telegram_group": "Telegram Group",
+                "telegram_private": "Telegram Private",
+                "api": "External API",
+                "external": "External Integration",
+                "external-ws": "External WebSocket",
+                # ChatPro / IM: the gateway serves this one account, and a group and a
+                # direct message are different conversations on it.
+                "chatpro": "IM Group",
+                "chatpro_group": "IM Group",
+                "chatpro_dm": "IM Direct Message",
+                "dm": "IM Direct Message",
+                "wake": "IM (queued drain)",
+            }
+            if channel or self._current_input_source in ("web", "gateway", "chatpro", "dm"):
+                label = (
+                    _channel_labels.get(channel)
+                    or _channel_labels.get(self._current_input_source)
+                    or channel
+                    or "Web UI"
+                )
                 # Build context parts
                 ctx_parts = [f"Source: {label}"]
                 if chat_name:
@@ -2939,7 +2996,9 @@ class AgentRunner:
                 source_chat_id = getattr(self, "_current_source_chat_id", "") or ""
                 if source_chat_id:
                     ctx_parts.append(f"chat_id: {source_chat_id}")
-                f"[{', '.join(ctx_parts)}] {initial_query}"
+                # NOTE: this used to be a bare f-string expression — computed and thrown
+                # away, so no turn ever carried the prefix it was written for.
+                initial_query = f"[{', '.join(ctx_parts)}] {initial_query}"
             elif self._current_input_source == "cli":
                 pass
             # chatpro group messages already prefixed in __PROCESS_QUEUE__ path
@@ -4051,6 +4110,7 @@ class AgentRunner:
                                         self._current_channel = "chatpro_group"
                                 elif msg.type == "dm":
                                     msg_text = f"[DM] {msg.sender_name}: {msg.content}"
+                                    self._current_channel = "chatpro_dm"
                                 else:
                                     msg_text = f"[{msg.type}] {msg.sender_name}: {msg.content}"
                                 evt_source = msg.type
@@ -4559,6 +4619,7 @@ class AgentRunner:
             current_turn=self._current_turn,
             current_round=self._current_round,
             chat_api=self.chat_api,
+            current_channel=self._current_channel,
         )
 
         # Store tools parameter for later use in chat() call

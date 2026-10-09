@@ -605,15 +605,24 @@ def build_collab_task_payload(
     }
 
 
+def encode_collab_task_marker(payload: dict[str, Any]) -> str:
+    """The machine marker alone — the one place the wire format is written.
+
+    Callers that carry their own readable body (the group invitation does) use this
+    instead of re-serialising the payload by hand, so marker and payload cannot drift.
+    """
+    body = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+    return f"{COLLAB_TASK_START}{body}{COLLAB_TASK_END}"
+
+
 def encode_collab_task_message(payload: dict[str, Any]) -> str:
     """Build chat TEXT content: machine marker first, then a readable fallback
     (agents read this text too, so the task id / card / join hint stay)."""
     kind = normalize_task_kind(str(payload.get("kind") or ""))
-    body = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
     headline = _TASK_HEADLINES.get(kind, "🤝 协作任务")
     cid = str(payload.get("collab_id") or "")
     lines = [
-        f"{COLLAB_TASK_START}{body}{COLLAB_TASK_END}",
+        encode_collab_task_marker(payload),
         f"{headline}：{payload.get('title') or '协作任务'}",
         f"Task ID: {cid}",
     ]
@@ -679,18 +688,7 @@ def strip_collab_task_marker(content: str) -> str:
 
 
 def _rewrite_collab_task_marker(content: str, payload: dict[str, Any]) -> str:
-    new_marker = f"{COLLAB_TASK_START}{json.dumps(payload, ensure_ascii=False, separators=(',', ':'))}{COLLAB_TASK_END}"
-    return _COLLAB_TASK_RE.sub(new_marker, content, count=1)
-
-
-def patch_collab_task_status_in_content(content: str, status: str, note: str = "") -> str:
-    payload = parse_collab_task_payload(content)
-    if not payload:
-        return content
-    payload["status"] = status
-    if note:
-        payload["resolve_note"] = note
-    return _rewrite_collab_task_marker(content, payload)
+    return _COLLAB_TASK_RE.sub(encode_collab_task_marker(payload), content, count=1)
 
 
 def patch_collab_task_participant_in_content(content: str, agent_id: str, state: str) -> str:
@@ -713,52 +711,3 @@ def patch_collab_task_participant_in_content(content: str, agent_id: str, state:
             }
         )
     return _rewrite_collab_task_marker(content, payload)
-
-
-def post_collab_task_card(payload: dict[str, Any], group_id: str) -> dict[str, Any]:
-    """Send a collaboration-task card to a group. Returns {ok, group_id, message_id}.
-
-    The card goes to the group where it lives: a group joined on a paired machine
-    is posted through that peer's bridge, not this agent's own gateway.
-    """
-    from opensquad.peer_bridge import owner_bridge
-
-    bridge, _why = owner_bridge(group_id=group_id)
-
-    if bridge is None:
-        return {"ok": False, "error": "Bridge not connected"}
-
-    target = group_id
-    try:
-        groups = bridge.list_groups_api() or []
-        if not any(isinstance(g, dict) and g.get("id") == group_id for g in groups):
-            for g in groups:
-                if isinstance(g, dict) and g.get("name") == group_id:
-                    target = str(g.get("id") or group_id)
-                    break
-    except Exception:
-        pass
-
-    ok = bridge.send_message(encode_collab_task_message(payload), target_id=target, target_type="group")
-    if not ok:
-        return {"ok": False, "error": "Failed to send collab-task card", "group_id": target}
-    return {"ok": True, "group_id": target, "message_id": bridge.last_sent_message_id()}
-
-
-def post_dm_collab_task_card(payload: dict[str, Any], recipient_name: str) -> dict[str, Any]:
-    """Send a collaboration-task card as a direct message (1:1 chat window)."""
-    from opensquad.bridge import bridge
-
-    if not bridge or not bridge.token:
-        return {"ok": False, "error": "Bridge not connected"}
-    if not (recipient_name or "").strip():
-        return {"ok": False, "error": "recipient_name is required"}
-
-    ok = bridge.send_message(
-        encode_collab_task_message(payload),
-        target_id=recipient_name.strip(),
-        target_type="dm",
-    )
-    if not ok:
-        return {"ok": False, "error": "Failed to send DM collab-task card", "recipient": recipient_name}
-    return {"ok": True, "recipient": recipient_name, "message_id": bridge.last_sent_message_id()}

@@ -117,6 +117,86 @@ def test_typing_and_clicking_change_the_shared_page(tmp_path):
     assert bs.frame("b2")["ok"] is True
 
 
+def test_an_external_cdp_client_drives_the_same_page(tmp_path):
+    """The Playwright MCP is pointed at this session's CDP port — so a second client, which
+    believes it owns a browser, must land on the page the session already has, and the session
+    must see what that client did."""
+    from playwright.sync_api import sync_playwright
+
+    opened = bs.open_session(session_id="cdp1")
+    assert opened["ok"] is True, opened
+
+    endpoint = bs.cdp_endpoint("cdp1")
+    assert endpoint.startswith("http://127.0.0.1:"), endpoint
+
+    bs.navigate("cdp1", _page(tmp_path).as_uri())
+
+    with sync_playwright() as pw:
+        other = pw.chromium.connect_over_cdp(endpoint)
+        try:
+            context = other.contexts[0]
+            page = context.pages[0]
+            assert page.title() == "opensquad-browser-ok"
+
+            page.fill("#box", "from-the-other-client")
+            page.click("#go")
+
+            # the session sees the other client's work
+            assert "from-the-other-client" in bs.snapshot("cdp1")["text"]
+            assert bs.frame("cdp1")["ok"] is True
+        finally:
+            other.close()
+
+
+def test_the_panel_frame_follows_a_change_made_by_an_external_cdp_client(tmp_path, monkeypatch):
+    """The plugin drives the page over CDP and calls none of this module's methods, so nothing
+    marks the cached frame dirty. The poll's TTL is the only thing keeping the preview live —
+    without it the panel froze on whatever was captured last, which is the whole point of the
+    request this covers."""
+    from playwright.sync_api import sync_playwright
+
+    # What is under test is "the cache expired", not "0.5 s went by"; a negative TTL says that
+    # without a sleep.
+    monkeypatch.setattr(bs, "FRAME_TTL_S", -1.0)
+
+    opened = bs.open_session(session_id="cdp2")
+    assert opened["ok"] is True, opened
+    endpoint = bs.cdp_endpoint("cdp2")
+    bs.navigate("cdp2", _page(tmp_path, "before-the-plugin").as_uri())
+
+    before = bs.frame("cdp2")
+    assert before["ok"] is True and before["title"] == "before-the-plugin"
+
+    with sync_playwright() as pw:
+        other = pw.chromium.connect_over_cdp(endpoint)
+        try:
+            page = other.contexts[0].pages[0]
+            page.goto(_page(tmp_path, "after-the-plugin").as_uri(), wait_until="domcontentloaded")
+
+            after = bs.frame("cdp2")
+
+            assert after["ok"] is True, after
+            # the poll read the document, not Playwright's cache of it
+            assert after["url"].endswith("after-the-plugin.html"), after
+            assert after["title"] == "after-the-plugin"
+            assert after["png"] != before["png"], "the panel was handed the stale frame"
+        finally:
+            other.close()
+
+
+def test_a_burst_of_polls_inside_the_ttl_renders_once(tmp_path):
+    """The cache still earns its place: the panel polls faster than it needs a new picture, and a
+    tick inside the TTL must not cost a render."""
+    bs.open_session(session_id="cdp3")
+    bs.navigate("cdp3", _page(tmp_path, "ttl-page").as_uri())
+
+    first = bs.frame("cdp3")
+    second = bs.frame("cdp3")
+
+    assert first["ok"] and second["ok"]
+    assert second["captured_at"] == first["captured_at"]
+
+
 def test_back_returns_to_the_previous_page(tmp_path):
     first = _page(tmp_path, "first-page")
     second = _page(tmp_path, "second-page")

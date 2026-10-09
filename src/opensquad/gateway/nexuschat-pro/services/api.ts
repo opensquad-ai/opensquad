@@ -379,6 +379,8 @@ export interface GroupListItem {
   is_private: boolean;
   created_at: string | null;
   notification_sound_enabled: boolean;
+  /** 群折叠（per-user）：true = 只在「折叠的群聊」里出现。 */
+  folded: boolean;
   pinned_message_id: string | null;
   last_message?: {
     id: string;
@@ -403,6 +405,7 @@ export interface GroupResponse {
   unread_count: number;
   has_unread_mention: boolean;
   notification_sound_enabled: boolean;
+  folded: boolean;
   created_at: string;
   created_by: string;
 }
@@ -428,6 +431,7 @@ export const groupAPI = {
     description: string;
     avatar: string;
     notification_sound_enabled: boolean;
+    folded: boolean;
   }>) => {
     return apiRequest<GroupResponse>(`/groups/${groupId}?token=${authToken}`, {
       method: 'PUT',
@@ -1775,6 +1779,132 @@ export const pluginServiceAPI = {
     return apiRequest<{ plugin_id: string; logs: string[]; total: number }>(
       `/ai-web/admin/plugin-services/${name}/logs?lines=${lines}`
     );
+  },
+};
+
+// ============================================================
+// Mods API (Claude Code 模组：静态兼容性裁定与管理)
+// ============================================================
+
+/** One reason a mod cannot fully run: the reference it made, and why we lack it. */
+export interface ModGap {
+  kind: 'event' | 'dollar' | 'module';
+  name: string;
+  why: string;
+}
+
+export type ModVerdict = 'runnable' | 'partial' | 'blocked' | 'unknown';
+
+export interface ModInfo {
+  name: string;
+  dir_name: string;
+  version: string;
+  description: string;
+  author: string;
+  dir: string;
+  has_manifest: boolean;
+  has_hooks: boolean;
+  modules: string[];
+  verdict: ModVerdict;
+  used_events: string[];
+  used_dollar: string[];
+  blocked_by: ModGap[];
+  degraded_by: ModGap[];
+  has_catch: boolean;
+  notes: string[];
+  state: { enabled: boolean };
+  /** Gated capabilities this mod currently holds (default-deny; granted here). */
+  permissions: { granted: string[]; domains: string[] };
+  /** Per-contribution loading: what would actually load, what stays inert, and
+   *  what — if anything — the user would actually notice. */
+  plan: {
+    loadable: boolean;
+    modules: string[];
+    inert: ModGap[];
+    effect: {
+      kind: 'not_loadable' | 'no_effect' | 'invisible' | 'works';
+      events: string[];
+      dollar: string[];
+      draws: boolean;
+    };
+    reason: string;
+  };
+}
+
+export interface ModsMatrix {
+  source: string;
+  upstream: string;
+  events: Record<'served' | 'degraded' | 'refused', string[]>;
+  dollar: Record<'served' | 'degraded' | 'refused', string[]>;
+  elements_open: string[];
+  elements_refused: string[];
+  slots_open: string[];
+  slots_never: string;
+}
+
+/** Compatibility is not availability: the mod host does not exist yet. */
+export interface ModsHostStatus {
+  available: boolean;
+  reason: string;
+  /** What the host actually wires today, derived from the runtime's own list. */
+  scope: string;
+  wired: { events: string[]; dollar: string[] };
+  node_runtime: string;
+  /** Last *reported* state of the per-agent hosts (not a live probe). */
+  observed: { running: number; degraded: number; stale: number };
+  last_failure: string;
+  observed_at_ts: number;
+}
+
+export interface ModsListResponse {
+  ok: boolean;
+  root: string;
+  mods: ModInfo[];
+  counts: Record<string, number>;
+  matrix: ModsMatrix;
+  host: ModsHostStatus;
+}
+
+export interface ModsPermissionsResponse {
+  ok: boolean;
+  capabilities: Array<{ id: string; blurb: string }>;
+  mods: Record<string, { granted: string[]; domains: string[] }>;
+}
+
+export const modsAPI = {
+  /** The four gated capabilities (id + what each means) and who holds them. */
+  permissions: async () => {
+    return apiRequest<ModsPermissionsResponse>('/ai-web/mods/permissions');
+  },
+
+  /** Grant/revoke the gated capabilities for one mod. */
+  setPermissions: async (name: string, granted: string[], domains: string[] = []) => {
+    return apiRequest<{ ok: boolean; name: string; permissions: { granted: string[]; domains: string[] } }>(
+      `/ai-web/mods/${encodeURIComponent(name)}/permissions`,
+      { method: 'PUT', body: JSON.stringify({ granted, domains }) }
+    );
+  },
+
+  /** Installed mods + their static verdicts + this host's capability table */
+  list: async () => {
+    return apiRequest<ModsListResponse>('/ai-web/mods');
+  },
+
+  /** Record the intent to run (or not run) a mod. The host reads this state, but
+   *  only `tool.call` is wired today — the API says exactly what is wired in `host`. */
+  setEnabled: async (name: string, enabled: boolean) => {
+    return apiRequest<{ ok: boolean; name: string; state: { enabled: boolean }; host: ModsHostStatus }>(
+      `/ai-web/mods/${encodeURIComponent(name)}/${enabled ? 'enable' : 'disable'}`,
+      { method: 'PUT' }
+    );
+  },
+
+  /** Copy a mod directory from disk into the workspace mods root */
+  importMod: async (path: string, overwrite = false) => {
+    return apiRequest<{ ok: boolean; name: string; mod: ModInfo }>('/ai-web/mods/import', {
+      method: 'POST',
+      body: JSON.stringify({ path, overwrite }),
+    });
   },
 };
 

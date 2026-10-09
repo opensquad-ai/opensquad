@@ -949,6 +949,7 @@ async def get_user_groups(current_user: User = Depends(get_current_user_dep), db
         unread_count = settings.unread_count if settings else 0
         has_unread_mention = settings.has_unread_mention if settings else False
         notification_enabled = settings.notification_enabled if settings else True
+        folded = bool(settings.folded) if settings else False
 
         last_msg = last_msgs_map.get(group.id)
         last_message_data = None
@@ -970,6 +971,7 @@ async def get_user_groups(current_user: User = Depends(get_current_user_dep), db
                 has_unread_mention=has_unread_mention,
                 is_private=group.is_private,
                 notification_sound_enabled=notification_enabled,
+                folded=folded,
                 last_message=last_message_data,
                 created_at=utc_iso(group.created_at),
             )
@@ -1137,6 +1139,7 @@ async def get_group(
         unread_count=settings.unread_count if settings else 0,
         has_unread_mention=settings.has_unread_mention if settings else False,
         notification_sound_enabled=settings.notification_enabled if settings else True,
+        folded=bool(settings.folded) if settings else False,
         created_by=group.created_by,
         created_at=group.created_at,
     )
@@ -1174,6 +1177,19 @@ async def update_group(
         if settings:
             settings.notification_enabled = group_update.notification_sound_enabled
 
+    if group_update.folded is not None:
+        settings_result = await db.execute(
+            select(UserGroupSettings).where(
+                and_(UserGroupSettings.user_id == current_user.id, UserGroupSettings.group_id == group_id)
+            )
+        )
+        settings = settings_result.scalar_one_or_none()
+        if settings:
+            settings.folded = group_update.folded
+        else:
+            # 折叠是 per-user 偏好，成员可能还没有 settings 行（只有退群/建群时才建）。
+            db.add(UserGroupSettings(user_id=current_user.id, group_id=group_id, folded=group_update.folded))
+
     # Build the response before commit to avoid object expiry after commit.
     # Manually fetch the current user's settings.
     settings_result = await db.execute(
@@ -1207,6 +1223,10 @@ async def update_group(
         created_by=group.created_by,
         created_at=group.created_at,
         notification_sound_enabled=group.notification_sound_enabled,
+        # 上面刚 add 的 settings 行还没 flush，re-query 查不到，所以以请求值为准。
+        folded=group_update.folded
+        if group_update.folded is not None
+        else (bool(settings.folded) if settings else False),
     )
 
     await db.commit()

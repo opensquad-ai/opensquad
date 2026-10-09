@@ -1,0 +1,35 @@
+{
+  "name": "mods_host",
+  "display_name": "Claude Code Mods Host",
+  "version": "0.1.0",
+  "type": "hook",
+  "enabled": true,
+  "node_scope": "all",
+  "description": "Runs Claude Code Mods in a Node child process and bridges their hooks.",
+  "author": "OpenSquad",
+  "tags": [
+    "mods",
+    "claude-code",
+    "bridge"
+  ],
+  "tools": [],
+  "hooks": [
+    "on_after_send",
+    "on_after_tool",
+    "on_before_tool",
+    "on_message_received",
+    "on_state_change",
+    "on_task_complete",
+    "on_task_start"
+  ],
+  "config": {
+    "schema": {}
+  },
+  "service_toggle": false,
+  "config_schema": {},
+  "contributes": {},
+  "dependencies": {
+    "pip": []
+  },
+  "setup": {}
+}

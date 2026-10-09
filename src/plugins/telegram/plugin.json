@@ -10,7 +10,15 @@
   "tags": [
     "im"
   ],
-  "tools": [],
+  "tools": [
+    {
+      "name": "telegram_send",
+      "module": "proxy",
+      "level": "extended",
+      "auto_register": true,
+      "requires_agent_id": true
+    }
+  ],
   "hooks": [],
   "config": {
     "schema": {

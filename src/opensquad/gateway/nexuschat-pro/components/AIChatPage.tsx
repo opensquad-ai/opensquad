@@ -15,7 +15,16 @@
  *   - Status indicators
  *   - Unified timeline: messages and workflow events interleaved
  */
-import React, { useState, useEffect, useLayoutEffect, useRef, useCallback, useMemo, Suspense } from 'react';
+import React, {
+  useState,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useCallback,
+  useMemo,
+  useSyncExternalStore,
+  Suspense,
+} from 'react';
 import {
   Send, Square,
   PanelLeftOpen, PanelLeftClose, PanelRightOpen, PanelRightClose, X, FileIcon, FileText, Upload,
@@ -97,6 +106,7 @@ import {
 } from '../utils/sessionProjectMeta';
 import {
   bindAgentWebUiSyncPush,
+  probeProjectRoot,
   pullAgentWebUiState,
   schedulePushAgentWebUiState,
   setAgentWebUiSyncTarget,
@@ -181,6 +191,13 @@ import {
 import { TaskFoldBlock } from './ai-chat/TaskFoldBlock';
 import { TimelineRow } from './ai-chat/TimelineRow';
 import { ChatTimeline } from './ai-chat/ChatTimeline';
+import { ModSlotHost } from './ai-chat/ModSlotHost';
+import {
+  PANE_SCOPE,
+  getModSlotVersion,
+  listModPanes,
+  subscribe as subscribeModSlots,
+} from './ai-chat/modSlotStore';
 import { ChatScrollComposerHint, ChatScrollHud } from './ai-chat/ChatScrollHud';
 import { SoloModelPicker } from './ai-chat/SoloModelPicker';
 import { EffortPicker, type ReasoningEffort } from './ai-chat/EffortPicker';
@@ -527,6 +544,13 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
   );
   const [closeWorkspaceTarget, setCloseWorkspaceTarget] = useState<Workspace | null>(null);
   const [createWorkspaceOpen, setCreateWorkspaceOpen] = useState(false);
+  /**
+   * Why a project folder was refused or did not take effect. Both used to fail
+   * silently: a workspace could be registered for a path the launcher cannot
+   * see, and the rejected cwd write left the agent running in its previous
+   * directory with nothing on screen to say so.
+   */
+  const [workspaceWarning, setWorkspaceWarning] = useState('');
   const [fileDirtyMap, setFileDirtyMap] = useState<Record<string, boolean>>({});
   const [tabSessionTitles, setTabSessionTitles] = useState<Record<string, string>>({});
   const pendingOpenSessionTabRef = useRef(false);
@@ -1624,6 +1648,51 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
   const bootRestoreAliasRef = useRef<Array<string | null | undefined>>([]);
   bootRestoreAliasRef.current = [agentProfile?.dir_name, agentProfile?.agent_id];
 
+  /**
+   * The backend is gone: the socket dropped and did not come back inside the
+   * hook's grace window. Nothing can still be running on this side, so freeze
+   * every live fold and drop the per-session busy markers.
+   *
+   * Every session, not just the ones the client believes are busy: the
+   * `busy_sessions` snapshot can be empty or stale (a turn that began after the
+   * last broadcast), and an unfinished fold counts as *live by definition* in
+   * the activity row (`stillLive = … || !block.completed`), so its elapsed kept
+   * counting `Date.now() - started_ms` — the day-long "执行中 · 23h 48m 48s"
+   * left behind by a service that was killed mid-turn.
+   *
+   * A partial stream is deliberately left on screen: the backend can no longer
+   * finish it, and throwing away what the user was reading is worse than a
+   * bubble that simply stopped moving.
+   */
+  const handleBackendLost = useCallback(() => {
+    const sealOpts = {
+      cancelOpenTools: 'Cancelled: agent disconnected',
+      fallbackStartedMs: turnStartedMsRef.current,
+    };
+    const hasOpenFold = (entries: TimelineEntry[]) =>
+      entries.some((e) => e.kind === 'workflow' && !e.data.completed);
+
+    const buckets = liveTimelinesBySessionRef.current;
+    const next: Record<string, TimelineEntry[]> = {};
+    for (const [sid, entries] of Object.entries(buckets)) {
+      // Keep the old identity when there is nothing to seal — a new array for
+      // every session would re-render every pane for no reason.
+      next[sid] = hasOpenFold(entries) ? sealIncompleteWorkflows(entries, sealOpts) : entries;
+    }
+    liveTimelinesBySessionRef.current = next;
+    setLiveTimelinesBySession(next);
+    setTimelineState((prev) => (hasOpenFold(prev) ? sealIncompleteWorkflows(prev, sealOpts) : prev));
+
+    // No turn is in flight any more, on any pane.
+    busySessionsRef.current = [];
+    setBusySessions([]);
+    isStreamingBySessionRef.current = {};
+    setIsStreamingBySession({});
+    setIsStreaming(false);
+    turnStartedMsRef.current = undefined;
+    setTurnStartedMs(undefined);
+  }, []);
+
   useAgentWebSocket(agentId, {
     SUMMARY_STREAM_DEBUG,
     agentCurrentSessionIdRef,
@@ -1661,6 +1730,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     modelSwitchRevertRef,
     newSessionGuardRef,
     newSessionPendingRef,
+    onBackendLost: handleBackendLost,
     pageActiveRef,
     pendingFilePushesRef,
     pendingHydrationFinalsRef,
@@ -3230,9 +3300,11 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
           pendingProjectPathRef.current = boundPath;
           setAgentCwd(boundPath);
           const dirName = agentProfile?.dir_name || agentId;
-          void adminAPI.setWorkingDirectory(dirName, boundPath, currentSessionId || undefined).catch((err: any) => {
-            console.error('[AIChatPage] Failed to set working directory for folder session:', err);
-          });
+          void adminAPI.setWorkingDirectory(dirName, boundPath, currentSessionId || undefined)
+            .catch((err: any) => {
+              console.error('[AIChatPage] Failed to set working directory for folder session:', err);
+              setWorkspaceWarning(`工作目录未生效：${boundPath}（${err?.message || err}）`);
+            });
         }
         return;
       }
@@ -3298,9 +3370,11 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
       pendingProjectPathRef.current = boundPath;
       setAgentCwd(boundPath);
       const dirName = agentProfile?.dir_name || agentId;
-      void adminAPI.setWorkingDirectory(dirName, boundPath, currentSessionId || undefined).catch((err: any) => {
-        console.error('[AIChatPage] Failed to set working directory for folder session:', err);
-      });
+      void adminAPI.setWorkingDirectory(dirName, boundPath, currentSessionId || undefined)
+        .catch((err: any) => {
+          console.error('[AIChatPage] Failed to set working directory for folder session:', err);
+          setWorkspaceWarning(`工作目录未生效：${boundPath}（${err?.message || err}）`);
+        });
       try {
         pushCwdRecent(boundPath);
       } catch { /* ignore */ }
@@ -4058,9 +4132,16 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     // agent-level file, which every pane reads — so switching a workspace re-rooted the others, and
     // a question asked in one project was answered against another's directory. Both ends already
     // accept a session id; this call was the half that did not send one.
-    void adminAPI.setWorkingDirectory(dirName, path, currentSessionId || undefined).catch((err: any) => {
-      console.error('[AIChatPage] Failed to set cwd for workspace:', err);
-    });
+    void adminAPI.setWorkingDirectory(dirName, path, currentSessionId || undefined)
+      .then(() => {
+        setWorkspaceWarning((prev) => (prev.startsWith('工作目录未生效') ? '' : prev));
+      })
+      .catch((err: any) => {
+        // Do not swallow this: the launcher rejects a directory it cannot see, so
+        // the agent keeps its previous cwd and answers about the wrong project.
+        console.error('[AIChatPage] Failed to set cwd for workspace:', err);
+        setWorkspaceWarning(`工作目录未生效：${path}（${err?.message || err}）`);
+      });
   }, [activeWorkspace?.id, activeWorkspace?.rootPath, agentId, agentProfile?.dir_name, currentSessionId]);
 
   useEffect(() => {
@@ -4222,16 +4303,36 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     // (avoids global「加载会话中」and remounting the live chatSlot).
   };
 
-  const handleOpenExistingWorkspace = (rootPath: string) => {
-    const ws = ensureWorkspace(agentId, rootPath);
+  const handleOpenExistingWorkspace = async (rootPath: string) => {
+    const path = (rootPath || '').trim();
+    if (!path) return;
+    // Register only a folder the launcher can actually see. Registering one it
+    // cannot used to succeed here and fail later and quieter: the tab opened,
+    // the panel answered "Root not found", and the cwd write was rejected, so
+    // the agent kept running in its previous project. Only an explicit "gone"
+    // answer refuses — an inconclusive probe (launcher briefly unreachable)
+    // must not block the user.
+    if ((await probeProjectRoot(fsAgentName, path)) === false) {
+      setWorkspaceWarning(`目录不存在，无法作为工作区打开：${path}`);
+      return;
+    }
+    setWorkspaceWarning('');
+    const ws = ensureWorkspace(agentId, path);
     openWorkspaceTab(agentId, ws.id);
     refreshWsSnap();
     setAgentCwd(ws.rootPath);
     pendingProjectPathRef.current = ws.rootPath;
   };
 
-  const handleCreateWorkspace = (name: string, rootPath: string) => {
-    const ws = ensureWorkspace(agentId, rootPath, name);
+  const handleCreateWorkspace = async (name: string, rootPath: string) => {
+    const path = (rootPath || '').trim();
+    if (!path) return;
+    if ((await probeProjectRoot(fsAgentName, path)) === false) {
+      setWorkspaceWarning(`目录不存在，无法创建工作区：${path}`);
+      return;
+    }
+    setWorkspaceWarning('');
+    const ws = ensureWorkspace(agentId, path, name);
     openWorkspaceTab(agentId, ws.id);
     refreshWsSnap();
     setAgentCwd(ws.rootPath);
@@ -4873,6 +4974,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     renderComposer: (sessionId: string) => (
       <AgentWebComposer
         key={`composer-${paneId}-${sessionId}`}
+        sid={sessionId}
         ref={(api) => {
           if (api) {
             composerApiByPaneRef.current.set(paneId, api);
@@ -5262,6 +5364,28 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
 
   const handleOpenTerminal = () => openPaneView('terminal');
   const handleOpenBrowser = () => openPaneView('browser');
+
+  // A mod pane is not in the pane menu — its id comes from the mod's own
+  // `$.ui.open` — so the arriving Pane frame is what opens its tab. Without this
+  // the tree would render into a tab nobody can reach.
+  const modPaneVersion = useSyncExternalStore(subscribeModSlots, getModSlotVersion, getModSlotVersion);
+  useEffect(() => {
+    if (!activeWorkspace) return;
+    // No session requirement: a mod pane belongs to the workspace, and its
+    // content is keyed by the pane id alone (see PANE_SCOPE).
+    const openKeys = new Set(
+      getFocusedPaneTabs(agentId, activeWorkspace.id).open.map((t) => `${t.kind}:${t.id}`),
+    );
+    for (const paneId of listModPanes(PANE_SCOPE)) {
+      if (openKeys.has(`mod:${paneId}`)) continue;
+      const pane = focusedPaneId;
+      openContentTab(agentId, activeWorkspace.id, { kind: 'mod', id: paneId }, pane);
+      if (pane) setFocusedPane(agentId, pane);
+      refreshWsSnap();
+    }
+    // `modPaneVersion` is the trigger; the rest is the context it needs.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [modPaneVersion, agentId, activeWorkspace?.id, currentSessionId, focusedPaneId]);
 
   // The shortcuts the welcome rows print. Bound once here so a row can never advertise a key
   // that does nothing; typing in a field is never intercepted.
@@ -5783,6 +5907,20 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
         </div>
 
       <div className="os-depth-body flex-1 min-h-0 flex flex-col">
+      {/* Project-folder problem: a workspace whose directory is gone, or a cwd
+          the launcher refused. Out here rather than inside the workspace body —
+          the point is that it also shows when no workspace could be activated. */}
+      {workspaceWarning ? (
+        <div className="px-4 py-2 bg-rose-500/15 border-b border-rose-500/30 flex items-center justify-between gap-3 flex-shrink-0">
+          <span className="text-sm text-rose-200 break-all">{workspaceWarning}</span>
+          <button
+            onClick={() => setWorkspaceWarning('')}
+            className="px-3 py-1 text-xs font-medium bg-rose-500/20 hover:bg-rose-500/30 text-rose-200 rounded transition-colors whitespace-nowrap"
+          >
+            知道了
+          </button>
+        </div>
+      ) : null}
       {activeWorkspace && workspaceLayout ? (
         <>
         {/* Auth expired banner */}
@@ -5988,12 +6126,14 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
                 return (
                   <TimelineRow key={entryKey} lockLayout={lockLayout} style={revealStyle}>
                     <MessageBubble {...msgProps} anchorId={entryKey} />
+                    <ModSlotHost sid={currentSessionId || ''} slot="AssistantMessage" className="mt-1 flex flex-col gap-1" />
                   </TimelineRow>
                 );
               }
               return (
                 <TimelineRow key={entryKey} lockLayout={lockLayout} style={revealStyle}>
                   <MessageBubble {...msgProps} anchorId={entryKey} />
+                  <ModSlotHost sid={currentSessionId || ''} slot="AssistantMessage" className="mt-1 flex flex-col gap-1" />
                   {(replyEmbeds.length > 0 || turnFilesCard) && (
                     <div className="w-full mt-1 mb-4" data-html-embeds-below-reply={replyEmbeds.length > 0 ? '1' : undefined}>
                       {replyEmbeds.map((payload, ei) => (

@@ -355,6 +355,10 @@ class TurnLoop:
                             "requirement": task_req,
                             "source": self.runner._current_input_source,
                             "agent_id": self.runner._agent_id,
+                            # Session facts for plugins. A live UI event without a
+                            # sid used to land in whichever pane was focused — see
+                            # useAgentWebSocket's routing comment.
+                            "sid": getattr(self.runner, "_turn_sid", ""),
                         },
                     )
 
@@ -530,6 +534,9 @@ class TurnLoop:
                         {
                             "message": _send_msg,
                             "agent_id": self.runner._agent_id,
+                            # Session facts for plugins, same as on_task_start:
+                            # a slot push without a sid has no pane to land in.
+                            "sid": getattr(self.runner, "_turn_sid", ""),
                         },
                     )
 
@@ -692,53 +699,6 @@ class TurnLoop:
                                 },
                                 session_id=getattr(self.runner, "_turn_sid", "") or None,
                             )
-
-                # Collaboration board auto-sync
-                try:
-                    import os as _os
-
-                    from opensquad.collab_board import update_latest_tool as _cb_update_latest_tool
-
-                    _agent_dir = getattr(self.runner, "_agent_dir", "") or ""
-                    _agent_id = _os.path.basename(_agent_dir) if _agent_dir else "unknown_agent"
-                    from opensquad.collab_board import list_tasks as _cb_list_tasks
-
-                    _tasks = _cb_list_tasks()
-                    _active_task_id = ""
-                    for _t in _tasks:
-                        if _t.get("status") == "active":
-                            _active_task_id = str(_t.get("task_id") or "")
-                            break
-                    if _active_task_id:
-                        _sensitive_tools = {
-                            "read_related_files",
-                            "glob",
-                            "grep",
-                            "rg",
-                            "filesystem__read",
-                            "filesystem__write",
-                            "filesystem__edit",
-                            "bash",
-                            "subprocess",
-                            "delegate_task",
-                            "system__send_file_to_web",
-                            "execute_command",
-                            "view_source_code",
-                            "find_files",
-                        }
-                        if t_name.startswith("collaboration.") or t_name.startswith("agent_setup."):
-                            _sensitive_tools.add(t_name)
-                        _should_sync = t_name not in _sensitive_tools
-                        if _should_sync:
-                            _cb_update_latest_tool(
-                                collab_id=_active_task_id,
-                                task_name="",
-                                agent_id=_agent_id,
-                                tool_name=t_name,
-                                tool_result=result,
-                            )
-                except Exception:
-                    pass
 
                 result_preview = str(result)[:300] if result else ""
                 if isinstance(result, str) and result.startswith("Error:"):
@@ -1234,6 +1194,9 @@ class TurnLoop:
                             "tools_used": completed.get("tools_used", []),
                             "turns": completed.get("turns", 0),
                             "agent_id": self.runner._agent_id,
+                            # Without this the bridge cannot remember the session,
+                            # and every slot push is dropped for want of an sid.
+                            "sid": getattr(self.runner, "_turn_sid", ""),
                         },
                     )
                 await _get_state_manager().set_state("idle")

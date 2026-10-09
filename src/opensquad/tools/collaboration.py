@@ -322,12 +322,9 @@ def start_collaboration(
                 # Announce as a clickable collaboration card: marker + the same
                 # readable text as before, so agents read what they always read.
                 try:
-                    import json as _json
-
                     from ..collab_approval import (
-                        COLLAB_TASK_END,
-                        COLLAB_TASK_START,
                         build_collab_task_payload,
+                        encode_collab_task_marker,
                     )
                     from ..collab_board import list_participants
 
@@ -341,11 +338,9 @@ def start_collaboration(
                         summary=project_description or "",
                         participants=list_participants(collab_id=_cid) if _cid != "(pending)" else [],
                     )
-                    _marker = (
-                        f"{COLLAB_TASK_START}"
-                        f"{_json.dumps(_payload, ensure_ascii=False, separators=(',', ':'))}"
-                        f"{COLLAB_TASK_END}"
-                    )
+                    # The marker comes from the shared encoder: this used to build the
+                    # same JSON by hand, one more place the wire format could drift.
+                    _marker = encode_collab_task_marker(_payload)
                     bridge.send_message(f"{_marker}\n{invite_msg}", target_id=target, target_type="group")
                 except Exception:
                     bridge.send_message(invite_msg, target_id=target, target_type="group")
@@ -1683,8 +1678,6 @@ def board_update(
     - "task": Task assignment area — PM should use assign_task() instead.
       Worker should use update_task_progress() instead.
       This function remains for custom/non-structured task entries.
-    - "status": Progress area — auto-updated by runner after each tool call.
-      You normally don't need to call this manually.
     - "discussion": Discussion history — use board_post_public_discussion instead.
 
     Example usage for PM:

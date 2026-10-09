@@ -693,6 +693,17 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
       /* storage unavailable: the choice is simply not remembered */
     }
   }, []);
+  /**
+   * Kept mounted once the terminal tab has been opened (the pane's terminal does the
+   * same), so switching to 文件 and back neither restarts the shell nor blanks its
+   * scrollback. Lazy on purpose: a user who never opens the terminal spawns no shell.
+   */
+  const [railTerminalMounted, setRailTerminalMounted] = useState(
+    () => viewTabs && railTab === 'terminal',
+  );
+  useEffect(() => {
+    if (railTab === 'terminal') setRailTerminalMounted(true);
+  }, [railTab]);
   // The pane's welcome rows (更改 / 文件) and their shortcuts point this rail at one of its
   // tabs; the rail is a sibling of the panes, so it is told which one.
   useEffect(() => {
@@ -2931,11 +2942,27 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
       {/* 浏览器 / 终端 are the other two tabs; the file list (below) is the third and is
           unchanged, including the chat drawer's treeOnly usage. */}
       {viewTabs && railTab === 'browser' ? (
-        <BrowserPanel />
-      ) : viewTabs && railTab === 'terminal' ? (
-        <TerminalPanel agentId={agentId} rootPath={rootPath} />
+        <BrowserPanel agentId={agentId} />
       ) : (
-      <div className="flex-1 min-h-0 flex">
+      <>
+      {/* Both live tabs stay mounted, and only the hidden one is painted: the terminal so
+          switching to 文件 (or closing and reopening the panel) neither kills the shell nor
+          blanks its scrollback, the list so switching back costs no refetch. */}
+      {viewTabs && railTerminalMounted ? (
+        <div
+          className={railTab === 'terminal' ? 'flex-1 min-h-0 flex flex-col' : 'hidden'}
+          aria-hidden={railTab !== 'terminal'}
+        >
+          <TerminalPanel
+            agentId={agentId}
+            rootPath={rootPath}
+            terminalKey={`rail:${rootPath || 'default'}`}
+          />
+        </div>
+      ) : null}
+      <div
+        className={`flex-1 min-h-0 flex${viewTabs && railTab === 'terminal' ? ' hidden' : ''}`}
+      >
         {listPane}
         {useSplitPreview ? (
           <div className="flex-1 min-w-0 flex flex-col bg-bgLight">
@@ -3006,6 +3033,7 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
           </div>
         ) : null}
       </div>
+      </>
       )}
 
       {renderCtxMenu()}

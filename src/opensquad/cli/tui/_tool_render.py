@@ -6,11 +6,12 @@ import re
 import time
 from typing import Any
 
+from opensquad.cli.tui._host import TuiHost
 from opensquad.cli.tui.i18n import t
 from opensquad.cli.tui.selectable_rich_log import SelectableRichLog as RichLog
 
 
-class ToolRenderMixin:
+class ToolRenderMixin(TuiHost):
     """Mixin methods moved from cli/tui/app.py (see app.py for the app class)."""
 
     def _shift_open_tool_starts(self, at: int, delta: int) -> None:

@@ -65,6 +65,22 @@ def is_external_ingress(source: str | None = None, channel: str | None = None) -
     return src.startswith("group:") or src.startswith("wake") or src.startswith("dm") or src.startswith("reminder")
 
 
+def chatpro_ingress_labels(msg_types: Any) -> tuple[str, str]:
+    """``(source, channel)`` for a batch of drained ChatPro queue messages.
+
+    The drain sites used to label every batch ``chatpro`` / ``chatpro_group``
+    regardless of what it held, so a DM told the model it had arrived in the group
+    channel — and the model, having no channel of its own, answered the user that a
+    DM had come in over the Agent Web panel (2026-10-06). A batch that is only DMs
+    now says so. A mixed batch keeps the group label: the reply targets default to
+    the group, and one label cannot describe two conversations.
+    """
+    kinds = {str(kind or "") for kind in (msg_types or ())}
+    if kinds == {"dm"}:
+        return "dm", "chatpro_dm"
+    return "chatpro", "chatpro_group"
+
+
 def resolve_primary_session_id(sm: Any | None = None) -> str:
     """Return the agent's primary ingress session id (fallback: focused)."""
     if sm is None:

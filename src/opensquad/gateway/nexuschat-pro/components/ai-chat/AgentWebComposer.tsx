@@ -18,6 +18,7 @@ import { agentSessionAPI, type ModelCardInfo, type SkillInfo } from '../../servi
 import { blobToWavFile } from '../../utils/mediaDevices';
 import { CHAT_DOCUMENT_COLUMN_CLASS } from '../../utils/chatLayout';
 import { ModePicker, type AgentMode } from './ModePicker';
+import { ModSlotHost } from './ModSlotHost';
 import { MobileComposerMenu } from './MobileComposerMenu';
 import { SoloModelPicker } from './SoloModelPicker';
 import { EffortPicker, type ReasoningEffort } from './EffortPicker';
@@ -124,6 +125,8 @@ export interface AgentWebComposerProps {
   /** Export this pane's session transcript (context panel row). */
   onExportContext?: SoloExportContextHandler;
   sessionChanges?: SessionChangesSummary | null;
+  /** This pane's session id — the mod band is looked up by it. */
+  sid?: string;
   changesBusy?: boolean;
   onOpenChanges?: () => void;
   onCommitPush?: () => void | Promise<void>;
@@ -200,6 +203,7 @@ export const AgentWebComposer = forwardRef<AgentWebComposerHandle, AgentWebCompo
     compressDisabled = false,
     onExportContext,
     sessionChanges,
+    sid = '',
     changesBusy = false,
     onOpenChanges,
     onCommitPush,
@@ -834,6 +838,13 @@ export const AgentWebComposer = forwardRef<AgentWebComposerHandle, AgentWebCompo
             {planPanel ? (
               <div className="os-composer-plan-layer">{planPanel}</div>
             ) : null}
+
+            {/* The band above the prompt. Renders nothing when this session has
+                no mod frame, so users without mods see zero new DOM. */}
+            <ModSlotHost
+              sid={sid || ''}
+              className="mx-1 mb-1 px-3 py-1.5 rounded-xl border border-border/60 bg-bgLight/60 flex flex-col gap-1 text-xs"
+            />
 
             <div
               className={`os-composer-input-layer w-full flex flex-col rounded-[22px] border border-boundary focus-within:ring-1 focus-within:ring-primary/40 relative transition-shadow duration-[420ms] ease-[cubic-bezier(0.22,1,0.36,1)] ${

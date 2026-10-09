@@ -16,6 +16,7 @@ import {
   saveWorkspaceStore,
   mergeWorkspaceSnapshots,
   isEmptyWorkspaceSnapshot,
+  reconcileWorkspaceExistence,
   WORKSPACES_CHANGED_EVENT,
   type WorkspaceStoreSnapshot,
 } from './workspaceStore';
@@ -58,7 +59,62 @@ function localSavedAt(storageAgentId: string, aliases: string[]): number {
   return wsAt;
 }
 
-function applyServerState(
+/**
+ * Does `root` exist as a directory on the agent host?
+ *
+ * `true` / `false` when the host answered, `null` when we could not find out —
+ * and unknown must never flag a workspace, or a single 502 from the launcher
+ * would retire every project at once. The check reuses the project listing
+ * (the launcher answers 404 `Root not found` for a path that is not a
+ * directory) so it needs no new backend route.
+ */
+export async function probeProjectRoot(
+  serverAgentName: string,
+  root: string,
+): Promise<boolean | null> {
+  const path = (root || '').trim();
+  if (!serverAgentName || !path) return null;
+  try {
+    await adminAPI.listProjectDir(serverAgentName, '', path);
+    return true;
+  } catch (err: any) {
+    if (Number(err?.status) === 404 && /Root not found/i.test(String(err?.message || ''))) {
+      return false;
+    }
+    console.warn('[agentWebUiSync] project root probe inconclusive', path, err);
+    return null;
+  }
+}
+
+/**
+ * Probe every registered workspace root and flag the ones that are gone.
+ *
+ * Returns true when flags or chrome changed; the caller's debounced push then
+ * carries that correction to the other origins (the registry only ever unions,
+ * so without a push the flag would stay local).
+ */
+async function reconcileHostWorkspaceExistence(
+  storageAgentId: string,
+  aliases: string[],
+): Promise<boolean> {
+  const t = target;
+  if (!t) return false;
+  const snap = loadWorkspaceStoreResolved(storageAgentId, aliases);
+  const paths = Array.from(
+    new Set(snap.workspaces.map((w) => (w.rootPath || '').trim()).filter(Boolean)),
+  );
+  if (paths.length === 0) return false;
+  const probed = await Promise.all(
+    paths.map(async (path) => [path, await probeProjectRoot(t.serverAgentName, path)] as const),
+  );
+  const exists: Record<string, boolean> = {};
+  for (const [path, ok] of probed) {
+    if (ok !== null) exists[path] = ok;
+  }
+  return reconcileWorkspaceExistence(storageAgentId, aliases, exists);
+}
+
+async function applyServerState(
   storageAgentId: string,
   aliases: string[],
   remote: {
@@ -66,7 +122,7 @@ function applyServerState(
     workspaces?: WorkspaceStoreSnapshot | null;
     session_project_meta?: Record<string, any>;
   },
-): boolean {
+): Promise<boolean> {
   const remoteAt = Number(remote.savedAt) || 0;
   const localAt = localSavedAt(storageAgentId, aliases);
   const remoteWs = remote.workspaces;
@@ -90,7 +146,11 @@ function applyServerState(
   const shouldApplyMeta =
     remoteMetaCount > 0 && (localMetaEmpty || remoteAt > localAt);
 
-  if (!shouldApplyWs && !shouldApplyMeta) return false;
+  if (!shouldApplyWs && !shouldApplyMeta) {
+    // Nothing to merge — but a stale entry that only ever lived here still has
+    // to be flagged, so probe regardless of whether the host had anything.
+    return reconcileHostWorkspaceExistence(storageAgentId, aliases);
+  }
 
   applyingServer = true;
   try {
@@ -113,6 +173,9 @@ function applyServerState(
   } finally {
     applyingServer = false;
   }
+  // Runs outside the `applyingServer` guard: it saves a corrected chrome, and
+  // that write must be allowed to schedule the push which propagates the flags.
+  await reconcileHostWorkspaceExistence(storageAgentId, aliases);
   return true;
 }
 
@@ -122,7 +185,7 @@ export async function pullAgentWebUiState(): Promise<boolean> {
   pullInFlight = true;
   try {
     const res = await adminAPI.getWebUiState(target.serverAgentName);
-    return applyServerState(target.storageAgentId, target.aliases, res);
+    return await applyServerState(target.storageAgentId, target.aliases, res);
   } catch (err) {
     console.warn('[agentWebUiSync] pull failed', err);
     return false;

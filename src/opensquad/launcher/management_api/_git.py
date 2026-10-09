@@ -163,7 +163,13 @@ class GitMixin:
         mgr = wm.manager_for(str(root))
         if mgr is None:
             return self._git_send({"ok": False, "code": "not_a_repo"})
-        tid = "ws-" + hashlib.sha1(os.path.normcase(os.path.abspath(str(root))).encode("utf-8")).hexdigest()[:10]
+        tid = (
+            "ws-"
+            + hashlib.sha1(
+                os.path.normcase(os.path.abspath(str(root))).encode("utf-8"),
+                usedforsecurity=False,
+            ).hexdigest()[:10]
+        )
         try:
             meta = mgr.create(tid)
             created = True

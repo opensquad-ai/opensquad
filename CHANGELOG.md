@@ -10,6 +10,7 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 | Version                                                                | Date       | Compare to previous                                                                    | Release page                                                                     |
 | ---------------------------------------------------------------------- | ---------- | -------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------- |
+| [0.9.0]                                                                | 2026-10-09 | [0.8.49 → 0.9.0](https://github.com/opensquad-ai/opensquad/compare/v0.8.49...v0.9.0) | [GitHub Release](https://github.com/opensquad-ai/opensquad/releases/tag/v0.9.0) |
 | [0.8.49]                                                               | 2026-09-29 | [0.8.48 → 0.8.49](https://github.com/opensquad-ai/opensquad/compare/v0.8.48...v0.8.49) | [GitHub Release](https://github.com/opensquad-ai/opensquad/releases/tag/v0.8.49) |
 | [0.8.48]                                                               | 2026-09-28 | [0.8.47 → 0.8.48](https://github.com/opensquad-ai/opensquad/compare/v0.8.47...v0.8.48) | [GitHub Release](https://github.com/opensquad-ai/opensquad/releases/tag/v0.8.48) |
 | [0.8.47]                                                               | 2026-09-27 | [0.8.46 → 0.8.47](https://github.com/opensquad-ai/opensquad/compare/v0.8.46...v0.8.47) | [GitHub Release](https://github.com/opensquad-ai/opensquad/releases/tag/v0.8.47) |
@@ -46,8 +47,64 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 > The next cycle's notes are collected here, then moved into a dated section
 > before the tag.
 
+## [0.9.0] — 2026-10-09
+
 ### Added
 
+- **A plugin can own the startup screen.** The window that covers startup is no longer
+  built into the shell: a plugin contributes it, rotates a playlist until the app is
+  ready (audio included, stopped on exit and never stalling at a seam), and can keep a
+  private clip private.
+- **Claude Code mods: a host, and slots in the app.** A Node host speaks NDJSON to the
+  agent process; `mod_slot` / `mod_commands` events carry the validated render tree and
+  the commands a mod contributes, `ModSlotHost` / `ModPaneView` render them, the `/mods`
+  routes and the mod slash commands wire them up, and Settings gains a "mods" entry
+  gated on the `mods_host` plugin. Mods declare the tools they proxy in their manifests.
+- **A built-in browser the agent and the panel share.** Playwright renders in the
+  launcher and exposes a CDP port; the Playwright MCP is pointed at that port, so a
+  plugin that believes it owns a browser drives the very page the agent's `browser_*`
+  tools and the panel see, instead of a second and invisible one. The panel gains a
+  read-only "Agent browser" tab that polls frames — a change made over CDP, which calls
+  none of the session's own methods, still shows up a poll later. Input is never
+  forwarded: watching is the feature, driving stays with the agent.
+- **A terminal in the file rail, hosted by the launcher.** A shell is a workspace tool,
+  not an agent capability, so it must work with the agent stopped — it runs in the
+  launcher and the panel polls its output. The shell is picked from what the machine
+  actually has (cmd / PowerShell / pwsh / Git Bash / WSL / zsh / fish), you type in the
+  terminal surface itself, and a terminal now keeps its scrollback across a tab switch,
+  a panel close or a reload because it is addressed by slot and the launcher keeps its
+  buffer. There is no PTY: the panel says so rather than letting a full-screen program
+  look broken.
+- **The right panel becomes 浏览器 / 终端 / 文件**, and the workspace pane's tab bar
+  offers all three.
+- **A first-launch tour, with the language switch inside it.**
+- **A messenger-style chat layout for the agent web.** The rail becomes one contacts
+  list for group chat and 1:1; talking to one agent gets its own whole-page layout with
+  bubbles, attachments in an always-visible footer, quoting, paged history and history
+  search. Both rails share one footer action set.
+- **Collaboration, end to end.** A collaboration-task card protocol with participant
+  state, a task-scoped channel agents talk in, and a task window that draws the work the
+  way the board does and renders markdown progress. An invitation is delivered to the
+  agent and only the coded invite is shown; work is assigned once the whole team has
+  accepted; one collaboration runs at a time, enforced at every door in; 补充 asks for a
+  change on an approval card without deciding it; the closure is announced in the window.
+- **Pairing across machines that survives a restart.** The invite names this machine's
+  LAN address instead of `127.0.0.1`, the host is detected rather than typed, a paired
+  machine shows whether it has ever connected, and a restart resumes the pairs instead of
+  forgetting them.
+- **Relay: queue, retry and backfill** a push the peer could not receive.
+- **Guided, step-by-step setup** for the plugins that talk to external services.
+- **A wake mode in the composer's + menu**, wired to the agent's own setting, and a
+  cross-group task strip above the composer with the merged task list behind it.
+- **A process says which code it is running, and shouts if the files beside it have moved
+  on.** A fix that landed after a process started is not running, and that has been
+  mistaken for "the fix did not work" more than once.
+- **A per-agent token statistics page** in the session sidebar, with the input split and
+  cache share on the cards.
+- **A long group message folds to its first stretch, with a faded edge**, and a plugin's
+  full details open in a dialog.
+- **Mods: the compatibility surface is documented**, with the host's trust boundary
+  written down (declared capabilities, install-time consent) instead of implied.
 - **Desktop: background updates that don't interrupt work.** The app already
   downloaded installers in the background, but only when the user clicked
   "download in background", and installing always forced an immediate restart.
@@ -160,6 +217,42 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   round's number; sub-agent thought rows are persisted the same way. The reload
   merge also keeps the newest recorded value instead of dropping it. Sessions
   recorded before this change still show no number — it was never written down.
+- **Agent Web: a project folder that is gone can no longer be registered or
+  activated.** The workspace registry only ever unions, so a path the launcher
+  cannot see stayed registered for good and was copied to every origin on the next
+  sync. Nothing surfaced it beyond a bare "Root not found" in the files panel,
+  while the launcher rejected that session's cwd write and the agent quietly kept
+  answering about its previous project. A workspace now carries a `missing` flag
+  set from a launcher probe on every pull: the entry is kept (the drive may come
+  back) but it is dropped from the open tabs and never becomes the active
+  workspace, the "+" menu lists it disabled with a hint, and registering a folder
+  probes it first — refusing an explicit "gone" answer, and only that, so a
+  launcher that is briefly unreachable never blocks the user. A rejected cwd write
+  now raises a banner naming the path and the reason instead of being swallowed.
+- **Agent Web: killing the backend no longer leaves an activity fold counting up
+  forever.** An unfinished workflow fold is live by definition in the activity row
+  and its elapsed is `Date.now() - started_ms`, so a turn the backend never settled
+  kept ticking — a service killed mid-turn left a day-long "执行中 · 23h 48m 48s"
+  on screen. The disconnect path sealed only the sessions the client believed were
+  busy, a snapshot broadcast on a ~5s loop, so a stale or empty one left the fold
+  open for good. Sealing now waits out a 10s grace window — a blip reconnects in a
+  second and must not end a fold the agent is still working on — and then freezes
+  every live fold in every session, dropping the busy/streaming markers and the
+  turn clock with them.
+- **Agent Web: a terminal keeps its scrollback across a tab switch and a reload.**
+  The rail rendered the terminal with a ternary, so switching to 文件 unmounted it,
+  and its unmount closed the shell; coming back minted a fresh id, started a fresh
+  shell and showed a blank screen. A terminal is now addressed by slot
+  (`rail:<workspace>`, `pane:<paneId>`) instead of by mount, and the launcher keys
+  shells on that id and keeps each one's buffer — so a remount reattaches to the
+  same shell and the poll replays its output. The rail additionally keeps the
+  terminal mounted once it has been opened, so 文件 ↔ 终端 costs neither a restart
+  nor a blank frame.
+- **Plugins: the SenseVoice service now declares the ffmpeg it resolves.** The
+  manifest listed every other dependency the service imports but not the one that
+  provides ffmpeg, and the launcher installs only *declared* deps into the Agent
+  Python — the interpreter the service runs in — so the bundled resolver had no
+  provider to find. This was the single failure keeping the test suite red.
 
 ## [0.8.49] — 2026-09-29
 

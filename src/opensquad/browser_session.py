@@ -8,6 +8,11 @@ clicked by a tool. Playwright can: it renders the page on this machine, and both
 and "the browser you are looking at" are the same page. It also means pages that refuse to be
 framed (Baidu, GitHub) display fine in the web build, because nothing is framed.
 
+The same page is also handed to the Playwright MCP server: each session launches Chromium with a
+CDP port (``cdp_port``) and the MCP is pointed at it with ``--cdp-endpoint``, so a plugin that
+believes it drives a browser of its own is in fact driving this one. That is why the url is read
+back from the page rather than from Playwright's cache — see ``_sync_state``.
+
 Threading: Playwright's sync objects belong to the thread that created them, so every session
 owns one worker thread and all calls are marshalled onto it through a queue. Callers block on a
 per-job event; nothing else touches the page.
@@ -23,19 +28,34 @@ import base64
 import logging
 import os
 import queue
+import socket
 import threading
 import uuid
 from typing import Any, Callable
 
 logger = logging.getLogger(__name__)
 
-# Keep one frame around so the panel can show the page without asking for a new screenshot on
-# every poll.
+# The panel's poll shows the last captured frame instead of rendering on every tick — but a cache
+# alone is not enough: a CDP client (the Playwright MCP) drives this page without going through any
+# method here, so nothing would ever mark it dirty and the panel would freeze on a stale picture.
+# A poll whose frame is older than this re-captures. See BrowserSession.frame_now.
+FRAME_TTL_S = 0.5
 MAX_SNAPSHOT_CHARS = 20_000
 DEFAULT_TIMEOUT_MS = 20_000
 # How long a caller waits to learn whether the session got a window (see BrowserSession.ready).
 START_TIMEOUT_S = 30.0
 VIEWPORT = {"width": 1280, "height": 800}
+
+
+def _free_port() -> int:
+    """A port Chromium can bind for CDP. Racy in principle; a miss just costs the MCP its
+    attachment, never the browser itself."""
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.bind(("127.0.0.1", 0))
+            return int(sock.getsockname()[1])
+    except Exception:  # noqa: BLE001 - no port simply means "no MCP sharing"
+        return 0
 
 
 class _Job:
@@ -60,6 +80,9 @@ class BrowserSession:
         self.headed = False
         self.window_note = ""
         self.profile_dir = _profile_dir(session_id)
+        # Allocated once, not per launch attempt: the MCP is told this port when the session
+        # opens, and a headed launch that falls back to headless must not move it.
+        self.cdp_port = _free_port()
         self.url = ""
         self.title = ""
         self.error = ""
@@ -124,11 +147,16 @@ class BrowserSession:
 
     def _start_context(self, *, headless: bool) -> None:
         """One persistent profile per session — that is what keeps you logged in across runs."""
+        args = ["--no-first-run", "--no-default-browser-check"]
+        if self.cdp_port:
+            # Playwright drives this browser over its own pipe; the port is a second, additive
+            # door so the Playwright MCP can drive the very same page.
+            args.append(f"--remote-debugging-port={self.cdp_port}")
         self._context = self._pw.chromium.launch_persistent_context(
             user_data_dir=self.profile_dir,
             headless=headless,
             viewport=VIEWPORT,
-            args=["--no-first-run", "--no-default-browser-check"],
+            args=args,
         )
         self._page = self._context.pages[0] if self._context.pages else self._context.new_page()
         self.headless = headless
@@ -172,14 +200,25 @@ class BrowserSession:
         return {"ok": True, "session_id": self.id}
 
     # ── actions ─────────────────────────────────────────────────────────────
-    def _sync_state(self) -> None:
-        """Read url + title, retrying briefly: during a navigation a title can still be empty."""
+    def _sync_state(self, *, retry: bool = True) -> None:
+        """Read url + title, retrying briefly: during a navigation a title can still be empty.
+
+        The url comes from the document (`location.href`), not from `page.url`: when the
+        Playwright MCP drives this same browser over CDP, Playwright's cached url is not always
+        refreshed by a navigation it did not initiate — the title is live, the cache is not.
+
+        ``retry=False`` is the poll's path: one attempt, no 2 s wait for a title. A page with no
+        `<title>` would otherwise make every poll of the panel take two seconds.
+        """
         import time as _time
 
-        deadline = _time.time() + 2.0
+        deadline = _time.time() + (2.0 if retry else 0.0)
         while True:
             try:
-                self.url = str(self._page.url)
+                try:
+                    self.url = str(self._page.evaluate("() => location.href"))
+                except Exception:
+                    self.url = str(self._page.url)
                 title = str(self._page.title())
                 self.title = title
                 if title or _time.time() >= deadline:
@@ -224,6 +263,7 @@ class BrowserSession:
             else:
                 raise ValueError("click needs a selector or x/y")
             self._sync_state()
+            self._capture()
             return True
 
         self._call(_click)
@@ -241,14 +281,21 @@ class BrowserSession:
                 if submit:
                     page.keyboard.press("Enter")
             self._sync_state()
+            self._capture()
             return True
 
         self._call(_type)
         return {"ok": True, "session_id": self.id, "url": self.url, "title": self.title}
 
     def press(self, key: str) -> dict[str, Any]:
-        self._call(lambda: self._page.keyboard.press(str(key or "Enter")))
-        return {"ok": True, "session_id": self.id, "url": self.url}
+        def _press():
+            self._page.keyboard.press(str(key or "Enter"))
+            self._sync_state()
+            self._capture()
+            return True
+
+        self._call(_press)
+        return {"ok": True, "session_id": self.id, "url": self.url, "title": self.title}
 
     def snapshot(self) -> dict[str, Any]:
         """What is on the page, as text — the cheap thing for a model to read."""
@@ -306,13 +353,31 @@ class BrowserSession:
             "bytes": len(png_b64),
         }
 
+    def _frame_is_stale(self) -> bool:
+        """True when the panel should be shown a fresh render rather than the cached one."""
+        import time as _time
+
+        return (not self.frame) or (_time.time() - self.frame_at) > FRAME_TTL_S
+
     def frame_now(self) -> dict[str, Any]:
-        """The panel's poll: the last frame, or a fresh one if there is none yet."""
-        if not self.frame:
+        """The panel's poll: the last frame, re-captured once it has gone stale.
+
+        `navigate`/`click`/`type_text`/`press` refresh the cache themselves, but the Playwright
+        MCP drives this same page over CDP and calls none of them — with the cache as the only
+        source, a plugin's work would never appear in the panel. Hence the TTL: a poll older than
+        `FRAME_TTL_S` re-reads the url and renders again, so whoever is driving, the preview keeps
+        up. The cache still does its job — a burst of polls inside the TTL renders once, not once
+        per tick.
+        """
+        if self._frame_is_stale():
             try:
-                return self.screenshot()
+                self._call(lambda: (self._sync_state(retry=False), self._capture()))
             except Exception as exc:  # noqa: BLE001 - a poll must not raise
-                return {"ok": False, "error": str(exc), "session_id": self.id}
+                # Only a poll with nothing to show reports the failure. A render can lose the race
+                # with a navigation (the plugin's, or the agent's) and throw for one tick; turning
+                # that into an error would flash the panel amber every time the page moves.
+                if not self.frame:
+                    return {"ok": False, "error": str(exc), "session_id": self.id}
         return {
             "ok": True,
             "session_id": self.id,
@@ -338,6 +403,8 @@ class BrowserSession:
             "headed": self.headed,
             "headless": self.headless,
             "profile_dir": self.profile_dir,
+            # where the Playwright MCP attaches to drive this same page
+            "cdp_port": self.cdp_port,
             "window_note": self.window_note,
         }
 
@@ -451,6 +518,16 @@ def screenshot(session_id: str, full_page: bool = False) -> dict[str, Any]:
 
 def frame(session_id: str) -> dict[str, Any]:
     return _action(session_id, lambda s: s.frame_now())
+
+
+def cdp_endpoint(session_id: str) -> str:
+    """Where a CDP client (the Playwright MCP) can reach this session's browser, or ""."""
+    try:
+        session = _get(session_id)
+    except KeyError:
+        return ""
+    port = int(getattr(session, "cdp_port", 0) or 0)
+    return f"http://127.0.0.1:{port}" if port else ""
 
 
 def close_session(session_id: str) -> dict[str, Any]:

@@ -117,6 +117,10 @@ EVENT_TYPES: frozenset[str] = frozenset(
         "task_update",
         "task_removed",
         "task_command_result",
+        # ── Claude Code mods: a validated render tree for one slot ───────
+        "mod_slot",
+        # The commands those mods contribute, so the UI can offer them.
+        "mod_commands",
         # ── launcher relayed, not part of the agent-output dispatch gate ──
         "agent_ready_stage",
         "group_member_update",
@@ -177,6 +181,11 @@ AGENT_OUTPUT_BROADCAST_TYPES: frozenset[str] = frozenset(
         # M2 parallel task lifecycle — the task panel is a per-agent shared view.
         "task_update",
         "task_removed",
+        # A mod slot is per-agent: every pane of that agent may show the band.
+        # Per-session targeting arrives with the session facts (plan P3).
+        "mod_slot",
+        # The command list is agent-scoped and has no session at all.
+        "mod_commands",
     }
 )
 
@@ -263,6 +272,10 @@ GENERIC_RELAY_TOPICS: tuple[str, ...] = (
     "busy_sessions",
     "scheduled_task_turn_done",
     "compression_progress",
+    # Claude Code mods: one validated render tree per slot, drawn by the mods.
+    "mod_slot",
+    # ...and the commands they contribute.
+    "mod_commands",
 )
 
 # The relay topic list in subscription order.  The launcher iterates this and

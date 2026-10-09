@@ -79,5 +79,6 @@
       "flask-cors",
       "imageio-ffmpeg"
     ]
-  }
+  },
+  "setup": {}
 }

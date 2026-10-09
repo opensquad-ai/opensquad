@@ -101,5 +101,6 @@
       "torch",
       "transformers"
     ]
-  }
+  },
+  "setup": {}
 }

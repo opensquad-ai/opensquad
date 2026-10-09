@@ -119,6 +119,8 @@ class GroupUpdate(BaseModel):
     description: str | None = None
     avatar: str | None = None
     notification_sound_enabled: bool | None = None
+    # 群折叠：per-user，写 user_group_settings.folded 而不是 groups 行本身
+    folded: bool | None = None
 
 
 class GroupMemberInfo(BaseModel):
@@ -140,6 +142,7 @@ class GroupResponse(GroupBase):
     unread_count: int = 0
     has_unread_mention: bool = False
     notification_sound_enabled: bool = True
+    folded: bool = False
     created_at: datetime
     created_by: str
 
@@ -156,6 +159,7 @@ class GroupListItem(BaseModel):
     has_unread_mention: bool
     is_private: bool
     notification_sound_enabled: bool
+    folded: bool = False
     last_message: dict | None = None
     created_at: str | None = None
 

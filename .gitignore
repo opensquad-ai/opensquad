@@ -397,6 +397,14 @@ promotion/
 # Underscore-prefixed variant of the same: probe/scratch scripts and captured
 # promo assets written during a recording session. Same category, same rule.
 _promo/
+# The film projects themselves: each one is a few GB of per-frame PNGs plus the
+# encoded reel, and the frames carry real session screenshots from the demo data.
+# All of them are reproducible from film.js + make_score.py, so none of them
+# belong in a public repo.
+promo_demo/
+promo_v4/
+promo_v5/
+promo_v6/
 
 # ===== Runtime / private stores (never commit these) =====
 # Task and reminder data written while the agent runs. Untracked today, but with
@@ -408,3 +416,7 @@ _promo/
 # repo-relative copy someone writes by hand.
 .session_cwd
 .session_cwd.*
+
+# mods_host transpiles a mod's .tsx next to the source (so its relative imports
+# still resolve) — a build artefact, never committed.
+*.mods-build.mjs

@@ -439,6 +439,72 @@
   }
 }
 </script>
+    <style>
+      /* 开屏 loader 的样式（静态四象限 + 插件覆盖层 + 提示语）。
+         ⚠️ **必须放在 <head>**：原先写在 #root 内部，而 React 一挂载
+         createRoot(#root).render() 就清空 #root 的子节点——CSS 随之消失，
+         `.boot-screen` 从"全屏 fixed + z-index 2147483000"退化成正常流里的普通
+         div，掉到页面底部看不见（实测 position:static、top=视口高度=579），用户
+         看到的是应用自己的四象限。样式必须与 React 的生命周期无关。 */
+      .boot-loader-wrap {
+        position: fixed;
+        inset: 0;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        background: var(--boot-bg, #F6F3EC);
+        /* initTheme() 会在 React 挂载前同步把 --boot-bg 切到用户主题色。
+           若瞬间切换，背景对比度突变会让 logo 看起来"缩了一圈"。
+           加过渡让背景平滑渐变到主题色，logo 视觉尺寸保持恒定。 */
+        transition: background-color 260ms ease;
+      }
+
+      /* 插件贡献的开屏动画（缝 B）：核心渲染，插件只提供素材。覆盖层挂在 body
+         上（不是 #root），所以 React 挂载不会把它清掉——桌面版在后端就绪后加载
+         App URL 时也看得到。
+         z-index 必须高过应用自己的每一层：应用里有 z-50 / z-[100] / z-[9999] 的
+         不透明全屏面板（App 的移动布局、DesktopUpdateOverlay 等），低于它们会被
+         盖住——表现就是"动画还没播完就进界面了"。 */
+      .boot-screen {
+        position: fixed;
+        inset: 0;
+        z-index: 2147483000;
+        background: var(--boot-bg, #F6F3EC);
+        opacity: 1;
+        transition: opacity 320ms ease;
+      }
+      .boot-screen.is-leaving { opacity: 0; }
+      .boot-screen video {
+        display: block;
+        width: 100%;
+        height: 100%;
+        object-fit: cover;
+        /* App 首屏渲染会阻塞主线程（实测有 350~500ms 的长任务），届时画面会"卡住"
+           而声音继续走。把视频提成独立合成层，主线程忙时仍由合成器推进画面。 */
+        will-change: transform;
+        transform: translateZ(0);
+      }
+      /* 加载完成后才显形的"可跳过"提示：让用户知道动画会自己放完，急着进去可以
+         点一下。React 挂载之前不显示——否则等于告诉用户"可以走了"，而应用还没起来。 */
+      .boot-screen-hint {
+        position: absolute;
+        left: 0;
+        right: 0;
+        bottom: 30px;
+        text-align: center;
+        font-size: 12.5px;
+        color: rgba(255, 255, 255, 0.86);
+        text-shadow: 0 1px 3px rgba(0, 0, 0, 0.6);
+        opacity: 0;
+        transition: opacity 240ms ease;
+        pointer-events: none;
+      }
+      .boot-screen-hint.is-shown { opacity: 1; }
+      @media (prefers-reduced-motion: reduce) {
+        .boot-screen { transition: none; }
+        .boot-screen-hint { transition: none; }
+      }
+    </style>
 </head>
   <body class="bg-bgLight text-textMain min-h-screen w-full overflow-hidden">
     <div id="root" class="h-full w-full overflow-hidden">
@@ -486,21 +552,484 @@
           </g>
         </svg>
       </div>
-      <style>
-        .boot-loader-wrap {
-          position: fixed;
-          inset: 0;
-          display: flex;
-          align-items: center;
-          justify-content: center;
-          background: var(--boot-bg, #F6F3EC);
-          /* initTheme() 会在 React 挂载前同步把 --boot-bg 切到用户主题色。
-             若瞬间切换，背景对比度突变会让 logo 看起来"缩了一圈"。
-             加过渡让背景平滑渐变到主题色，logo 视觉尺寸保持恒定。 */
-          transition: background-color 260ms ease;
-        }
-      </style>
     </div>
+  <script>
+    /* 插件贡献的开屏动画（缝 B）。核心拥有开屏位置，这里只向后端问一句"有没有
+       插件声明了开屏动画、放什么"。覆盖层挂在 body 上（不是 #root），所以 React
+       挂载不会把它清掉——桌面版在后端就绪后加载 App URL 时也能看到。没有声明、
+       或用户设置了"减少动效"，都什么都不做，退回默认四象限加载动画。
+
+       行为（目标：**全程看不见内置四象限**）：
+       1. 一访问就盖住 —— 静态四象限 glyph 立刻用 visibility 藏掉（不删节点，就绪判据
+          还要靠它），并把上次的播放列表缓存在 localStorage、先本地起播不等网络；
+       2. 一直盖到应用真的可用 —— 未就绪时每段放完接下一段（走完回到第一段）；静态
+          四象限和 App 自己的四象限 loader 都不许露出来；
+       3. 就绪后**不自动进界面** —— 留在原地继续轮换并显形"加载完成 · 点击或按任意键
+          跳过动画"，用户点了/按键才退出。
+       "就绪" = App 走出启动 gate（`<html data-opensquad-ready="1">`）**且** #root 里
+       没有四象限 loader；退场判定每次实时复查这两条——App 可能就绪之后又回到加载态。 */
+    (function () {
+      // 埋点（可整段删）：记录"页面开始跑 → 真正进界面"这段时间，回答一个问题——
+      // 这段时间是不是**全程**都在放插件动画？看 window.__opensquadBoot，或过滤
+      // console 里的 '[boot-screen]'。每条都带 quads=：当时屏幕上还有哪些 App 自带
+      // 的四象限 loader（按尺寸列）。退场后用 ui-visible 标出它到底什么时候才消失，
+      // 那一段就是"动画放完但还没进界面"的露馅时长。
+      var t0 = (window.performance && window.performance.now) ? window.performance.now() : Date.now();
+      var log = [];
+      var now = function () {
+        var t = (window.performance && window.performance.now) ? window.performance.now() : Date.now();
+        return Math.round(t - t0);
+      };
+      var quadLoaders = function () {
+        var nodes = document.querySelectorAll('#root svg[role="status"]');
+        var out = [];
+        for (var i = 0; i < nodes.length && i < 4; i++) out.push(nodes[i].getAttribute('width') || '?');
+        return out.join(',');
+      };
+      // 屏幕上**可见**的四象限 loader 有几个。静态 glyph 被我藏掉后仍留在 DOM 里
+      // （就绪判据要用），所以光看 quads 不能证明"用户没看见"——vis 才是那个证据。
+      // vis 全程为 0 = 用户一次都没看见内置四象限。
+      var visibleQuads = function () {
+        if (!window.getComputedStyle) return 0;
+        var nodes = document.querySelectorAll('#root svg[role="status"]');
+        var count = 0;
+        for (var i = 0; i < nodes.length; i++) {
+          var st = getComputedStyle(nodes[i]);
+          if (st.visibility !== 'hidden' && st.display !== 'none') count += 1;
+        }
+        return count;
+      };
+      var mark = function (event, extra) {
+        var rec = { t: now(), event: event, quads: quadLoaders(), vis: visibleQuads() };
+        if (extra) { for (var k in extra) rec[k] = extra[k]; }
+        log.push(rec);
+        try {
+          console.info(
+            '[boot-screen]', rec.t + 'ms', event, (extra ? JSON.stringify(extra) : ''),
+            'quads=' + (rec.quads || '-'), 'vis=' + rec.vis,
+          );
+        } catch (e) { /* 埋点不许影响启动 */ }
+      };
+      window.__opensquadBoot = log;
+      try {
+        if (window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+          mark('skip:reduced-motion');
+          return;
+        }
+
+        // ── 一访问就盖住内置四象限 ─────────────────────────────────
+        // 静态 .boot-loader-wrap 里那个四象限 glyph 立刻藏掉（**不删节点**：就绪判据
+        // 还要靠它在不在）。背景色保留，所以这段是主题底色而不是白屏。
+        var glyphStyle = document.createElement('style');
+        glyphStyle.textContent = '#root .boot-loader-wrap > svg{visibility:hidden}';
+        document.head.appendChild(glyphStyle);
+        var restoreGlyph = function () {
+          if (glyphStyle.parentNode) glyphStyle.parentNode.removeChild(glyphStyle);
+        };
+        // 藏完再取第一条埋点，这样 "start" 那条的 vis 就是 0：从第一帧起用户看不到
+        // 内置四象限。（reduced-motion 那条在上面已经 return，不会把 glyph 藏起来。）
+        mark('start');
+
+        // 上次的播放列表缓存在本地 → 先起播、不等网络，这才是"一访问就是自定义动画"。
+        // 联网结果回来后再以它为准（列表一样就接着放，不一样就换）。
+        var CACHE_KEY = 'opensquad.bootScreen';
+        // 首帧封面缓存：视频一换 src 就会丢帧、屏幕上只剩底色（用户看到的"白屏"）。
+        // 把每段的首帧抓成小 JPEG 存下来，换段前先挂成 poster，空档就没了。
+        var POSTER_KEY = CACHE_KEY + ':posters';
+        var posterCache = {};
+        var posterOrder = [];
+        try {
+          var rawPosters = localStorage.getItem(POSTER_KEY);
+          var savedPosters = rawPosters ? JSON.parse(rawPosters) : null;
+          if (savedPosters && savedPosters.map) {
+            posterCache = savedPosters.map;
+            posterOrder = savedPosters.order || [];
+          }
+        } catch (e) { /* 没有封面只是会闪一下底色 */ }
+        var rememberPoster = function (url, dataUrl) {
+          if (!url || !dataUrl) return;
+          posterCache[url] = dataUrl;
+          posterOrder = posterOrder.filter(function (u) { return u !== url; });
+          posterOrder.push(url);
+          while (posterOrder.length > 3) delete posterCache[posterOrder.shift()];
+          try {
+            localStorage.setItem(POSTER_KEY, JSON.stringify({ map: posterCache, order: posterOrder }));
+          } catch (e) { /* 配额满了就算了：下次只是少一张封面 */ }
+        };
+        var grabFrame = function (el, cb) {
+          try {
+            var w = el.videoWidth;
+            var h = el.videoHeight;
+            if (!w || !h) { cb(null); return; }
+            var scale = Math.min(1, 480 / w);
+            var cv = document.createElement('canvas');
+            cv.width = Math.round(w * scale);
+            cv.height = Math.round(h * scale);
+            cv.getContext('2d').drawImage(el, 0, 0, cv.width, cv.height);
+            cb(cv.toDataURL('image/jpeg', 0.6));
+          } catch (e) { cb(null); }
+        };
+        var pre = null;
+        try {
+          var rawCache = localStorage.getItem(CACHE_KEY);
+          var cached = rawCache ? JSON.parse(rawCache) : null;
+          if (cached && cached.videos && cached.videos.length && document.body) {
+            var pbox = document.createElement('div');
+            pbox.className = 'boot-screen';
+            var pvideo = document.createElement('video');
+            pvideo.src = cached.videos[0];
+            // 片子自带 BGM：先按"有声音"起播，被浏览器的自动播放策略拦下时再退回静音
+            // （见 tryPlay 的 NotAllowedError 分支）。静音起播只是保底手段，不是默认。
+            pvideo.muted = false;
+            pvideo.autoplay = true;
+            pvideo.setAttribute('playsinline', '');
+            pvideo.setAttribute('aria-hidden', 'true');
+            // 上次抓的首帧优先：它让画面从 0ms 就有内容，而不是等视频解码出第一帧
+            // （实测那要 1~2 秒，正是"一访问先白屏一两秒"的来源）。
+            pvideo.poster = posterCache[cached.videos[0]] || cached.poster || '';
+            pbox.appendChild(pvideo);
+            var phint = document.createElement('div');
+            phint.className = 'boot-screen-hint';
+            phint.setAttribute('role', 'status');
+            pbox.appendChild(phint);
+            document.body.appendChild(pbox);
+            try {
+              var pp = pvideo.play();
+              if (pp && typeof pp.catch === 'function') pp.catch(function () { /* 交给联网路径重试 */ });
+            } catch (e) { /* 交给联网路径重试 */ }
+            pre = { box: pbox, video: pvideo, hint: phint, clips: cached.videos };
+            mark('preload', { clips: cached.videos.length });
+          }
+        } catch (e) { /* 无缓存 / 隐私模式：直接走联网路径 */ }
+
+        fetch('/api/ai-web/boot-screen', { headers: { Accept: 'application/json' } })
+          .then(function (r) { return r.ok ? r.json() : null; })
+          .then(function (data) {
+            // `videos` 是会被轮换的播放列表；`video` 是单片的简便写法。
+            var playlist = Array.isArray(data.videos) ? data.videos.filter(Boolean) : [];
+            if (!data || !data.enabled || !playlist.length || !document.body) {
+              mark('skip:no-declaration', { enabled: !!(data && data.enabled) });
+              // 缓存说有、联网说没有（插件被关了 / 撤了声明）：收掉预载覆盖层、恢复
+              // 默认 loader，并把本地那份播放列表清掉——否则每次加载都会先闪一下
+              // 缓存里的动画再被撤掉。
+              if (pre) {
+                if (pre.box.parentNode) pre.box.parentNode.removeChild(pre.box);
+                pre = null;
+              }
+              restoreGlyph();
+              try { localStorage.removeItem(CACHE_KEY); } catch (e) { /* 清不掉也无妨 */ }
+              return;
+            }
+            try {
+              localStorage.setItem(
+                CACHE_KEY,
+                JSON.stringify({ videos: playlist, poster: data.poster || '', holdMs: data.holdMs || 0 }),
+              );
+            } catch (e) { /* 存不下只是少了预载，不影响本次播放 */ }
+
+            var box, video, hint;
+            var index = 0;
+            if (pre && pre.clips.join() === playlist.join()) {
+              // 缓存就是权威列表：接着放。**不要重设同一个 src**——那会重新加载并
+              // 打断正在播的那段（也正是一次 play() AbortError 的来源）。
+              box = pre.box;
+              video = pre.video;
+              hint = pre.hint;
+              mark('inject', { clips: playlist.length, preloaded: true });
+            } else {
+              if (pre) {
+                if (pre.box.parentNode) pre.box.parentNode.removeChild(pre.box);
+                pre = null;
+              }
+              box = document.createElement('div');
+              box.className = 'boot-screen';
+              video = document.createElement('video');
+              video.src = playlist[0];
+              video.muted = false; // 同上：先要声音，被拦才退回静音
+              video.autoplay = true;
+              video.setAttribute('playsinline', '');
+              video.setAttribute('aria-hidden', 'true');
+              if (data.poster) video.poster = data.poster;
+              box.appendChild(video);
+              hint = document.createElement('div');
+              hint.className = 'boot-screen-hint';
+              hint.setAttribute('role', 'status');
+              box.appendChild(hint);
+              document.body.appendChild(box);
+              mark('inject', { clips: playlist.length, preloaded: false });
+            }
+
+            // 换段前先挂"下一段首帧"：视频一换 src 就没帧了，poster 顶上，屏幕上不会
+            // 出现底色空档。首帧用隐藏的 preloader 提前抓——一段 8 秒的片子，抓一帧
+            // 的时间绰绰有余；实在没抓到就退回底色（比原来少了"每段都空一下"）。
+            var preloader = null;
+            var preloadNextFrame = function () {
+              if (playlist.length < 2) return;
+              var nextUrl = playlist[(index + 1) % playlist.length];
+              if (!nextUrl || posterCache[nextUrl]) return;
+              if (!preloader) {
+                preloader = document.createElement('video');
+                preloader.muted = true;
+                preloader.setAttribute('playsinline', '');
+                preloader.setAttribute('aria-hidden', 'true');
+                preloader.addEventListener('loadeddata', function onData() {
+                  preloader.removeEventListener('loadeddata', onData);
+                  grabFrame(preloader, function (dataUrl) {
+                    rememberPoster(nextUrl, dataUrl);
+                    mark('poster', { next: true, ok: !!dataUrl });
+                    // **刻意不卸 src**：卸掉等于把下载掐断，缓存里只留一小段，换段时
+                    // 还得重新缓冲（用户看到的"首帧大图停住一会"）。留着它，浏览器会把
+                    // 整段吃完，换段那次 load 基本命中缓存。
+                  });
+                });
+              }
+              preloader.src = nextUrl;
+            };
+            // 别在当前这段刚开播时就去拉下一段——那时 React 首屏也在抢带宽/解码，实测会
+            // 卡顿（音频照走、画面掉帧，看起来就是"音画不同步"）。等这段放到四成左右
+            // 再抓，留给它一帧的时间仍然绰绰有余。
+            var preloadTimer = null;
+            var schedulePreloadNext = function () {
+              if (preloadTimer) clearTimeout(preloadTimer);
+              var secs = isFinite(video.duration) && video.duration > 0 ? video.duration : 8;
+              // 两成处就开始（不是四成）：要留够时间把**整段**吃完，换段才不卡。最早
+              // 0.8s 起，免得跟 App 首屏最忙的那一下抢带宽。
+              preloadTimer = setTimeout(preloadNextFrame, Math.min(Math.max(secs * 200, 800), 6000));
+            };
+            // 当前这段的首帧也存下来：下次一访问就靠它立刻出画面。
+            var captureCurrentPoster = function () {
+              var url = video.getAttribute('src');
+              if (!url || posterCache[url]) return;
+              var cap = function () {
+                grabFrame(video, function (dataUrl) {
+                  rememberPoster(url, dataUrl);
+                  mark('poster', { next: false, ok: !!dataUrl });
+                });
+              };
+              if (video.requestVideoFrameCallback) video.requestVideoFrameCallback(function () { cap(); });
+              else setTimeout(cap, 400);
+            };
+            // 这一次如果既没缓存封面、插件也没给 poster，就先留空（首次访问那一瞬间）。
+            if (!video.poster) video.poster = posterCache[playlist[0]] || data.poster || '';
+
+            // 自动播放**被策略拒绝**（或 jsdom 这类没有媒体栈的环境）时，别让一个放不出
+            // 声画的覆盖层把用户挡在外面——放手，退回默认 loader。
+            // 但 AbortError 不是"被拒"：它是加载被瞬时中断（换 src、请求被打断），play()
+            // 的 promise 也会以它拒绝。实测这条会在 379ms 就把整个开屏页判死
+            // （reason=play-rejected，动画根本没放）——所以三种情况要分开：
+            //   ① token 已过期（这次 play 已被换 src 作废）→ 直接忽略；
+            //   ② AbortError → 有界重试；
+            //   ③ 其余（NotAllowedError 等）→ 真放手。
+            var playToken = 0;
+            var playRetries = 0;
+            var tryPlay = function () {
+              if (leaving) return; // 已退场：别再把（可能已移出 DOM 的）元素放起来
+              var token = ++playToken;
+              try {
+                var p = video.play();
+                if (p && typeof p.catch === 'function') {
+                  p.catch(function (err) {
+                    if (token !== playToken) return;
+                    var name = (err && err.name) || String(err);
+                    // 未静音起播被自动播放策略拦下（NotAllowedError）→ 退回静音重试。
+                    // **动画无论如何都要出来**：声音是加分项，静音是保底。
+                    if (!video.muted && name !== 'AbortError') {
+                      video.muted = true;
+                      mark('audio:blocked', { name: name });
+                      tryPlay();
+                      return;
+                    }
+                    if (name === 'AbortError' && playRetries < 5) {
+                      playRetries += 1;
+                      mark('play-retry', { name: name, n: playRetries, rs: video.readyState, ns: video.networkState });
+                      setTimeout(function () { if (token === playToken) tryPlay(); }, 150);
+                      return;
+                    }
+                    mark('play-error', {
+                      name: name,
+                      media: video.error ? video.error.code : null,
+                      rs: video.readyState,
+                      ns: video.networkState,
+                    });
+                    done('play-rejected');
+                  });
+                }
+              } catch (e) {
+                mark('play-threw', { name: (e && e.name) || String(e) });
+                done('play-threw');
+              }
+            };
+
+            // 退场后继续盯一小会：App 自带的四象限 loader 什么时候才真的消失。这段
+            // "露馅时长"就是"动画放完但还没进界面"的那几秒。
+            var watchUi = function () {
+              var until = Date.now() + 60000;
+              var timer = setInterval(function () {
+                if (!quadLoaders()) { mark('ui-visible'); clearInterval(timer); return; }
+                if (Date.now() > until) { mark('ui-visible:timeout'); clearInterval(timer); }
+              }, 200);
+            };
+
+            var leaving = false;
+            var done = function (reason) {
+              if (leaving) return;
+              leaving = true;
+              // 作废所有在途的 play()/重试：`tryPlay` 的 AbortError 重试是延迟 150ms
+              // 再播的，不拦住它就会在 pause() 之后把元素重新放起来——元素即便已被移出
+              // DOM 也会继续出声（用户报的"进了界面 BGM 还在响"）。
+              playToken += 1;
+              if (preloadTimer) clearTimeout(preloadTimer);
+              mark('leave', { reason: reason || 'unknown' });
+              video.pause();
+              // 再卸掉源：游离的媒体元素不会自己停，卸源才是"一定不再出声"的保证。
+              try {
+                video.removeAttribute('src');
+                video.load();
+              } catch (e) { /* 环境不支持也就算了，pause + 移出 DOM 已经足够 */ }
+              if (watcher) watcher.disconnect();
+              if (rootWatcher) rootWatcher.disconnect();
+              box.classList.add('is-leaving');
+              setTimeout(function () { if (box.parentNode) box.parentNode.removeChild(box); }, 340);
+              window.removeEventListener('keydown', onKey);
+              watchUi();
+            };
+            var advance = function () {
+              index = (index + 1) % playlist.length;
+              var nextUrl = playlist[index];
+              // 先挂封面再换 src：换的那一瞬间没有帧，poster 就成了"上一段的最后一帧 →
+              // 下一段的第一帧"之间的无缝过渡（否则露出底色 ~150ms）。
+              var cover = posterCache[nextUrl] || (index === 0 ? data.poster : '') || '';
+              if (cover) video.poster = cover;
+              else video.removeAttribute('poster');
+              video.src = nextUrl;
+              // pre= 下一段在切换前的缓冲程度（0-4；≥3 基本能立刻放），用来判断换段
+              // 会不会卡在上一帧。
+              mark('advance', { i: index, cover: !!cover, pre: preloader ? preloader.readyState : -1 });
+              tryPlay();
+              schedulePreloadNext();
+            };
+
+            // "加载完成" = **两件事同时成立**：App 走出了它自己的启动 gate（App.tsx 在
+            // <html> 上置 data-opensquad-ready="1"），并且 App 自己不再显示四象限 loader。
+            // 只等 React 挂载不够，只等 gate 也不够——gate 之后取会话/工作区那几秒，App
+            // 依然在显示同一个四象限 loader；动画一放完就会把这几秒露出来（就是量到的
+            // "露馅时长"）。quadLoaders() 与上面埋点同一个判据：静态 logo 和每个
+            // OpenSquadLoader 都是 #root 里的 svg[role=status]。
+            //
+            // **双向**：gate 会重开（实测 App 的 gate 关过之后又开过），就绪之后也可能
+            // 回到全屏加载态。所以提示语跟着实时状态收起/显形，退场判定也每次实时复查
+            // （`ready` 只用来记住"提示语是不是已经显示过"，不当退场依据）。
+            var watcher = null;
+            var rootWatcher = null;
+            var ready = false;
+            var appReady = function () {
+              return document.documentElement.getAttribute('data-opensquad-ready') === '1' && !quadLoaders();
+            };
+            var applyReady = function () {
+              if (leaving) return;
+              var ok = appReady();
+              if (ok === ready) return;
+              ready = ok;
+              if (ready) {
+                hint.textContent = '加载完成 · 点击或按任意键跳过动画';
+                hint.classList.add('is-shown');
+                mark('app-ready', { i: index });
+              } else {
+                hint.classList.remove('is-shown');
+                hint.textContent = '';
+                mark('app-not-ready', { i: index });
+              }
+            };
+            // MutationObserver 在 #root 每次变动都会回调；合并到下一个 macrotask 再查，
+            // 否则首屏渲染那几千次 DOM 变动会各查一遍整棵子树。
+            // 节流：React 首屏那几百毫秒里 #root 会被改上千次，而每次检查都要整棵子树
+            // 查一遍 `svg[role=status]`——按"每个宏任务一次"跑会明显卡住正在播的动画
+            // （实测的卡顿/音画不同步）。限制到 ≥200ms 一次，尾随那次保证不漏最终状态。
+            var readyQueued = false;
+            var lastReadyCheck = 0;
+            var READY_CHECK_MIN_MS = 200;
+            var checkReady = function () {
+              if (readyQueued || leaving) return;
+              var wait = READY_CHECK_MIN_MS - (Date.now() - lastReadyCheck);
+              readyQueued = true;
+              setTimeout(function () {
+                readyQueued = false;
+                lastReadyCheck = Date.now();
+                applyReady();
+              }, wait > 0 ? wait : 0);
+            };
+            applyReady();
+            watcher = new MutationObserver(checkReady);
+            watcher.observe(document.documentElement, {
+              attributes: true,
+              attributeFilter: ['data-opensquad-ready'],
+            });
+            // 四象限 loader 消失时上面那个属性并不变化，所以还要盯 #root 子树。
+            var rootEl = document.getElementById('root');
+            if (rootEl) {
+              rootWatcher = new MutationObserver(checkReady);
+              rootWatcher.observe(rootEl, { childList: true, subtree: true });
+            }
+
+            var failures = 0;
+            video.addEventListener('playing', function () {
+              failures = 0;
+              playRetries = 0; // 真的放起来了，重试额度重置
+              mark('playing', {
+                i: index,
+                dur: isFinite(video.duration) ? Math.round(video.duration * 10) / 10 : null,
+                muted: video.muted,
+              });
+              captureCurrentPoster();   // 存下这段的首帧，供下次访问立刻出画面
+              schedulePreloadNext();    // 下一段的封面稍后再抓（见上：避免抢带宽）
+            });
+            // 核心规则：**永远接着轮换**。就绪前是"盖住启动窗口"，就绪后是"继续放、
+            // 等用户手动退出"——唯一的差别是就绪后**不再自动进界面**（下面这句话在
+            // 这一版里根本不存在：退场只有点击/按键/兜底上限，没有 ended→done）。
+            // 这样也顺带修掉"尾巴"：App 就绪后又回到全屏加载、或者退场时正好有个
+            // 全屏 loader 在，都不会露出来——动画压根不走。
+            video.addEventListener('ended', function () {
+              advance();
+            });
+            // 一段放不出来不该整个停掉；轮完整圈都不行才放手（别把用户挡在一个放不出
+            // 东西的黑屏上）。
+            video.addEventListener('error', function () {
+              failures += 1;
+              mark('error', {
+                i: index,
+                failures: failures,
+                code: video.error ? video.error.code : null,
+                rs: video.readyState,
+                ns: video.networkState,
+              });
+              if (failures >= playlist.length) {
+                done('error-lap');
+                return;
+              }
+              advance();
+            });
+            // 手动退场**只在就绪之后**生效：这是"加载结束前不让人进去、进去就看不到
+            // 四象限"的唯一保证——加载中就点掉的话，正好落在 App 自己的加载态上。
+            // 非就绪时的出口只剩兜底上限（120s）与"一整圈都加载失败"。
+            var onClick = function () { if (!ready) return; done('click'); };
+            var onKey = function () { if (!ready) return; done('key'); };
+            box.addEventListener('click', onClick);
+            window.addEventListener('keydown', onKey);
+            // 兜底上限：现在是"循环到就绪为止"，所以给得比单条片长宽得多——它只防
+            // "应用永远加载不出来，把用户永远挡在开屏页"这一种情况。
+            var hold = Number(data.holdMs);
+            setTimeout(function () { done('hold-timeout'); }, hold > 0 ? hold : 120000);
+            tryPlay();
+          })
+          .catch(function () {
+            mark('skip:fetch-failed', { preloaded: !!pre });
+            // 有预载就继续放（缓存通常还有效，只是拿不到权威列表）；没有就恢复默认
+            // loader（把藏起来的四象限放回去）。
+            if (!pre) restoreGlyph();
+          });
+      } catch (e) { /* 装饰性，绝不阻塞启动 */ }
+    })();
+  </script>
   <script type="module" src="/index.tsx"></script>
 </body>
 </html>

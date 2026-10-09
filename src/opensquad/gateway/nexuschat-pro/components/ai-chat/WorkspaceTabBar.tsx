@@ -124,31 +124,48 @@ export const WorkspaceTabBar: React.FC<WorkspaceTabBarProps> = ({
                 {menuWorkspaces.map((ws) => {
                   const isActive = ws.id === activeId;
                   const isOpen = openIds.includes(ws.id);
+                  // Flagged missing by reconcileWorkspaceExistence: the entry stays
+                  // (the drive may come back) but opening it would only point the
+                  // files panel and the agent's cwd at a folder that is not there.
+                  const missing = !!ws.missing;
                   return (
                     <button
                       key={ws.id}
                       type="button"
                       role="menuitem"
-                      className={`w-full flex items-start gap-2 px-3 py-1.5 text-left hover:bg-primary/10 ${
-                        isActive ? 'bg-black/[0.03] dark:bg-white/[0.04]' : ''
-                      }`}
+                      disabled={missing}
+                      className={`w-full flex items-start gap-2 px-3 py-1.5 text-left ${
+                        missing
+                          ? 'opacity-60 cursor-not-allowed'
+                          : 'hover:bg-primary/10'
+                      } ${isActive ? 'bg-black/[0.03] dark:bg-white/[0.04]' : ''}`}
                       onClick={() => {
+                        if (missing) return;
                         setMenuOpen(false);
                         onSelect(ws.id);
                       }}
                     >
-                      {isOpen ? (
-                        <FolderOpen size={13} className="text-amber-500 mt-0.5 shrink-0" />
+                      {isOpen && !missing ? (
+                        <FolderOpen
+                          size={13}
+                          className={`mt-0.5 shrink-0 ${missing ? 'text-textMuted/50' : 'text-amber-500'}`}
+                        />
                       ) : (
-                        <Folder size={13} className="text-amber-500 mt-0.5 shrink-0" />
+                        <Folder
+                          size={13}
+                          className={`mt-0.5 shrink-0 ${missing ? 'text-textMuted/50' : 'text-amber-500'}`}
+                        />
                       )}
                       <div className="min-w-0 flex-1">
                         <div className="font-medium text-textMain truncate">
                           {workspaceDisplayName(ws)}
                         </div>
                         <div className="text-[10px] text-textMuted truncate">{ws.rootPath}</div>
+                        {missing ? (
+                          <div className="text-[10px] text-rose-500 shrink-0">目录不存在</div>
+                        ) : null}
                       </div>
-                      {isActive ? (
+                      {missing ? null : isActive ? (
                         <Check size={14} className="text-emerald-500 shrink-0 mt-0.5" />
                       ) : (
                         <span className="w-3.5 h-3.5 rounded-full border border-border/80 shrink-0 mt-1" />

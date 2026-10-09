@@ -5,7 +5,8 @@
 import type { SkillInfo } from '../../services/api';
 
 /** Stable ids — extend as new `/` commands are added. */
-export type SlashCommandId = 'skill' | 'goal' | 'plan';
+/** Builtin ids, plus `mod:<name>` for commands a Claude Code mod contributes. */
+export type SlashCommandId = 'skill' | 'goal' | 'plan' | `mod:${string}`;
 
 export interface SlashCommandDef {
   id: SlashCommandId;
@@ -91,10 +92,38 @@ export function parseSlashInput(text: string): SlashInputMode | null {
   return { kind: 'commands', query: rest };
 }
 
+/**
+ * Commands contributed by Claude Code mods, pushed by the agent over
+ * `mod_commands` (they appear and disappear with the mods, so they cannot live
+ * in the static list above).
+ *
+ * Selecting one just inserts `/name ` like any other command: the agent
+ * intercepts that text before the model sees it and runs the mod's handler.
+ */
+let modCommands: SlashCommandDef[] = [];
+
+export function setModSlashCommands(commands: Array<{ name?: string; help?: string; source?: string }>): void {
+  modCommands = (commands || [])
+    .filter((c) => !!c && !!c.name && !!c.source && c.source !== 'builtin')
+    .map((c) => ({
+      id: `mod:${c.name}` as SlashCommandId,
+      name: String(c.name),
+      description: c.help || (c.source as string),
+      takesArgs: true,
+    }));
+}
+
+export function modSlashCommands(): SlashCommandDef[] {
+  return [...modCommands];
+}
+
 export function filterSlashCommands(query: string): SlashCommandDef[] {
   const q = query.trim().toLowerCase();
-  if (!q) return [...SLASH_COMMANDS];
-  return SLASH_COMMANDS.filter((cmd) => {
+  // Builtins first, then mods — a mod may not shadow a builtin name, so the
+  // order only decides which shows first.
+  const all = [...SLASH_COMMANDS, ...modCommands];
+  if (!q) return all;
+  return all.filter((cmd) => {
     const hay = `${cmd.name} ${cmd.description}`.toLowerCase();
     return hay.includes(q) || cmd.name.toLowerCase().startsWith(q);
   });

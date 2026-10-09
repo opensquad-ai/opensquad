@@ -99,8 +99,10 @@ describe('the pane renders them', () => {
     expect(SHELL).toContain("active.kind === 'browser'");
     expect(SHELL).toContain('data-testid="pane-terminal"');
     expect(SHELL).toContain('data-testid="pane-browser"');
-    expect(SHELL).toContain('<TerminalPanel agentId={agentId} rootPath={rootPath} />');
-    expect(SHELL).toContain('<BrowserPanel />');
+    // Keyed by pane: the launcher keys shells by id, so the same slot reattaches to the
+    // shell it already has (reload included) instead of spawning a fresh one.
+    expect(SHELL).toContain('terminalKey={`pane:${paneId}`}');
+    expect(SHELL).toContain('<BrowserPanel agentId={agentId} />');
     // a render throw costs the pane that view, not the workspace
     expect(SHELL).toContain('<ErrorBoundary label="terminal"');
     expect(SHELL).toContain('<ErrorBoundary label="browser"');
@@ -247,7 +249,7 @@ describe('the panels themselves', () => {
     expect(launcher).toContain('terminal_session.read_terminal(');
   });
 
-  it('the browser is the user own view: real DOM, never the agent session', () => {
+  it('the browser keeps the user own view, and adds a READ-ONLY view of the agent session', () => {
     const browser = read('BrowserPanel.tsx');
     const main = fs.readFileSync(path.resolve(__dirname, '..', '..', 'electron', 'main.ts'), 'utf8');
 
@@ -262,12 +264,20 @@ describe('the panels themselves', () => {
     // A site that refuses to be embedded (Baidu: a page script, not a header) leaves a blank
     // area; in the browser build say why right there and offer the system browser.
     expect(browser).toContain('browser-iframe-hint-external');
-    // It must NOT touch the launcher's browser session — that one belongs to the agent and is
-    // frame-based, so a click here would act on some other window instead of this page.
-    expect(browser).not.toContain('browserAPI');
-    expect(browser).not.toContain('browserSessionId');
-    expect(browser).not.toContain('browser-frame');
-    expect(browser).not.toContain('agentId');
+
+    // The agent's own session is visible here too — but only as a picture. Forwarding input is
+    // what b7df0c0 reverted: a click reached a window on this machine and trailed the 700 ms
+    // poll. So the second tab polls `frame` and never sends input back.
+    expect(browser).toContain("from '../../services/api'");
+    expect(browser).toContain('browserAPI.frame(');
+    expect(browser).toContain('agentBrowserSessionId');
+    expect(browser).toContain('data-testid="browser-agent-frame"');
+    // `agent-<id>` is the id the agent's browser_* tools default to, so this is one browser.
+    expect(browser).toContain('`agent-${String(agentId');
+    expect(browser).not.toContain('browserAPI.click(');
+    expect(browser).not.toContain('browserAPI.type(');
+    expect(browser).not.toContain('browserAPI.press(');
+
     // …and the desktop shell stays hardened around webviews.
     expect(main).toContain('webviewTag:       true');
     expect(main).toContain("on('will-attach-webview'");

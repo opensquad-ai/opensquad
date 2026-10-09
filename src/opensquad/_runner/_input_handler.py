@@ -414,8 +414,10 @@ class InputHandler:
             + "\n".join(msg_parts)
             + "[Messages received, please decide how to reply based on the source]"
         )
-        runner._current_input_source = "chatpro"
-        runner._current_channel = "chatpro_group"
+        from opensquad.ingress_policy import chatpro_ingress_labels
+
+        # Label the batch by what it holds: a drained DM is not the group channel.
+        runner._current_input_source, runner._current_channel = chatpro_ingress_labels(m.type for m in pending)
         runner._current_group_targets = [
             {
                 "id": str(msg.source_id),

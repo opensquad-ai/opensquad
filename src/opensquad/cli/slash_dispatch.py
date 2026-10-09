@@ -6,6 +6,7 @@ import shlex
 from argparse import Namespace
 from typing import Any, Callable
 
+from opensquad.cli import slash_commands
 from opensquad.cli.slash_commands import format_help, match_commands, resolve_command, suggest_lines
 
 
@@ -47,6 +48,13 @@ def dispatch_slash(line: str, ctx: dict[str, Any]) -> bool:
         else:
             print(f"Unknown command: {prefix}{name}  — try /help")
             return True
+
+    # A mod-contributed command has no handler here: this process cannot run it.
+    # Returning False lets the caller send the text on as a message, where the
+    # agent's `on_message_received` interception runs it and speaks the answer —
+    # the same path Agent Web uses, so both surfaces behave identically.
+    if slash_commands.command_source(cmd.name) not in ("", "builtin"):
+        return False
 
     if cmd.name in ("quit",) or name in ("exit", "q"):
         return False

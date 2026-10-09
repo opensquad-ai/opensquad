@@ -413,7 +413,8 @@ class FilesystemMixin:
         )
 
     def _handle_browser_frame(self, name: str, body: dict):
-        """The panel's poll: the latest frame, without re-rendering the page."""
+        """The panel's poll: the latest frame. Cached inside its TTL, re-rendered past it — the
+        cache alone would freeze on a page the Playwright MCP is driving over CDP."""
         from opensquad import browser_session
 
         return self._browser_reply(browser_session.frame(str(body.get("session_id") or "")))

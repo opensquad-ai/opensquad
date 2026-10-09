@@ -10,7 +10,15 @@
   "tags": [
     "search"
   ],
-  "tools": [],
+  "tools": [
+    {
+      "name": "bocha_search",
+      "module": "proxy",
+      "level": "core",
+      "auto_register": true,
+      "requires_agent_id": false
+    }
+  ],
   "hooks": [],
   "config": {
     "schema": {

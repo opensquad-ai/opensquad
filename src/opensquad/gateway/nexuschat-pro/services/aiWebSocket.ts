@@ -791,6 +791,12 @@ class AIWebSocketService {
     console.warn('[AIWebSocket] Not connected, message not sent:', data);
   }
 
+  /** Send a `command` frame to the agent. The gateway forwards any command name
+   *  verbatim (it only special-cases new_session / abandon_current_draft). */
+  sendCommand(command: string, data?: any) {
+    this._sendCommand(command, data);
+  }
+
   private _sendCommand(command: string, data?: any) {
     const msg: any = { type: 'command', command };
     if (data !== undefined) {

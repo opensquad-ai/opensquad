@@ -44,13 +44,14 @@ export function openCollabTaskWindow(collabId: string): void {
   window.dispatchEvent(new CustomEvent('openCollabTask', { detail: { collabId } }));
 }
 
+/**
+ * Only `invite` is ever emitted (see docs/collab-card-kinds-decision.md); any other
+ * kind the server may send falls back to the neutral chip.
+ */
 const KIND_CLASS: Record<string, string> = {
   invite: 'bg-primary/10 text-primary',
-  assign: 'bg-sky-500/10 text-sky-600',
-  progress: 'bg-amber-500/10 text-amber-600',
-  discussion: 'bg-violet-500/10 text-violet-600',
-  done: 'bg-emerald-500/10 text-emerald-600',
 };
+const DEFAULT_KIND_CLASS = 'bg-violet-500/10 text-violet-600';
 
 const ParticipantState: React.FC<{ state: CollabTaskParticipant['state'] }> = ({ state }) => {
   const { t } = useTranslation();
@@ -104,13 +105,28 @@ export const CollabTaskCard: React.FC<CollabTaskCardProps> = ({ payload, onOpen,
    * that actually differs.
    */
   const [liveParticipants, setLiveParticipants] = React.useState<CollabTaskParticipant[] | null>(null);
+  /**
+   * The viewer is not a board participant, so nothing this card polls ever reflects
+   * *their* answer: the 参与 button used to stay live forever after it was pressed.
+   * It is disabled while the answer is in flight, and stays disabled once it lands.
+   */
+  const [responding, setResponding] = React.useState(false);
+  const [responded, setResponded] = React.useState(false);
   const collabId = payload.collab_id;
   React.useEffect(() => {
     if (!collabId) return;
     let alive = true;
     let timer: number | undefined;
 
+    const stopTimer = (): void => {
+      if (timer) {
+        window.clearTimeout(timer);
+        timer = undefined;
+      }
+    };
+
     const read = async (): Promise<void> => {
+      stopTimer();
       try {
         const summary = await collabBoardAPI.taskSummary(collabId);
         if (!alive) return;
@@ -124,15 +140,45 @@ export const CollabTaskCard: React.FC<CollabTaskCardProps> = ({ payload, onOpen,
       } catch {
         /* the snapshot stays on screen */
       }
-      if (alive) timer = window.setTimeout(() => void read(), 5000);
+      if (alive) {
+        stopTimer();
+        timer = window.setTimeout(() => void read(), 5000);
+      }
     };
+
+    /**
+     * The rest of the app refreshes at once when the window is focused again
+     * (SessionSidebar / ProjectFilesPanel / GitRepoBar); the card did not, so it kept
+     * showing up to a poll interval of stale names after switching back. `read`
+     * clears the pending timer first, so an early wake-up cannot fork a second chain.
+     */
+    const awake = (): void => {
+      if (document.visibilityState === 'visible') void read();
+    };
+    window.addEventListener('focus', awake);
+    document.addEventListener('visibilitychange', awake);
 
     void read();
     return () => {
       alive = false;
-      if (timer) window.clearTimeout(timer);
+      stopTimer();
+      window.removeEventListener('focus', awake);
+      document.removeEventListener('visibilitychange', awake);
     };
   }, [collabId]);
+
+  const acceptInvite = async (): Promise<void> => {
+    if (!onRespond || responding || responded) return;
+    setResponding(true);
+    try {
+      await onRespond('accept');
+      setResponded(true);
+    } catch {
+      /* leave the button usable so the user can retry */
+    } finally {
+      setResponding(false);
+    }
+  };
 
   const participants = liveParticipants ?? payload.participants ?? [];
   const kindLabel = t(`collabTask.kind.${kind}`, { defaultValue: kind });
@@ -140,7 +186,7 @@ export const CollabTaskCard: React.FC<CollabTaskCardProps> = ({ payload, onOpen,
   return (
     <div className="rounded-xl border border-border bg-panel px-3.5 py-3 shadow-sm max-w-full">
       <div className="flex items-center gap-2">
-        <span className={`shrink-0 rounded-md px-1.5 py-0.5 text-[10px] font-semibold ${KIND_CLASS[kind] || KIND_CLASS.discussion}`}>
+        <span className={`shrink-0 rounded-md px-1.5 py-0.5 text-[10px] font-semibold ${KIND_CLASS[kind] || DEFAULT_KIND_CLASS}`}>
           {kindLabel}
         </span>
         <span className="min-w-0 flex-1 truncate text-[13px] font-bold text-textMain">{payload.title}</span>
@@ -184,11 +230,12 @@ export const CollabTaskCard: React.FC<CollabTaskCardProps> = ({ payload, onOpen,
         {kind === 'invite' && onRespond ? (
           <button
             type="button"
-            disabled={disabled}
-            onClick={() => void onRespond('accept')}
+            disabled={disabled || responding || responded}
+            onClick={() => void acceptInvite()}
+            data-testid="collab-task-respond"
             className="rounded-lg border border-border px-2.5 py-1 text-[12px] text-textMain hover:bg-primary/10 disabled:opacity-50"
           >
-            {t('collabTask.respond')}
+            {responded ? t('collabTask.state.accepted') : t('collabTask.respond')}
           </button>
         ) : null}
         <span className="ml-auto shrink-0 font-mono text-[10px] text-textMuted">{payload.collab_id}</span>

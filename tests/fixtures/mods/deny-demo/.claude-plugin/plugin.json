@@ -1,0 +1,8 @@
+{
+  "name": "deny-demo",
+  "version": "1.0.0",
+  "description": "Fixture mod: exercises the tool.call deny path, .catch fallback and pass-through.",
+  "author": {
+    "name": "OpenSquad tests"
+  }
+}
