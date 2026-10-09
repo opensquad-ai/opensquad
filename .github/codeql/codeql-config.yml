@@ -1,0 +1,19 @@
+# CodeQL configuration for this repository.
+#
+# Why a config file exists at all: `py/path-injection` flags every filesystem read of a
+# path that came from a request, and one route is *defined* by doing exactly that. The
+# levers CodeQL offers are coarse — `query-filters` act on a whole query repo-wide, and
+# `paths-ignore` is the only per-file one — so the exclusion below is deliberately
+# narrowed to that single module.
+name: "OpenSquad CodeQL config"
+
+paths-ignore:
+  # `POST /mods/import` copies a mod directory into <workspace>/mods. The source path
+  # arrives in the request on purpose: "point at a cloned mod repo on this machine and
+  # import it" IS the feature. The route is an authenticated admin route, the source must
+  # already exist and must already contain `.claude-plugin/plugin.json` or
+  # `hooks/hooks.json` (else 400), and the destination is pinned to <workspace>/mods by
+  # `os.path.basename` on the name. The repository's workspace fence
+  # (`path_utils.is_path_safe`) cannot apply: the source is outside the workspace by
+  # design. See the route's own note in _mods.py.
+  - src/opensquad/gateway/backend/app/ai_web/routes/_mods.py

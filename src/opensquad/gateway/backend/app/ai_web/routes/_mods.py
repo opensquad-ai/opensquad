@@ -148,6 +148,12 @@ async def import_mod(body: ModImportRequest, current_user: User = Depends(get_cu
     at a cloned mod repo and manage it.  The source must actually look like a mod
     (a manifest or a hooks file), so a mistyped path fails here instead of
     appearing as an empty entry.
+
+    The source path arrives in the request because that *is* the feature, and the
+    reads below are exactly what CodeQL's ``py/path-injection`` query flags. That
+    query is suppressed for this module alone, with the reasoning, in
+    ``.github/codeql/codeql-config.yml``; the guards that matter here are the
+    "must already look like a mod" check and the basename pin on the destination.
     """
     src = os.path.abspath((body.path or "").strip())
     if not src or not os.path.isdir(src):

@@ -52,7 +52,10 @@ def instance_slug() -> str:
         root = syscfg.get_builtin_root()
     except Exception:
         root = str(Path(__file__).resolve().parents[1])
-    digest = hashlib.sha1(os.path.normcase(os.path.abspath(str(root))).encode("utf-8")).hexdigest()
+    digest = hashlib.sha1(
+        os.path.normcase(os.path.abspath(str(root))).encode("utf-8"),
+        usedforsecurity=False,
+    ).hexdigest()
     return digest[:10]
 
 
