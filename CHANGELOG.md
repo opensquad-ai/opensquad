@@ -10,6 +10,7 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 | Version                                                                | Date       | Compare to previous                                                                    | Release page                                                                     |
 | ---------------------------------------------------------------------- | ---------- | -------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------- |
+| [0.9.0]                                                                | 2026-10-09 | [0.8.49 → 0.9.0](https://github.com/opensquad-ai/opensquad/compare/v0.8.49...v0.9.0) | [GitHub Release](https://github.com/opensquad-ai/opensquad/releases/tag/v0.9.0) |
 | [0.8.49]                                                               | 2026-09-29 | [0.8.48 → 0.8.49](https://github.com/opensquad-ai/opensquad/compare/v0.8.48...v0.8.49) | [GitHub Release](https://github.com/opensquad-ai/opensquad/releases/tag/v0.8.49) |
 | [0.8.48]                                                               | 2026-09-28 | [0.8.47 → 0.8.48](https://github.com/opensquad-ai/opensquad/compare/v0.8.47...v0.8.48) | [GitHub Release](https://github.com/opensquad-ai/opensquad/releases/tag/v0.8.48) |
 | [0.8.47]                                                               | 2026-09-27 | [0.8.46 → 0.8.47](https://github.com/opensquad-ai/opensquad/compare/v0.8.46...v0.8.47) | [GitHub Release](https://github.com/opensquad-ai/opensquad/releases/tag/v0.8.47) |
@@ -45,6 +46,8 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 > The next cycle's notes are collected here, then moved into a dated section
 > before the tag.
+
+## [0.9.0] — 2026-10-09
 
 ### Added
 
@@ -160,6 +163,42 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   round's number; sub-agent thought rows are persisted the same way. The reload
   merge also keeps the newest recorded value instead of dropping it. Sessions
   recorded before this change still show no number — it was never written down.
+- **Agent Web: a project folder that is gone can no longer be registered or
+  activated.** The workspace registry only ever unions, so a path the launcher
+  cannot see stayed registered for good and was copied to every origin on the next
+  sync. Nothing surfaced it beyond a bare "Root not found" in the files panel,
+  while the launcher rejected that session's cwd write and the agent quietly kept
+  answering about its previous project. A workspace now carries a `missing` flag
+  set from a launcher probe on every pull: the entry is kept (the drive may come
+  back) but it is dropped from the open tabs and never becomes the active
+  workspace, the "+" menu lists it disabled with a hint, and registering a folder
+  probes it first — refusing an explicit "gone" answer, and only that, so a
+  launcher that is briefly unreachable never blocks the user. A rejected cwd write
+  now raises a banner naming the path and the reason instead of being swallowed.
+- **Agent Web: killing the backend no longer leaves an activity fold counting up
+  forever.** An unfinished workflow fold is live by definition in the activity row
+  and its elapsed is `Date.now() - started_ms`, so a turn the backend never settled
+  kept ticking — a service killed mid-turn left a day-long "执行中 · 23h 48m 48s"
+  on screen. The disconnect path sealed only the sessions the client believed were
+  busy, a snapshot broadcast on a ~5s loop, so a stale or empty one left the fold
+  open for good. Sealing now waits out a 10s grace window — a blip reconnects in a
+  second and must not end a fold the agent is still working on — and then freezes
+  every live fold in every session, dropping the busy/streaming markers and the
+  turn clock with them.
+- **Agent Web: a terminal keeps its scrollback across a tab switch and a reload.**
+  The rail rendered the terminal with a ternary, so switching to 文件 unmounted it,
+  and its unmount closed the shell; coming back minted a fresh id, started a fresh
+  shell and showed a blank screen. A terminal is now addressed by slot
+  (`rail:<workspace>`, `pane:<paneId>`) instead of by mount, and the launcher keys
+  shells on that id and keeps each one's buffer — so a remount reattaches to the
+  same shell and the poll replays its output. The rail additionally keeps the
+  terminal mounted once it has been opened, so 文件 ↔ 终端 costs neither a restart
+  nor a blank frame.
+- **Plugins: the SenseVoice service now declares the ffmpeg it resolves.** The
+  manifest listed every other dependency the service imports but not the one that
+  provides ffmpeg, and the launcher installs only *declared* deps into the Agent
+  Python — the interpreter the service runs in — so the bundled resolver had no
+  provider to find. This was the single failure keeping the test suite red.
 
 ## [0.8.49] — 2026-09-29
 
