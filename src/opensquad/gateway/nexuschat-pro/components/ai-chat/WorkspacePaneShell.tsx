@@ -345,7 +345,13 @@ export const WorkspacePaneShell: React.FC<WorkspacePaneShellProps> = ({
             data-testid="pane-terminal"
           >
             <ErrorBoundary label="terminal" resetKey={`${agentId}:terminal`}>
-              <TerminalPanel agentId={agentId} rootPath={rootPath} />
+              {/* Keyed by pane, so a reload reattaches to this pane's shell instead of
+                  starting a new one with a blank screen. */}
+              <TerminalPanel
+                agentId={agentId}
+                rootPath={rootPath}
+                terminalKey={`pane:${paneId}`}
+              />
             </ErrorBoundary>
           </div>
         ) : null}

@@ -99,7 +99,9 @@ describe('the pane renders them', () => {
     expect(SHELL).toContain("active.kind === 'browser'");
     expect(SHELL).toContain('data-testid="pane-terminal"');
     expect(SHELL).toContain('data-testid="pane-browser"');
-    expect(SHELL).toContain('<TerminalPanel agentId={agentId} rootPath={rootPath} />');
+    // Keyed by pane: the launcher keys shells by id, so the same slot reattaches to the
+    // shell it already has (reload included) instead of spawning a fresh one.
+    expect(SHELL).toContain('terminalKey={`pane:${paneId}`}');
     expect(SHELL).toContain('<BrowserPanel agentId={agentId} />');
     // a render throw costs the pane that view, not the workspace
     expect(SHELL).toContain('<ErrorBoundary label="terminal"');
