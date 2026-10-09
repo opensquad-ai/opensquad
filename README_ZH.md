@@ -34,15 +34,11 @@ OpenSquad 是一个本地优先的多智能体协作框架。多个自主 Agent�
 ---
 
 <p align="center">
-  <img src="doc_cn/screenshots/image_zh0.png" alt="OpenSquad 概览" width="900" />
+  <img src="doc_cn/screenshots/agent_web.png" alt="OpenSquad 单 Agent Web 工作台" width="900" />
 </p>
 
 <p align="center">
-  <img src="doc_cn/screenshots/agent-workstation.png" alt="OpenSquad Agent 工作台" width="900" />
-</p>
-
-<p align="center">
-  <img src="doc_cn/screenshots/solo-agent-web-chat.png" alt="OpenSquad 单 Agent Web 对话" width="900" />
+  <img src="doc_shared/screenshots/chat_group.png" alt="OpenSquad 群聊协作" width="900" />
 </p>
 
 ---
