@@ -128,21 +128,6 @@ _last_workspace_cache: dict = {}
 _last_workspace_cache_loaded: bool = False
 
 
-def _load_last_workspace_raw() -> dict:
-    """Load raw workspace metadata with in-process caching."""
-    global _last_workspace_cache, _last_workspace_cache_loaded
-    if _last_workspace_cache_loaded:
-        return _last_workspace_cache
-    if LAST_WORKSPACE_FILE.exists():
-        try:
-            with open(LAST_WORKSPACE_FILE, encoding="utf-8") as f:
-                _last_workspace_cache = json.load(f)
-        except Exception:
-            _last_workspace_cache = {}
-    _last_workspace_cache_loaded = True
-    return _last_workspace_cache
-
-
 def get_default_workspace_path() -> str:
     """Return the default workspace path (OS-dependent)."""
     if platform.system() == "Windows":

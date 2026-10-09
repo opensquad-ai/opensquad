@@ -95,6 +95,32 @@ def test_the_legacy_pointer_is_read_once_and_never_written(tmp_path, monkeypatch
     assert wu.read_last_workspace_path() == str(new_ws)
 
 
+def test_the_startup_loader_reads_the_pointer_the_switch_writes(tmp_path, monkeypatch):
+    """``bootstrap_workspace()`` decides the active workspace through ``load_last_workspace()``.
+
+    That loader has to read the same pointer ``save_last_workspace()`` writes, or a switch in the
+    UI survives in the registry yet the next start comes back on the old workspace. The module
+    used to define the raw loader twice — the later, legacy-only definition shadowed the
+    instance-aware one — so this test pins the loader a restart actually consults.
+    """
+    monkeypatch.setenv("OPENSQUAD_INSTANCE", "install-a")
+    legacy = wu.LEGACY_LAST_WORKSPACE_FILE
+    legacy.parent.mkdir(parents=True, exist_ok=True)
+    old_ws = _ws(tmp_path, "old-ws")
+    legacy.write_text(json.dumps({"last_workspace": str(old_ws)}), encoding="utf-8")
+
+    # Upgrade path: no instance pointer yet → the legacy value is what startup sees.
+    assert wu.load_last_workspace() == str(old_ws)
+
+    new_ws = _ws(tmp_path, "new-ws")
+    wu.save_last_workspace(str(new_ws))
+
+    # Simulate the next process start (fresh cache) — this is where the switch used to be lost.
+    wu._last_workspace_cache = {}
+    wu._last_workspace_cache_loaded = False
+    assert wu.load_last_workspace() == str(new_ws), "a restart would come back on the old workspace"
+
+
 def test_a_sibling_service_of_the_same_installation_may_share(tmp_path, monkeypatch):
     """gateway + launcher + registry are one installation and must all start."""
     monkeypatch.setenv("OPENSQUAD_INSTANCE", "install-a")
