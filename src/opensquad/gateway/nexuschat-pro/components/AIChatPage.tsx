@@ -1648,6 +1648,51 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
   const bootRestoreAliasRef = useRef<Array<string | null | undefined>>([]);
   bootRestoreAliasRef.current = [agentProfile?.dir_name, agentProfile?.agent_id];
 
+  /**
+   * The backend is gone: the socket dropped and did not come back inside the
+   * hook's grace window. Nothing can still be running on this side, so freeze
+   * every live fold and drop the per-session busy markers.
+   *
+   * Every session, not just the ones the client believes are busy: the
+   * `busy_sessions` snapshot can be empty or stale (a turn that began after the
+   * last broadcast), and an unfinished fold counts as *live by definition* in
+   * the activity row (`stillLive = … || !block.completed`), so its elapsed kept
+   * counting `Date.now() - started_ms` — the day-long "执行中 · 23h 48m 48s"
+   * left behind by a service that was killed mid-turn.
+   *
+   * A partial stream is deliberately left on screen: the backend can no longer
+   * finish it, and throwing away what the user was reading is worse than a
+   * bubble that simply stopped moving.
+   */
+  const handleBackendLost = useCallback(() => {
+    const sealOpts = {
+      cancelOpenTools: 'Cancelled: agent disconnected',
+      fallbackStartedMs: turnStartedMsRef.current,
+    };
+    const hasOpenFold = (entries: TimelineEntry[]) =>
+      entries.some((e) => e.kind === 'workflow' && !e.data.completed);
+
+    const buckets = liveTimelinesBySessionRef.current;
+    const next: Record<string, TimelineEntry[]> = {};
+    for (const [sid, entries] of Object.entries(buckets)) {
+      // Keep the old identity when there is nothing to seal — a new array for
+      // every session would re-render every pane for no reason.
+      next[sid] = hasOpenFold(entries) ? sealIncompleteWorkflows(entries, sealOpts) : entries;
+    }
+    liveTimelinesBySessionRef.current = next;
+    setLiveTimelinesBySession(next);
+    setTimelineState((prev) => (hasOpenFold(prev) ? sealIncompleteWorkflows(prev, sealOpts) : prev));
+
+    // No turn is in flight any more, on any pane.
+    busySessionsRef.current = [];
+    setBusySessions([]);
+    isStreamingBySessionRef.current = {};
+    setIsStreamingBySession({});
+    setIsStreaming(false);
+    turnStartedMsRef.current = undefined;
+    setTurnStartedMs(undefined);
+  }, []);
+
   useAgentWebSocket(agentId, {
     SUMMARY_STREAM_DEBUG,
     agentCurrentSessionIdRef,
@@ -1685,6 +1730,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     modelSwitchRevertRef,
     newSessionGuardRef,
     newSessionPendingRef,
+    onBackendLost: handleBackendLost,
     pageActiveRef,
     pendingFilePushesRef,
     pendingHydrationFinalsRef,

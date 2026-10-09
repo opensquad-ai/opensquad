@@ -75,6 +75,18 @@ import type { ChatMessage, FileAttachment } from '../components/ai-chat/MessageB
 
 const genUID = (): string => genTimelineUID();
 
+/**
+ * How long a dropped socket may stay down before we call the backend *gone*.
+ *
+ * A single close is not that evidence: a network blip reconnects within a
+ * second, and sealing then would end a fold the agent is still working on. The
+ * reconnect loop retries every ≤5s, so this window covers a couple of failed
+ * attempts. Past it we tell the UI to freeze the live folds (see
+ * `ctx.onBackendLost`) — otherwise an unfinished fold counts as live forever and
+ * its elapsed keeps counting `Date.now() - started_ms`.
+ */
+const BACKEND_LOST_GRACE_MS = 10_000;
+
 /** Runtime bag for the Agent Web WS bridge. Values are captured per agentId effect run. */
 export type AgentWebWsCtx = Record<string, any>;
 
@@ -232,9 +244,32 @@ export function useAgentWebSocket(agentId: string, ctx: AgentWebWsCtx) {
       setSessionExpired(true);
     });
 
+    // Backend-loss watchdog: armed whenever the connection drops, cancelled the
+    // moment it comes back. Only the expiry means the backend is gone.
+    let backendLostTimer: ReturnType<typeof setTimeout> | null = null;
+    const cancelBackendLost = () => {
+      if (backendLostTimer) {
+        clearTimeout(backendLostTimer);
+        backendLostTimer = null;
+      }
+    };
+    const armBackendLost = () => {
+      if (backendLostTimer) return; // one watchdog per outage
+      backendLostTimer = setTimeout(() => {
+        backendLostTimer = null;
+        if (aiWsService.isConnected) return; // came back in time — nothing was lost
+        try {
+          ctxRef.current.onBackendLost?.();
+        } catch (e) {
+          console.error('[AIWebSocket] onBackendLost handler error:', e);
+        }
+      }, BACKEND_LOST_GRACE_MS);
+    };
+
     const unsubStatus = aiWsService.onStatusChange((status) => {
       setWsStatus(status);
       if (status === 'connected') {
+        cancelBackendLost();
         setAgentStatus('connected');
         tryResumeVoiceCall();
         // Session may already be focused before WS is ready — refresh % now.
@@ -249,24 +284,20 @@ export function useAgentWebSocket(agentId: string, ctx: AgentWebWsCtx) {
         }
       } else if (status === 'disconnected') {
         setAgentStatus('disconnected');
-        const busy = [...busySessionsRef.current];
-        for (const sid of busy) {
-          if (!sid) continue;
-          userStoppedBySidRef.current[sid] = true;
-          eventSidRef.current = sid;
-          setTimeline((prev) => sealIncompleteWorkflows(prev, {
-            cancelOpenTools: 'Cancelled: agent disconnected',
-            fallbackStartedMs: turnStartedMsRef.current,
-          }));
-          eventSidRef.current = '';
-          clearSessionRunState(sid);
-        }
+        // Do not seal here. Sealing on the first close freezes a fold the agent
+        // may still be working on, and it only covered the sessions the client
+        // *believed* were busy — a stale/empty `busy_sessions` snapshot left the
+        // fold open for good. The watchdog decides instead.
+        armBackendLost();
       } else if (status === 'connecting') {
         setAgentStatus('connecting');
       } else if (status === 'agent-starting') {
+        // The agent process is (re)starting, so a turn it was running is gone.
         setAgentStatus('agent-starting');
+        armBackendLost();
       } else if (status === 'error') {
         setAgentStatus('error');
+        armBackendLost();
       }
     });
 
@@ -3263,6 +3294,7 @@ export function useAgentWebSocket(agentId: string, ctx: AgentWebWsCtx) {
         workflowTimelineRaf = null;
       }
       window.clearTimeout(bootstrapFailsafeTimer);
+      cancelBackendLost();
       unsubAuthExpired();
       unsubStatus();
       unsubReadyStage();
