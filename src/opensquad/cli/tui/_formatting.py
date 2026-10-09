@@ -5,6 +5,8 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+from opensquad.cli.tui._host import TuiHost
+
 
 def same_reply(a: str, b: str) -> bool:
     """True if two reply strings are the same turn (exact / whitespace-normalized).
@@ -29,7 +31,7 @@ def truncated_prefix(short: str, full: str) -> bool:
     return bool(s and f.startswith(s) and len(f) > len(s))
 
 
-class FormattingMixin:
+class FormattingMixin(TuiHost):
     """Mixin methods moved from cli/tui/app.py (see app.py for the app class)."""
 
     @staticmethod

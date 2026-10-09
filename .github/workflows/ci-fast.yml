@@ -118,6 +118,15 @@ jobs:
         run: |
           uv run --python 3.11 pytest tests/ -v --tb=short -q --override-ini "addopts="
 
+      - name: mypy error budget
+        # The same gate ci.yml runs, but on every push to dev. mypy used to run only on
+        # PRs to main, so a cycle's worth of type debt accumulated unnoticed and arrived
+        # at tag time as "+33 errors" with no obvious owner. Commands are copied from
+        # ci.yml verbatim so the two gates can never disagree about the budget.
+        run: |
+          uv run --python 3.11 mypy src/opensquad/ --ignore-missing-imports --warn-unused-ignores 2>&1 | tee mypy-out.txt || true
+          python scripts/check_mypy_budget.py mypy-out.txt
+
   frontend-smoke:
     name: frontend build smoke
     runs-on: ubuntu-latest

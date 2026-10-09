@@ -172,7 +172,7 @@ def is_git_repo(path: str) -> bool:
 def repo_key(repo_root: str) -> str:
     """Stable, filesystem-safe lock id for one repository."""
     norm = os.path.normcase(os.path.abspath(repo_root))
-    return "git_repo_" + hashlib.sha1(norm.encode("utf-8", "replace")).hexdigest()[:16]
+    return "git_repo_" + hashlib.sha1(norm.encode("utf-8", "replace"), usedforsecurity=False).hexdigest()[:16]
 
 
 def repo_lock(repo_root: str, *, timeout: float = 8.0):

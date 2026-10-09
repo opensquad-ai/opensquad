@@ -8,6 +8,7 @@ from typing import Any
 from textual import work
 from textual.widgets import Static
 
+from opensquad.cli.tui._host import TuiHost
 from opensquad.cli.tui.i18n import get_locale, normalize_locale, set_locale, t
 from opensquad.cli.tui.redact import redact_secrets
 from opensquad.cli.tui.selectable_rich_log import SelectableRichLog as RichLog
@@ -17,7 +18,7 @@ from opensquad.cli.tui.themes import (
 )
 
 
-class NavMixin:
+class NavMixin(TuiHost):
     """Mixin methods moved from cli/tui/app.py (see app.py for the app class)."""
 
     def open_nav(self, kind: str) -> None:

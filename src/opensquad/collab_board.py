@@ -50,7 +50,7 @@ def _board_key() -> str:
         raw = _board_dir()
     except Exception:
         raw = "collab_board"
-    return hashlib.sha1(raw.encode("utf-8", "replace")).hexdigest()[:12]
+    return hashlib.sha1(raw.encode("utf-8", "replace"), usedforsecurity=False).hexdigest()[:12]
 
 
 @contextmanager

@@ -5,6 +5,7 @@ from __future__ import annotations
 from textual import work
 from textual.widgets import Input, Static
 
+from opensquad.cli.tui._host import TuiHost
 from opensquad.cli.tui.decision_picker import (
     PendingDecision,
     from_group_approval,
@@ -15,7 +16,7 @@ from opensquad.cli.tui.decision_picker import (
 from opensquad.cli.tui.i18n import t
 
 
-class DecisionsMixin:
+class DecisionsMixin(TuiHost):
     """Mixin methods moved from cli/tui/app.py (see app.py for the app class)."""
 
     def _on_bridge_decision(self, event: str, data: dict) -> None:

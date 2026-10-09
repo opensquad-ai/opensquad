@@ -7,11 +7,12 @@ from typing import Any
 from textual import work
 from textual.widgets import Static
 
+from opensquad.cli.tui._host import TuiHost
 from opensquad.cli.tui.i18n import t
 from opensquad.cli.tui.selectable_rich_log import SelectableRichLog as RichLog
 
 
-class SessionsMixin:
+class SessionsMixin(TuiHost):
     """Mixin methods moved from cli/tui/app.py (see app.py for the app class)."""
 
     def _session_cmd(self, name: str, args: list | None = None) -> None:
