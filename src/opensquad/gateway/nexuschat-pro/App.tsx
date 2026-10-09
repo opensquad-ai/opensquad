@@ -30,6 +30,7 @@ import {
 } from './services/desktopUpdateOverlay';
 import { useDesktopUpdate } from './hooks/useDesktopUpdate';
 import { getActiveAgentWorkCount } from './utils/agentActivity';
+import { desktopUpdateCapabilities } from './utils/desktopUpdateCapability';
 import { getUpdatePrefs, loadUpdatePrefs } from './services/updatePrefs';
 import { AvatarImg } from './components/AvatarImg';
 import { OpenSquadLoader } from './components/OpenSquadLoader';
@@ -423,7 +424,12 @@ const App: React.FC = () => {
   // 由用户点「后台下载」；下载在后台进行，不阻塞使用。安装由用户在下载完成后
   // 主动确认（安装前会提醒正在运行的 Agent 任务，但不强制拦截）。
   // 已处理过的版本在会话内去重（ref），避免 1h 轮询重复弹窗。
-  const { startBackgroundDownload, installNow } = useDesktopUpdate();
+  const { startBackgroundDownload, installNow, downloadAndInstall } = useDesktopUpdate();
+  // Shells before 0.9.0 have no background-download IPC: the offer hands off to
+  // the one combined action they do implement (download, install, quit).
+  const downloadAction = desktopUpdateCapabilities().backgroundDownload
+    ? startBackgroundDownload
+    : downloadAndInstall;
   const [updateOverlay, setUpdateOverlay] = useState<DesktopUpdateOverlayState | null>(null);
   useEffect(() => subscribeDesktopUpdateOverlay(setUpdateOverlay), []);
 
@@ -2011,7 +2017,7 @@ const App: React.FC = () => {
 
       <DesktopUpdateOverlay />
       <UpdateNotification
-        onDownloadBackground={startBackgroundDownload}
+        onDownload={downloadAction}
         onInstallNow={installNow}
         onOpenChangelog={openDesktopUpdateChangelog}
         onDismiss={dismissDesktopUpdateOverlay}
@@ -2022,7 +2028,7 @@ const App: React.FC = () => {
           releaseNotes={updateOverlay.releaseNotes}
           releaseUrl={updateOverlay.releaseUrl}
           isBeta={updateOverlay.isBeta}
-          onDownloadBackground={startBackgroundDownload}
+          onDownload={downloadAction}
           onLater={closeDesktopUpdateChangelog}
         />
       )}

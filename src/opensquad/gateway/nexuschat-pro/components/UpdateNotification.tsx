@@ -6,6 +6,11 @@
  *
  * The install phases (preparing / launching / shutting-down) hand off to the
  * full-screen `DesktopUpdateOverlay`, so this card hides then.
+ *
+ * The primary action is whatever the shell can do: a background download on
+ * 0.9.0+, or the older combined download-and-install-and-quit. Its copy follows
+ * the same flag, so the hint never promises "keep working" on a shell that will
+ * restart the app.
  */
 import React, { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
@@ -17,6 +22,7 @@ import {
   markDesktopUpdateDownloaded,
   type DesktopUpdateOverlayState,
 } from '../services/desktopUpdateOverlay';
+import { desktopUpdateCapabilities } from '../utils/desktopUpdateCapability';
 import { OpenSquadLoader } from './OpenSquadLoader';
 
 function formatBytes(bytes: number): string {
@@ -32,20 +38,22 @@ function formatBytes(bytes: number): string {
 }
 
 interface Props {
-  onDownloadBackground: () => void;
+  /** The primary download action for the shell this card runs in. */
+  onDownload: () => void;
   onInstallNow: () => void;
   onOpenChangelog: () => void;
   onDismiss: () => void;
 }
 
 export const UpdateNotification: React.FC<Props> = ({
-  onDownloadBackground,
+  onDownload,
   onInstallNow,
   onOpenChangelog,
   onDismiss,
 }) => {
   const { t } = useTranslation();
   const [update, setUpdate] = useState<DesktopUpdateOverlayState | null>(null);
+  const backgroundDownload = desktopUpdateCapabilities().backgroundDownload;
 
   useEffect(() => subscribeDesktopUpdateOverlay(setUpdate), []);
 
@@ -98,10 +106,14 @@ export const UpdateNotification: React.FC<Props> = ({
           </p>
           <p className="text-[11px] text-textMuted mt-0.5">
             {phase === 'downloading'
-              ? t('systemConfig.about.updateNotifyDownloading')
+              ? backgroundDownload
+                ? t('systemConfig.about.updateNotifyDownloading')
+                : t('systemConfig.about.updateNotifyDownloadingLegacy')
               : phase === 'downloaded'
                 ? t('systemConfig.about.updateNotifyReadyHint')
-                : t('systemConfig.about.updateNotifyAvailableHint')}
+                : backgroundDownload
+                  ? t('systemConfig.about.updateNotifyAvailableHint')
+                  : t('systemConfig.about.updateNotifyAvailableHintLegacy')}
           </p>
         </div>
         <button
@@ -173,7 +185,9 @@ export const UpdateNotification: React.FC<Props> = ({
         ) : phase === 'downloading' ? (
           <span className="text-[11px] text-textMuted inline-flex items-center gap-1">
             <OpenSquadLoader size={11} />
-            {t('systemConfig.about.updateNotifyDownloadingBg')}
+            {backgroundDownload
+              ? t('systemConfig.about.updateNotifyDownloadingBg')
+              : t('systemConfig.about.updateNotifyDownloadingLegacy')}
           </span>
         ) : (
           <>
@@ -186,13 +200,15 @@ export const UpdateNotification: React.FC<Props> = ({
             </button>
             <button
               type="button"
-              onClick={onDownloadBackground}
+              onClick={onDownload}
               className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-[11px] font-medium text-white bg-primary hover:bg-primary/90"
             >
               <Download size={11} />
               {error
                 ? t('systemConfig.about.updateNotifyRetry')
-                : t('systemConfig.about.updateDownloadInBackground')}
+                : backgroundDownload
+                  ? t('systemConfig.about.updateDownloadInBackground')
+                  : t('systemConfig.about.updateDownloadAndInstall')}
             </button>
           </>
         )}

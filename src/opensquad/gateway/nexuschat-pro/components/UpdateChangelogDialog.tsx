@@ -2,22 +2,30 @@
  * UpdateChangelogDialog — the small "what's new" popup shown when a new
  * desktop build is discovered (and reopenable from the update notification).
  *
- * It only *offers* the update: "Download in background" hands off to the
- * non-blocking download; the app keeps running. Nothing here restarts the app —
- * that waits for the user to confirm once the installer is ready.
+ * It only *offers* the update: the primary button hands off to the download the
+ * shell supports (background on 0.9.0+, the older combined action otherwise).
+ * On the background path the app keeps running; on the older one it installs
+ * and restarts. Nothing here restarts the app by itself.
+ *
+ * Failures from that button are rendered here as well as on the card: this
+ * dialog is a modal (`z-[9998]`) and would otherwise hide the card's reason
+ * behind its own backdrop — a click that looks like it did nothing.
  */
-import React from 'react';
+import React, { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { marked } from 'marked';
 import { Download, ExternalLink, X } from 'lucide-react';
+import { subscribeDesktopUpdateOverlay } from '../services/desktopUpdateOverlay';
 import { sanitizeHtml } from '../utils/safeHtml';
+import { desktopUpdateCapabilities } from '../utils/desktopUpdateCapability';
 
 interface Props {
   version: string | null;
   releaseNotes: string | null;
   releaseUrl: string | null;
   isBeta?: boolean;
-  onDownloadBackground: () => void;
+  /** The primary download action for the shell this dialog runs in. */
+  onDownload: () => void;
   onLater: () => void;
 }
 
@@ -26,10 +34,17 @@ export const UpdateChangelogDialog: React.FC<Props> = ({
   releaseNotes,
   releaseUrl,
   isBeta,
-  onDownloadBackground,
+  onDownload,
   onLater,
 }) => {
   const { t } = useTranslation();
+  const [error, setError] = useState<string | null>(null);
+  const backgroundDownload = desktopUpdateCapabilities().backgroundDownload;
+
+  useEffect(
+    () => subscribeDesktopUpdateOverlay((next) => setError(next.error)),
+    [],
+  );
 
   const notes = (releaseNotes || '').trim();
 
@@ -94,6 +109,11 @@ export const UpdateChangelogDialog: React.FC<Props> = ({
         </div>
 
         <div className="flex items-center justify-end gap-2 px-5 py-3 border-t border-border shrink-0">
+          {error && (
+            <p className="flex-1 min-w-0 text-[11px] text-rose-500 break-words">
+              {t('systemConfig.about.updateNotifyFailed', { error })}
+            </p>
+          )}
           <button
             type="button"
             onClick={onLater}
@@ -103,11 +123,13 @@ export const UpdateChangelogDialog: React.FC<Props> = ({
           </button>
           <button
             type="button"
-            onClick={onDownloadBackground}
+            onClick={onDownload}
             className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[12px] font-medium text-white bg-primary hover:bg-primary/90"
           >
             <Download size={13} />
-            {t('systemConfig.about.updateDownloadInBackground')}
+            {backgroundDownload
+              ? t('systemConfig.about.updateDownloadInBackground')
+              : t('systemConfig.about.updateDownloadAndInstall')}
           </button>
         </div>
       </div>
