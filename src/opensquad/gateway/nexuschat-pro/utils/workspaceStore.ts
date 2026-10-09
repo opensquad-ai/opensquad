@@ -10,6 +10,12 @@ export type Workspace = {
   name: string;
   rootPath: string;
   createdAt: number;
+  /**
+   * The folder is known to be gone on the agent host. Set by
+   * ``reconcileWorkspaceExistence`` from a launcher probe; the entry is kept
+   * (a drive can come back) but it must not be opened or activated.
+   */
+  missing?: boolean;
 };
 
 export type ContentTabKind =
@@ -661,6 +667,78 @@ export function ensureActiveWorkspaceFromRoot(
   return ws;
 }
 
+/**
+ * Apply a directory-existence probe to one agent's registry.
+ *
+ * `exists` maps the *stored* rootPath to whether the folder is there. A
+ * workspace whose folder is gone is flagged `missing` — kept, never deleted,
+ * because the same path can be a drive that is merely offline — and a flagged
+ * workspace must not be the open/active one: its tab is closed here and the
+ * active id falls back to a workspace that still resolves.
+ *
+ * Why this exists: the registry only ever *unions* (see
+ * `mergeWorkspaceSnapshots`), so a bad path was permanent and replicated to
+ * every origin. Nothing surfaced it beyond a bare "Root not found" in the files
+ * panel, while the agent's cwd write was rejected and it silently kept an older
+ * directory.
+ *
+ * Paths absent from `exists` are left untouched — not probed is not missing.
+ */
+export function reconcileWorkspaceExistence(
+  agentId: string,
+  aliases: string[],
+  exists: Record<string, boolean>,
+): boolean {
+  if (!agentId || Object.keys(exists).length === 0) return false;
+  const snap = loadWorkspaceStoreResolved(agentId, aliases);
+  if (snap.workspaces.length === 0) return false;
+
+  let changed = false;
+  for (const ws of snap.workspaces) {
+    const probed = probeOf(exists, ws.rootPath);
+    if (probed === undefined) continue;
+    const nextMissing = !probed;
+    if (!!ws.missing === nextMissing) continue;
+    if (nextMissing) ws.missing = true;
+    else delete ws.missing;
+    changed = true;
+  }
+  if (!changed) return false;
+
+  const missingIds = new Set(snap.workspaces.filter((w) => w.missing).map((w) => w.id));
+  const chrome = snap.chrome;
+  const openNext = chrome.openWorkspaceIds.filter((id) => !missingIds.has(id));
+  let activeNext = chrome.activeWorkspaceId;
+  if (activeNext && missingIds.has(activeNext)) {
+    activeNext = openNext[0] || snap.workspaces.find((w) => !w.missing)?.id || null;
+  }
+  if (openNext.length !== chrome.openWorkspaceIds.length || activeNext !== chrome.activeWorkspaceId) {
+    chrome.openWorkspaceIds = openNext;
+    chrome.activeWorkspaceId = activeNext;
+    if (activeNext) {
+      const leaves = collectLeaves(ensureWorkspaceLayout(chrome, activeNext));
+      if (!leaves.some((l) => l.id === chrome.focusedPaneId)) {
+        chrome.focusedPaneId = leaves[0]?.id ?? null;
+      }
+    } else {
+      chrome.focusedPaneId = null;
+    }
+  }
+  snap.chrome = chrome;
+  saveWorkspaceStore(agentId, snap);
+  return true;
+}
+
+/** Case/separator-insensitive lookup of a probed result by path. */
+function probeOf(exists: Record<string, boolean>, rootPath: string): boolean | undefined {
+  const want = normPath(rootPath).toLowerCase();
+  if (!want) return undefined;
+  for (const [key, value] of Object.entries(exists)) {
+    if (normPath(key).toLowerCase() === want) return value;
+  }
+  return undefined;
+}
+
 export function listWorkspaces(agentId: string): Workspace[] {
   return loadWorkspaceStore(agentId).workspaces.slice();
 }
@@ -744,7 +822,11 @@ export function setFocusedPane(agentId: string, paneId: string): OpenChromeState
 /** Open workspace in L1 chrome (idempotent). */
 export function openWorkspaceTab(agentId: string, workspaceId: string): OpenChromeState {
   const snap = loadWorkspaceStore(agentId);
-  if (!snap.workspaces.some((w) => w.id === workspaceId)) return snap.chrome;
+  const target = snap.workspaces.find((w) => w.id === workspaceId);
+  // A workspace whose folder is gone must never become the open/active one: the
+  // files panel and the agent's cwd both resolve through it. Flagged by
+  // `reconcileWorkspaceExistence`; the entry stays in the `+` menu, disabled.
+  if (!target || target.missing) return snap.chrome;
   const chrome = snap.chrome;
   if (!chrome.openWorkspaceIds.includes(workspaceId)) {
     chrome.openWorkspaceIds = [...chrome.openWorkspaceIds, workspaceId];

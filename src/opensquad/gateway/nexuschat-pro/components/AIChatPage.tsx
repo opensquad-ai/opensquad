@@ -106,6 +106,7 @@ import {
 } from '../utils/sessionProjectMeta';
 import {
   bindAgentWebUiSyncPush,
+  probeProjectRoot,
   pullAgentWebUiState,
   schedulePushAgentWebUiState,
   setAgentWebUiSyncTarget,
@@ -543,6 +544,13 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
   );
   const [closeWorkspaceTarget, setCloseWorkspaceTarget] = useState<Workspace | null>(null);
   const [createWorkspaceOpen, setCreateWorkspaceOpen] = useState(false);
+  /**
+   * Why a project folder was refused or did not take effect. Both used to fail
+   * silently: a workspace could be registered for a path the launcher cannot
+   * see, and the rejected cwd write left the agent running in its previous
+   * directory with nothing on screen to say so.
+   */
+  const [workspaceWarning, setWorkspaceWarning] = useState('');
   const [fileDirtyMap, setFileDirtyMap] = useState<Record<string, boolean>>({});
   const [tabSessionTitles, setTabSessionTitles] = useState<Record<string, string>>({});
   const pendingOpenSessionTabRef = useRef(false);
@@ -3246,9 +3254,11 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
           pendingProjectPathRef.current = boundPath;
           setAgentCwd(boundPath);
           const dirName = agentProfile?.dir_name || agentId;
-          void adminAPI.setWorkingDirectory(dirName, boundPath, currentSessionId || undefined).catch((err: any) => {
-            console.error('[AIChatPage] Failed to set working directory for folder session:', err);
-          });
+          void adminAPI.setWorkingDirectory(dirName, boundPath, currentSessionId || undefined)
+            .catch((err: any) => {
+              console.error('[AIChatPage] Failed to set working directory for folder session:', err);
+              setWorkspaceWarning(`工作目录未生效：${boundPath}（${err?.message || err}）`);
+            });
         }
         return;
       }
@@ -3314,9 +3324,11 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
       pendingProjectPathRef.current = boundPath;
       setAgentCwd(boundPath);
       const dirName = agentProfile?.dir_name || agentId;
-      void adminAPI.setWorkingDirectory(dirName, boundPath, currentSessionId || undefined).catch((err: any) => {
-        console.error('[AIChatPage] Failed to set working directory for folder session:', err);
-      });
+      void adminAPI.setWorkingDirectory(dirName, boundPath, currentSessionId || undefined)
+        .catch((err: any) => {
+          console.error('[AIChatPage] Failed to set working directory for folder session:', err);
+          setWorkspaceWarning(`工作目录未生效：${boundPath}（${err?.message || err}）`);
+        });
       try {
         pushCwdRecent(boundPath);
       } catch { /* ignore */ }
@@ -4074,9 +4086,16 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     // agent-level file, which every pane reads — so switching a workspace re-rooted the others, and
     // a question asked in one project was answered against another's directory. Both ends already
     // accept a session id; this call was the half that did not send one.
-    void adminAPI.setWorkingDirectory(dirName, path, currentSessionId || undefined).catch((err: any) => {
-      console.error('[AIChatPage] Failed to set cwd for workspace:', err);
-    });
+    void adminAPI.setWorkingDirectory(dirName, path, currentSessionId || undefined)
+      .then(() => {
+        setWorkspaceWarning((prev) => (prev.startsWith('工作目录未生效') ? '' : prev));
+      })
+      .catch((err: any) => {
+        // Do not swallow this: the launcher rejects a directory it cannot see, so
+        // the agent keeps its previous cwd and answers about the wrong project.
+        console.error('[AIChatPage] Failed to set cwd for workspace:', err);
+        setWorkspaceWarning(`工作目录未生效：${path}（${err?.message || err}）`);
+      });
   }, [activeWorkspace?.id, activeWorkspace?.rootPath, agentId, agentProfile?.dir_name, currentSessionId]);
 
   useEffect(() => {
@@ -4238,16 +4257,36 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     // (avoids global「加载会话中」and remounting the live chatSlot).
   };
 
-  const handleOpenExistingWorkspace = (rootPath: string) => {
-    const ws = ensureWorkspace(agentId, rootPath);
+  const handleOpenExistingWorkspace = async (rootPath: string) => {
+    const path = (rootPath || '').trim();
+    if (!path) return;
+    // Register only a folder the launcher can actually see. Registering one it
+    // cannot used to succeed here and fail later and quieter: the tab opened,
+    // the panel answered "Root not found", and the cwd write was rejected, so
+    // the agent kept running in its previous project. Only an explicit "gone"
+    // answer refuses — an inconclusive probe (launcher briefly unreachable)
+    // must not block the user.
+    if ((await probeProjectRoot(fsAgentName, path)) === false) {
+      setWorkspaceWarning(`目录不存在，无法作为工作区打开：${path}`);
+      return;
+    }
+    setWorkspaceWarning('');
+    const ws = ensureWorkspace(agentId, path);
     openWorkspaceTab(agentId, ws.id);
     refreshWsSnap();
     setAgentCwd(ws.rootPath);
     pendingProjectPathRef.current = ws.rootPath;
   };
 
-  const handleCreateWorkspace = (name: string, rootPath: string) => {
-    const ws = ensureWorkspace(agentId, rootPath, name);
+  const handleCreateWorkspace = async (name: string, rootPath: string) => {
+    const path = (rootPath || '').trim();
+    if (!path) return;
+    if ((await probeProjectRoot(fsAgentName, path)) === false) {
+      setWorkspaceWarning(`目录不存在，无法创建工作区：${path}`);
+      return;
+    }
+    setWorkspaceWarning('');
+    const ws = ensureWorkspace(agentId, path, name);
     openWorkspaceTab(agentId, ws.id);
     refreshWsSnap();
     setAgentCwd(ws.rootPath);
@@ -5822,6 +5861,20 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
         </div>
 
       <div className="os-depth-body flex-1 min-h-0 flex flex-col">
+      {/* Project-folder problem: a workspace whose directory is gone, or a cwd
+          the launcher refused. Out here rather than inside the workspace body —
+          the point is that it also shows when no workspace could be activated. */}
+      {workspaceWarning ? (
+        <div className="px-4 py-2 bg-rose-500/15 border-b border-rose-500/30 flex items-center justify-between gap-3 flex-shrink-0">
+          <span className="text-sm text-rose-200 break-all">{workspaceWarning}</span>
+          <button
+            onClick={() => setWorkspaceWarning('')}
+            className="px-3 py-1 text-xs font-medium bg-rose-500/20 hover:bg-rose-500/30 text-rose-200 rounded transition-colors whitespace-nowrap"
+          >
+            知道了
+          </button>
+        </div>
+      ) : null}
       {activeWorkspace && workspaceLayout ? (
         <>
         {/* Auth expired banner */}
