@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import tempfile
 import time
 from typing import Any
 
@@ -106,20 +107,83 @@ def cache_clear(root: str | None = None) -> None:
 # ── Git listing ───────────────────────────────────────────────────────────
 
 
+def _kill_process_tree(proc: subprocess.Popen) -> None:
+    """Kill *proc* and whatever it spawned, and never block on either.
+
+    ``taskkill /T`` reaches grandchildren a bare ``kill()`` leaves behind (the live
+    failure left eight ``git ls-files`` children running for minutes).
+    """
+    try:
+        if os.name == "nt":
+            subprocess.run(
+                ["taskkill", "/PID", str(proc.pid), "/T", "/F"],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=10,
+                check=False,
+            )
+        else:
+            proc.kill()
+    except Exception:  # noqa: BLE001 - a failed kill must not reach the caller
+        pass
+    try:
+        proc.kill()
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        proc.wait(timeout=5)
+    except Exception:  # noqa: BLE001 - already dead, or unkillable: either way, move on
+        pass
+
+
+def _run_git(args: list[str], *, timeout: float) -> str | None:
+    """Run git under a *real* wall-clock bound, with stdout going to a file, not a pipe.
+
+    Why not ``subprocess.run(..., capture_output=True, timeout=...)``: on Windows that is
+    not a bound. ``run()`` is built on ``communicate()``, which waits for its pipe-reader
+    threads to reach EOF, and it keeps waiting after the timeout has killed only the
+    direct child as long as any other handle to those pipes stays open (a grandchild, for
+    instance). Measured on the packaged desktop app: the ``git ls-files`` spawned from the
+    frozen launcher never returned — eight of them alive at 0.0s CPU, the fs/tree request
+    thread parked in ``_communicate -> _wait_for_tstate_lock`` for good, and every attempt
+    leaked a thread plus a git process until the launcher was restarted. A temp file has
+    no reader to wait on, so ``wait(timeout=…)`` actually returns.
+    """
+    try:
+        with tempfile.TemporaryFile() as out:
+            try:
+                proc = subprocess.Popen(  # noqa: S603 - fixed argv, no shell
+                    args,
+                    stdin=subprocess.DEVNULL,
+                    stdout=out,
+                    stderr=subprocess.DEVNULL,
+                    env={**os.environ, "LC_ALL": "C"},
+                )
+            except OSError:
+                return None
+            try:
+                proc.wait(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                _kill_process_tree(proc)
+                return None
+            if proc.returncode != 0:
+                return None
+            out.seek(0)
+            return out.read().decode("utf-8", errors="replace")
+    except Exception:  # noqa: BLE001 - git is an optimisation; never break the caller
+        return None
+
+
 def _list_with_git(root: str) -> list[str] | None:
     """Full relative file list via git ls-files; None when not a git repo."""
-    try:
-        proc = subprocess.run(
-            ["git", "-C", root, "ls-files", "--cached", "--others", "--exclude-standard", "-z"],
-            capture_output=True,
-            timeout=_GIT_TIMEOUT_S,
-            env={**os.environ, "LC_ALL": "C"},
-        )
-    except (OSError, subprocess.TimeoutExpired):
+    out = _run_git(
+        ["git", "-C", root, "ls-files", "--cached", "--others", "--exclude-standard", "-z"],
+        timeout=_GIT_TIMEOUT_S,
+    )
+    if out is None:
         return None
-    if proc.returncode != 0:
-        return None
-    files = [f for f in proc.stdout.decode("utf-8", errors="replace").split("\0") if f]
+    files = [f for f in out.split("\0") if f]
     if len(files) > _GIT_HARD_CAP:
         files = files[:_GIT_HARD_CAP]
     return files

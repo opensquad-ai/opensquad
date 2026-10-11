@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import time
 from pathlib import Path
 
 import pytest
@@ -141,6 +142,57 @@ class TestGitAcceleration:
         assert "src" in paths
         assert "src/pkg" in paths
         assert "src/pkg/mod.py" in paths
+
+
+class TestGitIsBounded:
+    """A git that never exits must not park the caller, and must not be left running.
+
+    Measured on the packaged desktop app (2026-10-10): ``git ls-files`` spawned from the
+    frozen launcher never returned — eight of them alive at 0.0s CPU, the fs/tree request
+    thread parked in ``_communicate -> _wait_for_tstate_lock`` for good, so the gateway's
+    60s proxy window expired and the panel showed a bare "Launcher proxy error"; only a
+    launcher restart cleared the leak.
+
+    A ``Popen``-level fake cannot reproduce the pipe-EOF wait itself, so what is pinned
+    here is the invariant that makes the bound real: no pipes, and the call returns anyway.
+    """
+
+    def test_a_git_that_never_exits_does_not_hold_the_tree(self, tmp_path: Path, monkeypatch):
+        _make_tree(tmp_path)
+        spawned: list[tuple[tuple, dict]] = []
+
+        class NeverExits:
+            def __init__(self, *args, **kwargs):
+                spawned.append((args, kwargs))
+                self.pid = 4321
+                self.returncode = None
+
+            def wait(self, timeout=None):
+                raise subprocess.TimeoutExpired(cmd="git", timeout=timeout or 0.0)
+
+            def kill(self):
+                pass
+
+            def communicate(self, *args, **kwargs):
+                raise AssertionError("communicate() drains pipes: it can wait for EOF forever")
+
+        monkeypatch.setattr(fs_index.subprocess, "Popen", NeverExits)
+        monkeypatch.setattr(fs_index, "_GIT_TIMEOUT_S", 0.05)
+
+        started = time.monotonic()
+        result = list_tree(str(tmp_path), use_cache=False)
+        elapsed = time.monotonic() - started
+
+        assert elapsed < 5.0, "the git call was not bounded"
+        # The tree is still served: the walk fallback answers.
+        assert "README.md" in {e["path"] for e in result["entries"]}
+
+        git_calls = [(a, k) for a, k in spawned if a and isinstance(a[0], list) and a[0] and a[0][0] == "git"]
+        assert git_calls, "the git path was never attempted"
+        for _args, kwargs in git_calls:
+            assert kwargs.get("stdin") is subprocess.DEVNULL
+            assert kwargs.get("stdout") is not subprocess.PIPE
+            assert kwargs.get("stderr") is not subprocess.PIPE
 
 
 class TestCache:

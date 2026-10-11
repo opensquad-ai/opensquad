@@ -5,6 +5,7 @@ FastAPI main application entry point
 import asyncio
 import contextlib
 import hmac
+import json
 import logging
 import logging.config
 import os
@@ -711,8 +712,11 @@ async def launcher_http_proxy(path: str, request: Request):
             media_type="application/json",
         )
     except httpx.RequestError as exc:
+        # Name the exception type: an httpx timeout stringifies to "", and that empty
+        # message is what the UI showed as a bare "Launcher proxy error". json.dumps so a
+        # message containing quotes cannot produce invalid JSON.
         return Response(
-            content=f'{{"detail":"Launcher proxy error: {exc!s}"}}',
+            content=json.dumps({"detail": f"Launcher proxy error: {type(exc).__name__}: {exc} ({target})"}),
             status_code=502,
             media_type="application/json",
         )

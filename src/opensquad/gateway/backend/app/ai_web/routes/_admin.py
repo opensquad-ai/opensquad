@@ -177,10 +177,14 @@ async def _proxy_get(
         return result
     except httpx.ConnectError:
         raise HTTPException(502, f"Launcher is not running (cannot connect to {base})")
+    except httpx.TimeoutException as e:
+        # An httpx timeout stringifies to "", so the caller ended up displaying a bare
+        # "Launcher proxy error" with no cause. Name the type, the window and the path.
+        raise HTTPException(504, f"Launcher timed out after {timeout:g}s: {type(e).__name__} ({path})")
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(502, f"Launcher proxy error: {e}")
+        raise HTTPException(502, f"Launcher proxy error: {type(e).__name__}: {e} ({path})")
 
 
 async def _proxy_post(
@@ -207,10 +211,12 @@ async def _proxy_post(
         return resp.json()
     except httpx.ConnectError:
         raise HTTPException(502, f"Launcher is not running (cannot connect to {base})")
+    except httpx.TimeoutException as e:
+        raise HTTPException(504, f"Launcher timed out after {timeout:g}s: {type(e).__name__} ({path})")
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(502, f"Launcher proxy error: {e}")
+        raise HTTPException(502, f"Launcher proxy error: {type(e).__name__}: {e} ({path})")
 
 
 async def _proxy_put(
@@ -237,10 +243,12 @@ async def _proxy_put(
         return resp.json()
     except httpx.ConnectError:
         raise HTTPException(502, f"Launcher is not running (cannot connect to {base})")
+    except httpx.TimeoutException as e:
+        raise HTTPException(504, f"Launcher timed out after 5s: {type(e).__name__} ({path})")
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(502, f"Launcher proxy error: {e}")
+        raise HTTPException(502, f"Launcher proxy error: {type(e).__name__}: {e} ({path})")
 
 
 async def _proxy_delete(path: str, launcher_url: str | None = None) -> dict:
@@ -267,10 +275,12 @@ async def _proxy_delete(path: str, launcher_url: str | None = None) -> dict:
         return resp.json()
     except httpx.ConnectError:
         raise HTTPException(502, f"Launcher is not running (cannot connect to {base})")
+    except httpx.TimeoutException as e:
+        raise HTTPException(504, f"Launcher timed out after 5s: {type(e).__name__} ({path})")
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(502, f"Launcher proxy error: {e}")
+        raise HTTPException(502, f"Launcher proxy error: {type(e).__name__}: {e} ({path})")
 
 
 @admin_router.get("/admin/agents")
