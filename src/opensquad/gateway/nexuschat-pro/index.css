@@ -91,10 +91,15 @@ html.dark .ai-markdown .ai-code-block code {
   height: auto;
 }
 /* Diagrams render at natural size (wide ones scroll horizontally);
-   JS sets explicit px width/height when zooming. */
+   JS sets explicit px width/height when zooming. `zoom-in` is the whole affordance:
+   clicking the diagram opens the fullscreen viewer, so a drag-select of the labels must
+   not hijack the gesture (2026-10-10: "点图是拖拽，而不是放大"). */
 .ai-markdown .ai-mermaid-svg {
   cursor: zoom-in;
   min-height: 3rem;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-user-drag: none;
 }
 .ai-markdown .ai-mermaid-svg svg {
   display: block;
@@ -102,6 +107,8 @@ html.dark .ai-markdown .ai-code-block code {
   width: auto;
   height: auto;
   max-width: none !important;
+  user-select: none;
+  -webkit-user-drag: none;
 }
 .ai-markdown .ai-mermaid-toolbar {
   display: flex;

@@ -1,15 +1,22 @@
 import { useEffect, useRef } from 'react';
-import { hydrateMermaidIn } from '../utils/mermaidHydrate';
+import { hydrateMermaidIn, warmMermaid } from '../utils/mermaidHydrate';
 
 /**
  * Attach to a markdown container that may contain `.ai-mermaid` placeholders.
  * Re-runs when *html* (or any dep) changes.
+ *
+ * Warming is deliberately not gated on `enabled`: the lazy mermaid chunk is fetched as
+ * soon as a placeholder appears — i.e. while the answer is still streaming — so that the
+ * render the caller unlocks at the end of the stream starts immediately instead of first
+ * waiting for a ~276 KB chunk. See `utils/mermaidHydrate.loadMermaid`.
  */
 export function useMermaidHydration(html: string, enabled = true) {
   const ref = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
-    if (!enabled || !html) return;
+    if (!html) return;
+    if (html.includes('ai-mermaid')) void warmMermaid();
+    if (!enabled) return;
     const el = ref.current;
     if (!el) return;
     let cancelled = false;

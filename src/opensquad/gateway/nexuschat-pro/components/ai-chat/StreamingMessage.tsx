@@ -86,7 +86,9 @@ export const StreamingMessage: React.FC<StreamingMessageProps> = ({
   );
 
   // Hydrate mermaid only after the stream is complete — incomplete fences
-  // fail mermaid.render on every 100ms flush and spike CPU.
+  // fail mermaid.render on every 100ms flush and spike CPU. The chunk itself is
+  // warmed as soon as a placeholder appears (see useMermaidHydration), so the
+  // completion render does not also wait for the lazy import.
   const mermaidRef = useMermaidHydration(renderedHtml, !!isComplete && !!visibleContent);
   useTableCopyButtons(mermaidRef, renderedHtml);
 

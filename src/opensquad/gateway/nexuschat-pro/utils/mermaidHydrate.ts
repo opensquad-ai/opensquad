@@ -8,6 +8,38 @@ import DOMPurify from 'dompurify';
 let _initTheme: string | null = null;
 let _seq = 0;
 
+type MermaidApi = (typeof import('mermaid'))['default'];
+let _mermaidPromise: Promise<MermaidApi> | null = null;
+
+/**
+ * Load the mermaid module once per page. The chunk is lazy (~276 KB) and the first
+ * diagram used to wait for it *after* the answer had finished streaming, which read as
+ * "输出完了图还不出来" (2026-10-10). Warming it while the answer streams (see
+ * `useMermaidHydration`) moves that wait off the completion path.
+ */
+function loadMermaid(): Promise<MermaidApi> {
+  _mermaidPromise ??= import('mermaid')
+    .then((m) => m.default)
+    .catch((err) => {
+      // Do not memoise a failure: a load that failed while the box was offline must be
+      // retryable by the next diagram instead of needing a page reload.
+      _mermaidPromise = null;
+      throw err;
+    });
+  return _mermaidPromise;
+}
+
+/**
+ * Start the mermaid chunk download now. Idempotent and never rejects: warming is an
+ * optimisation, so a failed load must not break the message that asked for it.
+ */
+export function warmMermaid(): Promise<void> {
+  return loadMermaid().then(
+    () => undefined,
+    () => undefined,
+  );
+}
+
 function detectMermaidTheme(): 'dark' | 'default' {
   try {
     const root = document.documentElement;
@@ -106,7 +138,7 @@ const MMD_DARK_VARS = {
 };
 
 async function ensureMermaid(theme: 'dark' | 'default') {
-  const mermaid = (await import('mermaid')).default;
+  const mermaid = await loadMermaid();
   if (_initTheme !== theme) {
     mermaid.initialize({
       startOnLoad: false,
@@ -249,13 +281,25 @@ function svgNaturalSize(svg: SVGSVGElement): { w: number; h: number } {
   return { w: w > 0 ? w : 600, h: h > 0 ? h : 400 };
 }
 
-/** Wire the inline box: +/- / reset buttons + click to open the fullscreen viewer. */
-function attachMermaidInteractions(box: HTMLElement): void {
+/** Pointer movement (px) still counted as a click, not a drag. */
+const CLICK_SLOP_PX = 8;
+
+/**
+ * Wire the inline box: +/- / reset buttons + click to open the fullscreen viewer.
+ *
+ * A plain `click` listener was not enough: the diagram's SVG labels are selectable and the
+ * browser happily starts a native drag, which suppresses `click` — so "点图放大" turned
+ * into "点图拖拽" for any click with a pixel of movement (2026-10-10). Selection and native
+ * drag are cancelled here, and a pointer-up that stayed within a few pixels opens the
+ * viewer itself, so the gesture works even when the browser withholds `click`.
+ */
+export function attachMermaidInteractions(box: HTMLElement): void {
   const svg = box.querySelector<SVGSVGElement>('.ai-mermaid-svg svg');
   if (!svg) return;
   const { w, h } = svgNaturalSize(svg);
   const scaleEl = box.querySelector<HTMLElement>('.ai-mermaid-scale');
   let scale = 1;
+  let lastOpenAt = 0;
 
   const apply = () => {
     svg.style.width = `${Math.round(w * scale)}px`;
@@ -263,23 +307,60 @@ function attachMermaidInteractions(box: HTMLElement): void {
     if (scaleEl) scaleEl.textContent = `${Math.round(scale * 100)}%`;
   };
 
-  box.addEventListener('click', (e) => {
-    const btn = (e.target as HTMLElement).closest<HTMLElement>('[data-mmd-action]');
-    if (btn) {
-      e.stopPropagation();
-      const action = btn.getAttribute('data-mmd-action');
-      if (action === 'zoom-in') scale = Math.min(5, +(scale * 1.25).toFixed(3));
-      else if (action === 'zoom-out') scale = Math.max(0.2, +(scale / 1.25).toFixed(3));
-      else if (action === 'reset') scale = 1;
-      else if (action === 'open') {
-        openMermaidModal(svg, w, h);
-        return;
-      }
-      apply();
+  const buttonFor = (target: EventTarget | null): HTMLElement | null =>
+    (target as HTMLElement | null)?.closest<HTMLElement>('[data-mmd-action]') ?? null;
+
+  const openViewer = () => {
+    lastOpenAt = Date.now();
+    openMermaidModal(svg, w, h);
+  };
+
+  const runAction = (action: string | null) => {
+    if (action === 'zoom-in') scale = Math.min(5, +(scale * 1.25).toFixed(3));
+    else if (action === 'zoom-out') scale = Math.max(0.2, +(scale / 1.25).toFixed(3));
+    else if (action === 'reset') scale = 1;
+    else if (action === 'open') {
+      openViewer();
       return;
     }
-    // Clicking the diagram itself also opens the viewer.
-    openMermaidModal(svg, w, h);
+    apply();
+  };
+
+  // No text selection, no native image drag on the diagram body.
+  box.addEventListener('mousedown', (e) => {
+    if (!buttonFor(e.target)) e.preventDefault();
+  });
+  box.addEventListener('dragstart', (e) => {
+    if (!buttonFor(e.target)) e.preventDefault();
+  });
+
+  let pointerDownAt: { x: number; y: number } | null = null;
+  box.addEventListener('pointerdown', (e) => {
+    if (e.button !== 0 || buttonFor(e.target)) {
+      pointerDownAt = null;
+      return;
+    }
+    pointerDownAt = { x: e.clientX, y: e.clientY };
+  });
+  box.addEventListener('pointerup', (e) => {
+    const from = pointerDownAt;
+    pointerDownAt = null;
+    if (!from || e.button !== 0 || buttonFor(e.target)) return;
+    if (Math.hypot(e.clientX - from.x, e.clientY - from.y) > CLICK_SLOP_PX) return; // that was a drag
+    openViewer();
+  });
+
+  box.addEventListener('click', (e) => {
+    const btn = buttonFor(e.target);
+    if (btn) {
+      e.stopPropagation();
+      runAction(btn.getAttribute('data-mmd-action'));
+      return;
+    }
+    // The pointer path above already opened it for this gesture (a real browser fires
+    // pointerup before click); this covers clicks that never had a pointer sequence.
+    if (Date.now() - lastOpenAt < 400) return;
+    openViewer();
   });
 
   apply();
