@@ -33,3 +33,39 @@ export function isSessionRowBusy(opts: {
   if ((busySessionIds || []).includes(sessionId)) return true;
   return (streamingSessionIds || []).includes(sessionId);
 }
+
+/**
+ * Apply the agent's busy snapshot (sent with `connected`) to the client's own set.
+ *
+ * The live `busy_sessions` event only fires when the set *changes*, so a reload or a
+ * reconnect could not learn that a turn was still running: the composer came back with a
+ * Send arrow and the Stop button only reappeared at the next change (2026-10-10). The
+ * snapshot is the authority, so it replaces the set — a turn that finished while we were
+ * away must not stay red — but two things are unioned back in:
+ *
+ *   * sessions this client is *streaming* right now (fresh evidence beats a stale frame),
+ *   * never a session the user just stopped (`stopped`), which is the same rule the live
+ *     handler applies.
+ */
+export function mergeBusySnapshot(opts: {
+  /** `busy_sessions` from the `connected` frame; null/undefined means "no snapshot" */
+  snapshot?: unknown;
+  /** Sessions this client is streaming right now */
+  streamingSessionIds?: Iterable<string>;
+  /** Sessions the user pressed Stop on — never resurrected */
+  stopped?: Record<string, unknown> | null;
+}): string[] | null {
+  const { snapshot } = opts;
+  if (!Array.isArray(snapshot)) return null;
+  const stopped = opts.stopped || {};
+  const ids = new Set<string>();
+  for (const raw of snapshot) {
+    const id = String(raw ?? '').trim();
+    if (id && !stopped[id]) ids.add(id);
+  }
+  for (const id of opts.streamingSessionIds || []) {
+    const clean = String(id ?? '').trim();
+    if (clean && !stopped[clean]) ids.add(clean);
+  }
+  return Array.from(ids);
+}

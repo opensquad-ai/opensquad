@@ -62,6 +62,7 @@ import {
   unwrapTokenStatsPayload,
 } from '../utils/sessionTokenStats';
 import { requestSessionListRefresh } from '../utils/sessionProjectMeta';
+import { mergeBusySnapshot } from '../utils/sessionBusy';
 import { compressionHydrateSid } from '../utils/compressionHydrate';
 import { hydrateOptionsProposalsFromEvents } from '../components/ai-chat/OptionsApprovalCard';
 import {
@@ -2564,6 +2565,15 @@ export function useAgentWebSocket(agentId: string, ctx: AgentWebWsCtx) {
               setTimeline(merged);
               sessionBootstrapDoneRef.current = true;
               diskSessionLoadedRef.current = false;
+              // A degraded hydrate must not read as "this conversation is short": the WS
+              // buffer is the newest handful of messages, so say there is more on disk —
+              // otherwise the load-earlier affordance never appears (2026-10-10) and the
+              // earlier turns are unreachable until the user sends something.
+              setPagingCursor(viewedSid, {
+                offset: merged.length,
+                anchor: sessionMessageIdentity(fallbackEntries[0]?.data) || null,
+              });
+              setPaging(viewedSid, { hasMore: true });
             }
           }
         } catch (err: any) {
@@ -2586,6 +2596,13 @@ export function useAgentWebSocket(agentId: string, ctx: AgentWebWsCtx) {
               return flushBufferedFilePushes(fallbackEntries);
             });
             sessionBootstrapDoneRef.current = true;
+            // Same reason as the buffer branch above: the disk read failed, so the earlier
+            // history is still out there — keep it reachable.
+            setPagingCursor(viewedSid, {
+              offset: fallbackEntries.length,
+              anchor: sessionMessageIdentity(fallbackEntries[0]?.data) || null,
+            });
+            setPaging(viewedSid, { hasMore: true });
           }
         } finally {
           if (seq === sessionReloadSeqRef.current) {
@@ -2700,6 +2717,21 @@ export function useAgentWebSocket(agentId: string, ctx: AgentWebWsCtx) {
         setViewingHistorySession(false);
       }
       console.log('[AIChatPage] Connected to agent, session:', sid, 'history:', raw.history_count);
+
+      // `busy_sessions` is broadcast on *changes* only, so a reload or a reconnect used to
+      // arrive with an empty set and no Stop button while a turn was still running. This
+      // frame carries the agent's snapshot (registry-side truth) — apply it first.
+      const seededBusy = mergeBusySnapshot({
+        snapshot: raw.busy_sessions,
+        streamingSessionIds: Object.keys(isStreamingBySessionRef.current).filter(
+          (id) => isStreamingBySessionRef.current[id],
+        ),
+        stopped: userStoppedBySidRef.current,
+      });
+      if (seededBusy) {
+        busySessionsRef.current = seededBusy;
+        setBusySessions(seededBusy);
+      }
 
       // connected fires on WS reconnection (NOT after __NEW_SESSION__ command).
       // Capture the flag now; the finally block uses it to decide whether to

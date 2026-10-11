@@ -23,7 +23,7 @@
  *   M4 ignore the client-side stream evidence             -> R4 fails
  */
 import { describe, expect, it } from 'vitest';
-import { isSessionRowBusy } from './sessionBusy';
+import { isSessionRowBusy, mergeBusySnapshot } from './sessionBusy';
 
 const RUNNING = 'B-running';
 const FINISHED = 'A-finished';
@@ -66,5 +66,37 @@ describe('isSessionRowBusy', () => {
   it('nothing running, nothing pulsing', () => {
     expect(isSessionRowBusy({ sessionId: 'A', busySessionIds: [] })).toBe(false);
     expect(isSessionRowBusy({ sessionId: '' })).toBe(false);
+  });
+});
+
+/**
+ * The snapshot the `connected` frame carries (2026-10-10).
+ *
+ * Reported: a turn was running, the user switched sessions and came back (or reloaded) and
+ * the Stop button was gone — because the live event only fires on *changes*, so the client's
+ * set came back empty. These pin what the snapshot does to that set.
+ */
+describe('mergeBusySnapshot', () => {
+  it('R1 takes the snapshot as the authority — a turn that ended while we were away is not red', () => {
+    expect(mergeBusySnapshot({ snapshot: ['s2'], streamingSessionIds: [] })).toEqual(['s2']);
+  });
+
+  it('R2 keeps this client\'s own stream evidence, which is fresher than the frame', () => {
+    expect(mergeBusySnapshot({ snapshot: [], streamingSessionIds: ['s1'] })).toEqual(['s1']);
+  });
+
+  it('R3 never resurrects a session the user just stopped', () => {
+    expect(
+      mergeBusySnapshot({ snapshot: ['s1', 's2'], streamingSessionIds: ['s1'], stopped: { s1: true } }),
+    ).toEqual(['s2']);
+  });
+
+  it('R4 no snapshot in the frame → nothing to apply', () => {
+    expect(mergeBusySnapshot({})).toBeNull();
+    expect(mergeBusySnapshot({ snapshot: 's1' })).toBeNull();
+  });
+
+  it('blanks and duplicates are dropped', () => {
+    expect(mergeBusySnapshot({ snapshot: [' s1 ', '', null, 's1'] })).toEqual(['s1']);
   });
 });

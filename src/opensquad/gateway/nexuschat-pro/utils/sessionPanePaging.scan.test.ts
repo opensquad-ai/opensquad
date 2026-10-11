@@ -210,4 +210,27 @@ describe('P7 — 装不满视口的第一页也要有入口', () => {
     expect(PANE).toContain("t('aiChat.loadEarlierMessages')");
     expect(PAGE).toContain("t('aiChat.loadEarlierMessages')");
   });
+
+  it('hydrate 降级时也要把分页状态种上（2026-10-10 复报）', () => {
+    // 磁盘读失败/超时 → 只剩 WS 缓冲的那几条。此前这条路径不碰分页状态，于是
+    // `hasMore` 保持 false：刷新后「加载更早」两个入口都不出现，更早的历史就再也
+    // 回不来了（P1–P7 都在，缺的是"降级后还能翻页"）。
+    const degraded = HOOK.match(/setPaging\(viewedSid, \{ hasMore: true \}\)/g) || [];
+    expect(degraded.length).toBeGreaterThanOrEqual(2); // 两个降级分支（disk 不可用 / 异常）
+    expect(HOOK).toMatch(/setPagingCursor\(viewedSid, \{[\s\S]{0,120}anchor: sessionMessageIdentity/);
+  });
+
+  it('busy 快照随 connected 帧下发，并在重连时应用（2026-10-10）', () => {
+    // 实时 `busy_sessions` 只在"集合变化"时发；刷新/重连拿不到快照，Stop 按钮就会
+    // 消失且要等下一次变化才回来。契约两端必须同时存在。
+    const GATEWAY = strip(
+      fs.readFileSync(
+        path.join(ROOT, '..', 'backend', 'app', 'ai_web', 'websocket.py'),
+        'utf8',
+      ),
+    );
+    expect(GATEWAY).toMatch(/"busy_sessions": registry\.get_busy_sessions\(agent_id\)/);
+    expect(HOOK).toContain('mergeBusySnapshot');
+    expect(HOOK).toMatch(/snapshot: raw\.busy_sessions/);
+  });
 });

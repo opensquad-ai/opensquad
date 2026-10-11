@@ -722,6 +722,11 @@ class UserWebSocketHandler:
                     "session_id": canonical_sid or session_key,
                     "gateway_session_key": session_key,
                     "history_count": len(history),
+                    # Which sessions are running a turn right now. This frame is the only
+                    # moment a reload / reconnect can learn it: the live `busy_sessions`
+                    # event is emitted on *changes* only, so without the snapshot the
+                    # composer came back with no Stop button while a turn was still going.
+                    "busy_sessions": registry.get_busy_sessions(agent_id),
                 }
             )
             if history:
