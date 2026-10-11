@@ -933,3 +933,124 @@ async def test_a_button_survives_another_slot_being_drawn(tmp_path):
         assert verdict and verdict.get("verdict") == "pong", verdict
     finally:
         instance.on_unload()
+
+
+# ── the Mods page may switch a mod off under a running agent ───────────────
+
+
+async def test_a_toggle_restarts_the_host_with_the_new_mod_set(tmp_path):
+    """The node host learns the mod list once, at `init`, and `init` only *adds* mods.
+
+    So switching a mod off left its handlers — and its band — in place until the whole
+    plugin was reloaded: the Mods page switch looked broken (2026-10-10). Dropping the
+    child is what actually applies it, because the fresh generation re-inits.
+    """
+    state_root = str(tmp_path / "state")
+    mods_compat.write_mod_state(MOD_NAME, enabled=True, state_root=state_root)
+
+    instance = ModsHostPlugin(None)
+    instance._mods = instance._load_mods(root=FIXTURE_ROOT, state_root=state_root)
+    instance._mods_signature_seen = instance._mods_signature(root=FIXTURE_ROOT, state_root=state_root)
+    assert [m["name"] for m in instance._mods] == [MOD_NAME]
+
+    class _Client:
+        generation = 7
+        closed = False
+
+        def is_running(self) -> bool:
+            return True
+
+        async def close(self, **kwargs) -> None:
+            self.closed = True
+
+    client = _Client()
+    instance._client = client
+    instance._initialized = True
+    instance._init_generation = 7
+
+    # Nothing changed on disk → same host, no restart.
+    assert await instance._reload_mods_if_changed(root=FIXTURE_ROOT, state_root=state_root) is False
+    assert instance._client is client
+    assert client.closed is False
+
+    # The Mods page switches it off.
+    mods_compat.write_mod_state(MOD_NAME, enabled=False, state_root=state_root)
+
+    assert await instance._reload_mods_if_changed(root=FIXTURE_ROOT, state_root=state_root) is True
+    assert instance._mods == []
+    assert client.closed is True
+    assert instance._client is None, "the stale host must be dropped"
+    assert instance._initialized is False, "so the next _ensure_init re-inits the new list"
+
+
+async def test_the_push_that_clears_the_band_still_happens():
+    """Switching the *last* mod off must send the empty frame.
+
+    `_push_slot` skips the round trip when there is nothing to draw — which also swallowed
+    the one push that clears a band the UI is still showing.
+    """
+    instance = ModsHostPlugin(None)
+    instance._mods = []
+    instance._last_slot_payload = {"AbovePrompt": "stale-tree"}
+
+    emitted: list[tuple[str, dict]] = []
+
+    class _Bus:
+        def emit(self, topic: str, payload: dict) -> None:
+            emitted.append((topic, payload))
+
+    class _Ctx:
+        event_bus = _Bus()
+        agent_id = "test-agent"
+
+    instance.context = _Ctx()
+
+    async def _no_reload(*args, **kwargs) -> bool:
+        return False
+
+    async def _empty_render(slot: str = "AbovePrompt", **extra) -> dict:
+        return {"slot": slot, "nodes": [], "dropped": [], "invalidations": 0}
+
+    instance._reload_mods_if_changed = _no_reload  # type: ignore[method-assign]
+    instance.render_slot = _empty_render  # type: ignore[method-assign]
+
+    await instance._push_slot("AbovePrompt", sid="s1")
+
+    assert [topic for topic, _ in emitted] == ["mod_slot"]
+    assert emitted[0][1]["data"]["nodes"] == []
+
+
+async def test_switching_a_mod_off_drops_it_from_rendered_slots(tmp_path):
+    """End to end through a real node host — the only place the old behaviour lived.
+
+    `init` had already loaded the mod, so switching it off changed nothing on screen until
+    the whole plugin was reloaded. The `tsx-demo` fixture draws into `AbovePrompt`, so the
+    band is where the difference shows.
+    """
+    state_dir = str(tmp_path / "state")
+    mods_compat.write_mod_state("tsx-demo", enabled=True, state_root=state_dir)
+
+    instance = ModsHostPlugin(None)
+    # Bind the fixture roots as this instance's defaults: the render path re-reads the mod
+    # set through `_reload_mods_if_changed()`, which otherwise reads the real workspace.
+    instance._load_mods = lambda root=None, sroot=None: ModsHostPlugin._load_mods(  # type: ignore[method-assign]
+        instance, root or FIXTURE_ROOT, sroot or state_dir
+    )
+    instance._mods_signature = lambda root=None, sroot=None: ModsHostPlugin._mods_signature(  # type: ignore[method-assign]
+        instance, root or FIXTURE_ROOT, sroot or state_dir
+    )
+    instance._mods = instance._load_mods()
+    instance._mods_signature_seen = instance._mods_signature()
+    assert [m["name"] for m in instance._mods] == ["tsx-demo"]
+
+    try:
+        before = await instance.render_slot("AbovePrompt")
+        assert before["nodes"], "the fixture is expected to draw into AbovePrompt"
+
+        mods_compat.write_mod_state("tsx-demo", enabled=False, state_root=state_dir)
+
+        after = await instance.render_slot("AbovePrompt")
+        assert instance._mods == []
+        assert after["nodes"] == [], "the switched-off mod must be gone from the band"
+    finally:
+        instance.on_unload()

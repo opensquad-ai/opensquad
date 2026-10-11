@@ -175,6 +175,9 @@ class ModsHostPlugin(Plugin):
         self._init_generation = -1
         # Enabled mods handed to the host by `init`. Empty == bridge is inert.
         self._mods: list[dict[str, Any]] = []
+        # (dir_name, state.json mtime, size) per mod on disk — the cheap way to notice a
+        # Mods-page toggle while the agent runs. See `_reload_mods_if_changed`.
+        self._mods_signature_seen: tuple[tuple[str, int, int], ...] = ()
         # Last `init` reply — the per-mod load diagnostics. Kept for the Mods
         # page (S3) and for the smoke script.
         self._last_init: dict[str, Any] = {}
@@ -199,6 +202,7 @@ class ModsHostPlugin(Plugin):
     def on_load(self) -> None:
         try:
             self._mods = self._load_mods()
+            self._mods_signature_seen = self._mods_signature()
         except Exception as exc:  # noqa: BLE001 - a broken workspace must not break boot
             logger.warning("[mods_host] mod discovery failed: %s", exc)
             self._mods = []
@@ -342,6 +346,71 @@ class ModsHostPlugin(Plugin):
 
     # ── host access ──────────────────────────────────────────────────
 
+    def _mods_signature(
+        self, root: str | None = None, state_root: str | None = None
+    ) -> tuple[tuple[str, int, int], ...]:
+        """What the Mods page can change under a running agent: the mod set and its toggles.
+
+        Deliberately cheap — one directory listing plus a ``stat`` per ``state.json`` —
+        because it is checked on the render path, which runs a few times per turn.
+        """
+        from opensquad import mods_compat
+
+        base = root or mods_compat.mods_root()
+        states = state_root or mods_compat.mods_state_root()
+        signature: list[tuple[str, int, int]] = []
+        try:
+            names = sorted(os.listdir(base))
+        except OSError:
+            return ()
+        for name in names:
+            if name.startswith((".", "_")):
+                continue
+            if not os.path.isdir(os.path.join(base, name)):
+                continue
+            try:
+                stat = os.stat(mods_compat.mod_state_path(name, states))
+                signature.append((name, stat.st_mtime_ns, stat.st_size))
+            except OSError:
+                signature.append((name, 0, 0))
+        return tuple(signature)
+
+    async def _reload_mods_if_changed(self, root: str | None = None, state_root: str | None = None) -> bool:
+        """Rebuild the host when a mod was added, removed or switched while we ran.
+
+        The node host learns the mod list once, at ``init``, and ``init`` only *adds*
+        mods — switching one off left its handlers (and its band) in place until the whole
+        plugin was reloaded, which is why the Mods page switch looked broken
+        (2026-10-10). A fresh child is what actually drops it, so that is what this does:
+        the next ``_ensure_init`` sees a new generation and hands over the new list.
+
+        The last pushed tree per slot is deliberately *kept*: that is what makes the next
+        render emit the empty frame which clears a band whose last mod just went away.
+        """
+        signature = self._mods_signature(root, state_root)
+        if signature == self._mods_signature_seen:
+            return False
+        self._mods_signature_seen = signature
+        try:
+            self._mods = self._load_mods(root, state_root)
+        except Exception as exc:  # noqa: BLE001 - a broken workspace must not break a turn
+            logger.warning("[mods_host] mod re-discovery failed: %s", exc)
+            self._mods = []
+        client = self._client
+        if client is not None:
+            with contextlib.suppress(Exception):
+                await client.close()
+            self._client = None
+            self._initialized = False
+            # The fresh host re-registers the surviving mods' commands; keeping the old
+            # map would leave a switched-off mod's slash command on offer.
+            self._mod_commands.clear()
+        logger.info(
+            "[mods_host] mods changed on disk — host restarting (host lazy, %d enabled mod(s))",
+            len(self._mods),
+        )
+        return True
+
     async def _ensure_client(self) -> NodeHostClient:
         if self._client is None:
             self._client = NodeHostClient(request_handler=self._on_host_request, cwd=self._workspace())
@@ -349,11 +418,19 @@ class ModsHostPlugin(Plugin):
         self._write_journal("running")
         return self._client
 
-    async def _ensure_init(self, client: NodeHostClient) -> None:
+    async def _ensure_init(self, client: NodeHostClient) -> NodeHostClient:
+        """Hand the host its mod list, once per generation — and again when that changed.
+
+        Returns the client to talk to: a Mods-page toggle while we ran replaces it (see
+        ``_reload_mods_if_changed``), so callers must use the returned object and not the
+        one they passed in.
+        """
+        if await self._reload_mods_if_changed():
+            client = await self._ensure_client()
         # A restarted host is a *different* process with none of the mods loaded,
         # so the handshake is keyed on the host generation, not the client object.
         if self._initialized and client.generation == self._init_generation and client.is_running():
-            return
+            return client
         result = await client.request("init", {"mods": self._mods, "apiVersion": 1})
         self._initialized = True
         self._init_generation = client.generation
@@ -377,6 +454,7 @@ class ModsHostPlugin(Plugin):
             len(result.get("events") or []),
             len(result.get("diagnostics") or []),
         )
+        return client
 
     async def ping(self) -> dict[str, Any]:
         """Probe the host. Used by Mods 页 status (S3) and by tests."""
@@ -393,7 +471,7 @@ class ModsHostPlugin(Plugin):
         from opensquad import mods_compat
 
         client = await self._ensure_client()
-        await self._ensure_init(client)
+        client = await self._ensure_init(client)
         result = await client.request("ui.render", {"component": slot, **extra}, timeout=5.0)
         nodes = list(result.get("nodes") or [])
         validated = [mods_compat.validate_element_tree(node) for node in nodes]
@@ -413,11 +491,12 @@ class ModsHostPlugin(Plugin):
         Panes are dynamic (`$.ui.open({id})`), so they cannot live in the static
         pane registry — the host collects the open ones and we render each by id.
         """
+        await self._reload_mods_if_changed()
         if not self._mods:
             return
         try:
             client = await self._ensure_client()
-            await self._ensure_init(client)
+            client = await self._ensure_init(client)
             listed = await client.request("pane.list", {}, timeout=5.0)
         except (NodeHostError, NodeHostTimeoutError) as exc:
             self._degrade(f"pane.list: {exc}")
@@ -434,7 +513,12 @@ class ModsHostPlugin(Plugin):
         routed to whichever pane is focused), so we simply do not emit.
         Best-effort by design: a render failure must never break a turn.
         """
-        if not self._mods:
+        key = f"{slot}:{pane_id}" if pane_id else slot
+        await self._reload_mods_if_changed()
+        if not self._mods and key not in self._last_slot_payload:
+            # Nothing to draw, and nothing drawn before: skip the round trip. The second
+            # half matters when the *last* mod is switched off — that push still has to
+            # happen, to clear the band the UI is showing.
             return
         # Only the slots the UI actually mounts are worth a render round trip.
         # `ToolUse`/`StatusBar`/`Spinner` were pushed on every tool call and every
@@ -455,7 +539,6 @@ class ModsHostPlugin(Plugin):
             return
 
         # One pane id is its own slot instance, so it dedupes on its own.
-        key = f"{slot}:{pane_id}" if pane_id else slot
         fingerprint = json.dumps(drawn["nodes"], ensure_ascii=False, sort_keys=True)
         if fingerprint == self._last_slot_payload.get(key):
             return
@@ -809,7 +892,7 @@ class ModsHostPlugin(Plugin):
             return None
         try:
             client = await self._ensure_client()
-            await self._ensure_init(client)
+            client = await self._ensure_init(client)
             result = await client.request(
                 "command.dispatch",
                 {"command": name, "args": list(args or []), "sid": sid or self._session_id},
@@ -868,7 +951,7 @@ class ModsHostPlugin(Plugin):
             return
         try:
             client = await self._ensure_client()
-            await self._ensure_init(client)
+            client = await self._ensure_init(client)
             await client.request(event, payload, timeout=5.0)
         except (NodeHostError, NodeHostTimeoutError) as exc:
             # Fail-open: a broken host must never break a turn.
@@ -887,7 +970,7 @@ class ModsHostPlugin(Plugin):
     async def _apply_tool_call(self, ctx: dict[str, Any]) -> dict[str, Any]:
         try:
             client = await self._ensure_client()
-            await self._ensure_init(client)
+            client = await self._ensure_init(client)
             verdict = await client.request(
                 "tool.call",
                 {
