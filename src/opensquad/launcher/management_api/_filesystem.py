@@ -18,6 +18,9 @@ from opensquad.launcher_main import (
     _log,
 )
 
+#: Cookie exports are small text files; anything near this size is not one.
+MAX_COOKIE_FILE_BYTES = 8 * 1024 * 1024
+
 
 class FilesystemMixin:
     """Workspace filesystem browsing and per-session diff operations."""
@@ -423,6 +426,54 @@ class FilesystemMixin:
         from opensquad import browser_session
 
         return self._browser_reply(browser_session.close_session(str(body.get("session_id") or "")))
+
+    def _handle_browser_cookies_import(self, name: str, body: dict):
+        """Import cookies the user exported from their own browser into this agent's browser.
+
+        The panel posts either a ``path`` to read here (Electron, which cannot read files
+        from the renderer) or the file's ``text`` (the web build uploads it). Both are
+        parsed by the same reader, so the two builds cannot drift, and both end up in the
+        persistent Playwright profile — the agent's ``browser_*`` tools, the Playwright MCP
+        and the panel's 浏览器 tab then share one login.
+        """
+        from opensquad import browser_session
+        from opensquad.utils.cookie_import import parse_cookies
+
+        path = str(body.get("path") or "").strip()
+        text = str(body.get("text") or "")
+        if not text.strip() and path:
+            try:
+                with open(path, encoding="utf-8", errors="replace") as handle:
+                    text = handle.read(MAX_COOKIE_FILE_BYTES)
+            except OSError as exc:
+                return self._browser_reply({"ok": False, "error": f"cannot read {path}: {exc}"})
+        if not text.strip():
+            return self._browser_reply({"ok": False, "error": "no cookie data: send `path` or `text`"})
+
+        parsed = parse_cookies(text, filename=path)
+        if parsed.error:
+            return self._browser_reply({"ok": False, "error": parsed.error, "source": parsed.source})
+        if not parsed.cookies:
+            return self._browser_reply(
+                {"ok": False, "error": "no usable cookies found", "source": parsed.source, "skipped": parsed.skipped}
+            )
+
+        # The session id the panel and the tools both use; an empty one must NOT mint a
+        # random session, or the import would land in a profile nobody drives.
+        session_id = str(body.get("session_id") or "").strip() or f"agent-{name}"
+        result = browser_session.add_cookies(session_id, parsed.cookies)
+        return self._browser_reply(
+            {
+                **result,
+                "source": parsed.source,
+                "parsed": len(parsed.cookies),
+                "skipped": parsed.skipped,
+                "skipped_total": parsed.skipped_total,
+                # The panel forwards these to Electron so the panel's own webview (a
+                # different Chromium) shares the login; nothing else needs the values.
+                "cookies": parsed.cookies,
+            }
+        )
 
     def _handle_pick_directory(self, body: dict | None = None):
         """POST /api/system/pick-directory — native OS folder dialog on this host.

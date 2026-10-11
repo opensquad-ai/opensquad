@@ -23,7 +23,7 @@
  */
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { ArrowLeft, ArrowRight, ExternalLink, Globe, Home, MonitorPlay, RotateCw } from 'lucide-react';
+import { ArrowLeft, ArrowRight, Cookie, ExternalLink, Globe, Home, MonitorPlay, RotateCw } from 'lucide-react';
 
 import { browserAPI } from '../../services/api';
 
@@ -96,6 +96,10 @@ export const BrowserPanel: React.FC<BrowserPanelProps> = ({ suggestions, agentId
   const [agentNote, setAgentNote] = useState('');
   const [agentError, setAgentError] = useState('');
   const [refreshKey, setRefreshKey] = useState(0);
+  // Cookie import: the agent's browser is the launcher's Chromium, "My browser" is this
+  // window's own — one import feeds both, so the notice covers the pair.
+  const [cookieNotice, setCookieNotice] = useState('');
+  const [importingCookies, setImportingCookies] = useState(false);
   const lastFrameRef = useRef('');
 
   const sessionId = useMemo(() => agentBrowserSessionId(agentId || ''), [agentId]);
@@ -204,8 +208,58 @@ export const BrowserPanel: React.FC<BrowserPanelProps> = ({ suggestions, agentId
     };
   }, [mode, agentId, sessionId, refreshKey, t]);
 
-  const modeButton = (value: PanelMode, key: string, testId: string) => (
-    <button
+  /** Web build only — Electron hands over the picked file's *path* instead. */
+  const readPickedCookieText = (): Promise<string | null> =>
+    new Promise((resolve) => {
+      const input = document.createElement('input');
+      input.type = 'file';
+      input.accept = '.txt,.json,text/plain,application/json';
+      input.onchange = () => {
+        const file = input.files?.[0];
+        if (!file) return resolve(null);
+        file.text().then(resolve, () => resolve(null));
+      };
+      input.click();
+    });
+
+  const importCookies = useCallback(async () => {
+    if (!agentId || importingCookies) return;
+    setImportingCookies(true);
+    setCookieNotice('');
+    try {
+      const env = window.electronEnv;
+      let source: { path?: string; text?: string } | null = null;
+      if (env?.pickCookieFile) {
+        const path = await env.pickCookieFile();
+        if (path) source = { path };
+      } else {
+        const text = await readPickedCookieText();
+        if (text) source = { text };
+      }
+      if (!source) return; // the dialog was dismissed
+
+      const res = await browserAPI.importCookies(agentId, sessionId, source);
+      if (!res.ok) {
+        setCookieNotice(res.error || t('aiChat.browser.importFailed'));
+        return;
+      }
+      // "My browser" is a different Chromium than the agent's, so mirror the cookies into
+      // this window's partition too — otherwise only one of the two views is logged in.
+      if (res.cookies?.length && env?.importBrowserCookies) {
+        await env.importBrowserCookies(res.cookies);
+        webview()?.reload?.();
+      }
+      setCookieNotice(
+        t('aiChat.browser.importDone', { count: res.added ?? 0, skipped: res.skipped_total ?? 0 }),
+      );
+    } catch (err) {
+      setCookieNotice(err instanceof Error ? err.message : String(err));
+    } finally {
+      setImportingCookies(false);
+    }
+  }, [agentId, importingCookies, sessionId, t]);
+
+  const modeButton = (value: PanelMode, key: string, testId: string) => (    <button
       key={value}
       type="button"
       onClick={() => setMode(value)}
@@ -226,6 +280,26 @@ export const BrowserPanel: React.FC<BrowserPanelProps> = ({ suggestions, agentId
         <div className="flex-shrink-0 flex items-center gap-1 border-b border-border px-1.5 py-1">
           {modeButton('mine', 'aiChat.browser.modeMine', 'browser-mode-mine')}
           {modeButton('agent', 'aiChat.browser.modeAgent', 'browser-mode-agent')}
+          <button
+            type="button"
+            onClick={() => void importCookies()}
+            disabled={importingCookies}
+            className="ml-auto shrink-0 inline-flex items-center gap-1 rounded border border-border/60 px-1.5 py-0.5 text-[10px] text-textMuted hover:bg-primary/10 hover:text-textMain disabled:opacity-40"
+            title={t('aiChat.browser.importCookiesHint')}
+            data-testid="browser-import-cookies"
+          >
+            <Cookie size={11} />
+            {t('aiChat.browser.importCookies')}
+          </button>
+        </div>
+      ) : null}
+
+      {cookieNotice ? (
+        <div
+          className="shrink-0 border-b border-border px-2 py-1 text-[11px] text-textMuted break-words"
+          data-testid="browser-cookie-notice"
+        >
+          {cookieNotice}
         </div>
       ) : null}
 

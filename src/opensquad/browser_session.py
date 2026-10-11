@@ -297,6 +297,39 @@ class BrowserSession:
         self._call(_press)
         return {"ok": True, "session_id": self.id, "url": self.url, "title": self.title}
 
+    def add_cookies(self, cookies: list[dict[str, Any]]) -> dict[str, Any]:
+        """Merge imported cookies into this profile and report what took.
+
+        Through the context, never by editing the profile's files: Chromium holds the
+        profile open while it runs, and ``add_cookies`` is the supported door. Cookies land
+        in the *persistent* profile, so the agent's ``browser_*`` tools, the Playwright MCP
+        (same CDP target) and the panel all see one login — across restarts too.
+
+        A cookie Chromium refuses is reported, not raised: one unusable entry must not cost
+        the whole export.
+        """
+        if not cookies:
+            return {"ok": False, "error": "no cookies to import"}
+
+        def _add() -> dict[str, Any]:
+            context = self._context
+            if context is None:
+                raise RuntimeError("the browser is not running")
+            added = 0
+            failed: list[str] = []
+            for cookie in cookies:
+                try:
+                    context.add_cookies([cookie])
+                    added += 1
+                except Exception as exc:  # noqa: BLE001 - per-cookie verdict, never fatal
+                    label = cookie.get("domain") or cookie.get("url") or "?"
+                    failed.append(f"{label} {cookie.get('name') or '?'}: {exc}")
+            # Read back so the caller can report what the profile now holds.
+            return {"added": added, "failed": failed[:20], "total": len(context.cookies())}
+
+        result = self._call(_add)
+        return {"ok": True, "session_id": self.id, "url": self.url, "title": self.title, **result}
+
     def snapshot(self) -> dict[str, Any]:
         """What is on the page, as text — the cheap thing for a model to read."""
 
@@ -518,6 +551,27 @@ def screenshot(session_id: str, full_page: bool = False) -> dict[str, Any]:
 
 def frame(session_id: str) -> dict[str, Any]:
     return _action(session_id, lambda s: s.frame_now())
+
+
+def add_cookies(session_id: str, cookies: list[dict[str, Any]]) -> dict[str, Any]:
+    """Import cookies for a session, starting the browser when it is not up yet.
+
+    Starting it is the point: the panel can import before anything is open, and the cookies
+    have to land in the profile the *agent* will use — not in a second, idle copy of it.
+    """
+    sid = str(session_id or "").strip()
+    with _LOCK:
+        live = _SESSIONS.get(sid)
+    if live is None or live.closed:
+        opened = open_session(session_id=sid)
+        if not opened.get("ok"):
+            return {"ok": False, "session_id": sid, "error": opened.get("error")}
+        with _LOCK:
+            live = _SESSIONS.get(sid)
+    result = _action(sid, lambda s: s.add_cookies(cookies))
+    if live is not None:
+        result.setdefault("profile_dir", live.profile_dir)
+    return result
 
 
 def cdp_endpoint(session_id: str) -> str:

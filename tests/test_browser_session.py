@@ -314,3 +314,30 @@ def test_the_env_var_keeps_a_suite_headless(monkeypatch):
 
     assert opened["ok"] is True
     assert opened["headed"] is False
+
+
+def test_imported_cookies_reach_the_profile_the_agent_uses(tmp_path, monkeypatch):
+    """The point of the import: the cookies live in the one session both sides drive.
+
+    Written through the context, so this is also the proof that a locked profile is not a
+    blocker — the panel never has to close the browser to hand it cookies.
+    """
+    monkeypatch.setenv("OPENSQUAD_WORKSPACE", str(tmp_path))
+    assert bs.open_session(session_id="cookies", headless=True)["ok"] is True
+    try:
+        result = bs.add_cookies("cookies", [{"name": "sid", "value": "abc", "domain": "example.com", "path": "/"}])
+
+        assert result["ok"] is True, result
+        assert result["added"] == 1, result
+        session = bs._get("cookies")
+        stored = session._call(lambda: session._context.cookies())
+        match = [c for c in stored if c.get("name") == "sid"]
+        assert match and match[0].get("value") == "abc", stored
+
+        # One unusable entry is reported, not fatal: the rest of an export must still land.
+        bad = bs.add_cookies("cookies", [{"value": "no name", "domain": "example.com"}])
+        assert bad["ok"] is True, bad
+        assert bad["added"] == 0
+        assert bad["failed"], "a cookie Chromium refused has to be named"
+    finally:
+        bs.close_session("cookies")

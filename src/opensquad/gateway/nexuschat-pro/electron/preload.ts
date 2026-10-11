@@ -20,6 +20,15 @@ contextBridge.exposeInMainWorld('electronEnv', {
   isMaximized: () => ipcRenderer.invoke('electron:is-maximized') as Promise<boolean>,
   pickWorkspaceFolder: () =>
     ipcRenderer.invoke('electron:pick-workspace-folder') as Promise<string | null>,
+  /** Pick a cookies export (.txt / .json) from disk; null when the user cancels. */
+  pickCookieFile: () => ipcRenderer.invoke('electron:pick-cookie-file') as Promise<string | null>,
+  /** Mirror an imported cookie list into this window's own browser partition. */
+  importBrowserCookies: (cookies: Array<Record<string, unknown>>) =>
+    ipcRenderer.invoke('electron:import-browser-cookies', cookies) as Promise<{
+      ok: boolean
+      stored: number
+      failed: string[]
+    }>,
   restartApp: () => ipcRenderer.invoke('electron:restart-app') as Promise<void>,
   /** Manual update check; defaults to stable (beta reserved for future UI). */
   checkForUpdates: (channel: 'stable' | 'beta' = 'stable') =>

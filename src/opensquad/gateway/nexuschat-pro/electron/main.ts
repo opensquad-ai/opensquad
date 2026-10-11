@@ -34,6 +34,8 @@ const FRONTEND_PORT = parseInt(
 // page can list/configure agents. Without this, the UI shows
 // "Launcher is not running (cannot connect to http://127.0.0.1:9600)".
 const LAUNCHER_PORT = parseInt(process.env.OPENSQUAD_LAUNCHER_PORT || '9600', 10)
+/** Must match the `partition` BrowserPanel.tsx gives its own <webview>. */
+const BROWSER_PARTITION = 'persist:opensquad-browser'
 const DEV_MODE      = process.env.ELECTRON_DEV === '1' || process.env.ELECTRON_DEV === 'true'
 const HEALTH_URL    = DEV_MODE
   ? `http://127.0.0.1:${FRONTEND_PORT}/`
@@ -275,6 +277,21 @@ let autoDownloadTask: Promise<void> | null = null
 const USE_CUSTOM_TITLEBAR = process.platform === 'win32'
 let popupMenus = buildElectronPopupMenus()
 
+/** Electron's own spelling of sameSite; anything unknown stays 'unspecified'. */
+function electronSameSite(value: unknown): 'unspecified' | 'no_restriction' | 'lax' | 'strict' {
+  switch (String(value || '').toLowerCase()) {
+    case 'strict':
+      return 'strict'
+    case 'lax':
+      return 'lax'
+    case 'none':
+    case 'no_restriction':
+      return 'no_restriction'
+    default:
+      return 'unspecified'
+  }
+}
+
 function registerElectronIpc(): void {
   ipcMain.handle('electron:popup-menu', async (event, menuId: string) => {
     if (!isElectronMenuId(menuId)) return
@@ -315,6 +332,68 @@ function registerElectronIpc(): void {
   ipcMain.handle('electron:restart-app', async () => {
     app.relaunch()
     app.exit(0)
+  })
+
+// The panel's own webview keeps its cookies in this partition; the agent's browser is a
+  // separate Chromium under the launcher, so an imported cookie list has to be mirrored
+  // here by hand. Keep in step with BrowserPanel.tsx, which sets the same value.
+  ipcMain.handle('electron:pick-cookie-file', async () => {
+    const win = mainWindow ?? BrowserWindow.getFocusedWindow()
+    if (win) {
+      if (win.isMinimized()) win.restore()
+      win.show()
+      win.focus()
+    }
+    const opts = {
+      title: 'Select a cookies file',
+      properties: ['openFile'] as Array<'openFile'>,
+      filters: [
+        { name: 'Cookie export', extensions: ['txt', 'json'] },
+        { name: 'All files', extensions: ['*'] },
+      ],
+    }
+    const result = win ? await dialog.showOpenDialog(win, opts) : await dialog.showOpenDialog(opts)
+    if (result.canceled || !result.filePaths[0]) return null
+    return result.filePaths[0]
+  })
+
+  ipcMain.handle('electron:import-browser-cookies', async (_event, cookies: unknown) => {
+    const list = Array.isArray(cookies) ? (cookies as Array<Record<string, unknown>>) : []
+    const target = session.fromPartition(BROWSER_PARTITION)
+    let stored = 0
+    const failed: string[] = []
+    for (const raw of list) {
+      const name = String(raw?.name || '')
+      const domain = String(raw?.domain || '')
+      const host = domain.replace(/^\./, '')
+      const cookiePath = String(raw?.path || '/') || '/'
+      const secure = Boolean(raw?.secure)
+      if (!name || !host) continue
+      const expires = typeof raw?.expires === 'number' ? Number(raw.expires) : undefined
+      try {
+        await target.cookies.set({
+          // Electron's types make `url` mandatory; it has to agree with `domain`, which is
+          // only sent for a leading-dot cookie — that dot is its subdomain scope.
+          url: `${secure ? 'https' : 'http'}://${host}${cookiePath}`,
+          name,
+          value: String(raw?.value ?? ''),
+          ...(domain.startsWith('.') ? { domain, path: cookiePath } : {}),
+          secure,
+          httpOnly: Boolean(raw?.httpOnly),
+          ...(expires && expires > 0 ? { expirationDate: expires } : {}),
+          sameSite: electronSameSite(raw?.sameSite),
+        })
+        stored += 1
+      } catch (err) {
+        failed.push(`${domain || host} ${name}: ${err instanceof Error ? err.message : String(err)}`)
+      }
+    }
+    try {
+      await target.cookies.flushStore()
+    } catch {
+      /* best effort: the cookies are already in the in-memory store */
+    }
+    return { ok: true, stored, failed: failed.slice(0, 20) }
   })
 
   ipcMain.handle(

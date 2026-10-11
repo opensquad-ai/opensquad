@@ -2651,6 +2651,29 @@ export const browserAPI = {
       `/ai-web/admin/agents/${encodeURIComponent(name)}/browser/screenshot`,
       { method: 'POST', body: JSON.stringify({ session_id: sessionId, full_page: fullPage }) },
     ),
+  /**
+   * Load a cookie export into the agent's browser (the same Playwright profile the
+   * `browser_*` tools and the Playwright MCP drive). Electron sends the file `path` it just
+   * picked; the web build sends the file's `text`. The reply echoes the parsed cookies so the
+   * panel can mirror them into its own webview, which is a different Chromium.
+   */
+  importCookies: (name: string, sessionId: string, source: { path?: string; text?: string }) =>
+    apiRequest<{
+      ok: boolean;
+      error?: string;
+      session_id?: string;
+      added?: number;
+      total?: number;
+      failed?: string[];
+      parsed?: number;
+      skipped?: string[];
+      skipped_total?: number;
+      source?: string;
+      cookies?: Array<Record<string, unknown>>;
+    }>(`/ai-web/admin/agents/${encodeURIComponent(name)}/browser/cookies/import`, {
+      method: 'POST',
+      body: JSON.stringify({ session_id: sessionId, ...source }),
+    }),
   close: (name: string, sessionId: string) =>
     apiRequest<{ ok: boolean }>(
       `/ai-web/admin/agents/${encodeURIComponent(name)}/browser/close`,

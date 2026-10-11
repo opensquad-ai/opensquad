@@ -480,6 +480,10 @@ class BaseHandlerMixin:
             name = path.split("/")[3]
             body = self._read_body() or {}
             return self._handle_browser_close(name, body)
+        elif path.startswith("/api/agents/") and path.endswith("/browser/cookies/import"):
+            name = path.split("/")[3]
+            body = self._read_body() or {}
+            return self._handle_browser_cookies_import(name, body)
         elif path.startswith("/api/agents/") and path.endswith("/fs/session-diffs"):
             name = path.split("/")[3]
             body = self._read_body() or {}

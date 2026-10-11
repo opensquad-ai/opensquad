@@ -902,6 +902,21 @@ async def admin_browser_close(
     return await _proxy_post(f"/api/agents/{name}/browser/close", body or {}, timeout=30.0)
 
 
+@admin_router.post("/admin/agents/{name}/browser/cookies/import")
+async def admin_browser_cookies_import(
+    name: str, body: dict = Body(default={}), current_user: User = Depends(get_current_user_dep)
+):
+    """Load a cookie export into this agent's browser.
+
+    The panel sends a path (Electron) or the file's text (web build); the launcher parses
+    either and injects the cookies into the session's persistent profile, so the agent's
+    browser_* tools, the Playwright MCP and the panel's 浏览器 tab share one login. The
+    reply echoes the parsed list so the panel can put the same cookies into its own webview.
+    A slower window than the other browser routes: an import may have to start the browser.
+    """
+    return await _proxy_post(f"/api/agents/{name}/browser/cookies/import", body or {}, timeout=90.0)
+
+
 @admin_router.put("/admin/agents/{name}/config")
 async def admin_update_config(name: str, body: dict = Body(...), current_user: User = Depends(get_current_user_dep)):
     """Update Agent's config.json and sync agent_name to the bound account's display name"""

@@ -30,6 +30,14 @@ declare global {
       windowControl?: (action: 'minimize' | 'maximize' | 'close') => Promise<void>
       isMaximized?: () => Promise<boolean>
       pickWorkspaceFolder?: () => Promise<string | null>
+      /** Pick a cookies export (.txt / .json) from disk; null when the user cancels. */
+      pickCookieFile?: () => Promise<string | null>
+      /** Mirror an imported cookie list into this window's own browser partition. */
+      importBrowserCookies?: (cookies: Array<Record<string, unknown>>) => Promise<{
+        ok: boolean
+        stored: number
+        failed: string[]
+      }>
       restartApp?: () => Promise<void>
       checkForUpdates?: (channel?: 'stable' | 'beta') => Promise<{
         hasUpdate: boolean
