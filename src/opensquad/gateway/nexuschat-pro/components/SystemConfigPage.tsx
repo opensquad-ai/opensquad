@@ -261,7 +261,69 @@ const GeneralTab: React.FC<{
           ) : null}
         </div>
       </section>
+
+      {/* Desktop only: this is the switch that makes "reboot → agents come back and carry
+          on" work, so it lives where the language switch is. Hidden (not faked) outside
+          Electron, and it shows the OS's own answer rather than the stored preference. */}
+      {window.electronEnv?.getStartupPrefs ? <StartupToggle /> : null}
     </div>
+  );
+};
+
+// ---------- Startup (login item) ----------
+
+/**
+ * Whether the app starts with the OS login.
+ *
+ * The value shown is what the *OS* reports (`getLoginItemSettings`), not the file we wrote:
+ * a login item can be disabled from Task Manager's startup tab, and pretending otherwise is
+ * how a user ends up trusting a switch that does nothing.
+ */
+const StartupToggle: React.FC = () => {
+  const { t } = useTranslation();
+  const [prefs, setPrefs] = useState<{ openAtLogin: boolean } | null>(null);
+
+  useEffect(() => {
+    const env = window.electronEnv;
+    if (!env?.getStartupPrefs) return;
+    let alive = true;
+    void env
+      .getStartupPrefs()
+      .then((next) => {
+        if (alive) setPrefs(next);
+      })
+      .catch(() => {
+        /* leave it hidden rather than guess */
+      });
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  if (!prefs) return null;
+  return (
+    <section>
+      <h4 className="text-sm font-semibold text-textMain">{t('systemConfig.general.openAtLogin.title')}</h4>
+      <p className="mt-1 text-xs leading-relaxed text-textMuted">
+        {t('systemConfig.general.openAtLogin.hint')}
+      </p>
+      <div className="mt-3 flex items-center justify-between gap-3">
+        <p className="text-sm text-textMain">{t('systemConfig.general.openAtLogin.label')}</p>
+        <Toggle
+          value={prefs.openAtLogin}
+          onChange={(value) => {
+            const env = window.electronEnv;
+            if (!env?.setStartupPrefs) return;
+            void env
+              .setStartupPrefs({ openAtLogin: value })
+              .then(setPrefs)
+              .catch(() => {
+                /* the OS refused (managed machine): keep showing the real state */
+              });
+          }}
+        />
+      </div>
+    </section>
   );
 };
 

@@ -874,6 +874,8 @@ class AgentRunner:
         from opensquad.turn_trace import append_turn_summary_file, seal_cancelled_history
 
         sealed = seal_cancelled_history(self.chat_api)
+        # The user asked for the turn to end: nothing to resume on the next boot.
+        self._clear_task_checkpoint()
         ended_ms = int(datetime.now().timestamp() * 1000)
         started = int(getattr(self, "_workflow_started_ms", 0) or ended_ms)
         elapsed_ms = max(0, ended_ms - started)
@@ -1200,6 +1202,61 @@ class AgentRunner:
             )
         except Exception:
             pass
+        # No session is running any more → nothing to resume, so retire the checkpoint.
+        if not busy:
+            self._clear_task_checkpoint()
+
+    # ── Task checkpoint: what a restart should resume ─────────────────────────
+    #
+    # `task_checkpoint` could always write/read/clear a record and build the
+    # `[RECOVERY_MODE]` prompt, but nothing ever called it — so a machine restart mid-task
+    # lost the task with no trace. These three methods are the writing end; the reading end
+    # is `opensquad.task_recovery.recover_pending_task`, called from `agents_boot`.
+
+    def _record_task_checkpoint(
+        self,
+        *,
+        original_request: str = "",
+        tool: dict[str, Any] | None = None,
+        progress: str = "",
+        session_id: str = "",
+    ) -> None:
+        """Remember what this agent is doing, so a restart can ask it to continue."""
+        agent_dir = str(getattr(self, "_agent_dir", "") or "")
+        if not agent_dir:
+            return
+        from opensquad.task_checkpoint import write_checkpoint
+
+        write_checkpoint(
+            agent_dir,
+            active=True,
+            original_request=original_request or str(getattr(self, "_last_user_input", "") or ""),
+            progress_summary=progress,
+            last_turn_id=int(getattr(self, "_current_turn", 0) or 0),
+            last_tool_call=tool,
+            session_id=session_id or str(getattr(self, "_turn_sid", "") or ""),
+        )
+
+    def _record_tool_checkpoint(self, name: str, args: Any, status: str, result: str = "") -> None:
+        """One record per finished tool call, so a resume knows how far it got."""
+        self._record_task_checkpoint(
+            tool={
+                "name": str(name or ""),
+                "args": str(args or "")[:500],
+                "status": str(status or ""),
+                "result_preview": str(result or "")[:400],
+            },
+            progress=f"{name} {status}",
+        )
+
+    def _clear_task_checkpoint(self) -> None:
+        """Nothing is running any more — there is no task left to resume."""
+        agent_dir = str(getattr(self, "_agent_dir", "") or "")
+        if not agent_dir:
+            return
+        from opensquad.task_checkpoint import clear_checkpoint
+
+        clear_checkpoint(agent_dir)
 
     async def _release_busy_state(self, sid: str, reason: str = "") -> None:
         """Proactively drop a session from the parallel-scheduler busy set
@@ -1730,6 +1787,9 @@ class AgentRunner:
             self._last_user_input = content
             self._current_round = (self._current_round or 0) + 1
             self._workflow_started_ms = datetime.now().timestamp() * 1000
+            # A task is now in flight: if this process or the machine goes away before it
+            # finishes, the next boot asks the agent to carry on (opensquad.task_recovery).
+            self._record_task_checkpoint(original_request=content, session_id=sid)
             # Round-level billed-usage baseline (turn_usage = delta at teardown).
             _round_usage_start = self._round_usage_snapshot(sid)
 

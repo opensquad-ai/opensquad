@@ -30,6 +30,10 @@ contextBridge.exposeInMainWorld('electronEnv', {
       failed: string[]
     }>,
   restartApp: () => ipcRenderer.invoke('electron:restart-app') as Promise<void>,
+  /** Whether OpenSquad starts with the OS login (the OS's own answer, not the file). */
+  getStartupPrefs: () => ipcRenderer.invoke('electron:get-startup-prefs') as Promise<{ openAtLogin: boolean }>,
+  setStartupPrefs: (prefs: { openAtLogin?: boolean }) =>
+    ipcRenderer.invoke('electron:set-startup-prefs', prefs) as Promise<{ openAtLogin: boolean }>,
   /** Manual update check; defaults to stable (beta reserved for future UI). */
   checkForUpdates: (channel: 'stable' | 'beta' = 'stable') =>
     ipcRenderer.invoke('electron:check-for-updates', channel),

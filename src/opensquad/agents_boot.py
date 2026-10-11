@@ -1100,6 +1100,14 @@ async def main(agent_dir: str, override_port: int | None = None):
     # 5. Start response router
     await setup_response_router(agent_logger)
 
+    # 5.5 Resume an unfinished task
+    # If this agent was mid-task when it (or the machine) stopped, ask it to carry on. The
+    # request is pushed as a normal input, so it appears in the session and the agent
+    # decides how to resume — see opensquad/task_recovery.py.
+    from opensquad.task_recovery import recover_pending_task
+
+    recover_pending_task(agent_dir, push=input_hub.push)
+
     # 6. CLI listener
     async def cli_loop():
         loop = asyncio.get_event_loop()

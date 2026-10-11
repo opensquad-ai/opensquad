@@ -39,6 +39,9 @@ declare global {
         failed: string[]
       }>
       restartApp?: () => Promise<void>
+      /** Whether OpenSquad starts with the OS login (the OS's own answer, not the file). */
+      getStartupPrefs?: () => Promise<{ openAtLogin: boolean }>
+      setStartupPrefs?: (prefs: { openAtLogin?: boolean }) => Promise<{ openAtLogin: boolean }>
       checkForUpdates?: (channel?: 'stable' | 'beta') => Promise<{
         hasUpdate: boolean
         currentVersion: string

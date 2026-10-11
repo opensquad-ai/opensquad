@@ -277,6 +277,64 @@ let autoDownloadTask: Promise<void> | null = null
 const USE_CUSTOM_TITLEBAR = process.platform === 'win32'
 let popupMenus = buildElectronPopupMenus()
 
+// ── Startup preferences (run OpenSquad when the user logs in) ────────────────
+// The whole "the machine restarted, my agents should pick their work back up" chain needs
+// the app to be running in the first place: agents start with the launcher, and the
+// launcher is spawned here. Nothing registered a login item before, so the chain only ever
+// began if the user launched the app by hand. Persisted next to the other prefs.
+const STARTUP_PREFS_FILE = 'startup-prefs.json'
+
+interface StartupPrefs {
+  /** Register OpenSquad to start when this user logs in. */
+  openAtLogin: boolean
+}
+
+// Default on: the point of the feature is that nobody has to remember to launch it. It is a
+// preference, not a law — the switch in System Settings turns it off and stays off.
+const DEFAULT_STARTUP_PREFS: StartupPrefs = { openAtLogin: true }
+
+let startupPrefs: StartupPrefs = { ...DEFAULT_STARTUP_PREFS }
+
+function loadStartupPrefs(): void {
+  try {
+    const raw = fs.readFileSync(path.join(app.getPath('userData'), STARTUP_PREFS_FILE), 'utf-8')
+    const data = JSON.parse(raw) as Partial<StartupPrefs>
+    startupPrefs = { ...DEFAULT_STARTUP_PREFS, ...data }
+  } catch {
+    /* first run — defaults */
+  }
+}
+
+/** Push the preference to the OS and report what the OS actually says afterwards. */
+function applyStartupPrefs(): StartupPrefs {
+  try {
+    app.setLoginItemSettings({ openAtLogin: startupPrefs.openAtLogin })
+  } catch (err) {
+    console.warn('[electron] could not set the login item:', err)
+  }
+  try {
+    const state = app.getLoginItemSettings()
+    return { openAtLogin: Boolean(state.openAtLogin) }
+  } catch {
+    return { ...startupPrefs }
+  }
+}
+
+function saveStartupPrefs(next: Partial<StartupPrefs>): StartupPrefs {
+  startupPrefs = { ...startupPrefs, ...next }
+  try {
+    fs.writeFileSync(
+      path.join(app.getPath('userData'), STARTUP_PREFS_FILE),
+      JSON.stringify(startupPrefs),
+    )
+  } catch (err) {
+    console.warn('[electron] failed to persist startup preferences:', err)
+  }
+  return applyStartupPrefs()
+}
+
+loadStartupPrefs()
+
 /** Electron's own spelling of sameSite; anything unknown stays 'unspecified'. */
 function electronSameSite(value: unknown): 'unspecified' | 'no_restriction' | 'lax' | 'strict' {
   switch (String(value || '').toLowerCase()) {
@@ -334,7 +392,16 @@ function registerElectronIpc(): void {
     app.exit(0)
   })
 
-// The panel's own webview keeps its cookies in this partition; the agent's browser is a
+  // Startup / login-item preference: read what the OS currently says, never just the file.
+  ipcMain.handle('electron:get-startup-prefs', async () => applyStartupPrefs())
+
+  ipcMain.handle(
+    'electron:set-startup-prefs',
+    async (_event, next: Partial<StartupPrefs> | null) =>
+      saveStartupPrefs(next && typeof next === 'object' ? next : {}),
+  )
+
+  // The panel's own webview keeps its cookies in this partition; the agent's browser is a
   // separate Chromium under the launcher, so an imported cookie list has to be mirrored
   // here by hand. Keep in step with BrowserPanel.tsx, which sets the same value.
   ipcMain.handle('electron:pick-cookie-file', async () => {
@@ -1025,6 +1092,9 @@ function createTray(): void {
 // ── 应用生命周期 ──────────────────────────────────────────────────────────────
 app.whenReady().then(async () => {
   registerElectronIpc()
+  // Register (or drop) the login item before anything else: this is what makes a machine
+  // restart bring the whole stack back up without the user launching anything.
+  applyStartupPrefs()
   if (USE_CUSTOM_TITLEBAR) {
     Menu.setApplicationMenu(null)
     popupMenus = buildElectronPopupMenus()

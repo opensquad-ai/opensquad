@@ -1648,6 +1648,11 @@
         "title": "Language",
         "hint": "Switch the UI language. Takes effect immediately."
       },
+      "openAtLogin": {
+        "title": "Start at login",
+        "hint": "Starts OpenSquad when you log in and brings up the agent set as the default one; if that agent was mid-task when the machine restarted, it gets a recovery prompt from the system and finishes the job.",
+        "label": "Start automatically after login"
+      },
       "workflowExpand": {
         "title": "Workflow detail level",
         "hint": "Controls how far thinking, plan, process output, and tool-call folds auto-expand in chat. Manual expand/collapse is never overridden.",

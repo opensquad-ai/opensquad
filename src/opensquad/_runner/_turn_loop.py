@@ -869,14 +869,10 @@ class TurnLoop:
                 # --- system.wait: special control flow (immediate return) ---
                 if t_name in ("system.wait", "wait", "system__wait"):
                     if isinstance(result, dict) and result.get("status") == "success":
-                        _ckpt_dir = getattr(self.runner, "_agent_dir", "") or ""
-                        if _ckpt_dir:
-                            try:
-                                from opensquad import checkpoint as _ckpt2
-
-                                _ckpt2.clear_checkpoint(_ckpt_dir)
-                            except Exception:
-                                pass
+                        # A `system.wait` parks the *same* turn, so the task checkpoint stays
+                        # live: a restart while waiting must still resume. (The one trace of
+                        # the opposite intent here imported `opensquad.checkpoint`, a module
+                        # that does not exist, so it had been a silent no-op anyway.)
                         wake_type = result.get("wake_type", "natural")
                         wake_reason = result.get("wake_reason", "")
                         actual_seconds = result.get("actual_seconds", 0)
@@ -996,6 +992,9 @@ class TurnLoop:
                     result=entry["result_text"],
                     tool_call_id=entry["call_id"],
                 )
+                # Record progress once per finished tool call: this is what tells a later
+                # boot which step the agent was on (opensquad.task_recovery).
+                self.runner._record_tool_checkpoint(entry["name"], entry["args"], "completed", entry["result_text"])
                 if entry["pipeline_events"] and hasattr(self.runner.chat_api, "add_pipeline_events"):
                     self.runner.chat_api.add_pipeline_events(entry["pipeline_events"])
 
