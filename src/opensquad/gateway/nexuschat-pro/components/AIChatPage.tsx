@@ -760,7 +760,46 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     isFrozenRef: textSelectFrozenRef,
   } = useTextSelectionFreeze(messagesContainerRef, liveSelectView);
   const displayTimeline = selectFrozenView.entries;
-  const displayStreamingText = composeAssistantDisplayContent(selectFrozenView.streaming || '').trim();
+  // `streaming` only changes when the stream advances, but this component
+  // re-renders for hovers, tab switches and every timeline commit — and the
+  // cleanup pipeline runs ~15 regex passes over the full text. Memoize on the
+  // text itself; dependencies must stay primitive or this defeats the purpose.
+  const displayStreamingText = useMemo(
+    () => composeAssistantDisplayContent(selectFrozenView.streaming || '').trim(),
+    [selectFrozenView.streaming],
+  );
+
+  // Workflow groups are folded once per render pass. Two hot spots used to run
+  // per group: the "last incomplete group" lookup scanned the whole timeline
+  // backwards for every group (O(entries x groups)), and mergeWorkflowBlocks
+  // returned a fresh object every frame, so memo(SoloActivityRow) never hit and
+  // its `lines` memo rebuilt every event each frame. Precompute the index once
+  // and memoize each group's merged block on block identity.
+  const lastIncompleteWorkflowIdx = useMemo(() => {
+    for (let j = displayTimeline.length - 1; j >= 0; j -= 1) {
+      const candidate = displayTimeline[j] as { kind: string; data?: WorkflowBlock };
+      if (candidate.kind === 'workflow' && candidate.data && !candidate.data.completed) return j;
+    }
+    return -1;
+  }, [displayTimeline]);
+
+  const mergedWorkflowCacheRef = useRef(
+    new Map<number, { blocks: WorkflowBlock[]; merged: WorkflowBlock }>(),
+  );
+  const getMergedWorkflow = useCallback((headIndex: number, blocks: WorkflowBlock[]): WorkflowBlock => {
+    const cache = mergedWorkflowCacheRef.current;
+    const hit = cache.get(headIndex);
+    // Identity comparison on the group's blocks: a streaming turn only grows
+    // the last group, so earlier groups keep their block references and reuse
+    // the merged result instead of allocating a new one each frame.
+    if (hit && hit.blocks.length === blocks.length && hit.blocks.every((b, k) => b === blocks[k])) {
+      return hit.merged;
+    }
+    const merged = blocks.length > 1 ? mergeWorkflowBlocks(blocks) : blocks[0];
+    if (cache.size > 512) cache.clear();
+    cache.set(headIndex, { blocks, merged });
+    return merged;
+  }, []);
 
   const sessionBootstrapDoneRef = useRef(false); // true after first canonical timeline set on connect
   const sessionReloadSeqRef = useRef(0);
@@ -6152,12 +6191,6 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
               );
             }
             if (entry.kind === 'workflow') {
-              const lastIncompleteIdx = (() => {
-                for (let j = displayTimeline.length - 1; j >= 0; j--) {
-                  if (displayTimeline[j].kind === 'workflow' && !(displayTimeline[j] as { kind: 'workflow'; data: WorkflowBlock }).data.completed) return j;
-                }
-                return -1;
-              })();
               // Classic + Solo: document-style activity rows (thinking / tools)
               const curBlock = (entry as { kind: 'workflow'; data: WorkflowBlock }).data;
               // 'prompt' entries render as null — they must not split the
@@ -6173,7 +6206,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
                 }
                 j += 1;
               }
-              const merged = blocks.length > 1 ? mergeWorkflowBlocks(blocks) : curBlock;
+              const merged = getMergedWorkflow(i, blocks);
               const groupHasIncomplete = !merged.completed;
               // 任务已交付判定：该工作流组之后紧跟 assistant 最终回复 →
               // 即使块未密封/有未闭合工具，也停止"执行中"动画与流光。
@@ -6186,7 +6219,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
                 && !!(nextAfterGroup.data as ChatMessage).content.trim();
               const turnMs = groupHasIncomplete
                 ? turnStartedMs
-                : (i === lastIncompleteIdx ? turnStartedMs : undefined);
+                : (i === lastIncompleteWorkflowIdx ? turnStartedMs : undefined);
               return (
                 <TimelineRow
                   key={entryKey}

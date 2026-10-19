@@ -983,13 +983,51 @@ export function useAgentWebSocket(agentId: string, ctx: AgentWebWsCtx) {
       }
     });
 
-    // Live shell / background job stdout for CMD panel
-    // Live shell / background job stdout for CMD panel
+    // Live shell / background job stdout for CMD panel.
+    // A noisy build emits hundreds of chunks per second. One setState per chunk
+    // re-rendered this page and invalidated every mounted fold's `lines` memo,
+    // and `output += chunk` made the retained string quadratic. Coalesce on a
+    // short timer and merge same-call chunks into a single reducer pass.
+    let jobStdoutBuf: Record<string, unknown>[] = [];
+    let jobStdoutTimer: number | null = null;
+    const flushJobStdout = () => {
+      jobStdoutTimer = null;
+      if (!jobStdoutBuf.length) return;
+      const pending = jobStdoutBuf;
+      jobStdoutBuf = [];
+      const byCall = new Map<string, Record<string, unknown>>();
+      for (const payload of pending) {
+        const callId = typeof payload.call_id === 'string' ? payload.call_id : '';
+        const jobId = typeof payload.job_id === 'string' ? payload.job_id : '';
+        const key = callId || (jobId ? `job:${jobId}` : '');
+        if (!key) {
+          byCall.set(`anon:${byCall.size}`, payload);
+          continue;
+        }
+        const prevPayload = byCall.get(key);
+        if (prevPayload && typeof prevPayload.chunk === 'string' && typeof payload.chunk === 'string') {
+          byCall.set(key, { ...payload, chunk: prevPayload.chunk + payload.chunk });
+        } else {
+          byCall.set(key, payload);
+        }
+      }
+      setShellStreams((prev) => {
+        let next = prev;
+        for (const payload of byCall.values()) next = applyJobStdout(next, payload);
+        return next;
+      });
+    };
     const unsubJobStdout = onWs('job_stdout', (msg: AIWSMessage) => {
       const data = (msg.content || msg.data || {}) as Record<string, unknown>;
-      setShellStreams((prev) => applyJobStdout(prev, data));
+      jobStdoutBuf.push(data);
+      if (jobStdoutTimer == null) {
+        jobStdoutTimer = window.setTimeout(flushJobStdout, 80);
+      }
     });
     const unsubJobStatus = onWs('job_status', (msg: AIWSMessage) => {
+      // Land buffered output first: the status frame may be the last word on
+      // this job, and a later stdout flush would then mutate a sealed stream.
+      flushJobStdout();
       const data = (msg.content || msg.data || {}) as Record<string, unknown>;
       setShellStreams((prev) => applyJobStatus(prev, data));
     });
@@ -3345,6 +3383,10 @@ export function useAgentWebSocket(agentId: string, ctx: AgentWebWsCtx) {
       unsubToolResult();
       unsubJobStdout();
       unsubJobStatus();
+      if (jobStdoutTimer != null) {
+        clearTimeout(jobStdoutTimer);
+        jobStdoutTimer = null;
+      }
       unsubPlan();
       unsubSummaryStream();
       unsubCompressionProgress();

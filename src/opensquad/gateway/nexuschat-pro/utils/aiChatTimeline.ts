@@ -30,23 +30,34 @@ const PROTOCOL_SILENT_TAG_ALT =
   'system_reminder|task_start|task_complete|task_failed|invoke|parameter|' +
   'function_calls|calls|dots_function_call';
 
+const SILENT_PAIRED_RE = new RegExp(`<(${PROTOCOL_SILENT_TAG_ALT})\\b[^>]*>[\\s\\S]*?</\\1\\s*>`, 'gi');
+const SILENT_SELF_CLOSING_RE = new RegExp(`<(${PROTOCOL_SILENT_TAG_ALT})\\b[^>]*/>`, 'gi');
+const SILENT_OPEN_TAIL_RE = new RegExp(`<(${PROTOCOL_SILENT_TAG_ALT})\\b[^>]*>[\\s\\S]*$`, 'gi');
+const SILENT_ORPHAN_TAG_RE = new RegExp(`</?(?:${PROTOCOL_SILENT_TAG_ALT})\\b[^>]*>`, 'gi');
+
 /** `<system.run_session_job>cmd</…>` — tool-name-as-tag XML, not user chat. */
 const NAMESPACED_TOOL_TAG =
   '(?:system|filesystem|websearch|browser|mcp|anysearch|bocha|sequential_think)(?:\\.[A-Za-z_][\\w]*)+';
 
+// Precompiled: these run on every render of the streaming bubble, and building
+// a RegExp per call showed up as pure overhead (12 compilations per keystroke).
+const NAMESPACED_GREEDY_RE = new RegExp(`<(${NAMESPACED_TOOL_TAG})\\b[^>]*>[\\s\\S]*</\\1\\s*>`, 'gi');
+const NAMESPACED_OPEN_TAIL_RE = new RegExp(`<(${NAMESPACED_TOOL_TAG})\\b[^>]*>[\\s\\S]*$`, 'gi');
+const NAMESPACED_ORPHAN_TAG_RE = new RegExp(`</?(?:${NAMESPACED_TOOL_TAG})\\b[^>]*>`, 'gi');
+
 /** Drop `<ns.tool>…</ns.tool>` including inner command text (refresh leak). */
 export function stripNamespacedToolXml(content: string): string {
   if (!content || typeof content !== 'string') return content;
-  const tag = NAMESPACED_TOOL_TAG;
   let out = content;
   // Greedy: first open through last same-name close (mismatched extra closers).
-  const greedy = new RegExp(`<(${tag})\\b[^>]*>[\\s\\S]*</\\1\\s*>`, 'gi');
+  const greedy = NAMESPACED_GREEDY_RE;
   for (let i = 0; i < 8 && greedy.test(out); i += 1) {
     greedy.lastIndex = 0;
     out = out.replace(greedy, '\n');
   }
-  out = out.replace(new RegExp(`<(${tag})\\b[^>]*>[\\s\\S]*$`, 'gi'), '\n');
-  out = out.replace(new RegExp(`</?(?:${tag})\\b[^>]*>`, 'gi'), '');
+  greedy.lastIndex = 0;
+  out = out.replace(NAMESPACED_OPEN_TAIL_RE, '\n');
+  out = out.replace(NAMESPACED_ORPHAN_TAG_RE, '');
   return out.replace(/\n{3,}/g, '\n\n').trim();
 }
 
@@ -130,16 +141,16 @@ function mapOutsideMarkdownFences(content: string, fn: (chunk: string) => string
 /** Remove protocol XML including inner text so Markdown cannot show the leftovers. */
 export function stripSilentProtocolBlocks(content: string): string {
   if (!content || typeof content !== 'string') return content;
-  const names = PROTOCOL_SILENT_TAG_ALT;
   let out = stripPromptedThoughtBlocks(stripNamespacedToolXml(content));
-  const paired = new RegExp(`<(${names})\\b[^>]*>[\\s\\S]*?</\\1\\s*>`, 'gi');
+  const paired = SILENT_PAIRED_RE;
   for (let i = 0; i < 8 && paired.test(out); i += 1) {
     paired.lastIndex = 0;
     out = out.replace(paired, '\n');
   }
-  out = out.replace(new RegExp(`<(${names})\\b[^>]*/>`, 'gi'), '');
-  out = out.replace(new RegExp(`<(${names})\\b[^>]*>[\\s\\S]*$`, 'gi'), '\n');
-  out = out.replace(new RegExp(`</?(?:${names})\\b[^>]*>`, 'gi'), '');
+  paired.lastIndex = 0;
+  out = out.replace(SILENT_SELF_CLOSING_RE, '');
+  out = out.replace(SILENT_OPEN_TAIL_RE, '\n');
+  out = out.replace(SILENT_ORPHAN_TAG_RE, '');
   return out.replace(/\n{3,}/g, '\n\n').trim();
 }
 
@@ -208,6 +219,17 @@ function absorbPlanFromAssistantMessage(m: { content?: unknown; timestamp?: stri
  * `<to_user>` plus a short coda inside. Live UI only shows the coda; on
  * refresh we must recompose preamble + tag body so the report is visible.
  */
+const TO_USER_TAGS = ['to_user_end_task', 'to_user_reply', 'to_user'] as const;
+
+// Precompiled per tag: `composeAssistantDisplayContent` runs on every render of
+// the streaming bubble, and these used to be rebuilt on every call.
+const TO_USER_FIRST_RE = new Map<string, RegExp>(
+  TO_USER_TAGS.map((tag) => [tag, new RegExp(`<(${tag})\\b[^>]*>([\\s\\S]*?)<\\/${tag}>`, 'i')]),
+);
+const TO_USER_STRIP_RE = new Map<string, RegExp>(
+  TO_USER_TAGS.map((tag) => [tag, new RegExp(`<${tag}\\b[^>]*>[\\s\\S]*?<\\/${tag}>`, 'gi')]),
+);
+
 export function composeAssistantDisplayContent(content: string): string {
   if (!content || typeof content !== 'string') return content;
   // Strip DSML / native tool-call blocks that some models echo into the
@@ -216,11 +238,10 @@ export function composeAssistantDisplayContent(content: string): string {
   // would otherwise leak as raw XML into the chat bubble.
   const stripped = stripSilentProtocolBlocks(stripPlanBlocks(stripToolCallMarkup(content)));
   const body = stripped;
-  const tagNames = ['to_user_end_task', 'to_user_reply', 'to_user'] as const;
+  const tagNames = TO_USER_TAGS;
   let chosen: { tag: string; inner: string; index: number; full: string } | null = null;
   for (const tag of tagNames) {
-    const re = new RegExp(`<(${tag})\\b[^>]*>([\\s\\S]*?)<\\/${tag}>`, 'i');
-    const m = body.match(re);
+    const m = body.match(TO_USER_FIRST_RE.get(tag) as RegExp);
     if (m && typeof m.index === 'number') {
       chosen = { tag, inner: m[2] || '', index: m.index, full: m[0] };
       break;
@@ -236,10 +257,7 @@ export function composeAssistantDisplayContent(content: string): string {
 
   let preamble = body;
   for (const tag of tagNames) {
-    preamble = preamble.replace(
-      new RegExp(`<${tag}\\b[^>]*>[\\s\\S]*?<\\/${tag}>`, 'gi'),
-      '',
-    );
+    preamble = preamble.replace(TO_USER_STRIP_RE.get(tag) as RegExp, '');
   }
   preamble = dropPlanChecklistDump(
     stripSilentProtocolBlocks(preamble)
@@ -266,32 +284,37 @@ export function composeAssistantDisplayContent(content: string): string {
  * plus plain `<tool_calls>` / `<tool_call>` / `<invoke>` / `<parameter>` wrappers.
  * Unclosed blocks (stream truncated mid-call) are stripped through end-of-string.
  */
+// DSML delimiters: one or two fullwidth `｜` (U+FF5C) or halfwidth `|`,
+// optional `DSML`/`mcp` token, optional space before the tag name.
+// Also covers `<｜｜DSML｜｜ calls>` (short wrapper) and `<｜｜invoke>`.
+const DSML_BAR = '(?:\uFF5C{1,2}|\\|{1,2})';
+const DSML_PREFIX = `(?:${DSML_BAR}(?:(?:DSML|mcp)${DSML_BAR})?\\s*)`;
+const DSML_NAMES = '(?:tool_calls|function_calls|calls|invoke|parameter)';
+
+const DSML_BLOCK_RE = new RegExp(
+  `<${DSML_PREFIX}${DSML_NAMES}\\b[^>]*>[\\s\\S]*?</${DSML_PREFIX}${DSML_NAMES}\\s*>`,
+  'gi',
+);
+const DSML_OPEN_TAIL_RE = new RegExp(`<${DSML_PREFIX}${DSML_NAMES}\\b[^>]*>[\\s\\S]*$`, 'gi');
+const DSML_ORPHAN_TAG_RE = new RegExp(`</?${DSML_PREFIX}${DSML_NAMES}\\b[^>]*>`, 'gi');
+
 export function stripToolCallMarkup(content: string): string {
   if (!content || typeof content !== 'string') return content;
-  // DSML delimiters: one or two fullwidth `｜` (U+FF5C) or halfwidth `|`,
-  // optional `DSML`/`mcp` token, optional space before the tag name.
-  // Also covers `<｜｜DSML｜｜ calls>` (short wrapper) and `<｜｜invoke>`.
-  const bar = '(?:\uFF5C{1,2}|\\|{1,2})';
-  const prefix = `(?:${bar}(?:(?:DSML|mcp)${bar})?\\s*)`;
-  const names = '(?:tool_calls|function_calls|calls|invoke|parameter)';
   let out = content;
-  out = out.replace(
-    new RegExp(`<${prefix}${names}\\b[^>]*>[\\s\\S]*?</${prefix}${names}\\s*>`, 'gi'),
-    '',
-  );
+  out = out.replace(DSML_BLOCK_RE, '');
   // Plain (halfwidth) tool-call wrappers (plural and singular).
   out = out.replace(/<tool_calls>[\s\S]*?<\/tool_calls>/gi, '');
   out = out.replace(/<tool_call\b[^>]*>[\s\S]*?<\/tool_call>/gi, '');
   out = out.replace(/<invoke\b[^>]*>[\s\S]*?<\/invoke>/gi, '');
   out = out.replace(/<(?:func|function|parameter)\b[^>]*>[\s\S]*?<\/(?:func|function|parameter)>/gi, '');
   // Truncated / unclosed blocks — the stream hung before </tool_call>.
-  out = out.replace(new RegExp(`<${prefix}${names}\\b[^>]*>[\\s\\S]*$`, 'gi'), '');
+  out = out.replace(DSML_OPEN_TAIL_RE, '');
   out = out.replace(/<tool_calls?\b[^>]*>[\s\S]*$/gi, '');
   out = out.replace(/<invoke\b[^>]*>[\s\S]*$/gi, '');
   // Orphan closers / openers left after a mismatched DSML wrapper
   // (`</||DSML||calls>`). Markdown treats `|` as a table delimiter and
   // renders this as `</ | | DSML | | calls>`, which splits the tool stream.
-  out = out.replace(new RegExp(`</?${prefix}${names}\\b[^>]*>`, 'gi'), '');
+  out = out.replace(DSML_ORPHAN_TAG_RE, '');
   out = out.replace(
     /<\/?(?:tool_calls?|function_calls|invoke|parameter|func|arguments)\b[^>]*>/gi,
     '',

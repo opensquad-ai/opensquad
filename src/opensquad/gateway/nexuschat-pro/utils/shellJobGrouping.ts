@@ -329,6 +329,21 @@ export interface ShellStreamState {
   reason?: string;
 }
 
+/**
+ * Retained stdout per job. `output` is a plain string that is re-created on
+ * every append, so a runaway build would both grow without bound and copy
+ * quadratically. Keep the tail — that is what the user reads.
+ */
+export const MAX_SHELL_OUTPUT_CHARS = 256 * 1024;
+const TRUNCATED_MARKER = '… [earlier output truncated] …\n';
+
+function appendJobOutput(prev: string, chunk: string): string {
+  const next = prev + chunk;
+  if (next.length <= MAX_SHELL_OUTPUT_CHARS) return next;
+  const keep = MAX_SHELL_OUTPUT_CHARS - TRUNCATED_MARKER.length;
+  return TRUNCATED_MARKER + next.slice(next.length - keep);
+}
+
 export function applyJobStdout(
   prev: Record<string, ShellStreamState>,
   payload: Record<string, unknown>,
@@ -347,7 +362,7 @@ export function applyJobStdout(
     ...prev,
     [callId]: {
       callId,
-      output: (existing?.output || '') + chunk,
+      output: appendJobOutput(existing?.output || '', chunk),
       state: existing?.state || 'running',
       command: typeof payload.command === 'string' ? payload.command : existing?.command,
       jobId: jobId || existing?.jobId,
