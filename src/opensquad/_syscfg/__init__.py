@@ -61,9 +61,6 @@ from ._logging import (
     tool_call_debug_max_size_mb,
 )
 
-# Typed config models (Pydantic v2)
-from ._models import SystemConfig as SystemConfig
-
 # Network
 from ._network import (
     async_result_ttl,
@@ -195,3 +192,26 @@ __all__ = [
     "workspace_skills_dir",
     "workspace_uploads_dir",
 ]
+
+# PEP 562 lazy re-export for the typed config models (Pydantic v2).
+#
+# Importing ._models eagerly built 8 BaseModel schemas and dragged in pydantic —
+# ~500-650 ms measured on Windows, and it landed on every
+# ``import opensquad._syscfg`` (i.e. every CLI invocation and agent boot).
+# Nothing in the codebase reads SystemConfig yet, so build it on first access
+# instead. The public path ``from opensquad._syscfg import SystemConfig`` keeps
+# working; the first access pays the cost, later ones hit globals().
+_LAZY_EXPORTS: dict[str, str] = {
+    "SystemConfig": "._models",
+}
+
+
+def __getattr__(name: str):
+    module_name = _LAZY_EXPORTS.get(name)
+    if module_name is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    from importlib import import_module
+
+    value = getattr(import_module(module_name, __name__), name)
+    globals()[name] = value
+    return value

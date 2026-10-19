@@ -324,6 +324,12 @@ class ProviderAPIBase:
         # Incremented by add_* and invalidated by compression / pop / hot-reload.
         self._cached_token_count: int | None = None
         self._cached_tools_token_count: int = 0
+        # Tool-schema count memoized on the list object itself. `_last_tools` is
+        # rebuilt only when tool filtering changes, yet `_irreducible_prompt_tokens`
+        # runs on every `_prepare_messages` and used to re-serialize + re-encode
+        # ~77 schemas each time (~16 ms/turn). Holds a (list, count) pair and
+        # compares by identity, so a rebuilt list invalidates for free.
+        self._tools_token_cache: tuple[list[dict], int] | None = None
 
         # ── Per-message token cache (identity+shape keyed LRU) ──
         self._msg_token_cache: OrderedDict = OrderedDict()
@@ -538,6 +544,24 @@ class ProviderAPIBase:
             if fn.get("parameters"):
                 num_tokens += len(self.encoding.encode(json.dumps(fn["parameters"], ensure_ascii=False)))
         return num_tokens
+
+    def _tools_token_count(self) -> int:
+        """Memoized :meth:`_count_tools_tokens` for the current ``_last_tools``.
+
+        The schema list is a per-turn constant — it only changes when tool
+        filtering does — but ``_irreducible_prompt_tokens`` runs on every
+        ``_prepare_messages``. Re-serializing and re-encoding ~77 schemas each
+        time cost ~16 ms per turn for a value that never changed.
+        """
+        tools = self._last_tools
+        if not tools:
+            return 0
+        cached = self._tools_token_cache
+        if cached is not None and cached[0] is tools:
+            return cached[1]
+        count = self._count_tools_tokens(tools)
+        self._tools_token_cache = (tools, count)
+        return count
 
     def _count_message_tokens(self, message: dict) -> int:
         """Tokens for a single message, with an identity+shape LRU cache."""
@@ -814,7 +838,7 @@ class ProviderAPIBase:
         for m in self.req:
             if isinstance(m, dict) and m.get("role") == "system":
                 total += self._count_message_tokens(m)
-        total += self._count_tools_tokens(self._last_tools)
+        total += self._tools_token_count()
         return total
 
     def _prepare_messages(self) -> list[dict]:

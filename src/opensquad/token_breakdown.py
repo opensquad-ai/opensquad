@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import json
 import re
+import threading
+from collections import OrderedDict
 from typing import Any, Callable, Hashable
 
 _THOUGHT_RE = re.compile(r"<(thought|think)>(.*?)</\1>", re.DOTALL | re.IGNORECASE)
@@ -297,6 +299,209 @@ def enrich_req_with_session_tool_events(
     return [*req, *synth]
 
 
+def _accumulate_content_list(
+    items: list,
+    target: str,
+    stats: dict[str, int],
+    count_str: Callable[[str | None], int],
+) -> None:
+    """Fold one message's content-block list into ``stats`` (message-local)."""
+    has_tool_payload = any(is_tool_payload_block(x) for x in items)
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        t = item.get("type")
+        if t == "text":
+            text = item.get("text", "") or ""
+            if has_tool_payload:
+                stats["tool"] += count_str(text)
+            elif target == "user":
+                stats["user"] += count_str(text)
+            elif target == "assistant":
+                thought_sum = sum(count_str(m.group(2)) for m in _THOUGHT_RE.finditer(text))
+                if thought_sum:
+                    stats["thought"] += thought_sum
+                    text = _THOUGHT_RE.sub("", text).strip()
+                stats["response"] += count_str(text)
+        elif t in ("tool_result", "functionResponse"):
+            stats["tool"] += count_str(extract_tool_result_text(item))
+        elif t == "tool_use":
+            stats["tool"] += count_str(item.get("name", "") + str(item.get("input", {})))
+
+
+def _message_stats(message: dict, count_str: Callable[[str | None], int]) -> dict[str, int]:
+    """Token contribution of a single message.
+
+    Returns only the message-local buckets — ``tool_defs`` and ``overhead`` are
+    request-level and stay in :func:`compute_token_breakdown`. Self-contained by
+    construction: every branch depends on this message alone, which is what
+    makes the result safely cacheable per message.
+    """
+    stats: dict[str, int] = {"system": 0, "user": 0, "thought": 0, "tool": 0, "response": 0}
+    role = message.get("role")
+    content = message.get("content", "")
+
+    # OpenAI / DeepSeek native tool result
+    if role == "tool":
+        if isinstance(content, str):
+            stats["tool"] += count_str(content)
+        elif isinstance(content, list):
+            stats["tool"] += count_str(content_list_tool_text(content))
+        elif content is not None:
+            stats["tool"] += count_str(str(content))
+        return stats
+
+    if role == "assistant":
+        reasoning = message.get("reasoning_content")
+        if reasoning:
+            stats["thought"] += count_str(reasoning)
+
+        tool_calls = message.get("tool_calls")
+        if tool_calls:
+            for tc in tool_calls:
+                tc_d = _as_dict(tc)
+                fn = tc_d.get("function")
+                if fn is None and ("name" in tc_d or "arguments" in tc_d):
+                    fn = tc_d
+                stats["tool"] += count_str(tool_fn_text(fn))
+
+    counted = False
+    if isinstance(content, list):
+        target = "user" if role == "user" else "assistant" if role == "assistant" else str(role or "")
+        _accumulate_content_list(content, target, stats, count_str)
+        counted = True
+    elif isinstance(content, str):
+        if role == "system":
+            stats["system"] += count_str(content)
+            counted = True
+        elif role == "user":
+            if "<tool_result>" in content or "<tool_result " in content:
+                tool_sum = sum(count_str(m.group(1)) for m in _TOOL_RESULT_RE.finditer(content))
+                stats["tool"] += tool_sum
+                stats["user"] += count_str(_TOOL_RESULT_RE.sub("", content).strip())
+            elif _SUMMARIZE_TOOL_RE.match(content):
+                stats["tool"] += count_str(content)
+            else:
+                stats["user"] += count_str(content)
+            counted = True
+        elif role == "assistant":
+            thought_sum = sum(count_str(m.group(2)) for m in _THOUGHT_RE.finditer(content))
+            stats["thought"] += thought_sum
+            text_no_thought = _THOUGHT_RE.sub("", content).strip()
+            tool_sum = sum(count_str(m.group(1)) for m in _TOOL_CALL_RE.finditer(text_no_thought))
+            stats["tool"] += tool_sum
+            text_response = _TOOL_CALL_RE.sub("", text_no_thought).strip()
+            stats["response"] += count_str(text_response)
+            counted = True
+
+    if not counted and role == "assistant" and isinstance(content, dict):
+        text = content.get("text", "") or content.get("content", "")
+        if text and isinstance(text, str):
+            stats["response"] += count_str(text)
+    return stats
+
+
+# ── Per-message stats LRU ───────────────────────────────────────────────────
+# A long session re-sends the same 100-200 message dicts on every tool round;
+# only the last 1-2 change. Re-encoding all of them cost 164-205 ms per round
+# (measured, 181 messages / ~600 KB). Keying on the same identity+shape tuple
+# the provider's message LRU already uses makes a hit mean "same object, same
+# shape", so a stable history costs one dict lookup per message.
+_MSG_STATS_CACHE: OrderedDict[Any, dict[str, int]] = OrderedDict()
+_MSG_STATS_CACHE_MAX = 2048
+_MSG_STATS_CACHE_LOCK = threading.Lock()
+
+
+def _message_stats_cached(
+    message: dict,
+    count_str: Callable[[str | None], int],
+    encoding: Any | None,
+) -> dict[str, int]:
+    """Memoized :func:`_message_stats`. Returned dict is read-only to callers."""
+    try:
+        key = (encoding, message_token_cache_key(message))
+        hash(key)
+    except TypeError:
+        # Unhashable payload shape — fall back to counting without caching.
+        return _message_stats(message, count_str)
+
+    with _MSG_STATS_CACHE_LOCK:
+        hit = _MSG_STATS_CACHE.get(key)
+        if hit is not None:
+            _MSG_STATS_CACHE.move_to_end(key)
+            return hit
+
+    part = _message_stats(message, count_str)
+
+    with _MSG_STATS_CACHE_LOCK:
+        _MSG_STATS_CACHE[key] = part
+        while len(_MSG_STATS_CACHE) > _MSG_STATS_CACHE_MAX:
+            _MSG_STATS_CACHE.popitem(last=False)
+    return part
+
+
+def _walk_tool_defs(tools: list, count_str: Callable[[str | None], int]) -> int:
+    """Sum the token cost of raw tool definitions (uncached walk)."""
+    total = 0
+    for tool in tools:
+        tool_d = _as_dict(tool)
+        fn = _as_dict(tool_d.get("function") or tool)
+        total += 6
+        if fn.get("name"):
+            total += count_str(str(fn["name"]))
+        if fn.get("description"):
+            total += count_str(str(fn["description"]))
+        if fn.get("parameters") is not None:
+            try:
+                total += count_str(json.dumps(fn["parameters"], ensure_ascii=False))
+            except Exception:
+                total += count_str(str(fn["parameters"]))
+    return total
+
+
+# Tool schemas are a session constant (`_last_tools` is the same list object),
+# yet they were re-serialized and re-encoded on every breakdown — ~16 ms for 77
+# tools, which is what remained after the per-message cache landed.
+_TOOL_DEFS_CACHE: OrderedDict[Any, int] = OrderedDict()
+_TOOL_DEFS_CACHE_MAX = 32
+
+
+def _tool_defs_tokens(
+    tools: list | None,
+    encoding: Any | None,
+    count_str: Callable[[str | None], int],
+) -> int:
+    """Memoized :func:`_walk_tool_defs`, keyed on schema-list identity."""
+    if not tools:
+        return 0
+    try:
+        key = (
+            encoding,
+            id(tools),
+            len(tools),
+            id(tools[0]),
+            id(tools[len(tools) // 2]),
+            id(tools[-1]),
+        )
+        hash(key)
+    except (TypeError, IndexError):
+        return _walk_tool_defs(tools, count_str)
+
+    with _MSG_STATS_CACHE_LOCK:
+        hit = _TOOL_DEFS_CACHE.get(key)
+        if hit is not None:
+            _TOOL_DEFS_CACHE.move_to_end(key)
+            return hit
+
+    total = _walk_tool_defs(tools, count_str)
+
+    with _MSG_STATS_CACHE_LOCK:
+        _TOOL_DEFS_CACHE[key] = total
+        while len(_TOOL_DEFS_CACHE) > _TOOL_DEFS_CACHE_MAX:
+            _TOOL_DEFS_CACHE.popitem(last=False)
+    return total
+
+
 def compute_token_breakdown(
     messages: list[dict],
     tools: list[dict] | None = None,
@@ -316,106 +521,14 @@ def compute_token_breakdown(
     _count_str = make_count_str(encoding)
 
     if tools:
-        for tool in tools:
-            tool_d = _as_dict(tool)
-            fn = _as_dict(tool_d.get("function") or tool)
-            stats["tool_defs"] += 6
-            if fn.get("name"):
-                stats["tool_defs"] += _count_str(str(fn["name"]))
-            if fn.get("description"):
-                stats["tool_defs"] += _count_str(str(fn["description"]))
-            if fn.get("parameters") is not None:
-                try:
-                    stats["tool_defs"] += _count_str(json.dumps(fn["parameters"], ensure_ascii=False))
-                except Exception:
-                    stats["tool_defs"] += _count_str(str(fn["parameters"]))
-
-    def _count_content_list(items: list, target: str) -> None:
-        has_tool_payload = any(is_tool_payload_block(x) for x in items)
-        for item in items:
-            if not isinstance(item, dict):
-                continue
-            t = item.get("type")
-            if t == "text":
-                text = item.get("text", "") or ""
-                if has_tool_payload:
-                    stats["tool"] += _count_str(text)
-                elif target == "user":
-                    stats["user"] += _count_str(text)
-                elif target == "assistant":
-                    thought_sum = sum(_count_str(m.group(2)) for m in _THOUGHT_RE.finditer(text))
-                    if thought_sum:
-                        stats["thought"] += thought_sum
-                        text = _THOUGHT_RE.sub("", text).strip()
-                    stats["response"] += _count_str(text)
-            elif t in ("tool_result", "functionResponse"):
-                stats["tool"] += _count_str(extract_tool_result_text(item))
-            elif t == "tool_use":
-                stats["tool"] += _count_str(item.get("name", "") + str(item.get("input", {})))
+        stats["tool_defs"] = _tool_defs_tokens(tools, encoding, _count_str)
 
     for msg in messages or []:
         if not isinstance(msg, dict):
             continue
-        role = msg.get("role")
-        content = msg.get("content", "")
-
-        # OpenAI / DeepSeek native tool result
-        if role == "tool":
-            if isinstance(content, str):
-                stats["tool"] += _count_str(content)
-            elif isinstance(content, list):
-                stats["tool"] += _count_str(content_list_tool_text(content))
-            elif content is not None:
-                stats["tool"] += _count_str(str(content))
-            continue
-
-        if role == "assistant":
-            reasoning = msg.get("reasoning_content")
-            if reasoning:
-                stats["thought"] += _count_str(reasoning)
-
-            tool_calls = msg.get("tool_calls")
-            if tool_calls:
-                for tc in tool_calls:
-                    tc_d = _as_dict(tc)
-                    fn = tc_d.get("function")
-                    if fn is None and ("name" in tc_d or "arguments" in tc_d):
-                        fn = tc_d
-                    stats["tool"] += _count_str(tool_fn_text(fn))
-
-        counted = False
-        if isinstance(content, list):
-            target = "user" if role == "user" else "assistant" if role == "assistant" else str(role or "")
-            _count_content_list(content, target)
-            counted = True
-        elif isinstance(content, str):
-            if role == "system":
-                stats["system"] += _count_str(content)
-                counted = True
-            elif role == "user":
-                if "<tool_result>" in content or "<tool_result " in content:
-                    tool_sum = sum(_count_str(m.group(1)) for m in _TOOL_RESULT_RE.finditer(content))
-                    stats["tool"] += tool_sum
-                    stats["user"] += _count_str(_TOOL_RESULT_RE.sub("", content).strip())
-                elif _SUMMARIZE_TOOL_RE.match(content):
-                    stats["tool"] += _count_str(content)
-                else:
-                    stats["user"] += _count_str(content)
-                counted = True
-            elif role == "assistant":
-                thought_sum = sum(_count_str(m.group(2)) for m in _THOUGHT_RE.finditer(content))
-                stats["thought"] += thought_sum
-                text_no_thought = _THOUGHT_RE.sub("", content).strip()
-                tool_sum = sum(_count_str(m.group(1)) for m in _TOOL_CALL_RE.finditer(text_no_thought))
-                stats["tool"] += tool_sum
-                text_response = _TOOL_CALL_RE.sub("", text_no_thought).strip()
-                stats["response"] += _count_str(text_response)
-                counted = True
-
-        if not counted and role == "assistant" and isinstance(content, dict):
-            text = content.get("text", "") or content.get("content", "")
-            if text and isinstance(text, str):
-                stats["response"] += _count_str(text)
+        part = _message_stats_cached(msg, _count_str, encoding)
+        for bucket, value in part.items():
+            stats[bucket] += value
 
     if total is not None:
         breakdown_total = sum(stats.values())
