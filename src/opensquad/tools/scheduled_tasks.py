@@ -27,7 +27,11 @@ from opensquad.scheduled_tasks import get_task_manager
 logger = logging.getLogger(__name__)
 
 # 由 on_loaded（agent 启动）注入，见 agent_boot_phases.register_builtin_tools。
+# 内置工具热重载（opensquad.agent_boot_phases）必须把它带过去，否则重载后
+# _mgr() 会退化成 "default" 命名空间，任务读到的不是本 agent 的存储。
 _agent_id = ""
+
+__reload_preserve__ = ("_agent_id",)
 
 
 def set_agent_id(agent_id: str) -> None:
@@ -262,4 +266,10 @@ def run_task_now(task_id: str = "") -> dict[str, Any]:
         return _err(f"任务 {task_id} 不存在")
     if task.get("already_running"):
         return _ok("该任务正在执行中，已跳过重复触发", task=task)
+    if task.get("not_deliverable"):
+        return _err(
+            "任务本身没问题，但当前进程没有事件循环，投递不了。"
+            "任务已保存到磁盘，gateway 会在约 15 秒内接管并按计划执行；"
+            "要立刻跑，请在前端「定时任务」页点运行。"
+        )
     return _ok(f"已手动触发「{task.get('name')}」", task=task)

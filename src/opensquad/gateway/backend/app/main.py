@@ -342,7 +342,11 @@ async def lifespan(app: FastAPI):
     # fired tasks can route prompts to the Agent via the Gateway WS registry
     # even before any admin route lazily created a ScheduledTaskManager.
     try:
-        from opensquad.scheduled_tasks import set_gateway_loop, warm_all_task_managers
+        from opensquad.scheduled_tasks import (
+            set_gateway_loop,
+            start_reconcile_loop,
+            warm_all_task_managers,
+        )
 
         _loop = asyncio.get_running_loop()
         set_gateway_loop(_loop)
@@ -353,6 +357,15 @@ async def lifespan(app: FastAPI):
             _startup_log.info(f"Scheduled-task managers warmed: {n}")
         except Exception as _warm_e:
             _startup_log.warning(f"warm_all_task_managers failed: {_warm_e}")
+        # Keep adopting task files written after this point. The Agent's
+        # scheduled-task tool runs in a process without an event loop, so it
+        # can persist a task but never deliver a fire; warm-up only ran once,
+        # so without this tick such a task stayed invisible to the gateway and
+        # failed at its fire time with "delegate agent not connected".
+        try:
+            start_reconcile_loop(_loop)
+        except Exception as _rec_e:
+            _startup_log.warning(f"start_reconcile_loop failed: {_rec_e}")
     except Exception as _e:
         _startup_log.warning(f"set_gateway_loop failed: {_e}")
     # Agent WS liveness sweeper: drop half-dead connections where send_text

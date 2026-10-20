@@ -105,6 +105,10 @@ class ScheduledTaskManager:
         self._spawn_watchdogs: dict[str, threading.Timer] = {}
         # exec_id -> payload needed to redeliver (content, model_card, delegate, …)
         self._pending_deliveries: dict[str, dict[str, Any]] = {}
+        # mtime of _data_file at the last load/save. Drives reload_if_changed(),
+        # so a gateway reconcile can tell "another process rewrote this file"
+        # from "nothing changed" without re-reading and re-arming every tick.
+        self._loaded_mtime: float = 0.0
 
     # -- lifecycle --
     def start(self, loop: asyncio.AbstractEventLoop) -> None:
@@ -161,7 +165,42 @@ class ScheduledTaskManager:
                 task["last_status"] = "missed"
         self._save_persisted()
 
+    def _adopt_foreign_additions(self) -> None:
+        """Keep tasks another process added since our last load.
+
+        The store is a single JSON file with no cross-process lock: the Agent
+        writes it when the user creates a task, and a gateway fire also rewrites
+        it. Without this, the gateway's in-memory snapshot (which predates the
+        new task) would erase it on its next save — and because the file has
+        already been rewritten, the reconcile tick could not bring it back.
+
+        Only additions are merged. Updating or deleting a task from the other
+        process is picked up by ``reload_if_changed`` on the next tick, which is
+        the right place for it: a save must not silently discard a local edit.
+
+        Callers of ``_save_persisted`` usually already hold ``self._lock``, so
+        this deliberately does not take it.
+        """
+        try:
+            if not os.path.isfile(self._data_file):
+                return
+            if os.path.getmtime(self._data_file) <= (self._loaded_mtime or 0.0):
+                return
+            with open(self._data_file, encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception:
+            return
+        disk_tasks = (data or {}).get("tasks") or {}
+        if not isinstance(disk_tasks, dict):
+            return
+        for tid, task in disk_tasks.items():
+            if tid not in self._tasks and isinstance(task, dict):
+                self._tasks[tid] = task
+                logger.info("[ScheduledTasks] kept task=%s written by another process", tid)
+
     def _save_persisted(self) -> None:
+        # Merge foreign additions first — see _adopt_foreign_additions.
+        self._adopt_foreign_additions()
         try:
             with open(self._data_file, "w", encoding="utf-8") as f:
                 json.dump(
@@ -169,6 +208,13 @@ class ScheduledTaskManager:
                     f,
                     ensure_ascii=False,
                 )
+            # Refresh the marker after our own write, otherwise the next
+            # reconcile tick would see our mtime bump as a foreign edit and
+            # reload in a loop.
+            try:
+                self._loaded_mtime = os.path.getmtime(self._data_file)
+            except OSError:
+                pass
         except Exception as e:
             logger.error("[ScheduledTasks] save failed: %s", e)
 
@@ -250,6 +296,11 @@ class ScheduledTaskManager:
             for e in self._executions:
                 if e.get("task_id") == task_id and e.get("status") == "running":
                     return {"already_running": True}
+        if not self._can_schedule():
+            # This process cannot deliver. Report it instead of recording a
+            # "failed / delegate agent not connected" row the gateway will
+            # never reconcile — the task itself is fine and already persisted.
+            return {"not_deliverable": True}
         self._execute(task_id, manual=True)
         return self.get_task(task_id)
 
@@ -279,7 +330,24 @@ class ScheduledTaskManager:
         if t:
             t.cancel()
 
+    def _can_schedule(self) -> bool:
+        """True when this process can actually deliver a fire.
+
+        A timer is only worth arming where a live event loop can route the
+        prompt to the Agent. The Agent process creates tasks through its tool
+        but has no loop (``self._loop`` and ``_gateway_loop`` are both None),
+        so arming there produced a timer that always died with "delegate agent
+        not connected" and burned the task's run_count. Persisting the file and
+        letting the gateway adopt it is the correct split of responsibilities.
+        """
+        loop = self._loop or _gateway_loop
+        return loop is not None and loop.is_running()
+
     def _arm_timer(self, task_id: str, delay: float) -> None:
+        if not self._can_schedule():
+            # Data-only process: the task is already persisted, and the gateway
+            # arms it on its next reconcile tick.
+            return
         self._cancel_timer(task_id)
         if delay < 0:
             delay = 0.0
@@ -287,6 +355,55 @@ class ScheduledTaskManager:
         timer.daemon = True
         timer.start()
         self._timers[task_id] = timer
+
+    def ensure_scheduled(self) -> int:
+        """Arm every enabled task that has no timer yet. Idempotent.
+
+        Called when a manager gains a loop after being created in data-only
+        mode (gateway warm-up, admin route, reconcile tick). Returns how many
+        timers were newly armed.
+        """
+        if not self._can_schedule():
+            return 0
+        now_ts = time.time()
+        armed = 0
+        for tid, task in list(self._tasks.items()):
+            if not task.get("enabled", True):
+                continue
+            if tid in self._timers:
+                continue
+            next_ts = task.get("next_run_ts")
+            if not next_ts:
+                next_ts = _compute_next_ts(task.get("schedule") or {})
+                task["next_run_ts"] = next_ts
+            if not next_ts or next_ts <= now_ts:
+                continue
+            self._arm_timer(tid, next_ts - now_ts)
+            armed += 1
+        return armed
+
+    def reload_if_changed(self, mtime: float | None = None) -> bool:
+        """Reload the store when another process rewrote the task file.
+
+        Without this the gateway keeps a stale copy: the Agent can add or edit
+        a task, but the only process that can deliver keeps firing the old set.
+        Timers are cancelled before the reload — ``_load_persisted`` re-arms,
+        and keeping the old ones would double-fire the same task.
+        """
+        if mtime is None:
+            try:
+                mtime = os.path.getmtime(self._data_file)
+            except OSError:
+                return False
+        if mtime <= (self._loaded_mtime or 0.0):
+            return False
+        with self._lock:
+            for t in self._timers.values():
+                t.cancel()
+            self._timers.clear()
+        self._load_persisted()
+        logger.info("[ScheduledTasks] reloaded agent=%s after an external write", self.agent_id)
+        return True
 
     def _fire(self, task_id: str) -> None:
         self._execute(task_id, manual=False)
@@ -880,6 +997,14 @@ def get_task_manager(agent_id: str, data_dir: str | None = None) -> ScheduledTas
                 m._loop = asyncio.get_running_loop()
             except RuntimeError:
                 pass
+        # A manager first touched from the Agent process was created in
+        # data-only mode, so none of its timers were armed. Arm them now that a
+        # loop is available. Idempotent — already-armed tasks are skipped.
+        if m._loop is not None:
+            try:
+                m.ensure_scheduled()
+            except Exception as e:
+                logger.debug("[ScheduledTasks] ensure_scheduled failed for %s: %s", key, e)
         return m
 
 
@@ -912,10 +1037,94 @@ def warm_all_task_managers(loop: asyncio.AbstractEventLoop | None = None) -> int
                 m._loop = loop
             elif m._loop is None:
                 m._loop = _gateway_loop
+            # get_task_manager() may have built the manager before the loop was
+            # assigned; arm whatever is still unarmed.
+            m.ensure_scheduled()
             count += 1
         except Exception as e:
             logger.warning("[ScheduledTasks] warm failed for %s: %s", agent_id, e)
     return count
+
+
+def reconcile_task_managers(loop: asyncio.AbstractEventLoop | None = None) -> int:
+    """Adopt task files that appeared (or changed) after gateway warm-up.
+
+    Warm-up ran once at startup, so a task created afterwards by the Agent
+    process was invisible to the gateway: the Agent's own manager has no event
+    loop and its fire died with "delegate agent not connected" every time. This
+    tick closes that gap — new files get a manager (and armed timers), files
+    rewritten by another process reload, and everything enabled gets a timer.
+
+    Cheap by construction: one ``listdir`` plus a ``getmtime`` per file, and the
+    reload path only runs when the mtime actually moved.
+
+    Returns the number of managers adopted or reloaded.
+    """
+    try:
+        from opensquad.system_config import syscfg
+
+        data_dir = syscfg.workspace_data_dir("scheduled_tasks")
+    except Exception as e:
+        logger.warning("[ScheduledTasks] reconcile: data dir unavailable: %s", e)
+        return 0
+    if not data_dir or not os.path.isdir(data_dir):
+        return 0
+
+    changed = 0
+    suffix = "_scheduled_tasks.json"
+    for name in os.listdir(data_dir):
+        if not name.endswith(suffix):
+            continue
+        agent_id = name[: -len(suffix)]
+        if not agent_id:
+            continue
+        try:
+            mtime = os.path.getmtime(os.path.join(data_dir, name))
+        except OSError:
+            continue
+        with _managers_lock:
+            existing = _managers.get(agent_id)
+        try:
+            if existing is None:
+                m = get_task_manager(agent_id, data_dir)
+                if loop is not None:
+                    m._loop = loop
+                m.ensure_scheduled()
+                changed += 1
+                logger.info("[ScheduledTasks] adopted agent=%s tasks=%d", agent_id, len(m._tasks))
+            else:
+                if loop is not None and existing._loop is None:
+                    existing._loop = loop
+                if existing.reload_if_changed(mtime):
+                    changed += 1
+                else:
+                    existing.ensure_scheduled()
+        except Exception as e:
+            logger.warning("[ScheduledTasks] reconcile failed for %s: %s", agent_id, e)
+    return changed
+
+
+_reconcile_task: asyncio.Task | None = None
+
+
+async def _reconcile_loop(interval: float) -> None:
+    while True:
+        await asyncio.sleep(interval)
+        try:
+            reconcile_task_managers(_gateway_loop)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.warning("[ScheduledTasks] reconcile tick failed: %s", e)
+
+
+def start_reconcile_loop(loop: asyncio.AbstractEventLoop, interval: float = 15.0) -> None:
+    """Start the periodic adoption loop. Idempotent."""
+    global _reconcile_task
+    if _reconcile_task is not None and not _reconcile_task.done():
+        return
+    _reconcile_task = loop.create_task(_reconcile_loop(interval))
+    logger.info("[ScheduledTasks] reconcile loop started (every %.0fs)", interval)
 
 
 def set_execution_session_by_exec_id(exec_id: str, session_id: str) -> bool:
