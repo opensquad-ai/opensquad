@@ -225,7 +225,12 @@ class AgentsMixin:
 
     def _handle_get_config(self, name: str):
         """Read agent config.json — redact sensitive fields"""
-        config_path = os.path.join(AGENTS_DIR, name, "config.json")
+        # The API accepts either the on-disk dir name or the registered agent_id
+        # ("agent305" vs "agent305-001"); only the former is a directory name.
+        # Skipping the resolution made the config pane 404 for every agent whose
+        # id differs from its folder.
+        dir_name = self._resolve_agent_dir_name(name) or name
+        config_path = os.path.join(AGENTS_DIR, dir_name, "config.json")
         if not os.path.isfile(config_path):
             return self._send_json({"error": "Config not found"}, 404)
         config = _read_json(config_path)
@@ -539,8 +544,10 @@ class AgentsMixin:
 
     def _handle_put_config(self, name: str, body: dict):
         """Write agent config.json"""
-        config_path = os.path.join(AGENTS_DIR, name, "config.json")
-        agent_dir = os.path.join(AGENTS_DIR, name)
+        # Same dir_name vs agent_id split as _handle_get_config.
+        dir_name = self._resolve_agent_dir_name(name) or name
+        config_path = os.path.join(AGENTS_DIR, dir_name, "config.json")
+        agent_dir = os.path.join(AGENTS_DIR, dir_name)
         if not os.path.isdir(agent_dir):
             return self._send_json({"error": "Agent directory not found"}, 404)
         config_data = body.get("config")
