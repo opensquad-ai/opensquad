@@ -2463,6 +2463,77 @@ export function mergeToolResultIntoTimeline(
   return null;
 }
 
+/**
+ * A frame that was *received* before the trailing answer must not render after
+ * it.
+ *
+ * Live workflow frames are rAF-batched (`enqueueLiveWorkflowEvent`), so the
+ * last frame of a round — typically the final `thought` chunk — can still be in
+ * the buffer when `to_user_final` synchronously commits the reply. The deferred
+ * flush then runs against a timeline whose tail is the assistant bubble, and the
+ * generic path appends a brand-new block *below* it: the fold draws “深度思考”
+ * under its own answer, and `turn_elapsed` (which stamps the last block) either
+ * seals that stray block with the turn’s whole duration — a finished “深度思考
+ * 20s” that never ran — or leaves it spinning forever when the seal already
+ * happened.
+ *
+ * The frame’s own timestamp is the discriminator: earlier than the answer means
+ * it belonged to the round that produced that answer. Append it to that turn’s
+ * block (a sealed block keeps its stamp; only the open one takes the new
+ * status) or, if the turn somehow never had one, splice a block in above the
+ * answer. Frames that genuinely arrive *after* the answer are new work and keep
+ * the old append-below behaviour, which is what mid-turn progress reports need.
+ */
+function attachBeforeTrailingAnswer(
+  updated: TimelineEntry[],
+  event: WorkflowEvent,
+  status: string | null,
+): TimelineEntry[] | null {
+  let tail = updated.length - 1;
+  while (tail >= 0 && (updated[tail].kind === 'prompt' || updated[tail].kind === 'status_hint')) {
+    tail -= 1;
+  }
+  if (tail < 0 || updated[tail].kind !== 'message') return null;
+  const answer = updated[tail].data as ChatMessage;
+  if (answer.role !== 'assistant') return null;
+  const answerTs = answer.timestamp ? new Date(answer.timestamp).getTime() : NaN;
+  if (Number.isNaN(answerTs) || event.timestamp > answerTs) return null;
+
+  // The block of that same turn — never reach across a user message.
+  for (let i = tail - 1; i >= 0; i -= 1) {
+    const entry = updated[i];
+    if (entry.kind === 'message' && (entry.data as ChatMessage).role === 'user') break;
+    if (entry.kind !== 'workflow') continue;
+    const wf = entry.data;
+    const out = [...updated];
+    out[i] = {
+      ...entry,
+      data: {
+        ...wf,
+        events: appendEventIntoWorkflowBlock(wf, event),
+        // Never unseal a finished round here: reopening would restart the
+        // clock on a turn that is already delivered.
+        status: wf.completed ? wf.status : status,
+      },
+    } as TimelineEntry;
+    return out;
+  }
+
+  const out = [...updated];
+  out.splice(tail, 0, {
+    kind: 'workflow',
+    data: {
+      events: [{ ...event, _uid: genTimelineUID() }],
+      status,
+      // The answer below proves the round is over; a live block here would
+      // never be sealed by a `turn_elapsed` that has already been handled.
+      completed: true,
+    },
+    _uid: genTimelineUID(),
+  });
+  return sealStaleWorkflowBlocks(out);
+}
+
 export function appendWorkflowEvent(
   prev: TimelineEntry[],
   event: WorkflowEvent,
@@ -2580,7 +2651,8 @@ export function appendWorkflowEvent(
     }
 
     // No matching tool_call found anywhere — create new workflow block as fallback
-    return appendNewIncompleteWorkflow(updated, event, status);
+    return attachBeforeTrailingAnswer(updated, event, status)
+      ?? appendNewIncompleteWorkflow(updated, event, status);
   }
 
   if (targetIdx >= 0) {
@@ -2595,7 +2667,8 @@ export function appendWorkflowEvent(
     // 目标块之前的未完成块已不会再收到事件 — 封口防止块尾思考永久计时。
     return sealStaleWorkflowBlocks(updated);
   } else {
-    return appendNewIncompleteWorkflow(updated, event, status);
+    return attachBeforeTrailingAnswer(updated, event, status)
+      ?? appendNewIncompleteWorkflow(updated, event, status);
   }
 }
 

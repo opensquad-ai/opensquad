@@ -23,6 +23,7 @@ import {
   sealIncompleteWorkflows,
   sealPendingCompression,
   sealStaleWorkflowBlocks,
+  sealWorkflowAndAppendAssistantMessage,
   shouldTreatWorkflowComplete,
   stripToolCallMarkup,
   timelineHasToolEvent,
@@ -2140,5 +2141,87 @@ describe('isUiOnlyToolName', () => {
     expect(isUiOnlyToolName('system__run_session_job')).toBe(false);
     expect(isUiOnlyToolName('websearch__search')).toBe(false);
     expect(isUiOnlyToolName('')).toBe(false);
+  });
+});
+
+describe('a buffered workflow frame never lands below its own answer', () => {
+  const T0 = 1792471748000;
+  const iso = (ms: number) => new Date(ms).toISOString();
+  const userTurn = (ms: number) =>
+    ({
+      kind: 'message',
+      data: { role: 'user', content: '我chove你不是人啊', timestamp: iso(ms) },
+      _uid: genTimelineUID(),
+    }) as TimelineEntry;
+  const thoughtAt = (ms: number, content = 'thinking'): WorkflowEvent => ({
+    type: 'thought',
+    content,
+    timestamp: ms,
+  });
+
+  it('merges a late-flushed thought into the sealed block above the answer', () => {
+    // The round streamed a thought, then to_user_final committed the reply
+    // while the last chunk was still in the rAF queue (same frame).
+    let tl: TimelineEntry[] = [userTurn(T0)];
+    tl = appendWorkflowEvent(tl, thoughtAt(T0 + 4000, 'streamed over 5s'), 'Thinking...');
+    tl = sealWorkflowAndAppendAssistantMessage(tl, {
+      role: 'assistant',
+      content: '不用 chove，证据本来就在你眼前',
+      timestamp: iso(T0 + 4900),
+    });
+    tl = appendWorkflowEvent(tl, thoughtAt(T0 + 4500, ' + last chunk'), 'Thinking...');
+
+    expect(tl.map((e) => e.kind)).toEqual(['message', 'workflow', 'message']);
+    const wf = tl[1].kind === 'workflow' ? tl[1].data : null;
+    expect(wf?.completed).toBe(true);
+    // Coalesced into the same thought step instead of opening a second block.
+    expect(wf?.events.length).toBe(1);
+    expect(String(wf?.events[0].content)).toContain('last chunk');
+  });
+
+  it('splices a block above the answer when the round had no block yet', () => {
+    const tl0: TimelineEntry[] = [userTurn(T0)];
+    const answered = sealWorkflowAndAppendAssistantMessage(tl0, {
+      role: 'assistant',
+      content: '对，不是人。',
+      timestamp: iso(T0 + 2900),
+    });
+    const tl = appendWorkflowEvent(answered, thoughtAt(T0 + 100), 'Thinking...');
+
+    expect(tl.map((e) => e.kind)).toEqual(['message', 'workflow', 'message']);
+    const wf = tl[1].kind === 'workflow' ? tl[1].data : null;
+    // The answer below proves the round is over — never a phantom live fold.
+    expect(wf?.completed).toBe(true);
+  });
+
+  it('keeps genuinely new work below an intermediate answer', () => {
+    let tl: TimelineEntry[] = [userTurn(T0)];
+    tl = sealWorkflowAndAppendAssistantMessage(tl, {
+      role: 'assistant',
+      content: 'First progress report.',
+      timestamp: iso(T0 + 2000),
+    });
+    // Arrives AFTER the answer was committed → next round, renders below.
+    tl = appendWorkflowEvent(tl, thoughtAt(T0 + 5000), 'Thinking...');
+
+    expect(tl.map((e) => e.kind)).toEqual(['message', 'message', 'workflow']);
+    expect(tl[2].kind === 'workflow' && tl[2].data.completed).toBe(false);
+  });
+
+  it('keeps a parent tool_call below an intermediate answer', () => {
+    let tl: TimelineEntry[] = [userTurn(T0)];
+    tl = sealWorkflowAndAppendAssistantMessage(tl, {
+      role: 'assistant',
+      content: 'Let me look at the file.',
+      timestamp: iso(T0 + 2000),
+    });
+    tl = appendWorkflowEvent(
+      tl,
+      { type: 'tool_call', content: { id: 'c1', name: 'read_file' }, timestamp: T0 + 6000 },
+      'Calling read_file...',
+    );
+
+    expect(tl.map((e) => e.kind)).toEqual(['message', 'message', 'workflow']);
+    expect(tl[2].kind === 'workflow' && tl[2].data.events[0].type).toBe('tool_call');
   });
 });
